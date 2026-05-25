@@ -192,6 +192,8 @@ const COSE_ALG_ES256: i32 = -7;
 const CREDENTIAL_STORE_PATH: &str = "credentials.cbor";
 #[cfg(not(test))]
 const ATTESTATION_STORE_PATH: &str = "attestation.cbor";
+#[cfg(not(test))]
+const PIN_STATE_STORE_PATH: &str = "pin-state.cbor";
 pub(crate) const PIN_UV_AUTH_PROTOCOL_CLASSIC_V1: i32 = 1;
 pub(crate) const PIN_UV_AUTH_PROTOCOL_CLASSIC_V2: i32 = 2;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -242,6 +244,28 @@ struct PinState {
     pin_uv_auth_rp_provided: bool,
 }
 
+/// On-disk representation of the persistent PIN state.  Kept in sync with
+/// `transport-core::state::StoredPinState` so the CLI can read and write the
+/// same `pin-state.cbor` file the daemon uses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredPinState {
+    pin_hash: Option<[u8; 16]>,
+    pin_retries: u8,
+    consecutive_failures: u8,
+    pin_auth_blocked: bool,
+}
+
+impl StoredPinState {
+    fn snapshot(state: &PinState) -> Self {
+        Self {
+            pin_hash: state.pin_hash,
+            pin_retries: state.pin_retries,
+            consecutive_failures: state.consecutive_failures,
+            pin_auth_blocked: state.pin_auth_blocked,
+        }
+    }
+}
+
 impl PinState {
     const MIN_PIN_LENGTH: usize = 4;
 
@@ -251,6 +275,19 @@ impl PinState {
             pin_retries: MAX_PIN_RETRIES,
             consecutive_failures: 0,
             pin_auth_blocked: false,
+            pin_uv_auth_token: None,
+            pin_uv_auth_permissions: 0,
+            pin_uv_auth_rp_id: None,
+            pin_uv_auth_rp_provided: false,
+        }
+    }
+
+    fn from_stored(stored: StoredPinState) -> Self {
+        Self {
+            pin_hash: stored.pin_hash,
+            pin_retries: stored.pin_retries,
+            consecutive_failures: stored.consecutive_failures,
+            pin_auth_blocked: stored.pin_auth_blocked,
             pin_uv_auth_token: None,
             pin_uv_auth_permissions: 0,
             pin_uv_auth_rp_id: None,
@@ -572,7 +609,7 @@ where
     C: TrussedClient + FilesystemClient + CryptoClient,
 {
     pub fn new(client: C, aaguid: [u8; 16]) -> Self {
-        let app = Self {
+        let mut app = Self {
             client,
             aaguid,
             pin_state: PinState::new(),
@@ -589,6 +626,7 @@ where
             #[cfg(test)]
             stored_credentials: Vec::new(),
         };
+        app.load_persistent_pin_state();
         app
     }
 
@@ -676,6 +714,60 @@ where
             Err(CTAP2_ERR_PIN_AUTH_INVALID)
         }
     }
+
+    /// Load the persistent PIN state from `pin-state.cbor` on the internal
+    /// filesystem if one exists.  Missing or unreadable files leave the
+    /// in-memory state at its defaults.
+    #[cfg(not(test))]
+    fn load_persistent_pin_state(&mut self) {
+        let path = match PathBuf::try_from(PIN_STATE_STORE_PATH) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let reply = match try_syscall!(self.client.read_file(Location::Internal, path)) {
+            Ok(reply) => reply,
+            Err(_) => return,
+        };
+        let data = reply.data.as_slice();
+        if data.is_empty() {
+            return;
+        }
+        match from_reader::<StoredPinState, _>(data) {
+            Ok(stored) => {
+                self.pin_state = PinState::from_stored(stored);
+            }
+            Err(_) => {
+                log::warn!("pin-state.cbor is unreadable; starting with defaults");
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn load_persistent_pin_state(&mut self) {}
+
+    /// Persist the current PIN state.  Called after every CTAP handler that
+    /// can mutate the PIN/retries/lockout fields so the CLI and the next
+    /// daemon attach observe a consistent view.
+    #[cfg(not(test))]
+    fn save_persistent_pin_state(&mut self) {
+        let path = match PathBuf::try_from(PIN_STATE_STORE_PATH) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let stored = StoredPinState::snapshot(&self.pin_state);
+        let mut encoded = Vec::new();
+        if into_writer(&stored, &mut encoded).is_err() {
+            return;
+        }
+        let message = match Message::from_slice(&encoded) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let _ = try_syscall!(self.client.write_file(Location::Internal, path, message, None));
+    }
+
+    #[cfg(test)]
+    fn save_persistent_pin_state(&mut self) {}
 
     fn as_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], u8> {
         if bytes.len() != N {
@@ -845,6 +937,7 @@ where
         let hash = Self::hash_pin(&new_pin);
         new_pin.zeroize();
         self.pin_state.set_pin(hash);
+        self.save_persistent_pin_state();
         Ok(vec![CTAP2_OK])
     }
 
@@ -885,6 +978,7 @@ where
         let current_hash = Self::as_array::<16>(&current_plain)?;
         current_plain.zeroize();
         if let Err(err) = self.pin_state.verify_pin_hash(&current_hash) {
+            self.save_persistent_pin_state();
             return Err(err);
         }
 
@@ -894,6 +988,7 @@ where
         let hash = Self::hash_pin(&new_pin);
         new_pin.zeroize();
         self.pin_state.set_pin(hash);
+        self.save_persistent_pin_state();
         Ok(vec![CTAP2_OK])
     }
 
@@ -932,8 +1027,10 @@ where
         let current_hash = Self::as_array::<16>(&plain)?;
         plain.zeroize();
         if let Err(err) = self.pin_state.verify_pin_hash(&current_hash) {
+            self.save_persistent_pin_state();
             return Err(err);
         }
+        self.save_persistent_pin_state();
 
         let random = syscall!(self.client.random_bytes(32)).bytes;
         if random.len() != 32 {
