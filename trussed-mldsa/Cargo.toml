@@ -3,11 +3,12 @@ name = "trussed-mldsa"
 version = "0.1.0"
 edition = "2021"
 
-description = "Safe Rust wrapper around liboqs ML-DSA signatures"
+description = "Safe Rust wrapper around pure-Rust ML-DSA (FIPS 204) signatures"
 authors = ["Feitian Technologies <info@ftsafe.com>"]
 license = "Apache-2.0 OR MIT"
 
 [dependencies]
+fips204 = "0.4"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
 [features]
