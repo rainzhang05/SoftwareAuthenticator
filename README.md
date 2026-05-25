@@ -19,7 +19,7 @@ You will need a Linux host with Rust and a standard C toolchain installed.
 **Ubuntu/Debian Setup:**
 ```bash
 # 1. Install Rust (if you haven't already)
-curl [https://sh.rustup.rs](https://sh.rustup.rs) -sSf | sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # 2. Install required system packages
 sudo apt update

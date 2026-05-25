@@ -3,8 +3,8 @@ name = "authenticator"
 version = "0.1.0"
 edition = "2021"
 
-description = "Skeleton Trussed application demonstrating ML‑DSA integration"
-authors = ["Your Name <you@example.com>"]
+description = "FIDO2/CTAP2 authenticator core with post-quantum ML-DSA support"
+authors = ["Feitian Technologies <info@ftsafe.com>"]
 license = "Apache-2.0 OR MIT"
 
 [dependencies]
