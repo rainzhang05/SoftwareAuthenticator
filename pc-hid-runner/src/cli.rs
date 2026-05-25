@@ -33,12 +33,69 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Start the authenticator service
-    Start(StartCommand),
-    /// Stop a running authenticator service
-    Stop(StateArgs),
+    /// Start the authenticator service and expose the virtual security key
+    #[clap(alias = "start")]
+    Attach(StartCommand),
+    /// Stop the authenticator service and remove the virtual security key
+    #[clap(alias = "stop")]
+    Detach(StateArgs),
     /// Show service status
     Status(StateArgs),
+    /// Wipe all credentials and PIN state (requires the daemon to be detached)
+    Reset(ResetArgs),
+    /// Manage the authenticator PIN
+    Pin(PinCommand),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ResetArgs {
+    #[clap(flatten)]
+    pub state: StateArgs,
+    /// Skip the interactive confirmation prompt
+    #[clap(long)]
+    pub yes: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PinCommand {
+    #[clap(subcommand)]
+    pub action: PinAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum PinAction {
+    /// Set a new PIN on a PIN-less authenticator
+    Set {
+        #[clap(flatten)]
+        state: StateArgs,
+        /// PIN value (omit to be prompted)
+        #[clap(long)]
+        pin: Option<String>,
+    },
+    /// Change the existing PIN
+    Change {
+        #[clap(flatten)]
+        state: StateArgs,
+        /// Current PIN (omit to be prompted)
+        #[clap(long, value_name = "CURRENT_PIN")]
+        current: Option<String>,
+        /// New PIN (omit to be prompted)
+        #[clap(long, value_name = "NEW_PIN")]
+        new: Option<String>,
+    },
+    /// Remove the PIN entirely
+    Remove {
+        #[clap(flatten)]
+        state: StateArgs,
+        /// Current PIN (omit to be prompted)
+        #[clap(long)]
+        current: Option<String>,
+    },
+    /// Show whether a PIN is set, retries remaining, and block status
+    Status {
+        #[clap(flatten)]
+        state: StateArgs,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -353,8 +410,114 @@ fn status(state: StateArgs) -> io::Result<()> {
 pub fn run_cli() -> io::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Start(cmd) => start(cmd),
-        Command::Stop(state) => stop(state),
+        Command::Attach(cmd) => start(cmd),
+        Command::Detach(state) => stop(state),
         Command::Status(state) => status(state),
+        Command::Reset(args) => reset(args),
+        Command::Pin(cmd) => pin(cmd),
     }
+}
+
+fn require_daemon_stopped(state: &StateArgs) -> io::Result<()> {
+    if let Some(pid) = read_pid(&state.pid_path())? {
+        if process_running(pid) {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "authenticator daemon is running (pid {pid}); run 'feitian-authenticator detach' first"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn confirm(prompt: &str) -> io::Result<bool> {
+    use std::io::{BufRead, BufReader};
+    eprint!("{prompt} [y/N] ");
+    use std::io::Write;
+    std::io::stderr().flush().ok();
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    BufReader::new(stdin.lock()).read_line(&mut line)?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+}
+
+fn read_pin_interactive(prompt: &str) -> io::Result<String> {
+    use std::io::Write;
+    eprint!("{prompt}: ");
+    std::io::stderr().flush().ok();
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf)?;
+    Ok(buf.trim_end_matches(['\n', '\r']).to_string())
+}
+
+fn reset(args: ResetArgs) -> io::Result<()> {
+    require_daemon_stopped(&args.state)?;
+    service::ensure_state_dir(&args.state.state_dir)?;
+    if !args.yes
+        && !confirm(&format!(
+            "This will wipe ALL credentials and PIN state under {}. Continue?",
+            args.state.state_dir.display()
+        ))?
+    {
+        eprintln!("Reset cancelled.");
+        return Ok(());
+    }
+    service::reset_state(&args.state.state_dir)?;
+    println!("Authenticator state has been reset.");
+    Ok(())
+}
+
+fn pin(cmd: PinCommand) -> io::Result<()> {
+    match cmd.action {
+        PinAction::Status { state } => pin_status(state),
+        PinAction::Set { state, pin } => {
+            require_daemon_stopped(&state)?;
+            let pin = match pin {
+                Some(value) => value,
+                None => read_pin_interactive("New PIN")?,
+            };
+            service::pin_set(&state.state_dir, &pin)?;
+            println!("PIN set.");
+            Ok(())
+        }
+        PinAction::Change {
+            state,
+            current,
+            new,
+        } => {
+            require_daemon_stopped(&state)?;
+            let current = match current {
+                Some(value) => value,
+                None => read_pin_interactive("Current PIN")?,
+            };
+            let new = match new {
+                Some(value) => value,
+                None => read_pin_interactive("New PIN")?,
+            };
+            service::pin_change(&state.state_dir, &current, &new)?;
+            println!("PIN changed.");
+            Ok(())
+        }
+        PinAction::Remove { state, current } => {
+            require_daemon_stopped(&state)?;
+            let current = match current {
+                Some(value) => value,
+                None => read_pin_interactive("Current PIN")?,
+            };
+            service::pin_remove(&state.state_dir, &current)?;
+            println!("PIN removed.");
+            Ok(())
+        }
+    }
+}
+
+fn pin_status(state: StateArgs) -> io::Result<()> {
+    service::ensure_state_dir(&state.state_dir)?;
+    let info = service::pin_info(&state.state_dir)?;
+    println!("PIN set:           {}", info.is_set);
+    println!("Retries remaining: {}", info.retries);
+    println!("Blocked:           {}", info.blocked);
+    Ok(())
 }
