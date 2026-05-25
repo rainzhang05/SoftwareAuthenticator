@@ -214,6 +214,38 @@ impl PersistentStore {
         ensure_metadata(fs, &identity)?;
         Ok(())
     }
+
+    /// Read the persistent PIN state from disk, returning defaults if no
+    /// `pin-state.cbor` exists yet.
+    pub fn read_pin_state(&self) -> io::Result<StoredPinState> {
+        read_pin_state_from(self.store().ifs)
+    }
+
+    /// Persist a new PIN state record, overwriting any existing entry.
+    pub fn write_pin_state(&self, pin_state: &StoredPinState) -> io::Result<()> {
+        write_pin_state_to(self.store().ifs, pin_state)
+    }
+
+    /// Wipe every credential and reset PIN state to defaults.  This is the
+    /// authenticator-side equivalent of the CTAP `authenticatorReset`
+    /// command.  Attestation key/cert and device metadata are preserved.
+    pub fn reset(&mut self) -> io::Result<()> {
+        let fs = self.store().ifs;
+        if fs.exists(&path!("credentials.cbor")) {
+            fs.remove(&path!("credentials.cbor"))
+                .map_err(map_fs_error)?;
+        }
+        write_pin_state_to(fs, &StoredPinState::default())?;
+        Ok(())
+    }
+}
+
+/// Wipe every credential and PIN state file under `base`, without going
+/// through `PersistentStore` (used by `feitian-authenticator reset` when
+/// the daemon is detached).
+pub fn reset_state_dir(base: &Path) -> io::Result<()> {
+    let mut store = PersistentStore::new(base)?;
+    store.reset()
 }
 
 #[derive(Clone, Copy)]
@@ -230,13 +262,31 @@ struct StoredAttestation {
     certificate_chain: Vec<Vec<u8>>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct StoredPinState {
-    pin_hash: Option<[u8; 16]>,
-    pin_retries: u8,
-    consecutive_failures: u8,
-    pin_auth_blocked: bool,
+/// Persistent PIN state, mirrored on disk under `pin-state.cbor` in the
+/// authenticator's internal filesystem.  Mutating it requires the daemon to
+/// be stopped (no IPC channel exists today).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StoredPinState {
+    pub pin_hash: Option<[u8; 16]>,
+    pub pin_retries: u8,
+    pub consecutive_failures: u8,
+    pub pin_auth_blocked: bool,
 }
+
+impl Default for StoredPinState {
+    fn default() -> Self {
+        Self {
+            pin_hash: None,
+            pin_retries: DEFAULT_PIN_RETRIES,
+            consecutive_failures: 0,
+            pin_auth_blocked: false,
+        }
+    }
+}
+
+/// Default number of PIN attempts allowed before the authenticator is
+/// permanently blocked until a Reset.
+pub const DEFAULT_PIN_RETRIES: u8 = 8;
 
 #[derive(Serialize, Deserialize)]
 struct StoredDeviceMetadata {
@@ -276,17 +326,39 @@ fn ensure_pin_state(fs: &'static dyn DynFilesystem) -> io::Result<()> {
     if fs.exists(&path!("pin-state.cbor")) {
         return Ok(());
     }
-    let pin_state = StoredPinState {
-        pin_hash: None,
-        pin_retries: 8,
-        consecutive_failures: 0,
-        pin_auth_blocked: false,
-    };
+    write_pin_state_to(fs, &StoredPinState::default())
+}
+
+fn write_pin_state_to(
+    fs: &'static dyn DynFilesystem,
+    pin_state: &StoredPinState,
+) -> io::Result<()> {
     let mut encoded = Vec::new();
-    into_writer(&pin_state, &mut encoded)
+    into_writer(pin_state, &mut encoded)
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "failed to encode pin state"))?;
     fs.write(&path!("pin-state.cbor"), &encoded)
         .map_err(map_fs_error)
+}
+
+fn read_pin_state_from(fs: &'static dyn DynFilesystem) -> io::Result<StoredPinState> {
+    if !fs.exists(&path!("pin-state.cbor")) {
+        return Ok(StoredPinState::default());
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    fs.open_file_and_then_unit(&path!("pin-state.cbor"), &mut |file| {
+        let mut chunk = [0u8; 256];
+        loop {
+            let n = file.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        Ok(())
+    })
+    .map_err(map_fs_error)?;
+    ciborium::de::from_reader(buf.as_slice())
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("pin state: {err}")))
 }
 
 fn ensure_metadata(
