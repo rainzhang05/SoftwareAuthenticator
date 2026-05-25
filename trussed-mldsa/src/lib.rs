@@ -135,11 +135,10 @@ pub fn try_sign(ps: ParamSet, sk: &SecretKey, message: &[u8]) -> Result<Vec<u8>,
     match ps {
         #[cfg(feature = "mldsa44")]
         ParamSet::MLDSA44 => {
-            let bytes: [u8; fips204::ml_dsa_44::SK_LEN] = sk
-                .0
-                .as_slice()
-                .try_into()
-                .map_err(|_| MlDsaError::InvalidKeyLength)?;
+            let bytes: [u8; fips204::ml_dsa_44::SK_LEN] =
+                sk.0.as_slice()
+                    .try_into()
+                    .map_err(|_| MlDsaError::InvalidKeyLength)?;
             let sk = fips204::ml_dsa_44::PrivateKey::try_from_bytes(bytes)
                 .map_err(|_| MlDsaError::InvalidKeyLength)?;
             let sig = sk
@@ -149,11 +148,10 @@ pub fn try_sign(ps: ParamSet, sk: &SecretKey, message: &[u8]) -> Result<Vec<u8>,
         }
         #[cfg(feature = "mldsa65")]
         ParamSet::MLDSA65 => {
-            let bytes: [u8; fips204::ml_dsa_65::SK_LEN] = sk
-                .0
-                .as_slice()
-                .try_into()
-                .map_err(|_| MlDsaError::InvalidKeyLength)?;
+            let bytes: [u8; fips204::ml_dsa_65::SK_LEN] =
+                sk.0.as_slice()
+                    .try_into()
+                    .map_err(|_| MlDsaError::InvalidKeyLength)?;
             let sk = fips204::ml_dsa_65::PrivateKey::try_from_bytes(bytes)
                 .map_err(|_| MlDsaError::InvalidKeyLength)?;
             let sig = sk
@@ -163,11 +161,10 @@ pub fn try_sign(ps: ParamSet, sk: &SecretKey, message: &[u8]) -> Result<Vec<u8>,
         }
         #[cfg(feature = "mldsa87")]
         ParamSet::MLDSA87 => {
-            let bytes: [u8; fips204::ml_dsa_87::SK_LEN] = sk
-                .0
-                .as_slice()
-                .try_into()
-                .map_err(|_| MlDsaError::InvalidKeyLength)?;
+            let bytes: [u8; fips204::ml_dsa_87::SK_LEN] =
+                sk.0.as_slice()
+                    .try_into()
+                    .map_err(|_| MlDsaError::InvalidKeyLength)?;
             let sk = fips204::ml_dsa_87::PrivateKey::try_from_bytes(bytes)
                 .map_err(|_| MlDsaError::InvalidKeyLength)?;
             let sig = sk

@@ -79,14 +79,6 @@ impl<'a> TrussedApps<'a, CoreOnly> for Apps {
     ) -> T {
         f(&mut [&mut self.ctap])
     }
-
-    #[cfg(feature = "ccid")]
-    fn with_ccid_apps<T, const N: usize>(
-        &mut self,
-        f: impl FnOnce(&mut [&mut dyn apdu_dispatch::app::App<N>]) -> T,
-    ) -> T {
-        f(&mut [])
-    }
 }
 
 pub fn run(config: RunnerConfig) -> io::Result<()> {

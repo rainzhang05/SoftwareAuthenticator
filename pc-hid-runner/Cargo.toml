@@ -27,4 +27,3 @@ sha2 = "0.10"
 default = ["uhid-backend"]
 uhid-backend = []
 ctaphid = []
-ccid = []
