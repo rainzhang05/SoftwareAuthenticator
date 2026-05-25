@@ -84,18 +84,30 @@ pub fn try_keypair(ps: ParamSet) -> Result<(PublicKey, SecretKey), MlDsaError> {
     match ps {
         #[cfg(feature = "mldsa44")]
         ParamSet::MLDSA44 => {
-            let (pk, sk) = fips204::ml_dsa_44::try_keygen().map_err(|_| MlDsaError::KeyGenFailed)?;
-            Ok((PublicKey(pk.into_bytes().to_vec()), SecretKey(sk.into_bytes().to_vec())))
+            let (pk, sk) =
+                fips204::ml_dsa_44::try_keygen().map_err(|_| MlDsaError::KeyGenFailed)?;
+            Ok((
+                PublicKey(pk.into_bytes().to_vec()),
+                SecretKey(sk.into_bytes().to_vec()),
+            ))
         }
         #[cfg(feature = "mldsa65")]
         ParamSet::MLDSA65 => {
-            let (pk, sk) = fips204::ml_dsa_65::try_keygen().map_err(|_| MlDsaError::KeyGenFailed)?;
-            Ok((PublicKey(pk.into_bytes().to_vec()), SecretKey(sk.into_bytes().to_vec())))
+            let (pk, sk) =
+                fips204::ml_dsa_65::try_keygen().map_err(|_| MlDsaError::KeyGenFailed)?;
+            Ok((
+                PublicKey(pk.into_bytes().to_vec()),
+                SecretKey(sk.into_bytes().to_vec()),
+            ))
         }
         #[cfg(feature = "mldsa87")]
         ParamSet::MLDSA87 => {
-            let (pk, sk) = fips204::ml_dsa_87::try_keygen().map_err(|_| MlDsaError::KeyGenFailed)?;
-            Ok((PublicKey(pk.into_bytes().to_vec()), SecretKey(sk.into_bytes().to_vec())))
+            let (pk, sk) =
+                fips204::ml_dsa_87::try_keygen().map_err(|_| MlDsaError::KeyGenFailed)?;
+            Ok((
+                PublicKey(pk.into_bytes().to_vec()),
+                SecretKey(sk.into_bytes().to_vec()),
+            ))
         }
         #[cfg(not(feature = "mldsa44"))]
         ParamSet::MLDSA44 => Err(MlDsaError::InvalidParameterSet),
@@ -123,29 +135,44 @@ pub fn try_sign(ps: ParamSet, sk: &SecretKey, message: &[u8]) -> Result<Vec<u8>,
     match ps {
         #[cfg(feature = "mldsa44")]
         ParamSet::MLDSA44 => {
-            let bytes: [u8; fips204::ml_dsa_44::SK_LEN] =
-                sk.0.as_slice().try_into().map_err(|_| MlDsaError::InvalidKeyLength)?;
+            let bytes: [u8; fips204::ml_dsa_44::SK_LEN] = sk
+                .0
+                .as_slice()
+                .try_into()
+                .map_err(|_| MlDsaError::InvalidKeyLength)?;
             let sk = fips204::ml_dsa_44::PrivateKey::try_from_bytes(bytes)
                 .map_err(|_| MlDsaError::InvalidKeyLength)?;
-            let sig = sk.try_sign(message, &[]).map_err(|_| MlDsaError::SigningFailed)?;
+            let sig = sk
+                .try_sign(message, &[])
+                .map_err(|_| MlDsaError::SigningFailed)?;
             Ok(sig.to_vec())
         }
         #[cfg(feature = "mldsa65")]
         ParamSet::MLDSA65 => {
-            let bytes: [u8; fips204::ml_dsa_65::SK_LEN] =
-                sk.0.as_slice().try_into().map_err(|_| MlDsaError::InvalidKeyLength)?;
+            let bytes: [u8; fips204::ml_dsa_65::SK_LEN] = sk
+                .0
+                .as_slice()
+                .try_into()
+                .map_err(|_| MlDsaError::InvalidKeyLength)?;
             let sk = fips204::ml_dsa_65::PrivateKey::try_from_bytes(bytes)
                 .map_err(|_| MlDsaError::InvalidKeyLength)?;
-            let sig = sk.try_sign(message, &[]).map_err(|_| MlDsaError::SigningFailed)?;
+            let sig = sk
+                .try_sign(message, &[])
+                .map_err(|_| MlDsaError::SigningFailed)?;
             Ok(sig.to_vec())
         }
         #[cfg(feature = "mldsa87")]
         ParamSet::MLDSA87 => {
-            let bytes: [u8; fips204::ml_dsa_87::SK_LEN] =
-                sk.0.as_slice().try_into().map_err(|_| MlDsaError::InvalidKeyLength)?;
+            let bytes: [u8; fips204::ml_dsa_87::SK_LEN] = sk
+                .0
+                .as_slice()
+                .try_into()
+                .map_err(|_| MlDsaError::InvalidKeyLength)?;
             let sk = fips204::ml_dsa_87::PrivateKey::try_from_bytes(bytes)
                 .map_err(|_| MlDsaError::InvalidKeyLength)?;
-            let sig = sk.try_sign(message, &[]).map_err(|_| MlDsaError::SigningFailed)?;
+            let sig = sk
+                .try_sign(message, &[])
+                .map_err(|_| MlDsaError::SigningFailed)?;
             Ok(sig.to_vec())
         }
         #[cfg(not(feature = "mldsa44"))]

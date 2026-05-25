@@ -763,7 +763,9 @@ where
             Ok(m) => m,
             Err(_) => return,
         };
-        let _ = try_syscall!(self.client.write_file(Location::Internal, path, message, None));
+        let _ = try_syscall!(self
+            .client
+            .write_file(Location::Internal, path, message, None));
     }
 
     #[cfg(test)]
@@ -851,12 +853,8 @@ where
         if let Some(Value::Integer(int)) = Self::map_get(map, Value::Integer(Integer::from(1))) {
             let value: i128 = int.clone().into();
             match value {
-                v if v == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V2) => {
-                    Ok(ClassicPinProtocol::V2)
-                }
-                v if v == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V1) => {
-                    Ok(ClassicPinProtocol::V1)
-                }
+                v if v == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V2) => Ok(ClassicPinProtocol::V2),
+                v if v == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V1) => Ok(ClassicPinProtocol::V1),
                 _ => Err(CTAP1_ERR_INVALID_PARAMETER),
             }
         } else {

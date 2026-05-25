@@ -293,10 +293,7 @@ fn verify_current_pin(state: &mut StoredPinState, candidate: &str) -> io::Result
         }
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!(
-                "PIN is incorrect ({} retries remaining)",
-                state.pin_retries
-            ),
+            format!("PIN is incorrect ({} retries remaining)", state.pin_retries),
         ))
     }
 }

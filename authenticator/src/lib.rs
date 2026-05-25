@@ -461,5 +461,4 @@ mod tests {
         }
         panic!("COSE key missing public key bytes");
     }
-
 }
