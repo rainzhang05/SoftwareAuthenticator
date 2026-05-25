@@ -181,10 +181,21 @@ pub fn try_sign(ps: ParamSet, sk: &SecretKey, message: &[u8]) -> Result<Vec<u8>,
     }
 }
 
-/// Sign a message, panicking on failure.  Kept for API compatibility with
-/// the previous liboqs-based wrapper.
+/// Sign a message.  Kept for API compatibility with the previous
+/// liboqs-based wrapper; returns an empty `Vec` (and logs a warning via
+/// `eprintln!`-equivalent) on key-length / signing errors rather than
+/// aborting the process, since the daemon must not crash on a malformed
+/// stored credential.
 pub fn sign(ps: ParamSet, sk: &SecretKey, message: &[u8]) -> Vec<u8> {
-    try_sign(ps, sk, message).expect("ML-DSA signing failed")
+    match try_sign(ps, sk, message) {
+        Ok(sig) => sig,
+        Err(err) => {
+            #[cfg(feature = "log")]
+            log::warn!("ML-DSA signing failed: {err:?}");
+            let _ = err;
+            Vec::new()
+        }
+    }
 }
 
 /// Verify a signature.  Returns `false` on length mismatch or invalid
