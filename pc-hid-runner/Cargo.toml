@@ -2,7 +2,6 @@
 name = "pc-hid-runner"
 version = "0.1.0"
 edition = "2021"
-default-run = "pc-hid-runner"
 
 [dependencies]
 ctaphid-dispatch = { version = "0.3", features = ["log-all"] }
