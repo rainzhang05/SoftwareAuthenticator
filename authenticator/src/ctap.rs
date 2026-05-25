@@ -1239,6 +1239,34 @@ where
         Err(CTAP1_ERR_INVALID_COMMAND)
     }
 
+    /// CTAP2 `authenticatorReset` (command 0x07).  Wipes credentials and
+    /// PIN state after collecting user presence.  The standard 10-second
+    /// "since power-up" window from the FIDO spec is intentionally not
+    /// enforced; a software authenticator on a multi-user desktop already
+    /// requires explicit user consent via the presence prompt.
+    fn handle_reset(&mut self) -> Result<Vec<u8>, u8> {
+        let _present = self.await_user_presence()?;
+        self.clear_credentials()?;
+        self.pin_state = PinState::new();
+        self.save_persistent_pin_state();
+        self.cred_mgmt_state = CredentialManagementState::new();
+        self.pending_assertion = None;
+        Ok(vec![CTAP2_OK])
+    }
+
+    #[cfg(not(test))]
+    fn clear_credentials(&mut self) -> Result<(), u8> {
+        let path = Self::store_path()?;
+        let _ = try_syscall!(self.client.remove_file(Location::Internal, path));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn clear_credentials(&mut self) -> Result<(), u8> {
+        self.stored_credentials.clear();
+        Ok(())
+    }
+
     fn client_pin_get_retries(&mut self) -> Result<Vec<u8>, u8> {
         let mut entries = vec![(
             Value::Integer(Integer::from(0x03)),
@@ -2710,9 +2738,10 @@ where
                     CTAP_CMD_GET_ASSERTION => self.handle_get_assertion(payload),
                     CTAP_CMD_GET_NEXT_ASSERTION => self.handle_get_next_assertion(),
                     CTAP_CMD_CLIENT_PIN => self.handle_client_pin(payload),
+                    CTAP_CMD_RESET => self.handle_reset(),
                     CTAP_CMD_CREDENTIAL_MANAGEMENT => self.handle_credential_management(payload),
                     CTAP_CMD_BIO_ENROLLMENT => self.handle_bio_enrollment(payload),
-                    _ => Err(CTAP2_ERR_INVALID_CBOR),
+                    _ => Err(CTAP1_ERR_INVALID_COMMAND),
                 };
 
                 let (message, status) = match result {

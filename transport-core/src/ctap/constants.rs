@@ -2,6 +2,7 @@ pub const CTAP_CMD_MAKE_CREDENTIAL: u8 = 0x01;
 pub const CTAP_CMD_GET_ASSERTION: u8 = 0x02;
 pub const CTAP_CMD_GET_INFO: u8 = 0x04;
 pub const CTAP_CMD_CLIENT_PIN: u8 = 0x06;
+pub const CTAP_CMD_RESET: u8 = 0x07;
 pub const CTAP_CMD_GET_NEXT_ASSERTION: u8 = 0x08;
 pub const CTAP_CMD_CREDENTIAL_MANAGEMENT: u8 = 0x0A;
 pub const CTAP_CMD_BIO_ENROLLMENT: u8 = 0x40;
