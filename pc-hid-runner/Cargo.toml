@@ -21,6 +21,7 @@ trussed = { version = "0.1", default-features = false, features = ["log-all", "v
 authenticator = { path = "../authenticator" }
 daemonize = "0.4"
 rand = { version = "0.8", features = ["std"] }
+sha2 = "0.10"
 
 [features]
 default = ["uhid-backend"]
