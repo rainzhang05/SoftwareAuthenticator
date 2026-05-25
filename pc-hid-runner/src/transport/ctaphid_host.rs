@@ -771,7 +771,9 @@ mod tests {
 
         let frames = take_frame_bytes(&mut host);
         assert_eq!(frames.len(), 1);
-        let assigned = u32::from_be_bytes(frames[0][8..12].try_into().unwrap());
+        // Init response payload: 8-byte nonce echo followed by 4-byte
+        // assigned channel id; payload starts at frame offset 7.
+        let assigned = u32::from_be_bytes(frames[0][15..19].try_into().unwrap());
         assert_eq!(assigned, 0x1234_5678);
     }
 
@@ -792,7 +794,7 @@ mod tests {
 
         let frames = take_frame_bytes(&mut host);
         assert_eq!(frames.len(), 1);
-        let assigned = u32::from_be_bytes(frames[0][8..12].try_into().unwrap());
+        let assigned = u32::from_be_bytes(frames[0][15..19].try_into().unwrap());
         assert_eq!(assigned, 0xA1A2_A3A4);
 
         let mut reinit_packet = [0u8; 64];
@@ -806,7 +808,7 @@ mod tests {
 
         let frames = take_frame_bytes(&mut host);
         assert_eq!(frames.len(), 1);
-        let reused = u32::from_be_bytes(frames[0][8..12].try_into().unwrap());
+        let reused = u32::from_be_bytes(frames[0][15..19].try_into().unwrap());
         assert_eq!(reused, assigned);
 
         let mut second_broadcast = [0u8; 64];
@@ -820,7 +822,7 @@ mod tests {
 
         let frames = take_frame_bytes(&mut host);
         assert_eq!(frames.len(), 1);
-        let next_cid = u32::from_be_bytes(frames[0][8..12].try_into().unwrap());
+        let next_cid = u32::from_be_bytes(frames[0][15..19].try_into().unwrap());
         assert_eq!(next_cid, 0xDEAD_BEEF);
     }
 
@@ -840,7 +842,7 @@ mod tests {
         let _ = host.poll_dispatch(&mut dispatch, &mut apps);
         let frames = take_frame_bytes(&mut host);
         assert_eq!(frames.len(), 1);
-        let first_cid = u32::from_be_bytes(frames[0][8..12].try_into().unwrap());
+        let first_cid = u32::from_be_bytes(frames[0][15..19].try_into().unwrap());
         assert_eq!(first_cid, 0x0102_0304);
 
         let mut second_init = [0u8; 64];
@@ -854,7 +856,7 @@ mod tests {
 
         let frames = take_frame_bytes(&mut host);
         assert_eq!(frames.len(), 1);
-        let second_cid = u32::from_be_bytes(frames[0][8..12].try_into().unwrap());
+        let second_cid = u32::from_be_bytes(frames[0][15..19].try_into().unwrap());
         assert_eq!(second_cid, 0x0BAD_F00D);
         assert_ne!(first_cid, second_cid);
     }
@@ -877,9 +879,15 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0][4] & 0x7f, Command::Init.into_u8());
         assert_eq!(frames[0][5..7], [0, 17]);
+        // Init response payload layout:
+        // [7..15] nonce echo
+        // [15..19] assigned channel id
+        // [19] CTAPHID protocol version (2)
+        // [20..23] device major/minor/build version
+        // [23] capability flags
         assert_eq!(&frames[0][7..15], &[1, 2, 3, 4, 5, 6, 7, 8]);
-        // Verify CAPABILITY_CBOR | CAPABILITY_NMSG = 0x0C
-        assert_eq!(frames[0][16], CAPABILITY_CBOR | CAPABILITY_NMSG);
+        assert_eq!(frames[0][19], 2);
+        assert_eq!(frames[0][23], CAPABILITY_CBOR | CAPABILITY_NMSG);
     }
 
     #[test]

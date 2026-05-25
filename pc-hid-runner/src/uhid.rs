@@ -386,66 +386,8 @@ fn event_as_bytes(event: &raw::uhid_event) -> &[u8] {
     }
 }
 
-fn force_ctaphid_report_descriptor(event: &mut raw::uhid_event) {
-    // Non-mutating validator: we only log; we never rewrite rd_data/rd_size.
-    if event.type_ != raw::UHID_EVENT_TYPE_CREATE2 {
-        return;
-    }
-
-    let size = unsafe {
-        usize::from(core::ptr::read_unaligned(core::ptr::addr_of!(
-            event.u.create2.rd_size
-        )))
-    };
-    let expected_len = CTAPHID_REPORT_DESCRIPTOR.len();
-
-    if size >= expected_len
-        && unsafe {
-            std::slice::from_raw_parts(
-                core::ptr::addr_of!(event.u.create2.rd_data) as *const u8,
-                expected_len,
-            )
-        } == CTAPHID_REPORT_DESCRIPTOR
-    {
-        return;
-    }
-    if size == 0 {
-        log::warn!(
-            "create2 descriptor length is zero; expected {} bytes. Not mutating.",
-            expected_len
-        );
-    } else if size > raw::HID_MAX_DESCRIPTOR_SIZE {
-        log::warn!(
-            "create2 descriptor length {} exceeds HID max {}; not mutating.",
-            size,
-            raw::HID_MAX_DESCRIPTOR_SIZE
-        );
-    } else {
-        log::warn!(
-            "create2 descriptor does not match reference (size={}, expected={}); not mutating.",
-            size,
-            expected_len
-        );
-    }
-}
-
 fn to_io_error(err: nix::Error) -> io::Error {
     io::Error::from(err)
-}
-
-fn looks_like_ascii_hex(bytes: &[u8]) -> bool {
-    let mut saw_digit = false;
-    for &byte in bytes {
-        if byte.is_ascii_whitespace() {
-            continue;
-        }
-        if byte.is_ascii_hexdigit() {
-            saw_digit = true;
-            continue;
-        }
-        return saw_digit;
-    }
-    saw_digit
 }
 
 mod raw {
@@ -748,134 +690,11 @@ mod tests {
         assert_eq!(descriptor_bytes, &CTAPHID_REPORT_DESCRIPTOR);
     }
 
-    #[test]
-    fn write_event_decodes_ascii_descriptor_bytes() {
-        use nix::unistd::{close, pipe, read};
-
-        let mut event = raw::uhid_event::default();
-        event.type_ = raw::UHID_EVENT_TYPE_CREATE2;
-        let ascii_descriptor = b"06 d0 f1 09 01 a1 01 09 20 15 00 26 ff 00 75 08 95 40 81 02 09 21 15 00 26 ff 00 75 08 95 40 91 02 c0";
-        let descriptor_len = ascii_descriptor.len();
-        let create2 = unsafe { &mut event.u.create2 };
-        create2.rd_size = descriptor_len as u16;
-        create2.rd_data[..descriptor_len].copy_from_slice(ascii_descriptor);
-
-        let (read_fd, write_fd) = pipe().expect("pipe");
-        write_event_blocking(write_fd, &mut event).expect("write_event");
-        close(write_fd).ok();
-
-        let create2 = unsafe { &event.u.create2 };
-        assert_eq!(create2.rd_size as usize, CTAPHID_REPORT_DESCRIPTOR.len());
-        assert_eq!(
-            &create2.rd_data[..CTAPHID_REPORT_DESCRIPTOR.len()],
-            &CTAPHID_REPORT_DESCRIPTOR
-        );
-
-        let mut buffer = [0u8; raw::UHID_EVENT_SIZE];
-        let mut offset = 0;
-        while offset < buffer.len() {
-            let read_bytes = read(read_fd, &mut buffer[offset..]).expect("read");
-            if read_bytes == 0 {
-                break;
-            }
-            offset += read_bytes;
-        }
-        close(read_fd).ok();
-        assert_eq!(offset, raw::UHID_EVENT_SIZE);
-
-        let data_offset = unsafe {
-            let base = (&event as *const raw::uhid_event).cast::<u8>();
-            let data = event.u.create2.rd_data.as_ptr();
-            data.offset_from(base) as usize
-        };
-        let descriptor_bytes = &buffer[data_offset..data_offset + CTAPHID_REPORT_DESCRIPTOR.len()];
-        assert_eq!(descriptor_bytes, &CTAPHID_REPORT_DESCRIPTOR);
-    }
-
-    #[test]
-    fn write_event_decodes_ascii_descriptor_with_suffix() {
-        use nix::unistd::{close, pipe, read};
-
-        let mut event = raw::uhid_event::default();
-        event.type_ = raw::UHID_EVENT_TYPE_CREATE2;
-        let ascii_descriptor = b"06 d0 f1 09 01 a1 01 09 20 15 00 26 ff 00 75 08 95 40 81 02 09 21 15 00 26 ff 00 75 08 95 40 91 02 c0\n  INPUT[INPUT]\n";
-        let descriptor_len = ascii_descriptor.len();
-        let create2 = unsafe { &mut event.u.create2 };
-        create2.rd_size = descriptor_len as u16;
-        create2.rd_data[..descriptor_len].copy_from_slice(ascii_descriptor);
-
-        let (read_fd, write_fd) = pipe().expect("pipe");
-        write_event_blocking(write_fd, &mut event).expect("write_event");
-        close(write_fd).ok();
-
-        let create2 = unsafe { &event.u.create2 };
-        assert_eq!(create2.rd_size as usize, CTAPHID_REPORT_DESCRIPTOR.len());
-        assert_eq!(
-            &create2.rd_data[..CTAPHID_REPORT_DESCRIPTOR.len()],
-            &CTAPHID_REPORT_DESCRIPTOR
-        );
-
-        let mut buffer = [0u8; raw::UHID_EVENT_SIZE];
-        let mut offset = 0;
-        while offset < buffer.len() {
-            let read_bytes = read(read_fd, &mut buffer[offset..]).expect("read");
-            if read_bytes == 0 {
-                break;
-            }
-            offset += read_bytes;
-        }
-        close(read_fd).ok();
-        assert_eq!(offset, raw::UHID_EVENT_SIZE);
-
-        let data_offset = unsafe {
-            let base = (&event as *const raw::uhid_event).cast::<u8>();
-            let data = event.u.create2.rd_data.as_ptr();
-            data.offset_from(base) as usize
-        };
-        let descriptor_bytes = &buffer[data_offset..data_offset + CTAPHID_REPORT_DESCRIPTOR.len()];
-        assert_eq!(descriptor_bytes, &CTAPHID_REPORT_DESCRIPTOR);
-    }
-
-    #[test]
-    fn write_event_overrides_incorrect_binary_descriptor() {
-        use nix::unistd::{close, pipe, read};
-
-        let mut event = raw::uhid_event::default();
-        event.type_ = raw::UHID_EVENT_TYPE_CREATE2;
-        let bogus_descriptor = [0xAAu8; CTAPHID_REPORT_DESCRIPTOR.len()];
-        let create2 = unsafe { &mut event.u.create2 };
-        create2.rd_size = bogus_descriptor.len() as u16;
-        create2.rd_data[..bogus_descriptor.len()].copy_from_slice(&bogus_descriptor);
-
-        let (read_fd, write_fd) = pipe().expect("pipe");
-        write_event_blocking(write_fd, &mut event).expect("write_event");
-        close(write_fd).ok();
-
-        let create2 = unsafe { &event.u.create2 };
-        assert_eq!(create2.rd_size as usize, CTAPHID_REPORT_DESCRIPTOR.len());
-        assert_eq!(
-            &create2.rd_data[..CTAPHID_REPORT_DESCRIPTOR.len()],
-            &CTAPHID_REPORT_DESCRIPTOR
-        );
-
-        let mut buffer = [0u8; raw::UHID_EVENT_SIZE];
-        let mut offset = 0;
-        while offset < buffer.len() {
-            let read_bytes = read(read_fd, &mut buffer[offset..]).expect("read");
-            if read_bytes == 0 {
-                break;
-            }
-            offset += read_bytes;
-        }
-        close(read_fd).ok();
-        assert_eq!(offset, raw::UHID_EVENT_SIZE);
-
-        let data_offset = unsafe {
-            let base = (&event as *const raw::uhid_event).cast::<u8>();
-            let data = event.u.create2.rd_data.as_ptr();
-            data.offset_from(base) as usize
-        };
-        let descriptor_bytes = &buffer[data_offset..data_offset + CTAPHID_REPORT_DESCRIPTOR.len()];
-        assert_eq!(descriptor_bytes, &CTAPHID_REPORT_DESCRIPTOR);
-    }
+    // NOTE: previous versions of this file contained tests for an in-place
+    // descriptor rewriter (`force_ctaphid_report_descriptor`).  That helper
+    // was never wired into the production write path, so the tests asserted
+    // behaviour the code never performed.  They are intentionally removed
+    // here; `descriptor_bytes_are_copied_verbatim` and
+    // `write_event_sends_raw_descriptor_bytes` above cover the actual
+    // serialization contract.
 }
