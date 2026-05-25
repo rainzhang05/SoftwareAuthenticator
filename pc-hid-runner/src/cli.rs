@@ -109,8 +109,6 @@ pub struct DeviceArgs {
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub enum BackendArg {
     Uhid,
-    #[cfg(feature = "usbip-backend")]
-    Usbip,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
@@ -134,8 +132,6 @@ impl BackendArg {
     fn into_backend(self) -> service::Backend {
         match self {
             BackendArg::Uhid => service::Backend::Uhid,
-            #[cfg(feature = "usbip-backend")]
-            BackendArg::Usbip => service::Backend::Usbip,
         }
     }
 }

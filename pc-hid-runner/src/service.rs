@@ -4,8 +4,6 @@ use std::{
 };
 
 use authenticator::ctap::{CtapApp, PqcPolicy};
-#[cfg(feature = "usbip-backend")]
-use pc_usbip_runner::{exec as usbip_exec, Builder as UsbipBuilder};
 use transport_core::state::{IdentityConfig, PersistentStore};
 use transport_core::{set_waiting, Apps as TrussedApps, Builder, Options, Platform, Syscall};
 use trussed::{
@@ -20,8 +18,6 @@ use crate::{exec, HidDeviceDescriptor, CTAPHID_FRAME_LEN};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
     Uhid,
-    #[cfg(feature = "usbip-backend")]
-    Usbip,
 }
 
 #[derive(Clone)]
@@ -126,11 +122,6 @@ pub fn run(config: RunnerConfig) -> io::Result<()> {
         Backend::Uhid => {
             let runner = Builder::new(options).build::<Apps>();
             exec(runner, descriptor, platform, data)
-        }
-        #[cfg(feature = "usbip-backend")]
-        Backend::Usbip => {
-            let runner = UsbipBuilder::new(options).build::<Apps>();
-            usbip_exec(runner, platform, data)
         }
     }
 }
