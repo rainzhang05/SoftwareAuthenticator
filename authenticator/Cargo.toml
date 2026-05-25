@@ -12,7 +12,6 @@ trussed = "0.1.0"
 ciborium = { version = "0.2", default-features = false }
 heapless = "0.7"
 littlefs2 = "0.4"
-aes-gcm = "0.10"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 hkdf = "0.12"
@@ -27,10 +26,9 @@ rand_core = "0.6"
 log = { version = "0.4", default-features = false }
 transport-core = { path = "../transport-core", default-features = false }
 
-# Use our local wrapper for ML‑DSA.  By enabling all parameter set features the
-# wrapper links to the stub C implementation for 44/65/87.
+# Use our local wrapper for ML-DSA.  By enabling all parameter set features the
+# wrapper links to the underlying ML-DSA implementation for 44/65/87.
 trussed-mldsa = { path = "../trussed-mldsa", features = ["mldsa44", "mldsa65", "mldsa87"] }
-trussed-mlkem = { path = "../trussed-mlkem", features = ["mlkem512", "mlkem768", "mlkem1024"] }
 
 [dev-dependencies]
 serial_test = "2"

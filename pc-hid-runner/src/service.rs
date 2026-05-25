@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use authenticator::ctap::{CtapApp, PqcPolicy};
+use authenticator::ctap::CtapApp;
 use transport_core::state::{IdentityConfig, PersistentStore};
 use transport_core::{set_waiting, Apps as TrussedApps, Builder, Options, Platform, Syscall};
 use trussed::{
@@ -35,7 +35,6 @@ pub struct RunnerConfig {
     pub identity: IdentityStrings,
     pub auto_user_presence: bool,
     pub suppress_attestation: bool,
-    pub pqc_policy: PqcPolicy,
     pub backend: Backend,
 }
 
@@ -44,7 +43,6 @@ pub struct AppData {
     pub aaguid: [u8; 16],
     pub auto_user_presence: bool,
     pub suppress_attestation: bool,
-    pub pqc_policy: PqcPolicy,
 }
 
 pub struct Apps {
@@ -68,7 +66,6 @@ impl<'a> TrussedApps<'a, CoreOnly> for Apps {
         let mut ctap = CtapApp::new(client, data.aaguid);
         ctap.set_auto_user_presence(data.auto_user_presence);
         ctap.suppress_attestation(data.suppress_attestation);
-        ctap.set_pqc_policy(data.pqc_policy);
         ctap.set_keepalive_callback(set_waiting);
         Self { ctap }
     }
@@ -98,7 +95,6 @@ pub fn run(config: RunnerConfig) -> io::Result<()> {
         identity,
         auto_user_presence,
         suppress_attestation,
-        pqc_policy,
         backend,
     } = config;
 
@@ -115,7 +111,6 @@ pub fn run(config: RunnerConfig) -> io::Result<()> {
         aaguid,
         auto_user_presence,
         suppress_attestation,
-        pqc_policy,
     };
 
     match backend {

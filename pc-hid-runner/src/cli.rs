@@ -7,7 +7,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use authenticator::ctap::PqcPolicy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_num::maybe_hex;
 use daemonize::Daemonize;
@@ -98,9 +97,6 @@ pub struct DeviceArgs {
     /// Suppress attestation certificate material for makeCredential operations
     #[clap(long)]
     pub suppress_attestation: bool,
-    /// Policy controlling whether PQC PIN/UV is preferred, required, or disabled
-    #[clap(long, value_enum, default_value_t = PqcPolicyArg::Prefer)]
-    pub pqc_policy: PqcPolicyArg,
     /// Backend transport to use
     #[clap(long, value_enum, default_value_t = BackendArg::Uhid)]
     pub backend: BackendArg,
@@ -109,23 +105,6 @@ pub struct DeviceArgs {
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub enum BackendArg {
     Uhid,
-}
-
-#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
-pub enum PqcPolicyArg {
-    Prefer,
-    ClassicOnly,
-    Require,
-}
-
-impl From<PqcPolicyArg> for PqcPolicy {
-    fn from(value: PqcPolicyArg) -> Self {
-        match value {
-            PqcPolicyArg::Prefer => PqcPolicy::PreferPqc,
-            PqcPolicyArg::ClassicOnly => PqcPolicy::ClassicOnly,
-            PqcPolicyArg::Require => PqcPolicy::RequirePqc,
-        }
-    }
 }
 
 impl BackendArg {
@@ -171,7 +150,6 @@ impl StartCommand {
             },
             auto_user_presence: !self.device.manual_user_presence,
             suppress_attestation: self.device.suppress_attestation,
-            pqc_policy: self.device.pqc_policy.into(),
             backend: self.device.backend.into_backend(),
         })
     }

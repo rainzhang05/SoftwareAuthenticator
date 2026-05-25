@@ -1,7 +1,4 @@
 use aes::Aes256;
-#[allow(deprecated)]
-use aes_gcm::aead::{generic_array::GenericArray, Aead, KeyInit, Payload};
-use aes_gcm::Aes256Gcm;
 use cbc::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use cbc::{Decryptor, Encryptor};
 use ciborium::ser::into_writer;
@@ -14,16 +11,12 @@ use p256::{EncodedPoint, SecretKey as P256SecretKey};
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 use trussed_mldsa::{keypair, sign, ParamSet, PublicKey, SecretKey};
-use trussed_mlkem::ParamSet as KemParamSet;
 use zeroize::Zeroize;
 
 pub mod ctap;
 
 type Aes256CbcEncryptor = Encryptor<Aes256>;
 type Aes256CbcDecryptor = Decryptor<Aes256>;
-
-/// Identifier advertised in `authenticatorGetInfo` for the PQC PIN/UV protocol.
-pub const PIN_UV_AUTH_PROTOCOL_PQC: u8 = 101;
 
 /// COSE key type value assigned to Algorithm Key Pairs (AKP).
 pub const COSE_KEY_TYPE_AKP: i32 = 7;
@@ -32,11 +25,6 @@ pub const COSE_KEY_TYPE_AKP: i32 = 7;
 pub const COSE_KEY_LABEL_KTY: i32 = 1;
 pub const COSE_KEY_LABEL_ALG: i32 = 3;
 pub const COSE_KEY_PARAM_AKP_KEY: i32 = -1;
-
-/// COSE algorithm identifiers for ML-KEM parameter sets.
-pub const COSE_ALG_ML_KEM_512: i32 = -110;
-pub const COSE_ALG_ML_KEM_768: i32 = -111;
-pub const COSE_ALG_ML_KEM_1024: i32 = -112;
 
 /// Session keys derived from an ML-KEM shared secret and the transcript hash.
 #[derive(Debug, Zeroize)]
@@ -60,27 +48,6 @@ impl ClassicPinProtocol {
             ClassicPinProtocol::V1 => 1,
             ClassicPinProtocol::V2 => 2,
         }
-    }
-}
-
-/// Derive the AES-256-GCM encryption key and the 32-byte HMAC key used for
-/// client PIN handling.  The HKDF salt binds the keys to the transcript hash.
-pub fn derive_pqc_pin_uv_session_keys(
-    shared_secret: &[u8],
-    transcript_hash: &[u8],
-) -> PinUvSessionKeys {
-    let hkdf = Hkdf::<Sha256>::new(Some(transcript_hash), shared_secret);
-    let mut okm = [0u8; 64];
-    hkdf.expand(b"FIDO2-PQC-PIN-KEYS", &mut okm)
-        .expect("HKDF expand must not fail for valid length");
-    let mut encryption_key = [0u8; 32];
-    let mut auth_key = [0u8; 32];
-    encryption_key.copy_from_slice(&okm[..32]);
-    auth_key.copy_from_slice(&okm[32..]);
-    okm.zeroize();
-    PinUvSessionKeys {
-        encryption_key,
-        auth_key,
     }
 }
 
@@ -112,47 +79,6 @@ pub fn derive_classic_pin_uv_session_keys(
         encryption_key,
         auth_key,
     }
-}
-
-/// Encrypt PIN data using AES-256-GCM.  The transcript hash should be supplied
-/// as AAD to bind the ciphertext to the protocol run.
-#[allow(deprecated)]
-pub fn encrypt_pqc_pin_block(
-    keys: &PinUvSessionKeys,
-    nonce: &[u8; 12],
-    plaintext: &[u8],
-    transcript_hash: &[u8],
-) -> Vec<u8> {
-    let cipher = Aes256Gcm::new_from_slice(&keys.encryption_key).expect("invalid AES key length");
-    let nonce_ga = GenericArray::clone_from_slice(nonce);
-    cipher
-        .encrypt(
-            &nonce_ga,
-            Payload {
-                msg: plaintext,
-                aad: transcript_hash,
-            },
-        )
-        .expect("encryption should not fail for valid parameters")
-}
-
-/// Decrypt the PIN block using AES-256-GCM and the previously derived keys.
-#[allow(deprecated)]
-pub fn decrypt_pqc_pin_block(
-    keys: &PinUvSessionKeys,
-    nonce: &[u8; 12],
-    ciphertext: &[u8],
-    transcript_hash: &[u8],
-) -> Result<Vec<u8>, aes_gcm::Error> {
-    let cipher = Aes256Gcm::new_from_slice(&keys.encryption_key).expect("invalid AES key length");
-    let nonce_ga = GenericArray::clone_from_slice(nonce);
-    cipher.decrypt(
-        &nonce_ga,
-        Payload {
-            msg: ciphertext,
-            aad: transcript_hash,
-        },
-    )
 }
 
 /// Encrypt a classic PIN block using AES-256-CBC.  Protocol 1 uses an all-zero
@@ -259,15 +185,6 @@ pub fn mldsa_paramset_from_alg(alg: CoseAlg) -> Option<ParamSet> {
         CoseAlg::MLDSA65 => Some(ParamSet::MLDSA65),
         CoseAlg::MLDSA87 => Some(ParamSet::MLDSA87),
         _ => None,
-    }
-}
-
-/// Translate an ML-KEM parameter set to the corresponding COSE `alg` value.
-pub fn cose_alg_for_kem_param_set(param_set: KemParamSet) -> i32 {
-    match param_set {
-        KemParamSet::MLKEM512 => COSE_ALG_ML_KEM_512,
-        KemParamSet::MLKEM768 => COSE_ALG_ML_KEM_768,
-        KemParamSet::MLKEM1024 => COSE_ALG_ML_KEM_1024,
     }
 }
 
@@ -423,17 +340,11 @@ pub fn sign_challenge(
     }
 }
 
-// Additional structs and functions would be defined here to manage
-// credential records, persist secrets via Trussed storage, and
-// implement the CTAP2 command handlers.  See the README for links
-// explaining how to integrate this crate into a runner.
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ciborium::{de::from_reader, ser::into_writer, value::Integer};
+    use ciborium::{de::from_reader, value::Integer};
     use trussed_mldsa::verify;
-    use trussed_mlkem::{self, ParamSet as KemParamSet};
 
     #[test]
     fn cose_public_key_canonical_encoding_matches_fixture() {
@@ -449,32 +360,6 @@ mod tests {
         assert_eq!(
             decoded,
             cose_akp_key_map(CoseAlg::MLDSA44 as i32, &pk_bytes)
-        );
-    }
-
-    #[test]
-    fn mlkem_akp_map_matches_canonical_fixture() {
-        let pk = [0xCA, 0xFE];
-        let value = cose_akp_key_map(COSE_ALG_ML_KEM_512, &pk);
-        let mut encoded = Vec::new();
-        into_writer(&value, &mut encoded).expect("encode ML-KEM COSE key");
-        let expected = vec![0xA3, 0x01, 0x07, 0x03, 0x38, 0x6D, 0x20, 0x42, 0xCA, 0xFE];
-        assert_eq!(encoded, expected);
-    }
-
-    #[test]
-    fn mlkem_alg_mapping_matches_expected_values() {
-        assert_eq!(
-            cose_alg_for_kem_param_set(KemParamSet::MLKEM512),
-            COSE_ALG_ML_KEM_512
-        );
-        assert_eq!(
-            cose_alg_for_kem_param_set(KemParamSet::MLKEM768),
-            COSE_ALG_ML_KEM_768
-        );
-        assert_eq!(
-            cose_alg_for_kem_param_set(KemParamSet::MLKEM1024),
-            COSE_ALG_ML_KEM_1024
         );
     }
 
@@ -577,22 +462,4 @@ mod tests {
         panic!("COSE key missing public key bytes");
     }
 
-    #[test]
-    fn mlkem_pin_protocol_roundtrip() {
-        let (pk, sk) = trussed_mlkem::keypair(KemParamSet::MLKEM512);
-        let (ciphertext, shared_secret_client) =
-            trussed_mlkem::encapsulate(KemParamSet::MLKEM512, &pk);
-        let shared_secret_auth =
-            trussed_mlkem::decapsulate(KemParamSet::MLKEM512, &sk, &ciphertext)
-                .expect("ciphertext should be valid");
-        let transcript_hash = b"transcript";
-        let client_keys = derive_pqc_pin_uv_session_keys(&shared_secret_client.0, transcript_hash);
-        let auth_keys = derive_pqc_pin_uv_session_keys(&shared_secret_auth.0, transcript_hash);
-        let nonce = [0u8; 12];
-        let plaintext = b"PIN data";
-        let ciphertext = encrypt_pqc_pin_block(&client_keys, &nonce, plaintext, transcript_hash);
-        let decrypted = decrypt_pqc_pin_block(&auth_keys, &nonce, &ciphertext, transcript_hash)
-            .expect("decryption should succeed");
-        assert_eq!(plaintext.to_vec(), decrypted);
-    }
 }

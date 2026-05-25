@@ -1,8 +1,7 @@
 use crate::{
-    cose_akp_key_map, cose_alg_for_kem_param_set, create_credential, credential_secret_from_bytes,
-    decrypt_classic_pin_block, decrypt_pqc_pin_block, derive_classic_pin_uv_session_keys,
-    derive_pqc_pin_uv_session_keys, encrypt_classic_pin_block, encrypt_pqc_pin_block,
-    sign_challenge, ClassicPinProtocol, CoseAlg, PinUvSessionKeys, PIN_UV_AUTH_PROTOCOL_PQC,
+    create_credential, credential_secret_from_bytes, decrypt_classic_pin_block,
+    derive_classic_pin_uv_session_keys, encrypt_classic_pin_block, sign_challenge,
+    ClassicPinProtocol, CoseAlg, PinUvSessionKeys,
 };
 
 use aes::Aes256;
@@ -33,7 +32,6 @@ use trussed::try_syscall;
 use trussed::types::consent;
 #[cfg(not(test))]
 use trussed::types::{Location, Message, PathBuf};
-use trussed_mlkem::{self, Ciphertext, ParamSet as KemParamSet, SecretKey as KemSecretKey};
 use zeroize::Zeroize;
 
 use transport_core::{ctap::constants::*, logging::HexOption};
@@ -194,20 +192,14 @@ const COSE_ALG_ES256: i32 = -7;
 const CREDENTIAL_STORE_PATH: &str = "credentials.cbor";
 #[cfg(not(test))]
 const ATTESTATION_STORE_PATH: &str = "attestation.cbor";
-const PIN_UV_AUTH_PROTOCOL_CLASSIC_V1: i32 = 1;
-const PIN_UV_AUTH_PROTOCOL_CLASSIC_V2: i32 = 2;
+pub(crate) const PIN_UV_AUTH_PROTOCOL_CLASSIC_V1: i32 = 1;
+pub(crate) const PIN_UV_AUTH_PROTOCOL_CLASSIC_V2: i32 = 2;
 #[cfg_attr(not(test), allow(dead_code))]
-const PIN_UV_AUTH_PROTOCOL_CLASSIC: i32 = PIN_UV_AUTH_PROTOCOL_CLASSIC_V2;
-const PIN_UV_PROTOCOLS_PREFER: [i32; 3] = [
-    PIN_UV_AUTH_PROTOCOL_PQC as i32,
+pub(crate) const PIN_UV_AUTH_PROTOCOL_CLASSIC: i32 = PIN_UV_AUTH_PROTOCOL_CLASSIC_V2;
+const PIN_UV_PROTOCOLS_SUPPORTED: [i32; 2] = [
     PIN_UV_AUTH_PROTOCOL_CLASSIC_V2,
     PIN_UV_AUTH_PROTOCOL_CLASSIC_V1,
 ];
-const PIN_UV_PROTOCOLS_CLASSIC: [i32; 2] = [
-    PIN_UV_AUTH_PROTOCOL_CLASSIC_V2,
-    PIN_UV_AUTH_PROTOCOL_CLASSIC_V1,
-];
-const PIN_UV_PROTOCOLS_PQC_ONLY: [i32; 1] = [PIN_UV_AUTH_PROTOCOL_PQC as i32];
 
 const PIN_PERMISSION_MC: u8 = 0x01;
 const PIN_PERMISSION_GA: u8 = 0x02;
@@ -459,188 +451,109 @@ struct HmacSecretRequest {
     protocol: PinProtocol,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum PinProtocol {
-    Pqc,
-    Classic(ClassicPinProtocol),
-}
+pub(crate) type PinProtocol = ClassicPinProtocol;
 
-impl PinProtocol {
-    fn from_identifier(value: i128) -> Result<Self, u8> {
-        if value == i128::from(PIN_UV_AUTH_PROTOCOL_PQC) {
-            Ok(PinProtocol::Pqc)
-        } else if value == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V1) {
-            Ok(PinProtocol::Classic(ClassicPinProtocol::V1))
-        } else if value == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V2) {
-            Ok(PinProtocol::Classic(ClassicPinProtocol::V2))
-        } else {
-            Err(CTAP2_ERR_PIN_AUTH_INVALID)
-        }
+fn pin_protocol_from_identifier(value: i128) -> Result<PinProtocol, u8> {
+    if value == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V1) {
+        Ok(ClassicPinProtocol::V1)
+    } else if value == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V2) {
+        Ok(ClassicPinProtocol::V2)
+    } else {
+        Err(CTAP2_ERR_PIN_AUTH_INVALID)
     }
 }
 
-enum PinProtocolSession {
-    Pqc {
-        param_set: KemParamSet,
-        secret_key: KemSecretKey,
-        public_key: Vec<u8>,
-    },
-    Classic {
-        protocol: ClassicPinProtocol,
-        public_key: EncodedPoint,
-        secret_key: P256SecretKey,
-    },
+struct PinProtocolSession {
+    protocol: ClassicPinProtocol,
+    public_key: EncodedPoint,
+    secret_key: P256SecretKey,
 }
 
 impl PinProtocolSession {
     fn protocol(&self) -> PinProtocol {
-        match self {
-            PinProtocolSession::Pqc { .. } => PinProtocol::Pqc,
-            PinProtocolSession::Classic { protocol, .. } => PinProtocol::Classic(*protocol),
-        }
+        self.protocol
     }
 
     fn key_agreement_value(&self) -> Value {
-        match self {
-            PinProtocolSession::Pqc {
-                param_set,
-                public_key,
-                ..
-            } => {
-                let alg = cose_alg_for_kem_param_set(*param_set);
-                cose_akp_key_map(alg, public_key)
-            }
-            PinProtocolSession::Classic { public_key, .. } => {
-                let (x, y) = match (public_key.x(), public_key.y()) {
-                    (Some(x_bytes), Some(y_bytes)) => (x_bytes.to_vec(), y_bytes.to_vec()),
-                    _ => (Vec::new(), Vec::new()),
-                };
-                canonical_map(vec![
-                    (
-                        Value::Integer(Integer::from(1)),
-                        Value::Integer(Integer::from(2)),
-                    ),
-                    (
-                        Value::Integer(Integer::from(3)),
-                        Value::Integer(Integer::from(-25)),
-                    ),
-                    (
-                        Value::Integer(Integer::from(-1)),
-                        Value::Integer(Integer::from(1)),
-                    ),
-                    (Value::Integer(Integer::from(-2)), Value::Bytes(x)),
-                    (Value::Integer(Integer::from(-3)), Value::Bytes(y)),
-                ])
-            }
-        }
+        let (x, y) = match (self.public_key.x(), self.public_key.y()) {
+            (Some(x_bytes), Some(y_bytes)) => (x_bytes.to_vec(), y_bytes.to_vec()),
+            _ => (Vec::new(), Vec::new()),
+        };
+        canonical_map(vec![
+            (
+                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(2)),
+            ),
+            (
+                Value::Integer(Integer::from(3)),
+                Value::Integer(Integer::from(-25)),
+            ),
+            (
+                Value::Integer(Integer::from(-1)),
+                Value::Integer(Integer::from(1)),
+            ),
+            (Value::Integer(Integer::from(-2)), Value::Bytes(x)),
+            (Value::Integer(Integer::from(-3)), Value::Bytes(y)),
+        ])
     }
 
     fn derive_session_keys(
         self,
         platform_key: &[(Value, Value)],
     ) -> Result<(PinUvSessionKeys, Vec<u8>), u8> {
-        match self {
-            PinProtocolSession::Pqc {
-                param_set,
-                secret_key,
-                public_key,
-            } => {
-                let Some(ciphertext_bytes) = platform_key
-                    .iter()
-                    .find(|(k, _)| *k == Value::Integer(Integer::from(-2)))
-                    .and_then(|(_, v)| match v {
-                        Value::Bytes(bytes) => Some(bytes.clone()),
-                        _ => None,
-                    })
-                else {
-                    return Err(CTAP1_ERR_INVALID_PARAMETER);
-                };
-                let ciphertext = Ciphertext(ciphertext_bytes.clone());
-                let shared = trussed_mlkem::decapsulate(param_set, &secret_key, &ciphertext)
-                    .map_err(|_| CTAP1_ERR_INVALID_PARAMETER)?;
-                let mut hasher = Sha256::new();
-                hasher.update(&public_key);
-                hasher.update(&ciphertext_bytes);
-                let transcript_hash = hasher.finalize().to_vec();
-                let keys = derive_pqc_pin_uv_session_keys(&shared.0, &transcript_hash);
-                Ok((keys, transcript_hash))
-            }
-            PinProtocolSession::Classic {
-                protocol,
-                public_key,
-                secret_key,
-            } => {
-                let Some(peer_x) = platform_key
-                    .iter()
-                    .find(|(k, _)| *k == Value::Integer(Integer::from(-2)))
-                    .and_then(|(_, v)| match v {
-                        Value::Bytes(bytes) => Some(bytes.clone()),
-                        _ => None,
-                    })
-                else {
-                    return Err(CTAP1_ERR_INVALID_PARAMETER);
-                };
-                let Some(peer_y) = platform_key
-                    .iter()
-                    .find(|(k, _)| *k == Value::Integer(Integer::from(-3)))
-                    .and_then(|(_, v)| match v {
-                        Value::Bytes(bytes) => Some(bytes.clone()),
-                        _ => None,
-                    })
-                else {
-                    return Err(CTAP1_ERR_INVALID_PARAMETER);
-                };
-                if peer_x.len() != 32 || peer_y.len() != 32 {
-                    return Err(CTAP1_ERR_INVALID_PARAMETER);
-                }
-
-                let mut peer_encoded = [0u8; 65];
-                peer_encoded[0] = 0x04;
-                peer_encoded[1..33].copy_from_slice(&peer_x);
-                peer_encoded[33..65].copy_from_slice(&peer_y);
-
-                let peer_public = P256PublicKey::from_sec1_bytes(&peer_encoded)
-                    .map_err(|_| CTAP1_ERR_INVALID_PARAMETER)?;
-                let shared =
-                    diffie_hellman(secret_key.to_nonzero_scalar(), peer_public.as_affine());
-
-                let auth_public_bytes = public_key.as_bytes();
-                let mut hasher = Sha256::new();
-                hasher.update(auth_public_bytes);
-                hasher.update(&peer_encoded);
-                let transcript_hash = hasher.finalize().to_vec();
-
-                let shared_bytes = shared.raw_secret_bytes();
-                let keys = derive_classic_pin_uv_session_keys(protocol, shared_bytes.as_ref());
-                Ok((keys, transcript_hash))
-            }
+        let Some(peer_x) = platform_key
+            .iter()
+            .find(|(k, _)| *k == Value::Integer(Integer::from(-2)))
+            .and_then(|(_, v)| match v {
+                Value::Bytes(bytes) => Some(bytes.clone()),
+                _ => None,
+            })
+        else {
+            return Err(CTAP1_ERR_INVALID_PARAMETER);
+        };
+        let Some(peer_y) = platform_key
+            .iter()
+            .find(|(k, _)| *k == Value::Integer(Integer::from(-3)))
+            .and_then(|(_, v)| match v {
+                Value::Bytes(bytes) => Some(bytes.clone()),
+                _ => None,
+            })
+        else {
+            return Err(CTAP1_ERR_INVALID_PARAMETER);
+        };
+        if peer_x.len() != 32 || peer_y.len() != 32 {
+            return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
+
+        let mut peer_encoded = [0u8; 65];
+        peer_encoded[0] = 0x04;
+        peer_encoded[1..33].copy_from_slice(&peer_x);
+        peer_encoded[33..65].copy_from_slice(&peer_y);
+
+        let peer_public = P256PublicKey::from_sec1_bytes(&peer_encoded)
+            .map_err(|_| CTAP1_ERR_INVALID_PARAMETER)?;
+        let shared = diffie_hellman(self.secret_key.to_nonzero_scalar(), peer_public.as_affine());
+
+        let auth_public_bytes = self.public_key.as_bytes();
+        let mut hasher = Sha256::new();
+        hasher.update(auth_public_bytes);
+        hasher.update(&peer_encoded);
+        let transcript_hash = hasher.finalize().to_vec();
+
+        let shared_bytes = shared.raw_secret_bytes();
+        let keys = derive_classic_pin_uv_session_keys(self.protocol, shared_bytes.as_ref());
+        Ok((keys, transcript_hash))
     }
 }
 
 #[cfg(test)]
 mod tests;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PqcPolicy {
-    PreferPqc,
-    ClassicOnly,
-    RequirePqc,
-}
-
-impl Default for PqcPolicy {
-    fn default() -> Self {
-        Self::PreferPqc
-    }
-}
-
 pub struct CtapApp<C> {
     client: C,
     aaguid: [u8; 16],
     pin_state: PinState,
     pin_protocol_session: Option<PinProtocolSession>,
-    platform_declined_pqc: bool,
-    pqc_policy: PqcPolicy,
     suppress_attestation: bool,
     cred_mgmt_state: CredentialManagementState,
     pending_assertion: Option<PendingAssertion>,
@@ -664,8 +577,6 @@ where
             aaguid,
             pin_state: PinState::new(),
             pin_protocol_session: None,
-            platform_declined_pqc: false,
-            pqc_policy: PqcPolicy::default(),
             suppress_attestation: false,
             cred_mgmt_state: CredentialManagementState::new(),
             pending_assertion: None,
@@ -689,24 +600,15 @@ where
         self.auto_user_presence = enabled;
     }
 
-    pub fn set_pqc_policy(&mut self, policy: PqcPolicy) {
-        self.pqc_policy = policy;
-        self.platform_declined_pqc = matches!(policy, PqcPolicy::ClassicOnly);
-    }
-
     pub fn suppress_attestation(&mut self, suppress: bool) {
         self.suppress_attestation = suppress;
     }
 
     fn supported_pin_uv_protocols(&self) -> &'static [i32] {
-        match self.pqc_policy {
-            PqcPolicy::PreferPqc => &PIN_UV_PROTOCOLS_PREFER,
-            PqcPolicy::ClassicOnly => &PIN_UV_PROTOCOLS_CLASSIC,
-            PqcPolicy::RequirePqc => &PIN_UV_PROTOCOLS_PQC_ONLY,
-        }
+        &PIN_UV_PROTOCOLS_SUPPORTED
     }
     fn verify_pin_auth(
-        protocol: PinProtocol,
+        _protocol: PinProtocol,
         keys: &PinUvSessionKeys,
         data: &[u8],
         provided: &[u8],
@@ -715,49 +617,24 @@ where
             HmacSha256::new_from_slice(&keys.auth_key).map_err(|_| CTAP2_ERR_PROCESSING)?;
         mac.update(data);
         let result = mac.finalize().into_bytes();
-        match protocol {
-            PinProtocol::Classic(ClassicPinProtocol::V1)
-            | PinProtocol::Classic(ClassicPinProtocol::V2) => {
-                if provided.len() != 16 {
-                    return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-                }
-                if result[..16] == provided[..16] {
-                    Ok(())
-                } else {
-                    Err(CTAP2_ERR_PIN_AUTH_INVALID)
-                }
-            }
-            PinProtocol::Pqc => {
-                if provided.len() != 32 {
-                    return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-                }
-                if result[..] == provided[..] {
-                    Ok(())
-                } else {
-                    Err(CTAP2_ERR_PIN_AUTH_INVALID)
-                }
-            }
+        if provided.len() != 16 {
+            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
+        }
+        if result[..16] == provided[..16] {
+            Ok(())
+        } else {
+            Err(CTAP2_ERR_PIN_AUTH_INVALID)
         }
     }
 
     fn decrypt_pin_block_checked(
         protocol: PinProtocol,
         keys: &PinUvSessionKeys,
-        transcript_hash: &[u8],
+        _transcript_hash: &[u8],
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, u8> {
-        match protocol {
-            PinProtocol::Pqc => {
-                if ciphertext.len() < 16 {
-                    return Err(CTAP1_ERR_INVALID_PARAMETER);
-                }
-                let nonce = [0u8; 12];
-                decrypt_pqc_pin_block(keys, &nonce, ciphertext, transcript_hash)
-                    .map_err(|_| CTAP2_ERR_PIN_AUTH_INVALID)
-            }
-            PinProtocol::Classic(classic) => decrypt_classic_pin_block(classic, keys, ciphertext)
-                .map_err(|_| CTAP2_ERR_PIN_AUTH_INVALID),
-        }
+        decrypt_classic_pin_block(protocol, keys, ciphertext)
+            .map_err(|_| CTAP2_ERR_PIN_AUTH_INVALID)
     }
 
     fn extract_new_pin(plaintext: &mut [u8]) -> Result<Vec<u8>, u8> {
@@ -882,41 +759,16 @@ where
         if let Some(Value::Integer(int)) = Self::map_get(map, Value::Integer(Integer::from(1))) {
             let value: i128 = int.clone().into();
             match value {
-                v if v == i128::from(PIN_UV_AUTH_PROTOCOL_PQC) => {
-                    if matches!(self.pqc_policy, PqcPolicy::ClassicOnly) {
-                        return Err(CTAP1_ERR_INVALID_PARAMETER);
-                    }
-                    self.platform_declined_pqc = false;
-                    Ok(PinProtocol::Pqc)
-                }
                 v if v == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V2) => {
-                    if matches!(self.pqc_policy, PqcPolicy::RequirePqc) {
-                        return Err(CTAP1_ERR_INVALID_PARAMETER);
-                    }
-                    self.platform_declined_pqc = true;
-                    Ok(PinProtocol::Classic(ClassicPinProtocol::V2))
+                    Ok(ClassicPinProtocol::V2)
                 }
                 v if v == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V1) => {
-                    if matches!(self.pqc_policy, PqcPolicy::RequirePqc) {
-                        return Err(CTAP1_ERR_INVALID_PARAMETER);
-                    }
-                    self.platform_declined_pqc = true;
-                    Ok(PinProtocol::Classic(ClassicPinProtocol::V1))
+                    Ok(ClassicPinProtocol::V1)
                 }
                 _ => Err(CTAP1_ERR_INVALID_PARAMETER),
             }
         } else {
-            match self.pqc_policy {
-                PqcPolicy::PreferPqc => {
-                    if self.platform_declined_pqc {
-                        Ok(PinProtocol::Classic(ClassicPinProtocol::V2))
-                    } else {
-                        Ok(PinProtocol::Pqc)
-                    }
-                }
-                PqcPolicy::ClassicOnly => Ok(PinProtocol::Classic(ClassicPinProtocol::V2)),
-                PqcPolicy::RequirePqc => Ok(PinProtocol::Pqc),
-            }
+            Ok(ClassicPinProtocol::V2)
         }
     }
 
@@ -932,34 +784,21 @@ where
     }
 
     fn client_pin_get_key_agreement(&mut self, protocol: PinProtocol) -> Result<Vec<u8>, u8> {
-        let session = match protocol {
-            PinProtocol::Pqc => {
-                let param_set = KemParamSet::MLKEM512;
-                let (public_key, secret_key) = trussed_mlkem::keypair(param_set);
-                PinProtocolSession::Pqc {
-                    param_set,
-                    secret_key,
-                    public_key: public_key.0.clone(),
-                }
+        let secret_key = loop {
+            let bytes = syscall!(self.client.random_bytes(32)).bytes;
+            if bytes.len() != 32 {
+                continue;
             }
-            PinProtocol::Classic(classic_protocol) => {
-                let secret_key = loop {
-                    let bytes = syscall!(self.client.random_bytes(32)).bytes;
-                    if bytes.len() != 32 {
-                        continue;
-                    }
-                    match P256SecretKey::from_slice(bytes.as_slice()) {
-                        Ok(secret) => break secret,
-                        Err(_) => continue,
-                    }
-                };
-                let public_key = secret_key.public_key().to_encoded_point(false);
-                PinProtocolSession::Classic {
-                    protocol: classic_protocol,
-                    public_key,
-                    secret_key,
-                }
+            match P256SecretKey::from_slice(bytes.as_slice()) {
+                Ok(secret) => break secret,
+                Err(_) => continue,
             }
+        };
+        let public_key = secret_key.public_key().to_encoded_point(false);
+        let session = PinProtocolSession {
+            protocol,
+            public_key,
+            secret_key,
         };
         let mut key_map = session.key_agreement_value();
         if let Value::Map(mut entries) = key_map {
@@ -1103,26 +942,20 @@ where
         let mut token = [0u8; 32];
         token.copy_from_slice(random.as_slice());
         let encrypted = match protocol {
-            PinProtocol::Pqc => {
-                let nonce = [0u8; 12];
-                encrypt_pqc_pin_block(&keys, &nonce, &token, &transcript_hash)
+            ClassicPinProtocol::V1 => {
+                encrypt_classic_pin_block(ClassicPinProtocol::V1, &keys, None, &token)
+                    .map_err(|_| CTAP2_ERR_PROCESSING)?
             }
-            PinProtocol::Classic(classic_protocol) => match classic_protocol {
-                ClassicPinProtocol::V1 => {
-                    encrypt_classic_pin_block(ClassicPinProtocol::V1, &keys, None, &token)
-                        .map_err(|_| CTAP2_ERR_PROCESSING)?
+            ClassicPinProtocol::V2 => {
+                let iv_bytes = syscall!(self.client.random_bytes(16)).bytes;
+                if iv_bytes.len() != 16 {
+                    return Err(CTAP2_ERR_PROCESSING);
                 }
-                ClassicPinProtocol::V2 => {
-                    let iv_bytes = syscall!(self.client.random_bytes(16)).bytes;
-                    if iv_bytes.len() != 16 {
-                        return Err(CTAP2_ERR_PROCESSING);
-                    }
-                    let mut iv = [0u8; 16];
-                    iv.copy_from_slice(iv_bytes.as_slice());
-                    encrypt_classic_pin_block(ClassicPinProtocol::V2, &keys, Some(&iv), &token)
-                        .map_err(|_| CTAP2_ERR_PROCESSING)?
-                }
-            },
+                let mut iv = [0u8; 16];
+                iv.copy_from_slice(iv_bytes.as_slice());
+                encrypt_classic_pin_block(ClassicPinProtocol::V2, &keys, Some(&iv), &token)
+                    .map_err(|_| CTAP2_ERR_PROCESSING)?
+            }
         };
         self.pin_state
             .set_pin_uv_auth_token(token, permissions, rp_id);
@@ -2409,10 +2242,10 @@ where
                         {
                             Some(Value::Integer(int)) => {
                                 let value: i128 = int.clone().into();
-                                PinProtocol::from_identifier(value)?
+                                pin_protocol_from_identifier(value)?
                             }
                             Some(_) => return Err(CTAP2_ERR_PIN_AUTH_INVALID),
-                            None => PinProtocol::Classic(ClassicPinProtocol::V2),
+                            None => ClassicPinProtocol::V2,
                         };
                         hmac_secret_request = Some(HmacSecretRequest {
                             key_agreement,

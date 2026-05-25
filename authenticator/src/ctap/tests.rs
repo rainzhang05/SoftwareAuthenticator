@@ -24,7 +24,6 @@ use trussed::client::{
 };
 use trussed::error::Error as TrussedError;
 use trussed::types::{consent, Message};
-use trussed_mlkem::{ParamSet as KemParamSet, SecretKey as KemSecretKey};
 use zeroize::Zeroize;
 
 #[derive(Default)]
@@ -111,29 +110,10 @@ impl UiClient for TestClient {}
 impl TrussedClient for TestClient {}
 
 #[test]
-fn pqc_key_agreement_value_is_canonical_akp_map() {
-    let public_key = vec![0x01, 0x02];
-    let session = PinProtocolSession::Pqc {
-        param_set: KemParamSet::MLKEM512,
-        secret_key: KemSecretKey(vec![]),
-        public_key: public_key.clone(),
-    };
-
-    let value = session.key_agreement_value();
-    let expected_alg = cose_alg_for_kem_param_set(KemParamSet::MLKEM512);
-    assert_eq!(value, cose_akp_key_map(expected_alg, &public_key));
-
-    let mut encoded = Vec::new();
-    into_writer(&value, &mut encoded).expect("encode COSE key agreement map");
-    let expected = vec![0xA3, 0x01, 0x07, 0x03, 0x38, 0x6D, 0x20, 0x42, 0x01, 0x02];
-    assert_eq!(encoded, expected);
-}
-
-#[test]
 fn classic_key_agreement_value_is_canonical() {
     let secret_key = P256SecretKey::from_slice(&[0x13; 32]).expect("valid secret key");
     let public_key = secret_key.public_key().to_encoded_point(false);
-    let session = PinProtocolSession::Classic {
+    let session = PinProtocolSession {
         protocol: ClassicPinProtocol::V2,
         public_key: public_key.clone(),
         secret_key,
@@ -247,8 +227,8 @@ fn assert_get_info_response(app: &mut CtapApp<TestClient>, aaguid: [u8; 16]) {
         (
             Value::Integer(Integer::from(6)),
             Value::Array(vec![
-                Value::Integer(Integer::from(i32::from(PIN_UV_AUTH_PROTOCOL_PQC))),
-                Value::Integer(Integer::from(PIN_UV_AUTH_PROTOCOL_CLASSIC)),
+                Value::Integer(Integer::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V2)),
+                Value::Integer(Integer::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V1)),
             ]),
         ),
         (
