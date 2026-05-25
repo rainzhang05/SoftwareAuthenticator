@@ -68,20 +68,69 @@ newgrp plugdev
 ```
 
 ### 3. Run the Authenticator
-Launch the virtual authenticator in the foreground. It will automatically handle WebAuthn requests from your browser!
+Launch the virtual authenticator in the foreground. It will automatically
+handle WebAuthn requests from your browser:
 
 ```bash
-RUST_LOG=info cargo run -p pc-hid-runner -- start --foreground
+RUST_LOG=info cargo run -p pc-hid-runner -- attach --foreground
 ```
+
+`attach` and `detach` are the new primary verbs; the legacy `start` and
+`stop` aliases continue to work.
 
 ---
 
-## Configuration Options
+## CLI Reference
 
-When running the `pc-hid-runner`, you can append several useful flags to customize its behavior:
+The `pc-hid-runner` binary is the single management tool. Every subcommand
+takes an optional `--state-dir <path>` (defaults to
+`$XDG_DATA_HOME/feitian-mldsa-authenticator`).
 
-* `--manual-user-presence` : Require manual approval when a site requests user presence (default is auto-approve).
-* `--state-dir <path>` : Change where the authenticator saves its internal state and credentials (defaults to `$XDG_DATA_HOME/feitian-mldsa-authenticator`).
-* `--suppress-attestation` : Hide attestation certificates for privacy testing.
+### Lifecycle
 
-*Note: Omit the `--foreground` flag to run the authenticator quietly as a background daemon. You can manage a daemonized instance using the `status` and `stop` subcommands.*
+| Command | Purpose |
+|---------|---------|
+| `pc-hid-runner attach [--foreground]` | Start the daemon and expose the virtual security key |
+| `pc-hid-runner detach` | Stop a running daemon and remove the virtual device |
+| `pc-hid-runner status` | Report whether the daemon is currently running |
+| `pc-hid-runner reset [--yes]` | Wipe all credentials and PIN state (daemon must be detached) |
+
+### PIN management
+
+`pin` subcommands must be run with the daemon detached; the daemon reloads
+the persisted PIN state on its next `attach`.
+
+| Command | Purpose |
+|---------|---------|
+| `pc-hid-runner pin status` | Show whether a PIN is set, retries remaining, and blocked state |
+| `pc-hid-runner pin set [--pin <PIN>]` | Set a new PIN on a PIN-less device |
+| `pc-hid-runner pin change [--current <PIN> --new <PIN>]` | Change the existing PIN |
+| `pc-hid-runner pin remove [--current <PIN>]` | Remove the PIN entirely |
+
+When `--pin` / `--current` / `--new` are omitted, the CLI reads the values
+interactively from stdin.
+
+### Attach-time flags
+
+| Flag | Purpose |
+|------|---------|
+| `--foreground` | Run in the foreground (useful for systemd integration) |
+| `--manual-user-presence` | Require manual approval rather than auto-approving user presence |
+| `--suppress-attestation` | Hide attestation certificates for privacy testing |
+
+---
+
+## Supported Algorithms
+
+The authenticator advertises all of the following COSE algorithms in
+`authenticatorGetInfo` and will register and assert credentials against any
+of them:
+
+* `ES256` (-7) — classical NIST P-256 ECDSA
+* `ML-DSA-44` (-48) — post-quantum, NIST level 2
+* `ML-DSA-65` (-49) — post-quantum, NIST level 3
+* `ML-DSA-87` (-50) — post-quantum, NIST level 5
+
+PIN/UV uses the standard CTAP2.1 protocols (1 and 2). The authenticator
+also handles `authenticatorReset` (CTAP command 0x07) so credentials can be
+wiped over the wire if needed.
