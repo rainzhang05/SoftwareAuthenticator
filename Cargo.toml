@@ -2,7 +2,6 @@
 members = [
     "trussed-mldsa",
     "authenticator",
-    "trussed-mlkem",
     "pc-hid-runner",
     "transport-core"
 ]
