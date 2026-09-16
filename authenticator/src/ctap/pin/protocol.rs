@@ -20,7 +20,7 @@ use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use trussed::syscall;
 use zeroize::Zeroizing;
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 /// `decrypt(shared secret, ciphertext)` for the given PIN/UV auth protocol:
 /// AES-256-CBC with an all-zero IV for protocol one (CTAP 2.3 §6.5.6), and with

@@ -14,7 +14,7 @@ use ciborium::{
     value::{Integer, Value},
 };
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 fn assert_get_info_response(app: &mut CtapApp<TestClient>, aaguid: [u8; 16]) {
     let response = app.handle_get_info().expect("getInfo succeeds");

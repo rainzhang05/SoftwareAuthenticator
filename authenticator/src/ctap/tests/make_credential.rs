@@ -15,7 +15,7 @@ use ciborium::{
 };
 use p256::ecdsa::{signature::Signer, Signature as P256EcdsaSignature, SigningKey};
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 #[test]
 fn make_credential_includes_extensions() {

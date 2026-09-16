@@ -13,7 +13,7 @@ use ciborium::{
 use serial_test::serial;
 use trussed::types::consent;
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 #[test]
 #[serial]

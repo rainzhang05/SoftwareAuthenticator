@@ -13,7 +13,7 @@ use trussed::try_syscall;
 use trussed::types::{Location, Message, PathBuf};
 use zeroize::Zeroize;
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 #[cfg(not(test))]
 const CREDENTIAL_STORE_PATH: &str = "credentials.cbor";

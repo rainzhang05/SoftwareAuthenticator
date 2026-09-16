@@ -1,4 +1,5 @@
 mod cbor;
+pub mod constants;
 mod credential_management;
 mod get_assertion;
 mod get_info;
@@ -18,12 +19,26 @@ use self::presence::noop_keepalive;
 use self::storage::StoredCredential;
 
 use ciborium::{de::from_reader, value::Value};
+use core::fmt;
 use ctaphid_app::{App, Command, Error};
 use log::info;
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use trussed::interrupt::InterruptFlag;
 
-use transport_core::{ctap::constants::*, logging::HexOption};
+use self::constants::*;
+
+/// Formats an optional byte for the request log: `0x..` or `n/a`.
+#[derive(Copy, Clone)]
+struct HexOption(Option<u8>);
+
+impl fmt::Display for HexOption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(value) => write!(f, "0x{value:02x}"),
+            None => write!(f, "n/a"),
+        }
+    }
+}
 
 pub struct CtapApp<C> {
     client: C,

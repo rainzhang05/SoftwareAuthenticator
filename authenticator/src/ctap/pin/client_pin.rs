@@ -17,7 +17,7 @@ use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use trussed::syscall;
 use zeroize::Zeroizing;
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 /// The authenticatorClientPIN subcommands this authenticator implements
 /// (CTAP 2.3 §6.5.5).  getPinUvAuthTokenUsingUvWithPermissions (0x06) and

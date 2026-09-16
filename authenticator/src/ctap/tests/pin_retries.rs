@@ -15,7 +15,7 @@ use crate::ClassicPinProtocol;
 use ciborium::{de::from_reader, ser::into_writer, value::Value};
 use serde::{Deserialize, Serialize};
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 const PIN: &[u8] = b"1234";
 const WRONG: [u8; 16] = [0x5A; 16];

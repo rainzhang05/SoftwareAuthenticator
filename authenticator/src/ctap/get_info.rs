@@ -11,7 +11,7 @@ use ciborium::{
 };
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 impl<C> CtapApp<C>
 where

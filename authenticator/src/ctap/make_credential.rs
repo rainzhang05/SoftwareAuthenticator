@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use trussed::syscall;
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 pub(super) const COSE_ALG_ES256: i32 = -7;
 

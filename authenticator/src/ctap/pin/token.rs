@@ -15,7 +15,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::protocol::{verify, PinProtocol};
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 /// "initial usage time limit": "The platform MUST invoke an authenticator
 /// operation using the pinUvAuthToken within this time limit for the

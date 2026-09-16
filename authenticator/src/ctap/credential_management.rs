@@ -13,7 +13,7 @@ use ciborium::{
 use sha2::{Digest, Sha256};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 pub(super) struct CredentialManagementState {
     rp_list: Vec<String>,

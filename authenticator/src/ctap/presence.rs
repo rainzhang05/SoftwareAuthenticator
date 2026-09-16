@@ -6,7 +6,7 @@ use trussed::interrupt::InterruptFlag;
 use trussed::try_syscall;
 use trussed::types::consent;
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 #[cfg(test)]
 use std::sync::Mutex;

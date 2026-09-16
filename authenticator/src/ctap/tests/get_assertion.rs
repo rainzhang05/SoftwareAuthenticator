@@ -24,7 +24,7 @@ use p256::{
 };
 use sha2::{Digest, Sha256};
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 #[test]
 fn get_assertion_response_encoding_is_canonical() {

@@ -9,7 +9,7 @@ license = "Apache-2.0 OR MIT"
 
 [dependencies]
 trussed = "0.1.0"
-ciborium = { version = "0.2", default-features = false }
+ciborium = { version = "0.2", default-features = false, features = ["std"] }
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 hkdf = "0.12"
@@ -20,9 +20,9 @@ serde = { version = "1", features = ["derive"] }
 ctaphid-app = "0.1"
 heapless-bytes = "0.3"
 p256 = { version = "0.13", features = ["ecdh"] }
-rand_core = "0.6"
+# `getrandom` provides `OsRng`, which key generation uses.
+rand_core = { version = "0.6", features = ["getrandom"] }
 log = { version = "0.4", default-features = false }
-transport-core = { path = "../transport-core", default-features = false }
 # Credential store: record encryption and constant-time comparison of secrets.
 # chacha20poly1305 0.10 shares the cipher 0.4 generation already in the tree;
 # its default features only add an RNG convenience the store does not use.

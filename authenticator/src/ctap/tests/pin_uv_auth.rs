@@ -22,7 +22,7 @@ use ciborium::{de::from_reader, value::Value};
 use hmac::Mac as _;
 use serial_test::serial;
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 const PROTOCOLS: [ClassicPinProtocol; 2] = [ClassicPinProtocol::V1, ClassicPinProtocol::V2];
 

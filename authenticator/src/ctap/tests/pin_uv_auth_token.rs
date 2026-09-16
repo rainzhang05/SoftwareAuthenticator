@@ -20,7 +20,7 @@ use ciborium::value::Value;
 use core::time::Duration;
 use serial_test::serial;
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 const PIN: &[u8] = b"1234";
 const PROTOCOLS: [ClassicPinProtocol; 2] = [ClassicPinProtocol::V1, ClassicPinProtocol::V2];

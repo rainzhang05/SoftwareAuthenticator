@@ -27,7 +27,7 @@ use trussed::client::{
 use trussed::error::Error as TrussedError;
 use trussed::types::{consent, Message};
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 #[derive(Default)]
 pub(super) struct TestClient {

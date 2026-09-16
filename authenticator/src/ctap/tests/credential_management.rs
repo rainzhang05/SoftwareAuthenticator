@@ -17,7 +17,7 @@ use ciborium::{
     value::{Integer, Value},
 };
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 /// `authenticate(pinUvAuthToken, subCommand || subCommandParams)` over
 /// protocol two, the protocol these tests declare (CTAP 2.3 §6.8).

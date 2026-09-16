@@ -8,7 +8,7 @@ use super::token::{Clock, MonotonicClock, PinUvAuthTokenState};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 /// The maximum, and initial, value of pinRetries: "Authenticators MUST allow no
 /// more than 8 retries but MAY set a lower maximum." (CTAP 2.3 §6.5.2.3)

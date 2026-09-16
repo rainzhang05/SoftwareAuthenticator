@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use zeroize::{Zeroize, Zeroizing};
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 use std::collections::VecDeque;
 

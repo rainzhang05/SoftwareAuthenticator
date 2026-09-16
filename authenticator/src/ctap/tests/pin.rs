@@ -23,7 +23,7 @@ use p256::{elliptic_curve::sec1::ToEncodedPoint, SecretKey as P256SecretKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 #[test]
 fn classic_key_agreement_value_is_canonical() {

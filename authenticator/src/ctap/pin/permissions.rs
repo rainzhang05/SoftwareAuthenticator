@@ -6,7 +6,7 @@ use crate::ctap::CtapApp;
 use ciborium::value::{Integer, Value};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 
-use transport_core::ctap::constants::*;
+use crate::ctap::constants::*;
 
 pub(crate) const PIN_PERMISSION_MC: u8 = 0x01;
 pub(crate) const PIN_PERMISSION_GA: u8 = 0x02;
