@@ -7,9 +7,9 @@
 
 use super::support::{
     client_pin, encode, es256_credential, get_assertion_request, get_assertion_request_with,
-    install_pin_uv_auth_token, int, make_credential_request, make_credential_request_with,
-    padded_pin, pin_hash, platform_authenticate, response_auth_data, PlatformPinSession,
-    TestClient, FLAG_UV,
+    get_pin_uv_auth_token, install_pin_uv_auth_token, int, make_credential_request,
+    make_credential_request_with, padded_pin, pin_hash, platform_authenticate, response_auth_data,
+    set_pin_encrypted, set_pin_padded, token_pin_auth, PlatformPinSession, TestClient, FLAG_UV,
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
@@ -670,5 +670,54 @@ fn hmac_secret_defaults_to_pin_uv_auth_protocol_one() {
             }
             Some(_) => assert_eq!(result, Err(CTAP1_ERR_INVALID_PARAMETER)),
         }
+    }
+}
+
+// -- authenticatorReset ----------------------------------------------------------------
+
+#[test]
+#[serial]
+fn reset_discards_the_pin_uv_auth_token_and_the_key_agreement_key() {
+    for protocol in PROTOCOLS {
+        let mut app = CtapApp::new(TestClient::new(), [0x6B; 16]);
+        app.pin_state.set_pin(pin_hash(b"1234"));
+        let token = get_pin_uv_auth_token(
+            &mut app,
+            protocol,
+            b"1234",
+            (PIN_PERMISSION_MC | PIN_PERMISSION_GA).into(),
+            Some("example.com"),
+        )
+        .expect("pinUvAuthToken issued");
+        // A platform that fetched the key agreement key before the reset.
+        let stale = PlatformPinSession::establish(&mut app, protocol, 0x16);
+
+        assert_eq!(app.handle_reset(), Ok(vec![CTAP2_OK]), "{protocol:?}");
+        assert!(!app.pin_state.is_set());
+
+        // The token authenticates nothing any more.
+        let client_hash = [0x49; 32];
+        let param = token_pin_auth(protocol, &token, &client_hash);
+        let request = make_credential_request(&client_hash, "example.com", Some((protocol, param)));
+        assert_eq!(
+            app.handle_make_credential(&request),
+            Err(CTAP2_ERR_PIN_AUTH_INVALID),
+            "{protocol:?}"
+        );
+
+        // Nor does a shared secret built on the old key agreement key.
+        let new_pin_enc = stale.encrypt(&padded_pin(b"5678"));
+        assert_eq!(
+            set_pin_encrypted(&mut app, &stale, new_pin_enc),
+            Err(CTAP2_ERR_PIN_AUTH_INVALID),
+            "{protocol:?}"
+        );
+        assert!(!app.pin_state.is_set());
+
+        // A fresh key agreement does.
+        assert_eq!(
+            set_pin_padded(&mut app, protocol, &padded_pin(b"5678")),
+            Ok(vec![CTAP2_OK])
+        );
     }
 }

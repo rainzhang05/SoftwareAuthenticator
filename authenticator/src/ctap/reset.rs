@@ -20,7 +20,11 @@ where
     pub(super) fn handle_reset(&mut self) -> Result<Vec<u8>, u8> {
         let _present = self.await_user_presence()?;
         self.clear_credentials()?;
+        // The PIN, pinRetries and the pinUvAuthToken go back to their initial
+        // values, and so does each protocol's key agreement key, as at
+        // power-up (CTAP 2.3 §6.5.5.1).
         self.pin_state = PinState::new();
+        self.pin_protocol_session = None;
         self.save_persistent_pin_state();
         self.cred_mgmt_state = CredentialManagementState::new();
         self.pending_assertion = None;
