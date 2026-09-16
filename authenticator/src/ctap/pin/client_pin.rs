@@ -18,7 +18,7 @@ use p256::{elliptic_curve::sec1::ToEncodedPoint, SecretKey as P256SecretKey};
 use sha2::{Digest, Sha256};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use trussed::syscall;
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use transport_core::ctap::constants::*;
 
@@ -74,36 +74,79 @@ fn required_bytes(map: &[(Value, Value)], key: i32) -> Result<&[u8], u8> {
     }
 }
 
+/// Length of paddedPin: newPin "padded on the right with 0x00 bytes to make
+/// it 64 bytes long" (CTAP 2.3 §6.5.5.5).
+const PADDED_PIN_LENGTH: usize = 64;
+
+/// "Maximum PIN Length: 63 bytes" (CTAP 2.3 §6.5.1).
+const MAX_PIN_BYTES: usize = 63;
+
+/// Attempts at drawing a P-256 private key from the RNG before giving up.  A
+/// uniformly random 32-byte string is out of range with probability below
+/// 2^-32, so exhausting these means the RNG is broken.
+const KEY_AGREEMENT_KEY_ATTEMPTS: usize = 8;
+
+/// Recover newPin from the decrypted newPinEnc, as setPIN (CTAP 2.3 §6.5.5.5)
+/// and changePIN (§6.5.5.6) specify:
+///
+/// > If paddedNewPin is NOT 64 bytes long, it returns
+/// > CTAP1_ERR_INVALID_PARAMETER. The authenticator drops all trailing 0x00
+/// > bytes from paddedNewPin to produce newPin. The authenticator checks the
+/// > length of newPin against the current minimum PIN length, returning
+/// > CTAP2_ERR_PIN_POLICY_VIOLATION if it is too short.
+///
+/// The minimum is counted in Unicode code points and the maximum is 63 bytes
+/// (§6.5.1: "Minimum PIN Length: 4 code points", "Maximum PIN Length: 63
+/// bytes").  A newPin that is not UTF-8 has no length in code points, so it is
+/// refused too ("An authenticator MAY impose arbitrary, additional constraints
+/// on PINs").
+fn decode_new_pin(padded_new_pin: &[u8]) -> Result<Zeroizing<Vec<u8>>, u8> {
+    if padded_new_pin.len() != PADDED_PIN_LENGTH {
+        return Err(CTAP1_ERR_INVALID_PARAMETER);
+    }
+    let length = padded_new_pin
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .map_or(0, |last| last + 1);
+    let new_pin = &padded_new_pin[..length];
+    if new_pin.len() > MAX_PIN_BYTES {
+        return Err(CTAP2_ERR_PIN_POLICY_VIOLATION);
+    }
+    let code_points = core::str::from_utf8(new_pin)
+        .map_err(|_| CTAP2_ERR_PIN_POLICY_VIOLATION)?
+        .chars()
+        .count();
+    if code_points < PinState::MIN_PIN_LENGTH {
+        return Err(CTAP2_ERR_PIN_POLICY_VIOLATION);
+    }
+    Ok(Zeroizing::new(new_pin.to_vec()))
+}
+
+/// CurrentStoredPIN for `pin`: `LEFT(SHA-256(pin), 16)`.
+fn hash_pin(pin: &[u8]) -> [u8; 16] {
+    let digest = Zeroizing::new(Sha256::digest(pin));
+    let mut hash = [0u8; 16];
+    hash.copy_from_slice(&digest[..16]);
+    hash
+}
+
 impl<C> CtapApp<C>
 where
     C: TrussedClient + FilesystemClient + CryptoClient,
 {
-    fn extract_new_pin(plaintext: &mut [u8]) -> Result<Vec<u8>, u8> {
-        if plaintext.len() != 64 {
-            return Err(CTAP1_ERR_INVALID_PARAMETER);
-        }
-        let mut end = plaintext.len();
-        while end > 0 && plaintext[end - 1] == 0 {
-            end -= 1;
-        }
-        let pin = plaintext[..end].to_vec();
-        plaintext.zeroize();
-        if pin.len() < PinState::MIN_PIN_LENGTH {
-            return Err(CTAP2_ERR_PIN_POLICY_VIOLATION);
-        }
-        if pin.len() > 63 {
-            return Err(CTAP2_ERR_PIN_POLICY_VIOLATION);
-        }
-        Ok(pin)
-    }
-
-    fn hash_pin(pin: &[u8]) -> [u8; 16] {
-        let mut hasher = Sha256::new();
-        hasher.update(pin);
-        let digest = hasher.finalize();
-        let mut out = [0u8; 16];
-        out.copy_from_slice(&digest[..16]);
-        out
+    /// Decrypt newPinEnc and turn it into the PIN hash to store:
+    /// "calls decrypt(shared secret, newPinEnc) to produce paddedNewPin. If an
+    /// error results, it returns CTAP2_ERR_PIN_AUTH_INVALID." (CTAP 2.3
+    /// §6.5.5.5, §6.5.5.6)
+    fn new_pin_hash(
+        protocol: PinProtocol,
+        keys: &PinUvSessionKeys,
+        new_pin_enc: &[u8],
+    ) -> Result<[u8; 16], u8> {
+        let padded_new_pin =
+            decrypt(protocol, keys, new_pin_enc).ok_or(CTAP2_ERR_PIN_AUTH_INVALID)?;
+        let new_pin = decode_new_pin(&padded_new_pin)?;
+        Ok(hash_pin(&new_pin))
     }
 
     /// The PIN check of changePIN (CTAP 2.3 §6.5.5.6), getPinToken
@@ -135,16 +178,15 @@ where
     }
 
     fn client_pin_get_key_agreement(&mut self, protocol: PinProtocol) -> Result<Vec<u8>, u8> {
-        let secret_key = loop {
-            let bytes = syscall!(self.client.random_bytes(32)).bytes;
-            if bytes.len() != 32 {
-                continue;
-            }
-            match P256SecretKey::from_slice(bytes.as_slice()) {
-                Ok(secret) => break secret,
-                Err(_) => continue,
-            }
-        };
+        let secret_key = (0..KEY_AGREEMENT_KEY_ATTEMPTS)
+            .find_map(|_| {
+                let bytes = syscall!(self.client.random_bytes(32)).bytes;
+                if bytes.len() != 32 {
+                    return None;
+                }
+                P256SecretKey::from_slice(bytes.as_slice()).ok()
+            })
+            .ok_or(CTAP2_ERR_PROCESSING)?;
         let public_key = secret_key.public_key().to_encoded_point(false);
         let session = PinProtocolSession {
             protocol,
@@ -183,13 +225,9 @@ where
         }
 
         let session = self.take_session(protocol)?;
-        let (keys, transcript_hash) = session.derive_session_keys(key_agreement)?;
+        let keys = session.derive_session_keys(key_agreement)?;
         verify(protocol, &keys.auth_key, new_pin_enc, pin_auth_param)?;
-        let mut plaintext =
-            Self::decrypt_pin_block_checked(protocol, &keys, &transcript_hash, new_pin_enc)?;
-        let mut new_pin = Self::extract_new_pin(&mut plaintext)?;
-        let hash = Self::hash_pin(&new_pin);
-        new_pin.zeroize();
+        let hash = Self::new_pin_hash(protocol, &keys, new_pin_enc)?;
         self.pin_state.set_pin(hash);
         self.save_persistent_pin_state();
         Ok(vec![CTAP2_OK])
@@ -210,18 +248,14 @@ where
         self.pin_state.check_pin_attempt_allowed()?;
 
         let session = self.take_session(protocol)?;
-        let (keys, transcript_hash) = session.derive_session_keys(key_agreement)?;
+        let keys = session.derive_session_keys(key_agreement)?;
         let mut auth_data = Vec::with_capacity(new_pin_enc.len() + pin_hash_enc.len());
         auth_data.extend_from_slice(new_pin_enc);
         auth_data.extend_from_slice(pin_hash_enc);
         verify(protocol, &keys.auth_key, &auth_data, pin_auth_param)?;
         self.verify_pin_hash_enc(protocol, &keys, pin_hash_enc)?;
 
-        let mut new_pin_plain =
-            Self::decrypt_pin_block_checked(protocol, &keys, &transcript_hash, new_pin_enc)?;
-        let mut new_pin = Self::extract_new_pin(&mut new_pin_plain)?;
-        let hash = Self::hash_pin(&new_pin);
-        new_pin.zeroize();
+        let hash = Self::new_pin_hash(protocol, &keys, new_pin_enc)?;
         self.pin_state.set_pin(hash);
         self.save_persistent_pin_state();
         Ok(vec![CTAP2_OK])
@@ -243,7 +277,7 @@ where
         // "If the pinRetries counter is 0, return CTAP2_ERR_PIN_BLOCKED error."
         self.pin_state.check_pin_attempt_allowed()?;
         let session = self.take_session(protocol)?;
-        let (keys, _transcript_hash) = session.derive_session_keys(key_agreement)?;
+        let keys = session.derive_session_keys(key_agreement)?;
         self.verify_pin_hash_enc(protocol, &keys, pin_hash_enc)?;
 
         let random = syscall!(self.client.random_bytes(32)).bytes;

@@ -4,7 +4,7 @@
 use super::support::{
     classic_encrypt, classic_pin_auth, client_pin, derive_classic_session, get_pin_retries,
     get_pin_uv_auth_token, int, padded_pin, pin_hash, request_classic_key_agreement,
-    PlatformPinSession, TestClient,
+    set_pin_encrypted, set_pin_padded, PlatformPinSession, TestClient,
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
@@ -216,8 +216,7 @@ fn run_classic_pin_flow(protocol: ClassicPinProtocol) {
     // setPin
     let set_entries = request_classic_key_agreement(&mut app, protocol);
     let set_secret = P256SecretKey::from_slice(&[0x11; 32]).expect("valid secret key");
-    let (set_keys, _set_hash, platform_entries) =
-        derive_classic_session(protocol, &set_entries, &set_secret);
+    let (set_keys, platform_entries) = derive_classic_session(protocol, &set_entries, &set_secret);
     let mut new_pin_block = [0u8; 64];
     new_pin_block[..initial_pin.len()].copy_from_slice(initial_pin);
     let set_iv = match protocol {
@@ -258,7 +257,7 @@ fn run_classic_pin_flow(protocol: ClassicPinProtocol) {
     // changePin
     let change_entries = request_classic_key_agreement(&mut app, protocol);
     let change_secret = P256SecretKey::from_slice(&[0x22; 32]).expect("valid secret key");
-    let (change_keys, _change_hash, change_platform_entries) =
+    let (change_keys, change_platform_entries) =
         derive_classic_session(protocol, &change_entries, &change_secret);
 
     let mut hasher = Sha256::new();
@@ -325,7 +324,7 @@ fn run_classic_pin_flow(protocol: ClassicPinProtocol) {
     // getPinToken (legacy)
     let token_entries = request_classic_key_agreement(&mut app, protocol);
     let token_secret = P256SecretKey::from_slice(&[0x33; 32]).expect("valid secret key");
-    let (token_keys, _token_hash, token_platform_entries) =
+    let (token_keys, token_platform_entries) =
         derive_classic_session(protocol, &token_entries, &token_secret);
 
     let token_iv = match protocol {
@@ -395,7 +394,7 @@ fn client_pin_token_with_permissions_sets_metadata() {
 
     let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
     let platform_secret = P256SecretKey::from_slice(&[0x33; 32]).expect("valid platform secret");
-    let (keys, _transcript_hash, platform_entries) =
+    let (keys, platform_entries) =
         derive_classic_session(ClassicPinProtocol::V2, &auth_entries, &platform_secret);
     let iv = [0xAA; 16];
     let pin_hash_enc = classic_encrypt(ClassicPinProtocol::V2, &keys, &digest[..16], Some(iv));
@@ -458,7 +457,7 @@ fn client_pin_get_token_legacy_succeeds_without_pin_uv_auth_param() {
 
     let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
     let platform_secret = P256SecretKey::from_slice(&[0x55; 32]).expect("valid platform secret");
-    let (keys, _transcript_hash, platform_entries) =
+    let (keys, platform_entries) =
         derive_classic_session(ClassicPinProtocol::V2, &auth_entries, &platform_secret);
     let iv = [0xCC; 16];
     let pin_hash_enc = classic_encrypt(ClassicPinProtocol::V2, &keys, &digest[..16], Some(iv));
@@ -522,7 +521,7 @@ fn client_pin_token_with_permissions_accepts_missing_pin_uv_auth_param() {
 
     let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
     let platform_secret = P256SecretKey::from_slice(&[0x66; 32]).expect("valid platform secret");
-    let (keys, _transcript_hash, platform_entries) =
+    let (keys, platform_entries) =
         derive_classic_session(ClassicPinProtocol::V2, &auth_entries, &platform_secret);
     let iv = [0xDD; 16];
     let pin_hash_enc = classic_encrypt(ClassicPinProtocol::V2, &keys, &digest[..16], Some(iv));
@@ -601,7 +600,7 @@ fn client_pin_token_with_permissions_requires_rp_id() {
 
     let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
     let platform_secret = P256SecretKey::from_slice(&[0x44; 32]).expect("valid platform secret");
-    let (keys, _transcript_hash, platform_entries) =
+    let (keys, platform_entries) =
         derive_classic_session(ClassicPinProtocol::V2, &auth_entries, &platform_secret);
     let iv = [0xBB; 16];
     let pin_hash_enc = classic_encrypt(ClassicPinProtocol::V2, &keys, &digest[..16], Some(iv));
@@ -904,6 +903,151 @@ fn get_pin_uv_auth_token_ignores_undefined_permissions() {
         assert_eq!(
             app.pin_state.pin_uv_auth_permissions, granted,
             "permissions {requested:#x}"
+        );
+    }
+}
+
+const PROTOCOLS: [ClassicPinProtocol; 2] = [ClassicPinProtocol::V1, ClassicPinProtocol::V2];
+
+#[test]
+fn set_pin_counts_the_minimum_length_in_code_points() {
+    // "Minimum PIN Length: 4 code points." (CTAP 2.3 §6.5.1)
+    let cases: [(&[u8], Result<(), u8>); 8] = [
+        (b"", Err(CTAP2_ERR_PIN_POLICY_VIOLATION)),
+        (b"123", Err(CTAP2_ERR_PIN_POLICY_VIOLATION)),
+        (b"1234", Ok(())),
+        // Three code points in six bytes.
+        (
+            "\u{e9}\u{e9}\u{e9}".as_bytes(),
+            Err(CTAP2_ERR_PIN_POLICY_VIOLATION),
+        ),
+        ("\u{e9}\u{e9}\u{e9}\u{e9}".as_bytes(), Ok(())),
+        // Three code points in twelve bytes.
+        (
+            "\u{1d11e}\u{1d11e}\u{1d11e}".as_bytes(),
+            Err(CTAP2_ERR_PIN_POLICY_VIOLATION),
+        ),
+        ("\u{1d11e}\u{1d11e}\u{1d11e}\u{1d11e}".as_bytes(), Ok(())),
+        // Not UTF-8, so it has no length in code points.
+        (
+            &[0xFF, 0xFE, 0xFD, 0xFC, 0xFB],
+            Err(CTAP2_ERR_PIN_POLICY_VIOLATION),
+        ),
+    ];
+    for protocol in PROTOCOLS {
+        for (pin, expected) in cases {
+            let mut app = CtapApp::new(TestClient::new(), [0x49; 16]);
+            let result = set_pin_padded(&mut app, protocol, &padded_pin(pin)).map(|_| ());
+            assert_eq!(result, expected, "{protocol:?} {pin:02x?}");
+            let stored = app.pin_state.persistent().pin_hash;
+            assert_eq!(stored, expected.ok().map(|()| pin_hash(pin)));
+        }
+    }
+}
+
+#[test]
+fn set_pin_allows_63_bytes_and_refuses_64() {
+    // "Maximum PIN Length: 63 bytes" (CTAP 2.3 §6.5.1)
+    for protocol in PROTOCOLS {
+        let mut app = CtapApp::new(TestClient::new(), [0x4A; 16]);
+        assert_eq!(
+            set_pin_padded(&mut app, protocol, &padded_pin(&[b'7'; 63])),
+            Ok(vec![CTAP2_OK])
+        );
+        assert_eq!(
+            app.pin_state.persistent().pin_hash,
+            Some(pin_hash(&[b'7'; 63]))
+        );
+
+        // No 0x00 left to strip: newPin would be all 64 bytes.
+        let mut app = CtapApp::new(TestClient::new(), [0x4A; 16]);
+        assert_eq!(
+            set_pin_padded(&mut app, protocol, &[b'7'; 64]),
+            Err(CTAP2_ERR_PIN_POLICY_VIOLATION)
+        );
+        assert!(!app.pin_state.is_set());
+    }
+}
+
+#[test]
+fn set_pin_requires_a_64_byte_padded_pin() {
+    // "If paddedNewPin is NOT 64 bytes long, it returns
+    // CTAP1_ERR_INVALID_PARAMETER." (CTAP 2.3 §6.5.5.5)
+    for protocol in PROTOCOLS {
+        for length in [16, 48, 80, 128] {
+            let mut padded = vec![0u8; length];
+            padded[..4].copy_from_slice(b"1234");
+            let mut app = CtapApp::new(TestClient::new(), [0x4B; 16]);
+            assert_eq!(
+                set_pin_padded(&mut app, protocol, &padded),
+                Err(CTAP1_ERR_INVALID_PARAMETER),
+                "{protocol:?} {length}"
+            );
+            assert!(!app.pin_state.is_set());
+        }
+    }
+}
+
+#[test]
+fn set_pin_refuses_a_new_pin_enc_that_does_not_decrypt() {
+    // "If an error results, it returns CTAP2_ERR_PIN_AUTH_INVALID."
+    for (protocol, new_pin_enc) in [
+        (ClassicPinProtocol::V1, vec![0x11; 63]),
+        (ClassicPinProtocol::V2, vec![0x11; 15]),
+        (ClassicPinProtocol::V2, vec![0x11; 16 + 63]),
+    ] {
+        let mut app = CtapApp::new(TestClient::new(), [0x4C; 16]);
+        let session = PlatformPinSession::establish(&mut app, protocol, 0x52);
+        assert_eq!(
+            set_pin_encrypted(&mut app, &session, new_pin_enc.clone()),
+            Err(CTAP2_ERR_PIN_AUTH_INVALID),
+            "{protocol:?} {}",
+            new_pin_enc.len()
+        );
+        assert!(!app.pin_state.is_set());
+    }
+}
+
+#[test]
+fn change_pin_applies_the_same_pin_policy() {
+    for protocol in PROTOCOLS {
+        let mut app = CtapApp::new(TestClient::new(), [0x4D; 16]);
+        app.pin_state.set_pin(pin_hash(b"1234"));
+        let session = PlatformPinSession::establish(&mut app, protocol, 0x53);
+        let new_pin_enc = session.encrypt(&padded_pin("\u{e9}\u{e9}\u{e9}".as_bytes()));
+        let pin_hash_enc = session.encrypt(&pin_hash(b"1234"));
+        let mut message = new_pin_enc.clone();
+        message.extend_from_slice(&pin_hash_enc);
+        let pin_uv_auth_param = classic_pin_auth(protocol, &session.keys, &message);
+        let result = client_pin(
+            &mut app,
+            vec![
+                (int(1), int(protocol.identifier().into())),
+                (int(2), int(0x04)),
+                (int(3), session.key_agreement.clone()),
+                (int(4), Value::Bytes(pin_uv_auth_param)),
+                (int(5), Value::Bytes(new_pin_enc)),
+                (int(6), Value::Bytes(pin_hash_enc)),
+            ],
+        );
+        assert_eq!(result, Err(CTAP2_ERR_PIN_POLICY_VIOLATION), "{protocol:?}");
+        assert_eq!(app.pin_state.persistent().pin_hash, Some(pin_hash(b"1234")));
+        // The current PIN was verified before the new one was looked at.
+        assert_eq!(app.pin_state.retries(), MAX_PIN_RETRIES);
+    }
+}
+
+#[test]
+fn get_key_agreement_gives_up_when_the_rng_yields_no_valid_key() {
+    // All-zero and all-0xFF scalars are both outside [1, n).
+    for fill in [0x00, 0xFF] {
+        let mut client = TestClient::new();
+        client.set_random_fill(fill);
+        let mut app = CtapApp::new(client, [0x4E; 16]);
+        assert_eq!(
+            client_pin(&mut app, vec![(int(1), int(2)), (int(2), int(0x02))]),
+            Err(CTAP2_ERR_PROCESSING),
+            "random bytes {fill:#04x}"
         );
     }
 }

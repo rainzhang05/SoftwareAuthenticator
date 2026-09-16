@@ -13,7 +13,7 @@ use hmac::{Hmac, Mac};
 use p256::{
     ecdh::diffie_hellman, EncodedPoint, PublicKey as P256PublicKey, SecretKey as P256SecretKey,
 };
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use trussed::syscall;
@@ -183,10 +183,13 @@ impl PinProtocolSession {
         ])
     }
 
+    /// `decapsulate(peerCoseKey)`: ECDH with the platform key-agreement key,
+    /// then the protocol's `kdf(Z)` (CTAP 2.3 §6.5.6, §6.5.7).  Parse errors
+    /// and points not on the curve are CTAP1_ERR_INVALID_PARAMETER.
     pub(crate) fn derive_session_keys(
         self,
         platform_key: &[(Value, Value)],
-    ) -> Result<(PinUvSessionKeys, Vec<u8>), u8> {
+    ) -> Result<PinUvSessionKeys, u8> {
         let Some(peer_x) = platform_key
             .iter()
             .find(|(k, _)| *k == Value::Integer(Integer::from(-2)))
@@ -220,15 +223,11 @@ impl PinProtocolSession {
             .map_err(|_| CTAP1_ERR_INVALID_PARAMETER)?;
         let shared = diffie_hellman(self.secret_key.to_nonzero_scalar(), peer_public.as_affine());
 
-        let auth_public_bytes = self.public_key.as_bytes();
-        let mut hasher = Sha256::new();
-        hasher.update(auth_public_bytes);
-        hasher.update(&peer_encoded);
-        let transcript_hash = hasher.finalize().to_vec();
-
         let shared_bytes = shared.raw_secret_bytes();
-        let keys = derive_classic_pin_uv_session_keys(self.protocol, shared_bytes.as_ref());
-        Ok((keys, transcript_hash))
+        Ok(derive_classic_pin_uv_session_keys(
+            self.protocol,
+            shared_bytes.as_ref(),
+        ))
     }
 }
 
@@ -282,16 +281,6 @@ where
                 .ok_or(CTAP2_ERR_PIN_AUTH_INVALID)?,
         );
         verify(protocol, &token, message, pin_uv_auth_param)
-    }
-
-    pub(super) fn decrypt_pin_block_checked(
-        protocol: PinProtocol,
-        keys: &PinUvSessionKeys,
-        _transcript_hash: &[u8],
-        ciphertext: &[u8],
-    ) -> Result<Vec<u8>, u8> {
-        decrypt_classic_pin_block(protocol, keys, ciphertext)
-            .map_err(|_| CTAP2_ERR_PIN_AUTH_INVALID)
     }
 
     pub(crate) fn take_session(&mut self, protocol: PinProtocol) -> Result<PinProtocolSession, u8> {

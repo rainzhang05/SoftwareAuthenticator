@@ -33,6 +33,7 @@ use transport_core::ctap::constants::*;
 pub(super) struct TestClient {
     pending: Option<Result<Reply, TrussedError>>,
     random_counter: u8,
+    random_fill: Option<u8>,
     files: HashMap<Vec<u8>, Vec<u8>>,
     writes: Vec<(Vec<u8>, Vec<u8>)>,
     presence_responses: VecDeque<consent::Result>,
@@ -41,6 +42,11 @@ pub(super) struct TestClient {
 impl TestClient {
     pub(super) fn new() -> Self {
         Self::default()
+    }
+
+    /// Make every random byte `fill` instead of a counter.
+    pub(super) fn set_random_fill(&mut self, fill: u8) {
+        self.random_fill = Some(fill);
     }
 
     /// Put `data` at `path`, as if an earlier run had written it.
@@ -69,7 +75,7 @@ impl TestClient {
             Request::RandomBytes(req) => {
                 let mut bytes = Vec::with_capacity(req.count);
                 for _ in 0..req.count {
-                    bytes.push(self.random_counter);
+                    bytes.push(self.random_fill.unwrap_or(self.random_counter));
                     self.random_counter = self.random_counter.wrapping_add(1);
                 }
                 let message = Message::from_slice(&bytes).expect("random bytes fit message");
@@ -212,23 +218,20 @@ fn classic_platform_key_entries(point: &EncodedPoint) -> Vec<(Value, Value)> {
     entries
 }
 
+/// Platform-side `encapsulate`: the shared secret and the platform
+/// key-agreement key to send.
 pub(super) fn derive_classic_session(
     protocol: ClassicPinProtocol,
     auth_entries: &[(Value, Value)],
     platform_secret: &P256SecretKey,
-) -> (PinUvSessionKeys, Vec<u8>, Vec<(Value, Value)>) {
+) -> (PinUvSessionKeys, Vec<(Value, Value)>) {
     let auth_public = authenticator_public_key(auth_entries);
     let platform_public = platform_secret.public_key().to_encoded_point(false);
     let shared = diffie_hellman(platform_secret.to_nonzero_scalar(), auth_public.as_affine());
-    let auth_encoded = auth_public.to_encoded_point(false);
-    let mut hasher = Sha256::new();
-    hasher.update(auth_encoded.as_bytes());
-    hasher.update(platform_public.as_bytes());
-    let transcript_hash = hasher.finalize().to_vec();
     let shared_bytes = shared.raw_secret_bytes();
     let keys = crate::derive_classic_pin_uv_session_keys(protocol, shared_bytes.as_ref());
     let platform_entries = classic_platform_key_entries(&platform_public);
-    (keys, transcript_hash, platform_entries)
+    (keys, platform_entries)
 }
 
 pub(super) fn classic_encrypt(
@@ -340,8 +343,7 @@ impl PlatformPinSession {
     ) -> Self {
         let authenticator_key = request_classic_key_agreement(app, protocol);
         let secret = P256SecretKey::from_slice(&[platform_secret; 32]).expect("valid secret key");
-        let (keys, _transcript_hash, platform_key) =
-            derive_classic_session(protocol, &authenticator_key, &secret);
+        let (keys, platform_key) = derive_classic_session(protocol, &authenticator_key, &secret);
         Self {
             protocol,
             keys,
@@ -362,6 +364,36 @@ impl PlatformPinSession {
         crate::decrypt_classic_pin_block(self.protocol, &self.keys, ciphertext)
             .expect("ciphertext decrypts")
     }
+}
+
+/// setPIN over `protocol`, with `padded_new_pin` as the plaintext of newPinEnc.
+pub(super) fn set_pin_padded(
+    app: &mut CtapApp<TestClient>,
+    protocol: ClassicPinProtocol,
+    padded_new_pin: &[u8],
+) -> Result<Vec<u8>, u8> {
+    let session = PlatformPinSession::establish(app, protocol, 0x51);
+    let new_pin_enc = session.encrypt(padded_new_pin);
+    set_pin_encrypted(app, &session, new_pin_enc)
+}
+
+/// setPIN with a newPinEnc exactly as given, authenticated correctly.
+pub(super) fn set_pin_encrypted(
+    app: &mut CtapApp<TestClient>,
+    session: &PlatformPinSession,
+    new_pin_enc: Vec<u8>,
+) -> Result<Vec<u8>, u8> {
+    let pin_uv_auth_param = classic_pin_auth(session.protocol, &session.keys, &new_pin_enc);
+    client_pin(
+        app,
+        vec![
+            (int(1), int(session.protocol.identifier().into())),
+            (int(2), int(0x03)),
+            (int(3), session.key_agreement.clone()),
+            (int(4), Value::Bytes(pin_uv_auth_param)),
+            (int(5), Value::Bytes(new_pin_enc)),
+        ],
+    )
 }
 
 /// getPINRetries: `(pinRetries, powerCycleState)`.

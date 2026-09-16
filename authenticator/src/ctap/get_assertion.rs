@@ -95,7 +95,7 @@ where
         user_verified: bool,
     ) -> Result<(Option<Vec<u8>>, PendingHmacSecret), u8> {
         let session = self.take_session(request.protocol)?;
-        let (keys, _) = session.derive_session_keys(&request.key_agreement)?;
+        let keys = session.derive_session_keys(&request.key_agreement)?;
 
         // CTAP 2.3 §12.7: "The authenticator calls verify(shared secret,
         // saltEnc, saltAuth). If the verification fails, return

@@ -561,7 +561,7 @@ fn get_assertion_produces_hmac_secret_output() {
 
     let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
     let platform_secret = P256SecretKey::from_slice(&[0x23; 32]).expect("valid secret key");
-    let (session_keys, _transcript_hash, platform_entries) =
+    let (session_keys, platform_entries) =
         derive_classic_session(ClassicPinProtocol::V2, &auth_entries, &platform_secret);
 
     let salt = vec![0x99; 32];
