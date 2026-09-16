@@ -17,8 +17,9 @@ use nix::{
     unistd::Pid,
 };
 use transport_core::{state::default_state_dir, Options};
+use zeroize::Zeroizing;
 
-use crate::{permissions, service, HidDeviceDescriptor};
+use crate::{permissions, pin_input::PinReader, service, HidDeviceDescriptor};
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -449,15 +450,6 @@ fn confirm(prompt: &str) -> io::Result<bool> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
 }
 
-fn read_pin_interactive(prompt: &str) -> io::Result<String> {
-    use std::io::Write;
-    eprint!("{prompt}: ");
-    std::io::stderr().flush().ok();
-    let mut buf = String::new();
-    std::io::stdin().read_line(&mut buf)?;
-    Ok(buf.trim_end_matches(['\n', '\r']).to_string())
-}
-
 fn reset(args: ResetArgs) -> io::Result<()> {
     require_daemon_stopped(&args.state)?;
     service::ensure_state_dir(&args.state.state_dir)?;
@@ -481,8 +473,8 @@ fn pin(cmd: PinCommand) -> io::Result<()> {
         PinAction::Set { state, pin } => {
             require_daemon_stopped(&state)?;
             let pin = match pin {
-                Some(value) => value,
-                None => read_pin_interactive("New PIN")?,
+                Some(value) => Zeroizing::new(value),
+                None => PinReader::from_stdin().new_pin()?,
             };
             service::pin_set(&state.state_dir, &pin)?;
             println!("PIN set.");
@@ -494,13 +486,14 @@ fn pin(cmd: PinCommand) -> io::Result<()> {
             new,
         } => {
             require_daemon_stopped(&state)?;
+            let reader = PinReader::from_stdin();
             let current = match current {
-                Some(value) => value,
-                None => read_pin_interactive("Current PIN")?,
+                Some(value) => Zeroizing::new(value),
+                None => reader.current_pin()?,
             };
             let new = match new {
-                Some(value) => value,
-                None => read_pin_interactive("New PIN")?,
+                Some(value) => Zeroizing::new(value),
+                None => reader.new_pin()?,
             };
             service::pin_change(&state.state_dir, &current, &new)?;
             println!("PIN changed.");
@@ -509,8 +502,8 @@ fn pin(cmd: PinCommand) -> io::Result<()> {
         PinAction::Remove { state, current } => {
             require_daemon_stopped(&state)?;
             let current = match current {
-                Some(value) => value,
-                None => read_pin_interactive("Current PIN")?,
+                Some(value) => Zeroizing::new(value),
+                None => PinReader::from_stdin().current_pin()?,
             };
             service::pin_remove(&state.state_dir, &current)?;
             println!("PIN removed.");

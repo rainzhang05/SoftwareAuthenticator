@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod permissions;
+pub mod pin_input;
 pub mod service;
 pub mod transport;
 pub mod uhid;

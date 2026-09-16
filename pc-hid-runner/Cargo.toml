@@ -7,7 +7,7 @@ edition = "2021"
 ctaphid-dispatch = { version = "0.3", features = ["log-all"] }
 heapless-bytes = "0.3"
 interchange = "0.3"
-nix = { version = "0.27", default-features = false, features = ["fs", "poll", "signal", "user"] }
+nix = { version = "0.27", default-features = false, features = ["fs", "poll", "signal", "term", "user"] }
 signal-hook = { version = "0.3", features = ["iterator"] }
 transport-core = { path = "../transport-core", default-features = false, features = ["ctaphid"] }
 clap = { version = "4", features = ["derive"] }
@@ -20,3 +20,4 @@ authenticator = { path = "../authenticator" }
 daemonize = "0.4"
 rand = { version = "0.8", features = ["std"] }
 sha2 = "0.10"
+zeroize = "1"

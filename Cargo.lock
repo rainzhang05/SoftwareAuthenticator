@@ -1336,6 +1336,7 @@ dependencies = [
  "signal-hook",
  "transport-core",
  "trussed",
+ "zeroize",
 ]
 
 [[package]]
