@@ -99,12 +99,6 @@ pub trait Apps<'interrupt, D: Dispatch> {
         &mut self,
         f: impl FnOnce(&mut [&mut dyn ctaphid_dispatch::app::App<'interrupt, N>]) -> T,
     ) -> T;
-
-    #[cfg(feature = "ccid")]
-    fn with_ccid_apps<T, const N: usize>(
-        &mut self,
-        f: impl FnOnce(&mut [&mut dyn apdu_dispatch::app::App<N>]) -> T,
-    ) -> T;
 }
 
 #[derive(Copy, Clone)]

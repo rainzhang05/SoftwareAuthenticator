@@ -19,9 +19,7 @@ serde = { version = "1", features = ["derive"] }
 trussed = { version = "0.1", default-features = false, features = ["log-all", "virt"] }
 
 ctaphid-dispatch = { version = "0.3", features = ["log-all"], optional = true }
-apdu-dispatch = { version = "0.3", optional = true }
 
 [features]
 default = []
 ctaphid = ["ctaphid-dispatch"]
-ccid = ["apdu-dispatch"]
