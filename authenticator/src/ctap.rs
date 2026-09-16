@@ -5,6 +5,7 @@ mod get_info;
 mod make_credential;
 mod pin;
 mod presence;
+mod reset;
 mod storage;
 
 use self::credential_management::CredentialManagementState;
@@ -87,21 +88,6 @@ where
 
     fn handle_bio_enrollment(&mut self, _payload: &[u8]) -> Result<Vec<u8>, u8> {
         Err(CTAP1_ERR_INVALID_COMMAND)
-    }
-
-    /// CTAP2 `authenticatorReset` (command 0x07).  Wipes credentials and
-    /// PIN state after collecting user presence.  The standard 10-second
-    /// "since power-up" window from the FIDO spec is intentionally not
-    /// enforced; a software authenticator on a multi-user desktop already
-    /// requires explicit user consent via the presence prompt.
-    fn handle_reset(&mut self) -> Result<Vec<u8>, u8> {
-        let _present = self.await_user_presence()?;
-        self.clear_credentials()?;
-        self.pin_state = PinState::new();
-        self.save_persistent_pin_state();
-        self.cred_mgmt_state = CredentialManagementState::new();
-        self.pending_assertion = None;
-        Ok(vec![CTAP2_OK])
     }
 
     fn extract_subcommand_and_pin_protocol_for_logging(payload: &[u8]) -> (Option<u8>, Option<u8>) {
