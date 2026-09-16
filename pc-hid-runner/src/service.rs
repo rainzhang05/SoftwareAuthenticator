@@ -8,7 +8,9 @@ use sha2::{Digest, Sha256};
 use transport_core::state::{
     reset_state_dir, IdentityConfig, PersistentStore, StoredPinState, DEFAULT_PIN_RETRIES,
 };
-use transport_core::{set_waiting, Apps as TrussedApps, Builder, Options, Platform, Syscall};
+use transport_core::{
+    set_waiting, Apps as TrussedApps, Builder, Client, Options, Platform, Syscall,
+};
 use trussed::{
     backend::{CoreOnly, NoId},
     pipe::{ServiceEndpoint, TrussedChannel},
@@ -49,7 +51,7 @@ pub struct AppData {
 }
 
 pub struct Apps {
-    ctap: CtapApp<crate::Client>,
+    ctap: CtapApp<Client>,
 }
 
 impl<'a> TrussedApps<'a, CoreOnly> for Apps {
@@ -65,7 +67,7 @@ impl<'a> TrussedApps<'a, CoreOnly> for Apps {
         let (requester, responder) = CHANNEL.split().expect("Trussed channel split");
         let context = CoreContext::new(littlefs2::path!("authenticator").into());
         endpoints.push(ServiceEndpoint::new(responder, context, &[]));
-        let client = crate::Client::new(requester, syscall, None);
+        let client = Client::new(requester, syscall, None);
         let mut ctap = CtapApp::new(client, data.aaguid);
         ctap.set_auto_user_presence(data.auto_user_presence);
         ctap.suppress_attestation(data.suppress_attestation);
@@ -145,14 +147,6 @@ pub fn parse_aaguid(input: &str) -> Result<[u8; 16], String> {
             u8::from_str_radix(hex, 16).map_err(|_| format!("invalid hex at byte {}", idx))?;
     }
     Ok(out)
-}
-
-pub fn default_identity() -> IdentityStrings {
-    IdentityStrings {
-        manufacturer: "Feitian Technologies Co., Ltd.".to_string(),
-        product: "Feitian FIDO2 Software Authenticator (ML-DSA)".to_string(),
-        serial: "FEITIAN-PQC-001".to_string(),
-    }
 }
 
 pub fn ensure_state_dir(path: &Path) -> io::Result<()> {

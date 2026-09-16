@@ -3,7 +3,6 @@ use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::libc;
 use nix::poll::{poll, PollFd, PollFlags};
 use nix::unistd::{read, write};
-use serde::{Deserialize, Serialize};
 use signal_hook::iterator::Signals;
 use std::fs::OpenOptions;
 use std::io;
@@ -36,7 +35,7 @@ const CTAPHID_REPORT_DESCRIPTOR: [u8; 34] = [
     0x91, 0x02, //   Output (Data, Variable, Absolute)
     0xC0, // End Collection
 ];
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct HidDeviceDescriptor {
     pub name: String,
     pub vendor_id: u32,

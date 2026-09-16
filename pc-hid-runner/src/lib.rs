@@ -11,12 +11,9 @@ use std::{
 
 use ctaphid_dispatch::{self, Channel, DEFAULT_MESSAGE_SIZE};
 use transport::ctaphid_host::{CtaphidHost, Version};
-pub use transport_core::{
-    set_waiting, waiting_for_user_presence, Apps, Builder, Client, Options, Platform, Runner,
-    Store, Syscall, Timeout, Transport,
-};
+use transport_core::{Apps, Platform, Runner, Transport};
 use trussed::backend::Dispatch;
-pub use uhid::{CtapHidFrame, HidDeviceDescriptor, ReportType, UhidDevice, CTAPHID_FRAME_LEN};
+use uhid::{HidDeviceDescriptor, UhidDevice, CTAPHID_FRAME_LEN};
 
 // CTAPHID capability flags (CTAP spec section 11.2.9.1.3)
 pub const CAPABILITY_CBOR: u8 = 0x04; // Implements CTAPHID_CBOR

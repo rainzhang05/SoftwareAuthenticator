@@ -16,9 +16,9 @@ use nix::{
     sys::signal::{self, Signal},
     unistd::Pid,
 };
-use transport_core::state::default_state_dir;
+use transport_core::{state::default_state_dir, Options};
 
-use crate::{permissions, service, HidDeviceDescriptor, Options};
+use crate::{permissions, service, HidDeviceDescriptor};
 
 #[derive(Parser, Debug)]
 #[clap(
