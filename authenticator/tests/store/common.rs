@@ -1,5 +1,5 @@
-//! Temporary directories, record builders, and independent verification
-//! helpers.
+//! Temporary directories, record builders, independent verification helpers,
+//! and log capture.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -158,5 +158,55 @@ pub fn assert_signature_verifies(record: &CredentialRecord) {
                 "{alg:?} signature verifies under the derived public key"
             );
         }
+    }
+}
+
+/// Captures warnings logged anywhere in this test binary.
+///
+/// The logger is process-wide and tests run in parallel, so callers look for
+/// messages naming something unique to their own test.
+pub mod logs {
+    use std::sync::{Mutex, Once};
+
+    use log::{Level, LevelFilter, Log, Metadata, Record};
+
+    static MESSAGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static INSTALL: Once = Once::new();
+
+    struct Capture;
+
+    impl Log for Capture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            metadata.level() <= Level::Warn
+        }
+
+        fn log(&self, record: &Record<'_>) {
+            if self.enabled(record.metadata()) {
+                MESSAGES
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(record.args().to_string());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    pub fn install() {
+        INSTALL.call_once(|| {
+            log::set_logger(&Capture).expect("no other logger is installed");
+            log::set_max_level(LevelFilter::Warn);
+        });
+    }
+
+    /// Warnings logged so far that contain `needle`.
+    pub fn warnings_containing(needle: &str) -> Vec<String> {
+        MESSAGES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|message| message.contains(needle))
+            .cloned()
+            .collect()
     }
 }
