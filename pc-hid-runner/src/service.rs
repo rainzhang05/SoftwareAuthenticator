@@ -205,7 +205,7 @@ pub fn pin_info(state_dir: &Path) -> io::Result<PinInfo> {
     Ok(PinInfo {
         is_set: state.pin_hash.is_some(),
         retries: state.pin_retries,
-        blocked: state.pin_auth_blocked,
+        blocked: pin_is_blocked(&state),
     })
 }
 
@@ -234,11 +234,8 @@ pub fn pin_change(state_dir: &Path, current_pin: &str, new_pin: &str) -> io::Res
     validate_pin(new_pin)?;
     let store = PersistentStore::new(state_dir)?;
     let mut state = store.read_pin_state()?;
-    verify_current_pin(&mut state, current_pin)?;
+    verify_current_pin(&store, &mut state, current_pin)?;
     state.pin_hash = Some(hash_pin(new_pin));
-    state.pin_retries = DEFAULT_PIN_RETRIES;
-    state.consecutive_failures = 0;
-    state.pin_auth_blocked = false;
     store.write_pin_state(&state)
 }
 
@@ -246,11 +243,8 @@ pub fn pin_change(state_dir: &Path, current_pin: &str, new_pin: &str) -> io::Res
 pub fn pin_remove(state_dir: &Path, current_pin: &str) -> io::Result<()> {
     let store = PersistentStore::new(state_dir)?;
     let mut state = store.read_pin_state()?;
-    verify_current_pin(&mut state, current_pin)?;
+    verify_current_pin(&store, &mut state, current_pin)?;
     state.pin_hash = None;
-    state.pin_retries = DEFAULT_PIN_RETRIES;
-    state.consecutive_failures = 0;
-    state.pin_auth_blocked = false;
     store.write_pin_state(&state)
 }
 
@@ -259,33 +253,63 @@ pub fn reset_state(state_dir: &Path) -> io::Result<()> {
     reset_state_dir(state_dir)
 }
 
-fn verify_current_pin(state: &mut StoredPinState, candidate: &str) -> io::Result<()> {
+/// Whether PIN verification is refused outright. `pin_retries == 0` is the
+/// permanent block; `pin_auth_blocked` is also set by the CTAP side after
+/// repeated failures, and is honoured here as well.
+fn pin_is_blocked(state: &StoredPinState) -> bool {
+    state.pin_auth_blocked || state.pin_retries == 0
+}
+
+/// Check `candidate` against the stored PIN, spending one retry.
+///
+/// As in CTAP 2.1 (section 6.5.5.6), the retry counter is decremented and
+/// written to disk *before* the comparison, so an attempt always counts even
+/// if the process is killed before it reports the result. On success the
+/// counters in `state` are reset; the caller persists that together with the
+/// change the PIN was verified for.
+fn verify_current_pin(
+    store: &PersistentStore,
+    state: &mut StoredPinState,
+    candidate: &str,
+) -> io::Result<()> {
     let stored = state.pin_hash.ok_or_else(|| {
         io::Error::new(io::ErrorKind::PermissionDenied, "no PIN is currently set")
     })?;
-    if state.pin_auth_blocked {
+    if pin_is_blocked(state) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "PIN is blocked until the authenticator is reset",
         ));
     }
-    let provided = hash_pin(candidate);
-    let mut diff = 0u8;
-    for (a, b) in stored.iter().zip(provided.iter()) {
-        diff |= a ^ b;
+    // Every PIN ever accepted, by this CLI or over CTAP, is at least
+    // MIN_PIN_CODE_POINTS bytes and at most MAX_PIN_BYTES bytes long, so a
+    // candidate outside that range cannot match. Reject it without spending a
+    // retry, e.g. when Enter is pressed at the prompt by accident.
+    if candidate.len() < MIN_PIN_CODE_POINTS || candidate.len() > MAX_PIN_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PIN is incorrect (it has an impossible length; no retry was used)",
+        ));
     }
-    if diff == 0 {
+
+    state.pin_retries -= 1;
+    state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+    if state.pin_retries == 0 {
+        state.pin_auth_blocked = true;
+    }
+    store.write_pin_state(state)?;
+
+    if hashes_match(&stored, &hash_pin(candidate)) {
         state.pin_retries = DEFAULT_PIN_RETRIES;
         state.consecutive_failures = 0;
+        state.pin_auth_blocked = false;
         Ok(())
+    } else if state.pin_retries == 0 {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "PIN is incorrect; no retries remain and the PIN is now blocked until the authenticator is reset",
+        ))
     } else {
-        if state.pin_retries > 0 {
-            state.pin_retries -= 1;
-        }
-        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
-        if state.pin_retries == 0 {
-            state.pin_auth_blocked = true;
-        }
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("PIN is incorrect ({} retries remaining)", state.pin_retries),
@@ -293,9 +317,15 @@ fn verify_current_pin(state: &mut StoredPinState, candidate: &str) -> io::Result
     }
 }
 
+/// Compare two PIN hashes without an early exit on the first difference.
+fn hashes_match(a: &[u8; 16], b: &[u8; 16]) -> bool {
+    a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempDir;
 
     // Test characters by UTF-8 width, so the boundaries below are explicit.
     const TWO_BYTES: &str = "\u{e9}"; // e with acute accent
@@ -348,5 +378,127 @@ mod tests {
     fn pin_must_not_end_with_nul() {
         assert!(validate_pin("1234\u{0}").is_err());
         assert!(validate_pin("12\u{0}34").is_ok());
+    }
+
+    const PIN: &str = "1234";
+    const WRONG_PIN: &str = "9999";
+    const NEW_PIN: &str = "5678";
+
+    /// Read the PIN state back through a fresh mount, as the next CLI
+    /// invocation would.
+    fn state_on_disk(dir: &Path) -> StoredPinState {
+        PersistentStore::new(dir)
+            .expect("mount state")
+            .read_pin_state()
+            .expect("read PIN state")
+    }
+
+    #[test]
+    fn wrong_pin_decrements_the_retry_counter_on_disk() {
+        let dir = TempDir::new("pin-retries");
+        pin_set(dir.path(), PIN).unwrap();
+
+        let err = pin_change(dir.path(), WRONG_PIN, NEW_PIN).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let state = state_on_disk(dir.path());
+        assert_eq!(state.pin_retries, DEFAULT_PIN_RETRIES - 1);
+        assert_eq!(state.consecutive_failures, 1);
+        assert!(!state.pin_auth_blocked);
+
+        // The next invocation continues from the persisted counter, whichever
+        // command it is.
+        let err = pin_remove(dir.path(), WRONG_PIN).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let state = state_on_disk(dir.path());
+        assert_eq!(state.pin_retries, DEFAULT_PIN_RETRIES - 2);
+        assert_eq!(state.consecutive_failures, 2);
+        assert_eq!(state.pin_hash, Some(hash_pin(PIN)));
+    }
+
+    #[test]
+    fn pin_blocks_when_retries_run_out_and_then_refuses_the_correct_pin() {
+        let dir = TempDir::new("pin-block");
+        pin_set(dir.path(), PIN).unwrap();
+        for _ in 0..DEFAULT_PIN_RETRIES {
+            let err = pin_change(dir.path(), WRONG_PIN, NEW_PIN).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        }
+
+        let info = pin_info(dir.path()).unwrap();
+        assert!(info.is_set);
+        assert_eq!(info.retries, 0);
+        assert!(info.blocked);
+
+        for result in [
+            pin_change(dir.path(), PIN, NEW_PIN),
+            pin_remove(dir.path(), PIN),
+        ] {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        }
+        let state = state_on_disk(dir.path());
+        assert_eq!(state.pin_hash, Some(hash_pin(PIN)));
+        assert_eq!(state.pin_retries, 0);
+        assert!(state.pin_auth_blocked);
+    }
+
+    #[test]
+    fn correct_pin_resets_the_failure_counters() {
+        let dir = TempDir::new("pin-reset-counters");
+        pin_set(dir.path(), PIN).unwrap();
+        for _ in 0..DEFAULT_PIN_RETRIES - 1 {
+            pin_change(dir.path(), WRONG_PIN, NEW_PIN).unwrap_err();
+        }
+        assert_eq!(state_on_disk(dir.path()).pin_retries, 1);
+
+        // The last remaining retry still accepts the correct PIN.
+        pin_change(dir.path(), PIN, NEW_PIN).unwrap();
+        let state = state_on_disk(dir.path());
+        assert_eq!(state.pin_hash, Some(hash_pin(NEW_PIN)));
+        assert_eq!(state.pin_retries, DEFAULT_PIN_RETRIES);
+        assert_eq!(state.consecutive_failures, 0);
+        assert!(!state.pin_auth_blocked);
+
+        pin_remove(dir.path(), WRONG_PIN).unwrap_err();
+        pin_remove(dir.path(), NEW_PIN).unwrap();
+        let state = state_on_disk(dir.path());
+        assert_eq!(state.pin_hash, None);
+        assert_eq!(state.pin_retries, DEFAULT_PIN_RETRIES);
+        assert_eq!(state.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn rejected_input_does_not_spend_a_retry() {
+        let dir = TempDir::new("pin-no-retry");
+        pin_set(dir.path(), PIN).unwrap();
+
+        // A current PIN no authenticator could have accepted.
+        for impossible in ["", "123", &"1".repeat(MAX_PIN_BYTES + 1)] {
+            let err = pin_remove(dir.path(), impossible).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
+        // An invalid new PIN is refused before the current PIN is checked.
+        let err = pin_change(dir.path(), WRONG_PIN, "12").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        let state = state_on_disk(dir.path());
+        assert_eq!(state.pin_retries, DEFAULT_PIN_RETRIES);
+        assert_eq!(state.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn pin_blocked_by_the_ctap_side_is_honoured() {
+        let dir = TempDir::new("pin-auth-blocked");
+        pin_set(dir.path(), PIN).unwrap();
+        let store = PersistentStore::new(dir.path()).unwrap();
+        let mut state = store.read_pin_state().unwrap();
+        state.pin_auth_blocked = true;
+        state.pin_retries = 5;
+        store.write_pin_state(&state).unwrap();
+
+        let err = pin_change(dir.path(), PIN, NEW_PIN).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let state = state_on_disk(dir.path());
+        assert_eq!(state.pin_retries, 5);
+        assert_eq!(state.pin_hash, Some(hash_pin(PIN)));
     }
 }

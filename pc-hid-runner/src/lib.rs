@@ -4,6 +4,9 @@ pub mod service;
 pub mod transport;
 pub mod uhid;
 
+#[cfg(test)]
+mod test_support;
+
 use std::{
     io,
     time::{Duration, Instant},
