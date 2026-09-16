@@ -22,6 +22,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 // `ctap.rs` has been migrated to the `try_*` API.
 #[allow(deprecated)]
 pub mod ctap;
+pub mod store;
 
 type Aes256CbcEncryptor = Encryptor<Aes256>;
 type Aes256CbcDecryptor = Decryptor<Aes256>;

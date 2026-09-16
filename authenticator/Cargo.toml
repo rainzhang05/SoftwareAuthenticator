@@ -23,6 +23,8 @@ p256 = { version = "0.13", features = ["ecdh"] }
 rand_core = "0.6"
 log = { version = "0.4", default-features = false }
 transport-core = { path = "../transport-core", default-features = false }
+# Credential store: constant-time comparison of secrets.
+subtle = "2"
 
 # Use our local wrapper for ML-DSA.  By enabling all parameter set features the
 # wrapper links to the underlying ML-DSA implementation for 44/65/87.
