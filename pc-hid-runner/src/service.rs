@@ -21,7 +21,11 @@ use trussed::{
     types::{CoreContext, NoData},
 };
 
-use crate::{exec, HidDeviceDescriptor, CTAPHID_FRAME_LEN};
+use crate::{
+    exec,
+    shutdown::{is_shutdown, ok_if_shutdown, ShutdownSignal},
+    HidDeviceDescriptor, CTAPHID_FRAME_LEN,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
@@ -121,7 +125,9 @@ fn serving_syscalls<T>(
     })
 }
 
-pub fn run(config: RunnerConfig) -> io::Result<()> {
+/// Run the authenticator until the device fails or `shutdown` is requested.
+/// A requested shutdown returns `Ok(())`.
+pub fn run(config: RunnerConfig, shutdown: ShutdownSignal) -> io::Result<()> {
     let RunnerConfig {
         descriptor,
         options,
@@ -151,7 +157,11 @@ pub fn run(config: RunnerConfig) -> io::Result<()> {
     match backend {
         Backend::Uhid => {
             let runner = Builder::new(options).build::<Apps>();
-            exec(runner, descriptor, platform, data)
+            let result = exec(runner, descriptor, platform, data, shutdown);
+            if result.as_ref().is_err_and(is_shutdown) {
+                log::info!("shutdown requested; the virtual authenticator has been removed");
+            }
+            ok_if_shutdown(result)
         }
     }
 }
@@ -547,14 +557,17 @@ mod tests {
         assert_eq!(state.pin_hash, Some(hash_pin(PIN)));
     }
 
-    /// Sends one CTAP request through the apps, reports its status, then
-    /// fails the way a transport does when its device goes away.
+    /// Sends one CTAP request through the apps and reports its status, then
+    /// asks for shutdown and fails like the uhid transport does when it sees
+    /// the request.
     struct OneRequestTransport {
         status: mpsc::Sender<Option<u8>>,
+        shutdown: ShutdownSignal,
     }
 
     impl<'interrupt, D: trussed::backend::Dispatch> Transport<'interrupt, D> for OneRequestTransport {
         fn poll<A: TrussedApps<'interrupt, D>>(&mut self, apps: &mut A) -> io::Result<bool> {
+            self.shutdown.check()?;
             // authenticatorReset writes to storage, so it only completes if
             // the runner's Trussed service thread is answering syscalls.
             const CTAP_RESET: u8 = 0x07;
@@ -568,7 +581,8 @@ mod tests {
                 },
             );
             let _ = self.status.send(status);
-            Err(io::Error::other("device gone"))
+            self.shutdown.request();
+            Ok(true)
         }
 
         fn send(&mut self, _waiting_for_user: bool) -> io::Result<bool> {
@@ -576,19 +590,19 @@ mod tests {
         }
 
         fn wait(&mut self) -> io::Result<()> {
-            Ok(())
+            self.shutdown.check()
         }
     }
 
     /// `Runner::exec` must get through `Apps::new`, answer requests, and
-    /// return once the transport fails. Returning requires every Trussed
-    /// client (and so every syscall sender) to be dropped, or the scoped
-    /// service thread never finishes.
+    /// return once shutdown is requested. Returning requires every Trussed
+    /// client (and with it every syscall sender) to be dropped, or the scoped
+    /// service thread never finishes and `exec` hangs.
     ///
     /// This is the only test that constructs `Apps`, whose Trussed channel is
     /// a process-wide static.
     #[test]
-    fn runner_answers_requests_and_returns_when_the_transport_stops() {
+    fn runner_answers_requests_and_returns_when_shutdown_is_requested() {
         let dir = TempDir::new("runner");
         let state_dir = dir.path().to_owned();
         let (status_tx, status_rx) = mpsc::channel();
@@ -608,7 +622,10 @@ mod tests {
                 auto_user_presence: true,
                 suppress_attestation: false,
             };
-            let transport = OneRequestTransport { status: status_tx };
+            let transport = OneRequestTransport {
+                status: status_tx,
+                shutdown: ShutdownSignal::new(),
+            };
             let result = Builder::new(options).build::<Apps>().exec(
                 Platform::new(store.store()),
                 data,
@@ -624,7 +641,9 @@ mod tests {
         assert_eq!(status, Some(0), "authenticatorReset did not succeed");
         let result = result_rx
             .recv_timeout(timeout)
-            .expect("Runner::exec did not return after the transport failed");
-        assert_eq!(result.unwrap_err().to_string(), "device gone");
+            .expect("Runner::exec did not return after shutdown was requested");
+        let err = result.unwrap_err();
+        assert!(is_shutdown(&err), "{err:?}");
+        assert!(ok_if_shutdown(Err(err)).is_ok());
     }
 }

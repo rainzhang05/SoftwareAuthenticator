@@ -391,6 +391,7 @@ mod tests {
 
     #[test]
     fn terminal_input_is_not_echoed_and_echo_is_restored() {
+        let _serialized = crate::test_support::lock_signal_handlers();
         let pty = nix::pty::openpty(None, None).expect("openpty");
         let mut terminal = File::from(pty.master);
         let tty = File::from(pty.slave);

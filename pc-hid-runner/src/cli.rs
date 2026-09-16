@@ -18,7 +18,9 @@ use nix::{
 };
 use transport_core::{state::default_state_dir, Options};
 
-use crate::{permissions, pin_input::PinReader, service, HidDeviceDescriptor};
+use crate::{
+    permissions, pin_input::PinReader, service, shutdown::ShutdownSignal, HidDeviceDescriptor,
+};
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -246,7 +248,9 @@ fn process_running(pid: Pid) -> bool {
 
 fn run_service(config: service::RunnerConfig) -> io::Result<()> {
     let _ = env_logger::try_init();
-    service::run(config)
+    let shutdown = ShutdownSignal::new();
+    shutdown.install_signal_handlers()?;
+    service::run(config, shutdown)
 }
 
 fn warn_device_permissions(descriptor: &HidDeviceDescriptor) {

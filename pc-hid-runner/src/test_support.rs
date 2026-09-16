@@ -3,8 +3,18 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex, MutexGuard,
+    },
 };
+
+/// Serializes tests that change process-wide signal dispositions, so one
+/// cannot save and later restore a handler another has just installed.
+pub fn lock_signal_handlers() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// A uniquely named directory under the system temporary directory, removed
 /// again when dropped.

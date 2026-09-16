@@ -1,18 +1,17 @@
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
-use nix::libc;
 use nix::poll::{poll, PollFd, PollFlags};
 use nix::unistd::{read, write};
-use signal_hook::iterator::Signals;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 const DEVICE_PATH: &str = "/dev/uhid";
+
+#[cfg(test)]
+pub(crate) use raw::{UHID_EVENT_SIZE, UHID_EVENT_TYPE_DESTROY};
 
 pub const CTAPHID_FRAME_LEN: usize = 64;
 const BUS_USB: u16 = 0x03;
@@ -105,8 +104,10 @@ fn frame_from_report_slice(slice: &[u8]) -> Option<CtapHidFrame> {
     }
 }
 
+/// A virtual HID device created through `/dev/uhid`. Dropping it destroys the
+/// device.
 pub struct UhidDevice {
-    inner: Arc<UhidInner>,
+    inner: UhidInner,
     descriptor: HidDeviceDescriptor,
 }
 
@@ -130,11 +131,19 @@ impl UhidDevice {
         fcntl(fd, FcntlArg::F_SETFL(oflags)).map_err(to_io_error)?;
 
         let owned = unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) };
-        let inner = Arc::new(UhidInner::new(owned));
+        Ok(Self {
+            inner: UhidInner { fd: owned },
+            descriptor,
+        })
+    }
 
-        register_signal_handler(&inner)?;
-
-        Ok(Self { inner, descriptor })
+    /// Wrap an already open descriptor that stands in for `/dev/uhid`.
+    #[cfg(test)]
+    pub(crate) fn from_fd(fd: OwnedFd, descriptor: HidDeviceDescriptor) -> Self {
+        Self {
+            inner: UhidInner { fd },
+            descriptor,
+        }
     }
 
     pub fn try_read_frame(&self) -> io::Result<Option<CtapHidFrame>> {
@@ -211,17 +220,9 @@ impl UhidDevice {
 
 struct UhidInner {
     fd: OwnedFd,
-    destroyed: AtomicBool,
 }
 
 impl UhidInner {
-    fn new(fd: OwnedFd) -> Self {
-        Self {
-            fd,
-            destroyed: AtomicBool::new(false),
-        }
-    }
-
     fn try_read_event(&self) -> io::Result<Option<raw::uhid_event>> {
         match read_event_nonblocking(self.fd.as_raw_fd()) {
             Ok(event) => Ok(Some(event)),
@@ -235,12 +236,11 @@ impl UhidInner {
         let timeout_ms = timeout
             .map(|d| d.as_millis().min(i32::MAX as u128) as i32)
             .unwrap_or(-1);
-        loop {
-            match poll(&mut fds, timeout_ms) {
-                Ok(ready) => return Ok(ready > 0),
-                Err(Errno::EINTR) => continue,
-                Err(err) => return Err(to_io_error(err.into())),
-            }
+        match poll(&mut fds, timeout_ms) {
+            Ok(ready) => Ok(ready > 0),
+            // Interrupted by a signal: return, so the caller can look at why.
+            Err(Errno::EINTR) => Ok(false),
+            Err(err) => Err(to_io_error(err.into())),
         }
     }
 
@@ -278,20 +278,15 @@ impl UhidInner {
         reply.err = err;
         write_event_blocking(self.fd.as_raw_fd(), &mut event)
     }
-
-    fn destroy_blocking(&self) -> io::Result<()> {
-        if self.destroyed.swap(true, Ordering::SeqCst) {
-            return Ok(());
-        }
-        let mut event = raw::uhid_event::default();
-        event.type_ = raw::UHID_EVENT_TYPE_DESTROY;
-        write_event_blocking(self.fd.as_raw_fd(), &mut event)
-    }
 }
 
 impl Drop for UhidInner {
     fn drop(&mut self) {
-        let _ = self.destroy_blocking();
+        // Closing the descriptor would destroy the device as well; saying so
+        // explicitly removes it before anything else is torn down.
+        let mut event = raw::uhid_event::default();
+        event.type_ = raw::UHID_EVENT_TYPE_DESTROY;
+        let _ = write_event_blocking(self.fd.as_raw_fd(), &mut event);
     }
 }
 
@@ -329,21 +324,6 @@ fn copy_str_to_array(value: &str, dest: &mut [u8]) {
     }
     dest[..bytes.len()].copy_from_slice(bytes);
     dest[bytes.len()] = 0;
-}
-
-fn register_signal_handler(inner: &Arc<UhidInner>) -> io::Result<()> {
-    let mut signals = Signals::new([libc::SIGINT, libc::SIGTERM])?;
-    let weak = Arc::downgrade(inner);
-    std::thread::spawn(move || {
-        for _ in signals.forever() {
-            if let Some(device) = weak.upgrade() {
-                let _ = device.destroy_blocking();
-            } else {
-                break;
-            }
-        }
-    });
-    Ok(())
 }
 
 fn write_event_blocking(fd: RawFd, event: &mut raw::uhid_event) -> io::Result<()> {
