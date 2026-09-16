@@ -20,6 +20,42 @@ use zeroize::Zeroize;
 
 use transport_core::ctap::constants::*;
 
+/// The authenticatorClientPIN subcommands this authenticator implements
+/// (CTAP 2.3 §6.5.5).  getPinUvAuthTokenUsingUvWithPermissions (0x06) and
+/// getUVRetries (0x07) need a built-in user verification method, which it
+/// does not have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClientPinSubcommand {
+    GetPinRetries,
+    GetKeyAgreement,
+    SetPin,
+    ChangePin,
+    GetPinToken,
+    GetPinUvAuthTokenUsingPinWithPermissions,
+}
+
+impl ClientPinSubcommand {
+    /// Parse subCommand (0x02).  "If the authenticator implements a command
+    /// code having subcommands, but does not implement an invoked subcommand,
+    /// it MUST return CTAP2_ERR_INVALID_SUBCOMMAND." (CTAP 2.3 §8.1)
+    fn parse(value: Option<&Value>) -> Result<Self, u8> {
+        let number = match value {
+            Some(Value::Integer(number)) => i128::from(*number),
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
+        };
+        match number {
+            0x01 => Ok(Self::GetPinRetries),
+            0x02 => Ok(Self::GetKeyAgreement),
+            0x03 => Ok(Self::SetPin),
+            0x04 => Ok(Self::ChangePin),
+            0x05 => Ok(Self::GetPinToken),
+            0x09 => Ok(Self::GetPinUvAuthTokenUsingPinWithPermissions),
+            _ => Err(CTAP2_ERR_INVALID_SUBCOMMAND),
+        }
+    }
+}
+
 impl<C> CtapApp<C>
 where
     C: TrussedClient + FilesystemClient + CryptoClient,
@@ -306,23 +342,18 @@ where
             Value::Map(map) => map,
             _ => return Err(CTAP2_ERR_INVALID_CBOR),
         };
-        let subcommand = match cbor::map_get(&map, Value::Integer(Integer::from(2))) {
-            Some(Value::Integer(int)) => {
-                let value: i128 = int.clone().into();
-                value as u8
-            }
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
+        let subcommand =
+            ClientPinSubcommand::parse(cbor::map_get(&map, Value::Integer(Integer::from(2))))?;
         let protocol = self.requested_pin_protocol(&map)?;
         match subcommand {
-            0x01 => self.client_pin_get_retries(),
-            0x02 => self.client_pin_get_key_agreement(protocol),
-            0x03 => self.client_pin_set_pin(protocol, &map),
-            0x04 => self.client_pin_change_pin(protocol, &map),
-            0x05 => self.client_pin_get_token_legacy(protocol, &map),
-            0x07 => Err(CTAP2_ERR_UNSUPPORTED_OPTION),
-            0x09 => self.client_pin_get_token_with_permissions(protocol, &map),
-            _ => Err(CTAP1_ERR_INVALID_PARAMETER),
+            ClientPinSubcommand::GetPinRetries => self.client_pin_get_retries(),
+            ClientPinSubcommand::GetKeyAgreement => self.client_pin_get_key_agreement(protocol),
+            ClientPinSubcommand::SetPin => self.client_pin_set_pin(protocol, &map),
+            ClientPinSubcommand::ChangePin => self.client_pin_change_pin(protocol, &map),
+            ClientPinSubcommand::GetPinToken => self.client_pin_get_token_legacy(protocol, &map),
+            ClientPinSubcommand::GetPinUvAuthTokenUsingPinWithPermissions => {
+                self.client_pin_get_token_with_permissions(protocol, &map)
+            }
         }
     }
 

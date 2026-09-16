@@ -2,8 +2,8 @@
 //! subcommands over both PIN/UV auth protocols.
 
 use super::support::{
-    classic_encrypt, classic_pin_auth, derive_classic_session, request_classic_key_agreement,
-    TestClient,
+    classic_encrypt, classic_pin_auth, client_pin, derive_classic_session, int,
+    request_classic_key_agreement, TestClient,
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
@@ -648,4 +648,57 @@ fn classic_pin_uv_protocol_flow_v1() {
 #[test]
 fn classic_pin_uv_protocol_flow_v2() {
     run_classic_pin_flow(ClassicPinProtocol::V2);
+}
+
+#[test]
+fn client_pin_rejects_subcommands_it_does_not_implement() {
+    // 0x06 getPinUvAuthTokenUsingUvWithPermissions and 0x07 getUVRetries need
+    // built-in user verification; the rest are undefined.  0x103 and 0x109
+    // must not be truncated to setPIN and getPinUvAuthTokenUsingPinWithPermissions.
+    let subcommands: [i128; 10] = [
+        0x00,
+        0x06,
+        0x07,
+        0x08,
+        0x0A,
+        0xFF,
+        0x103,
+        0x109,
+        -1,
+        i128::from(u64::MAX),
+    ];
+    for subcommand in subcommands {
+        let mut app = CtapApp::new(TestClient::new(), [0x3E; 16]);
+        let result = client_pin(
+            &mut app,
+            vec![
+                (int(1), int(2)),
+                (
+                    int(2),
+                    Value::Integer(Integer::try_from(subcommand).expect("CBOR integer")),
+                ),
+            ],
+        );
+        assert_eq!(
+            result,
+            Err(CTAP2_ERR_INVALID_SUBCOMMAND),
+            "subCommand {subcommand:#x}"
+        );
+    }
+}
+
+#[test]
+fn client_pin_requires_an_integer_subcommand() {
+    let mut app = CtapApp::new(TestClient::new(), [0x3F; 16]);
+    assert_eq!(
+        client_pin(&mut app, vec![(int(1), int(2))]),
+        Err(CTAP2_ERR_MISSING_PARAMETER)
+    );
+    assert_eq!(
+        client_pin(
+            &mut app,
+            vec![(int(1), int(2)), (int(2), Value::Text("0x01".into()))]
+        ),
+        Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE)
+    );
 }

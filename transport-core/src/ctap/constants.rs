@@ -74,6 +74,9 @@ pub const CTAP2_ERR_REQUEST_TOO_LARGE: u8 = 0x39;
 pub const CTAP2_ERR_ACTION_TIMEOUT: u8 = 0x3A;
 /// Note `0x3B`, not `0x39`: `0x39` is [`CTAP2_ERR_REQUEST_TOO_LARGE`].
 pub const CTAP2_ERR_UP_REQUIRED: u8 = 0x3B;
+/// "The requested subcommand is either invalid or not implemented." Required
+/// for any subcommand a command does not implement (CTAP 2.3 § 8.1).
+pub const CTAP2_ERR_INVALID_SUBCOMMAND: u8 = 0x3E;
 pub const CTAP2_ERR_UNAUTHORIZED_PERMISSION: u8 = 0x40;
 pub const CTAP1_ERR_OTHER: u8 = 0x7F;
 
@@ -138,6 +141,7 @@ mod tests {
         ("CTAP2_ERR_REQUEST_TOO_LARGE", CTAP2_ERR_REQUEST_TOO_LARGE),
         ("CTAP2_ERR_ACTION_TIMEOUT", CTAP2_ERR_ACTION_TIMEOUT),
         ("CTAP2_ERR_UP_REQUIRED", CTAP2_ERR_UP_REQUIRED),
+        ("CTAP2_ERR_INVALID_SUBCOMMAND", CTAP2_ERR_INVALID_SUBCOMMAND),
         (
             "CTAP2_ERR_UNAUTHORIZED_PERMISSION",
             CTAP2_ERR_UNAUTHORIZED_PERMISSION,
@@ -185,6 +189,7 @@ mod tests {
         assert_eq!(CTAP2_ERR_REQUEST_TOO_LARGE, 0x39);
         assert_eq!(CTAP2_ERR_ACTION_TIMEOUT, 0x3A);
         assert_eq!(CTAP2_ERR_UP_REQUIRED, 0x3B);
+        assert_eq!(CTAP2_ERR_INVALID_SUBCOMMAND, 0x3E);
         assert_eq!(CTAP2_ERR_UNAUTHORIZED_PERMISSION, 0x40);
         assert_eq!(CTAP1_ERR_OTHER, 0x7F);
     }
