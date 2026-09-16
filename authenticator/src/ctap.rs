@@ -1,7 +1,12 @@
 mod cbor;
+mod presence;
 mod storage;
 
 use self::cbor::{canonical_map, canonical_sort};
+use self::presence::noop_keepalive;
+// The tests still address these through `super::`.
+#[cfg(test)]
+use self::presence::{take_waiting_log, USER_PRESENCE_MAX_WAIT_MS, USER_PRESENCE_POLL_TIMEOUT_MS};
 use self::storage::StoredCredential;
 use crate::{
     create_credential, credential_secret_from_bytes, decrypt_classic_pin_block,
@@ -30,89 +35,14 @@ use sha2::{Digest, Sha256};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use trussed::interrupt::InterruptFlag;
 use trussed::syscall;
-use trussed::try_syscall;
-use trussed::types::consent;
 use zeroize::Zeroize;
 
 use transport_core::{ctap::constants::*, logging::HexOption};
 
 use std::collections::VecDeque;
-#[cfg(test)]
-use std::sync::Mutex;
 
 type Aes256CbcEnc = Encryptor<Aes256>;
 type Aes256CbcDec = Decryptor<Aes256>;
-
-#[cfg(test)]
-static WAITING_LOG: Mutex<Vec<bool>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-pub(crate) fn take_waiting_log() -> Vec<bool> {
-    WAITING_LOG
-        .lock()
-        .expect("waiting log mutex poisoned")
-        .drain(..)
-        .collect()
-}
-
-fn noop_keepalive(_: bool) {}
-
-fn set_keepalive_waiting(callback: fn(bool), waiting: bool) {
-    callback(waiting);
-
-    #[cfg(test)]
-    {
-        WAITING_LOG
-            .lock()
-            .expect("waiting log mutex poisoned")
-            .push(waiting);
-    }
-}
-
-struct WaitingState {
-    active: bool,
-    callback: fn(bool),
-}
-
-impl WaitingState {
-    fn begin(callback: fn(bool)) -> Self {
-        set_keepalive_waiting(callback, true);
-        Self {
-            active: true,
-            callback,
-        }
-    }
-
-    fn clear(&mut self) {
-        if self.active {
-            set_keepalive_waiting(self.callback, false);
-            self.active = false;
-        }
-    }
-}
-
-impl Drop for WaitingState {
-    fn drop(&mut self) {
-        self.clear();
-    }
-}
-
-struct InterruptWorkGuard<'a> {
-    flag: &'a InterruptFlag,
-}
-
-impl<'a> InterruptWorkGuard<'a> {
-    fn begin(flag: &'a InterruptFlag) -> Self {
-        flag.set_working();
-        Self { flag }
-    }
-}
-
-impl<'a> Drop for InterruptWorkGuard<'a> {
-    fn drop(&mut self) {
-        self.flag.set_idle();
-    }
-}
 
 fn encrypt_shared_secret(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, u8> {
     if plaintext.len() % 16 != 0 {
@@ -138,9 +68,6 @@ fn decrypt_shared_secret(key: &[u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>, u
 
 const MAX_PIN_RETRIES: u8 = 8;
 const MAX_PIN_FAILURES_BEFORE_BLOCK: u8 = 3;
-
-const USER_PRESENCE_POLL_TIMEOUT_MS: u32 = 200;
-const USER_PRESENCE_MAX_WAIT_MS: u32 = 10_000;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -614,63 +541,6 @@ where
         let mut array = [0u8; N];
         array.copy_from_slice(bytes);
         Ok(array)
-    }
-
-    fn await_user_presence(&mut self) -> Result<bool, u8> {
-        let _interrupt_guard = InterruptWorkGuard::begin(self.interrupt_flag);
-        let mut waiting = WaitingState::begin(self.keepalive_callback);
-        if self.auto_user_presence {
-            waiting.clear();
-            return Ok(true);
-        }
-        let mut waited_ms = 0u32;
-        loop {
-            if self.interrupt_flag.is_interrupted() {
-                waiting.clear();
-                return Err(CTAP2_ERR_KEEPALIVE_CANCEL);
-            }
-
-            let consent = match try_syscall!(self
-                .client
-                .confirm_user_present(USER_PRESENCE_POLL_TIMEOUT_MS))
-            {
-                Ok(reply) => reply,
-                Err(_) => {
-                    waiting.clear();
-                    return Err(CTAP2_ERR_PROCESSING);
-                }
-            };
-
-            match consent.result {
-                Ok(()) => {
-                    waiting.clear();
-                    return Ok(true);
-                }
-                Err(consent::Error::TimedOut) => {
-                    waited_ms = waited_ms.saturating_add(USER_PRESENCE_POLL_TIMEOUT_MS);
-                    if waited_ms >= USER_PRESENCE_MAX_WAIT_MS {
-                        waiting.clear();
-                        return Err(CTAP2_ERR_NOT_ALLOWED);
-                    }
-                }
-                Err(consent::Error::Interrupted) => {
-                    waiting.clear();
-                    return Err(CTAP2_ERR_KEEPALIVE_CANCEL);
-                }
-                Err(consent::Error::TimeoutNotImplemented) => {
-                    waiting.clear();
-                    return Err(CTAP2_ERR_NOT_ALLOWED);
-                }
-                Err(consent::Error::FailedToInterrupt) => {
-                    waiting.clear();
-                    return Err(CTAP2_ERR_PROCESSING);
-                }
-                Err(_) => {
-                    waiting.clear();
-                    return Err(CTAP2_ERR_NOT_ALLOWED);
-                }
-            }
-        }
     }
 
     fn credential_allows(
