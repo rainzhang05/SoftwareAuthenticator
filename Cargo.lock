@@ -115,7 +115,7 @@ dependencies = [
  "heapless-bytes",
  "hkdf",
  "hmac 0.12.1",
- "littlefs2 0.4.0",
+ "littlefs2",
  "log",
  "p256 0.13.2",
  "rand_core",
@@ -154,31 +154,12 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bindgen"
-version = "0.56.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2da379dbebc0b76ef63ca68d8fc6e71c0f13e59432e0987e508c1820e6ab5239"
-dependencies = [
- "bitflags 1.3.2",
- "cexpr 0.4.0",
- "clang-sys",
- "lazy_static",
- "lazycell",
- "peeking_take_while",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash",
- "shlex 0.1.1",
-]
-
-[[package]]
-name = "bindgen"
 version = "0.70.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f49d8fed880d473ea71efb9bf597651e77201bdd4893efe54c9e5d65ae04ce6f"
 dependencies = [
- "bitflags 2.13.2",
- "cexpr 0.6.0",
+ "bitflags",
+ "cexpr",
  "clang-sys",
  "itertools",
  "proc-macro2",
@@ -188,12 +169,6 @@ dependencies = [
  "shlex 1.3.0",
  "syn 2.0.119",
 ]
-
-[[package]]
-name = "bitflags"
-version = "1.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitflags"
@@ -279,20 +254,11 @@ dependencies = [
 
 [[package]]
 name = "cexpr"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4aedb84272dbe89af497cf81375129abda4fc0a9e7c5d317498c15cc30c0d27"
-dependencies = [
- "nom 5.1.3",
-]
-
-[[package]]
-name = "cexpr"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
 dependencies = [
- "nom 7.1.3",
+ "nom",
 ]
 
 [[package]]
@@ -509,16 +475,6 @@ checksum = "25fab6889090c8133f3deb8f73ba3c65a7f456f66436fc012a1b1e272b1e103e"
 dependencies = [
  "generic-array",
  "subtle",
-]
-
-[[package]]
-name = "cstr_core"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd98742e4fdca832d40cab219dc2e3048de17d873248f83f17df47c1bea70956"
-dependencies = [
- "cty",
- "memchr",
 ]
 
 [[package]]
@@ -1121,12 +1077,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
-name = "lazycell"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
-
-[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1144,22 +1094,6 @@ dependencies = [
 
 [[package]]
 name = "littlefs2"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95c72bdf63e7ad35f391e60c48e4c32560038f1d3a0dd97f90a2891ce09160bf"
-dependencies = [
- "bitflags 1.3.2",
- "cstr_core",
- "cty",
- "delog",
- "generic-array",
- "heapless",
- "littlefs2-sys 0.1.7",
- "serde",
-]
-
-[[package]]
-name = "littlefs2"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a43f3c0c6a7d127e3e1241665dd896d8bf1ca31cf9d826a1dc65239bd59868"
@@ -1168,7 +1102,7 @@ dependencies = [
  "generic-array",
  "heapless",
  "littlefs2-core",
- "littlefs2-sys 0.3.2",
+ "littlefs2-sys",
 ]
 
 [[package]]
@@ -1177,20 +1111,9 @@ version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c0f7acafcb6c9dfcbc3c7c54aa7b8e04367d535daeb4be0e7131f93e4587dd2"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
  "heapless-bytes",
  "serde",
-]
-
-[[package]]
-name = "littlefs2-sys"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c25e4f545f6ca5415c6325066260e764674d7893dcf0017a52a2ef456ba915f5"
-dependencies = [
- "bindgen 0.56.0",
- "cc",
- "cty",
 ]
 
 [[package]]
@@ -1199,7 +1122,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae112b732df34c1420471e1ff21c562dfdf81219efb5960dd15b3947097e784a"
 dependencies = [
- "bindgen 0.70.1",
+ "bindgen",
  "cc",
 ]
 
@@ -1264,19 +1187,9 @@ version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
  "cfg-if",
  "libc",
-]
-
-[[package]]
-name = "nom"
-version = "5.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08959a387a676302eebf4ddbcbc611da04285579f76f88ee0506c63b1a61dd4b"
-dependencies = [
- "memchr",
- "version_check",
 ]
 
 [[package]]
@@ -1414,7 +1327,7 @@ dependencies = [
  "daemonize",
  "heapless-bytes",
  "interchange",
- "littlefs2 0.6.1",
+ "littlefs2",
  "littlefs2-core",
  "log",
  "nix",
@@ -1426,12 +1339,6 @@ dependencies = [
  "transport-core",
  "trussed",
 ]
-
-[[package]]
-name = "peeking_take_while"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19b17cddbe7ec3f8bc800887bab5e717348c95ea2ca0b1bf0837fb964dc67099"
 
 [[package]]
 name = "pem"
@@ -1602,7 +1509,7 @@ version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
 ]
 
 [[package]]
@@ -1860,12 +1767,6 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
-
-[[package]]
-name = "shlex"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fdf1b9db47230893d76faad238fd6097fd6d6a9245cd7a4d90dbd639536bbd2"
 
 [[package]]
 name = "shlex"
@@ -2136,7 +2037,7 @@ dependencies = [
  "ciborium",
  "ctaphid-dispatch",
  "interchange",
- "littlefs2 0.6.1",
+ "littlefs2",
  "littlefs2-core",
  "log",
  "p256 0.13.2",
@@ -2154,7 +2055,7 @@ version = "0.1.0"
 source = "git+https://github.com/trussed-dev/trussed.git?rev=024e0eca5fb7dbd2457831f7c7bffe4341e08775#024e0eca5fb7dbd2457831f7c7bffe4341e08775"
 dependencies = [
  "aes",
- "bitflags 2.13.2",
+ "bitflags",
  "cbc",
  "cbor-smol",
  "cfg-if",
@@ -2170,7 +2071,7 @@ dependencies = [
  "hex-literal",
  "hmac 0.12.1",
  "interchange",
- "littlefs2 0.6.1",
+ "littlefs2",
  "littlefs2-core",
  "nb",
  "p256-cortex-m4",
