@@ -282,7 +282,13 @@ fn warn_device_permissions(descriptor: &HidDeviceDescriptor) {
 fn warn_group_membership() {
     const GROUP_NAME: &str = "plugdev";
     let plugdev_gid = group_by_name(GROUP_NAME);
+    // nix does not expose getgroups on Apple platforms. The daemon only runs on
+    // Linux (it needs /dev/uhid), but gating this keeps the crate compiling and
+    // testable on macOS development machines.
+    #[cfg(target_os = "linux")]
     let groups = unistd::getgroups().unwrap_or_default();
+    #[cfg(not(target_os = "linux"))]
+    let groups: Vec<Gid> = Vec::new();
     let egid = unistd::getegid();
 
     if let Some(gid) = plugdev_gid {
