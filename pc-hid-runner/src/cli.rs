@@ -1,10 +1,10 @@
 use std::{
     env,
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Seek, SeekFrom, Write},
+    fs::{File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom},
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::{Path, PathBuf},
-    process::{self, Command as ProcessCommand, Stdio},
+    process::{Command as ProcessCommand, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -20,7 +20,12 @@ use nix::{
 use transport_core::{state::default_state_dir, Options};
 
 use crate::{
-    permissions, pin_input::PinReader, service, shutdown::ShutdownSignal, HidDeviceDescriptor,
+    permissions,
+    pin_input::PinReader,
+    service,
+    shutdown::ShutdownSignal,
+    state_lock::{self, DaemonState, StateLock},
+    HidDeviceDescriptor,
 };
 
 #[derive(Parser, Debug)]
@@ -179,12 +184,33 @@ impl BackendArg {
 }
 
 impl StateArgs {
-    fn pid_path(&self) -> PathBuf {
-        self.state_dir.join("authenticator.pid")
-    }
-
     fn log_path(&self) -> PathBuf {
         self.state_dir.join("authenticator.log")
+    }
+
+    /// Take exclusive use of the state directory for a command that reads or
+    /// writes the stored state, failing if the daemon or another command has
+    /// it.
+    fn lock(&self) -> io::Result<StateLock> {
+        service::ensure_state_dir(&self.state_dir)?;
+        let lock = StateLock::try_acquire(&self.state_dir)?.ok_or_else(|| self.in_use_error())?;
+        // Nothing else can be running, so a pid file is left over from a
+        // daemon that did not exit cleanly.
+        state_lock::remove_pid_file(&self.state_dir, &lock)?;
+        Ok(lock)
+    }
+
+    fn in_use_error(&self) -> io::Error {
+        let message = match state_lock::read_pid(&self.state_dir) {
+            Ok(Some(pid)) => format!(
+                "the authenticator daemon is running (pid {pid}); run 'pc-hid-runner detach' first"
+            ),
+            _ => format!(
+                "{} is in use by another pc-hid-runner process",
+                self.state_dir.display()
+            ),
+        };
+        io::Error::new(io::ErrorKind::ResourceBusy, message)
     }
 }
 
@@ -222,55 +248,23 @@ impl StartCommand {
     }
 }
 
-/// Read the pid file. Unreadable content counts as no pid; the file is left
-/// alone, since the daemon may be writing it right now.
-fn read_pid(path: &Path) -> io::Result<Option<Pid>> {
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok(contents.trim().parse::<i32>().ok().map(Pid::from_raw)),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err),
-    }
-}
-
-/// Write this process's pid atomically, so readers never see a partial file.
-fn write_pid_file(path: &Path) -> io::Result<()> {
-    let pid = process::id();
-    let temporary = path.with_extension(format!("pid.{pid}.tmp"));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)?;
-    writeln!(file, "{pid}")?;
-    fs::rename(&temporary, path)
-}
-
-fn remove_pid_file(path: &Path) {
-    if let Err(err) = fs::remove_file(path) {
-        if err.kind() != io::ErrorKind::NotFound {
-            log::warn!("could not remove {}: {err}", path.display());
-        }
-    }
-}
-
-fn process_running(pid: Pid) -> bool {
-    match signal::kill(pid, None) {
-        Ok(_) => true,
-        Err(Errno::ESRCH) => false,
-        Err(_) => true,
-    }
-}
-
-/// Run the daemon in this process until it is told to stop. The pid file is
-/// written once the virtual device exists and removed again on the way out.
-fn run_foreground(state: &StateArgs, config: service::RunnerConfig) -> io::Result<()> {
+/// Run the daemon in this process until it is told to stop, holding the
+/// state directory lock throughout. The pid file is published once the
+/// virtual device exists and removed again on the way out.
+fn run_foreground(
+    lock: StateLock,
+    state: &StateArgs,
+    config: service::RunnerConfig,
+) -> io::Result<()> {
     let _ = env_logger::try_init();
     let shutdown = ShutdownSignal::new();
     shutdown.install_signal_handlers()?;
-    let pid_path = state.pid_path();
-    let result = service::run(config, shutdown, || write_pid_file(&pid_path));
-    remove_pid_file(&pid_path);
+    let result = service::run(config, shutdown, || {
+        state_lock::write_pid_file(&state.state_dir, &lock)
+    });
+    if let Err(err) = state_lock::remove_pid_file(&state.state_dir, &lock) {
+        log::warn!("could not remove the pid file: {err}");
+    }
     result
 }
 
@@ -314,7 +308,7 @@ fn spawn_daemon(state: &StateArgs) -> io::Result<()> {
                 log_path.display()
             )));
         }
-        if read_pid(&state.pid_path())? == Some(daemon_pid) {
+        if state_lock::read_pid(&state.state_dir)? == Some(daemon_pid) {
             println!(
                 "Authenticator attached (pid {daemon_pid}); logging to {}",
                 log_path.display()
@@ -420,68 +414,74 @@ fn group_by_name(name: &str) -> Option<Gid> {
 
 fn start(cmd: StartCommand) -> io::Result<()> {
     service::ensure_state_dir(&cmd.state.state_dir)?;
-    if let Some(pid) = read_pid(&cmd.state.pid_path())? {
-        if process_running(pid) {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("authenticator already running (pid {})", pid),
-            ));
-        }
-    }
-
     let config = cmd
         .to_runner_config()
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 
-    warn_device_permissions(&config.descriptor);
-
     if cmd.foreground {
-        run_foreground(&cmd.state, config)
+        // Taken before anything touches the stored state and held until the
+        // daemon exits; this is what makes a second daemon refuse to start.
+        let lock = cmd.state.lock()?;
+        warn_device_permissions(&config.descriptor);
+        run_foreground(lock, &cmd.state, config)
     } else {
+        // Only a quick check for a friendlier message: the daemon started
+        // below takes the lock itself and exits if it cannot.
+        if state_lock::daemon_state(&cmd.state.state_dir)? != DaemonState::Stopped {
+            return Err(cmd.state.in_use_error());
+        }
+        warn_device_permissions(&config.descriptor);
         spawn_daemon(&cmd.state)
     }
 }
 
+/// How long `detach` waits for the daemon to exit after asking it to.
+const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn stop(state: StateArgs) -> io::Result<()> {
-    let pid_path = state.pid_path();
-    match read_pid(&pid_path)? {
-        Some(pid) => {
-            if process_running(pid) {
-                signal::kill(pid, Signal::SIGTERM)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
-                let deadline = Instant::now() + Duration::from_secs(5);
-                while process_running(pid) && Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(200));
-                }
-                if process_running(pid) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "timed out waiting for authenticator to stop",
-                    ));
-                }
-            }
-            fs::remove_file(&pid_path).ok();
-            println!("Authenticator stopped");
-            Ok(())
-        }
-        None => {
+    let pid = match state_lock::daemon_state(&state.state_dir)? {
+        DaemonState::Stopped => {
             println!("Authenticator is not running");
-            Ok(())
+            return Ok(());
+        }
+        DaemonState::Busy => return Err(state.in_use_error()),
+        DaemonState::Running(pid) => pid,
+    };
+    match signal::kill(pid, Signal::SIGTERM) {
+        // ESRCH: it exited in the meantime.
+        Ok(()) | Err(Errno::ESRCH) => {}
+        Err(err) => {
+            return Err(io::Error::other(format!(
+                "could not signal the authenticator (pid {pid}): {err}"
+            )))
         }
     }
+    // The daemon holds the lock until its very end, and unlike a pid the lock
+    // cannot end up belonging to some unrelated process.
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    while state_lock::is_locked(&state.state_dir)? {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "the authenticator (pid {pid}) did not stop within {}s",
+                    STOP_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    println!("Authenticator stopped");
+    Ok(())
 }
 
 fn status(state: StateArgs) -> io::Result<()> {
-    let pid_path = state.pid_path();
-    match read_pid(&pid_path)? {
-        Some(pid) if process_running(pid) => {
-            println!("Authenticator running (pid {})", pid);
-        }
-        Some(_) => {
-            fs::remove_file(&pid_path).ok();
-            println!("Authenticator is not running");
-        }
-        None => println!("Authenticator is not running"),
+    match state_lock::daemon_state(&state.state_dir)? {
+        DaemonState::Running(pid) => println!("Authenticator running (pid {pid})"),
+        DaemonState::Busy => println!(
+            "Authenticator state is in use: the daemon is still starting, or a pin or reset command is running"
+        ),
+        DaemonState::Stopped => println!("Authenticator is not running"),
     }
     Ok(())
 }
@@ -497,20 +497,6 @@ pub fn run_cli() -> io::Result<()> {
     }
 }
 
-fn require_daemon_stopped(state: &StateArgs) -> io::Result<()> {
-    if let Some(pid) = read_pid(&state.pid_path())? {
-        if process_running(pid) {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "authenticator daemon is running (pid {pid}); run 'feitian-authenticator detach' first"
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn confirm(prompt: &str) -> io::Result<bool> {
     use std::io::{BufRead, BufReader};
     eprint!("{prompt} [y/N] ");
@@ -523,8 +509,7 @@ fn confirm(prompt: &str) -> io::Result<bool> {
 }
 
 fn reset(args: ResetArgs) -> io::Result<()> {
-    require_daemon_stopped(&args.state)?;
-    service::ensure_state_dir(&args.state.state_dir)?;
+    let _lock = args.state.lock()?;
     if !args.yes
         && !confirm(&format!(
             "This will wipe ALL credentials and PIN state under {}. Continue?",
@@ -543,14 +528,14 @@ fn pin(cmd: PinCommand) -> io::Result<()> {
     match cmd.action {
         PinAction::Status { state } => pin_status(state),
         PinAction::Set { state } => {
-            require_daemon_stopped(&state)?;
+            let _lock = state.lock()?;
             let pin = PinReader::from_stdin().new_pin()?;
             service::pin_set(&state.state_dir, &pin)?;
             println!("PIN set.");
             Ok(())
         }
         PinAction::Change { state } => {
-            require_daemon_stopped(&state)?;
+            let _lock = state.lock()?;
             let reader = PinReader::from_stdin();
             let current = reader.current_pin()?;
             let new = reader.new_pin()?;
@@ -559,7 +544,7 @@ fn pin(cmd: PinCommand) -> io::Result<()> {
             Ok(())
         }
         PinAction::Remove { state } => {
-            require_daemon_stopped(&state)?;
+            let _lock = state.lock()?;
             let current = PinReader::from_stdin().current_pin()?;
             service::pin_remove(&state.state_dir, &current)?;
             println!("PIN removed.");
@@ -569,7 +554,9 @@ fn pin(cmd: PinCommand) -> io::Result<()> {
 }
 
 fn pin_status(state: StateArgs) -> io::Result<()> {
-    service::ensure_state_dir(&state.state_dir)?;
+    // Even reading mounts the stored state, which must not happen while the
+    // daemon has it mounted.
+    let _lock = state.lock()?;
     let info = service::pin_info(&state.state_dir)?;
     println!("PIN set:           {}", info.is_set);
     println!("Retries remaining: {}", info.retries);
