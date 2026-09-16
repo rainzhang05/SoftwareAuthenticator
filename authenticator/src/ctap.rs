@@ -1,3 +1,6 @@
+mod cbor;
+
+use self::cbor::{canonical_map, canonical_sort};
 use crate::{
     create_credential, credential_secret_from_bytes, decrypt_classic_pin_block,
     derive_classic_pin_uv_session_keys, encrypt_classic_pin_block, sign_challenge,
@@ -36,51 +39,9 @@ use zeroize::Zeroize;
 
 use transport_core::{ctap::constants::*, logging::HexOption};
 
+use std::collections::VecDeque;
 #[cfg(test)]
 use std::sync::Mutex;
-use std::{cmp::Ordering, collections::VecDeque};
-
-fn canonical_fallback_cmp(left: &Value, right: &Value) -> Ordering {
-    let mut left_bytes = Vec::new();
-    into_writer(left, &mut left_bytes).expect("serialize left key for canonical ordering");
-    let mut right_bytes = Vec::new();
-    into_writer(right, &mut right_bytes).expect("serialize right key for canonical ordering");
-    match left_bytes.len().cmp(&right_bytes.len()) {
-        Ordering::Equal => left_bytes.cmp(&right_bytes),
-        other => other,
-    }
-}
-
-fn canonical_key_cmp(left: &Value, right: &Value) -> Ordering {
-    use Value::{Integer as IntValue, Text};
-
-    match (left, right) {
-        (IntValue(left_int), IntValue(right_int)) => left_int.canonical_cmp(right_int),
-        (IntValue(_), Text(_)) => Ordering::Less,
-        (Text(_), IntValue(_)) => Ordering::Greater,
-        (Text(left_text), Text(right_text)) => match left_text.len().cmp(&right_text.len()) {
-            Ordering::Equal => left_text.cmp(right_text),
-            other => other,
-        },
-        (Value::Bytes(left_bytes), Value::Bytes(right_bytes)) => {
-            match left_bytes.len().cmp(&right_bytes.len()) {
-                Ordering::Equal => left_bytes.cmp(right_bytes),
-                other => other,
-            }
-        }
-        (Value::Bool(left_bool), Value::Bool(right_bool)) => left_bool.cmp(right_bool),
-        _ => canonical_fallback_cmp(left, right),
-    }
-}
-
-fn canonical_sort(entries: &mut Vec<(Value, Value)>) {
-    entries.sort_by(|(left_key, _), (right_key, _)| canonical_key_cmp(left_key, right_key));
-}
-
-fn canonical_map(mut entries: Vec<(Value, Value)>) -> Value {
-    canonical_sort(&mut entries);
-    Value::Map(entries)
-}
 
 type Aes256CbcEnc = Encryptor<Aes256>;
 type Aes256CbcDec = Decryptor<Aes256>;
@@ -850,7 +811,7 @@ where
     }
 
     fn requested_pin_protocol(&mut self, map: &[(Value, Value)]) -> Result<PinProtocol, u8> {
-        if let Some(Value::Integer(int)) = Self::map_get(map, Value::Integer(Integer::from(1))) {
+        if let Some(Value::Integer(int)) = cbor::map_get(map, Value::Integer(Integer::from(1))) {
             let value: i128 = int.clone().into();
             match value {
                 v if v == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V2) => Ok(ClassicPinProtocol::V2),
@@ -913,15 +874,15 @@ where
         if self.pin_state.is_set() {
             return Err(CTAP2_ERR_PIN_AUTH_INVALID);
         }
-        let key_agreement = match Self::map_get(map, Value::Integer(Integer::from(3))) {
+        let key_agreement = match cbor::map_get(map, Value::Integer(Integer::from(3))) {
             Some(Value::Map(entries)) => entries,
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let new_pin_enc = match Self::map_get(map, Value::Integer(Integer::from(5))) {
+        let new_pin_enc = match cbor::map_get(map, Value::Integer(Integer::from(5))) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let pin_auth_param = match Self::map_get(map, Value::Integer(Integer::from(4))) {
+        let pin_auth_param = match cbor::map_get(map, Value::Integer(Integer::from(4))) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
@@ -947,19 +908,19 @@ where
         if !self.pin_state.is_set() {
             return Err(CTAP2_ERR_PIN_NOT_SET);
         }
-        let key_agreement = match Self::map_get(map, Value::Integer(Integer::from(3))) {
+        let key_agreement = match cbor::map_get(map, Value::Integer(Integer::from(3))) {
             Some(Value::Map(entries)) => entries,
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let new_pin_enc = match Self::map_get(map, Value::Integer(Integer::from(5))) {
+        let new_pin_enc = match cbor::map_get(map, Value::Integer(Integer::from(5))) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let pin_hash_enc = match Self::map_get(map, Value::Integer(Integer::from(6))) {
+        let pin_hash_enc = match cbor::map_get(map, Value::Integer(Integer::from(6))) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let pin_auth_param = match Self::map_get(map, Value::Integer(Integer::from(4))) {
+        let pin_auth_param = match cbor::map_get(map, Value::Integer(Integer::from(4))) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
@@ -1000,15 +961,15 @@ where
         if !self.pin_state.is_set() {
             return Err(CTAP2_ERR_PIN_NOT_SET);
         }
-        let key_agreement = match Self::map_get(map, Value::Integer(Integer::from(3))) {
+        let key_agreement = match cbor::map_get(map, Value::Integer(Integer::from(3))) {
             Some(Value::Map(entries)) => entries,
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let pin_hash_enc = match Self::map_get(map, Value::Integer(Integer::from(6))) {
+        let pin_hash_enc = match cbor::map_get(map, Value::Integer(Integer::from(6))) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let pin_auth_param = match Self::map_get(map, Value::Integer(Integer::from(4))) {
+        let pin_auth_param = match cbor::map_get(map, Value::Integer(Integer::from(4))) {
             Some(Value::Bytes(bytes)) => Some(bytes.clone()),
             Some(_) => return Err(CTAP2_ERR_INVALID_CBOR),
             None => None,
@@ -1074,8 +1035,8 @@ where
         protocol: PinProtocol,
         map: &[(Value, Value)],
     ) -> Result<Vec<u8>, u8> {
-        if Self::map_get(map, Value::Integer(Integer::from(9))).is_some()
-            || Self::map_get(map, Value::Integer(Integer::from(10))).is_some()
+        if cbor::map_get(map, Value::Integer(Integer::from(9))).is_some()
+            || cbor::map_get(map, Value::Integer(Integer::from(10))).is_some()
         {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
@@ -1088,7 +1049,7 @@ where
         protocol: PinProtocol,
         map: &[(Value, Value)],
     ) -> Result<Vec<u8>, u8> {
-        let permissions_value = match Self::map_get(map, Value::Integer(Integer::from(9))) {
+        let permissions_value = match cbor::map_get(map, Value::Integer(Integer::from(9))) {
             Some(Value::Integer(value)) => {
                 let int_value: i128 = value.clone().into();
                 if int_value <= 0 || int_value > u8::MAX as i128 {
@@ -1103,7 +1064,7 @@ where
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
 
-        let rp_id_value = match Self::map_get(map, Value::Integer(Integer::from(10))) {
+        let rp_id_value = match cbor::map_get(map, Value::Integer(Integer::from(10))) {
             Some(Value::Text(text)) => Some(text.clone()),
             Some(_) => return Err(CTAP2_ERR_INVALID_CBOR),
             None => None,
@@ -1167,7 +1128,7 @@ where
             0x01 | 0x02 | 0x03 => Err(CTAP2_ERR_PIN_AUTH_INVALID),
             0x04 => {
                 let params = params.ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
-                let rp_hash = match Self::map_get(params, Value::Integer(Integer::from(1))) {
+                let rp_hash = match cbor::map_get(params, Value::Integer(Integer::from(1))) {
                     Some(Value::Bytes(bytes)) => bytes,
                     _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
                 };
@@ -1183,11 +1144,11 @@ where
             },
             0x06 | 0x07 => {
                 let params = params.ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
-                let descriptor = match Self::map_get(params, Value::Integer(Integer::from(2))) {
+                let descriptor = match cbor::map_get(params, Value::Integer(Integer::from(2))) {
                     Some(Value::Map(map)) => map,
                     _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
                 };
-                let Some(Value::Bytes(id)) = Self::map_get(descriptor, Value::Text("id".into()))
+                let Some(Value::Bytes(id)) = cbor::map_get(descriptor, Value::Text("id".into()))
                 else {
                     return Err(CTAP2_ERR_MISSING_PARAMETER);
                 };
@@ -1213,7 +1174,7 @@ where
             Value::Map(map) => map,
             _ => return Err(CTAP2_ERR_INVALID_CBOR),
         };
-        let subcommand = match Self::map_get(&map, Value::Integer(Integer::from(2))) {
+        let subcommand = match cbor::map_get(&map, Value::Integer(Integer::from(2))) {
             Some(Value::Integer(int)) => {
                 let value: i128 = int.clone().into();
                 value as u8
@@ -1432,10 +1393,6 @@ where
         Ok(())
     }
 
-    fn map_get<'a>(map: &'a [(Value, Value)], key: Value) -> Option<&'a Value> {
-        map.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
-    }
-
     fn extract_subcommand_and_pin_protocol_for_logging(payload: &[u8]) -> (Option<u8>, Option<u8>) {
         use std::io::Cursor;
 
@@ -1637,7 +1594,7 @@ where
         &mut self,
         params: &[(Value, Value)],
     ) -> Result<Vec<(Value, Value)>, u8> {
-        let rp_hash = match Self::map_get(params, Value::Integer(Integer::from(1))) {
+        let rp_hash = match cbor::map_get(params, Value::Integer(Integer::from(1))) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
@@ -1672,11 +1629,11 @@ where
     }
 
     fn cm_delete_credential(&mut self, params: &[(Value, Value)]) -> Result<(), u8> {
-        let descriptor = match Self::map_get(params, Value::Integer(Integer::from(2))) {
+        let descriptor = match cbor::map_get(params, Value::Integer(Integer::from(2))) {
             Some(Value::Map(map)) => map,
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let Some(Value::Bytes(id)) = Self::map_get(descriptor, Value::Text("id".into())) else {
+        let Some(Value::Bytes(id)) = cbor::map_get(descriptor, Value::Text("id".into())) else {
             return Err(CTAP2_ERR_MISSING_PARAMETER);
         };
         let mut credentials = self.load_credentials()?;
@@ -1695,19 +1652,19 @@ where
     }
 
     fn cm_update_user_information(&mut self, params: &[(Value, Value)]) -> Result<(), u8> {
-        let descriptor = match Self::map_get(params, Value::Integer(Integer::from(2))) {
+        let descriptor = match cbor::map_get(params, Value::Integer(Integer::from(2))) {
             Some(Value::Map(map)) => map,
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let Some(Value::Bytes(id)) = Self::map_get(descriptor, Value::Text("id".into())) else {
+        let Some(Value::Bytes(id)) = cbor::map_get(descriptor, Value::Text("id".into())) else {
             return Err(CTAP2_ERR_MISSING_PARAMETER);
         };
 
-        let user_map = match Self::map_get(params, Value::Integer(Integer::from(3))) {
+        let user_map = match cbor::map_get(params, Value::Integer(Integer::from(3))) {
             Some(Value::Map(map)) => map,
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let Some(Value::Bytes(user_id)) = Self::map_get(user_map, Value::Text("id".into())) else {
+        let Some(Value::Bytes(user_id)) = cbor::map_get(user_map, Value::Text("id".into())) else {
             return Err(CTAP2_ERR_MISSING_PARAMETER);
         };
 
@@ -1722,7 +1679,7 @@ where
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
 
-        credential.user_name = Self::map_get(user_map, Value::Text("name".into())).and_then(|v| {
+        credential.user_name = cbor::map_get(user_map, Value::Text("name".into())).and_then(|v| {
             if let Value::Text(text) = v {
                 if text.is_empty() {
                     None
@@ -1733,7 +1690,7 @@ where
                 None
             }
         });
-        credential.user_display_name = Self::map_get(user_map, Value::Text("displayName".into()))
+        credential.user_display_name = cbor::map_get(user_map, Value::Text("displayName".into()))
             .and_then(|v| {
                 if let Value::Text(text) = v {
                     if text.is_empty() {
@@ -1915,7 +1872,7 @@ where
             _ => return Err(CTAP2_ERR_INVALID_CBOR),
         };
 
-        let subcommand = match Self::map_get(&map, Value::Integer(Integer::from(1))) {
+        let subcommand = match cbor::map_get(&map, Value::Integer(Integer::from(1))) {
             Some(Value::Integer(int)) => {
                 let value: i128 = int.clone().into();
                 if value < 0 || value > u8::MAX as i128 {
@@ -1926,19 +1883,19 @@ where
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
 
-        let subcommand_params = match Self::map_get(&map, Value::Integer(Integer::from(2))) {
+        let subcommand_params = match cbor::map_get(&map, Value::Integer(Integer::from(2))) {
             Some(Value::Map(entries)) => Some(entries.clone()),
             Some(_) => return Err(CTAP2_ERR_INVALID_CBOR),
             None => None,
         };
 
-        let protocol_value = match Self::map_get(&map, Value::Integer(Integer::from(3))) {
+        let protocol_value = match cbor::map_get(&map, Value::Integer(Integer::from(3))) {
             Some(Value::Integer(int)) => int.clone().into(),
             _ => return Err(CTAP2_ERR_PIN_AUTH_INVALID),
         };
         self.ensure_supported_pin_uv_protocol(protocol_value)?;
 
-        let pin_auth_param = match Self::map_get(&map, Value::Integer(Integer::from(4))) {
+        let pin_auth_param = match cbor::map_get(&map, Value::Integer(Integer::from(4))) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             Some(_) => return Err(CTAP2_ERR_PUAT_REQUIRED),
             None => return Err(CTAP2_ERR_PUAT_REQUIRED),
@@ -2021,39 +1978,39 @@ where
             _ => return Err(CTAP2_ERR_INVALID_CBOR),
         };
 
-        let client_hash = match Self::map_get(&map, Value::Integer(Integer::from(1))) {
+        let client_hash = match cbor::map_get(&map, Value::Integer(Integer::from(1))) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err(CTAP2_ERR_INVALID_CBOR),
         };
 
-        let rp = match Self::map_get(&map, Value::Integer(Integer::from(2))) {
+        let rp = match cbor::map_get(&map, Value::Integer(Integer::from(2))) {
             Some(Value::Map(rp)) => rp,
             _ => return Err(CTAP2_ERR_INVALID_CBOR),
         };
-        let rp_id = match Self::map_get(rp, Value::Text("id".into())) {
+        let rp_id = match cbor::map_get(rp, Value::Text("id".into())) {
             Some(Value::Text(text)) => text.clone(),
             _ => return Err(CTAP2_ERR_INVALID_CBOR),
         };
 
-        let user = match Self::map_get(&map, Value::Integer(Integer::from(3))) {
+        let user = match cbor::map_get(&map, Value::Integer(Integer::from(3))) {
             Some(Value::Map(user)) => user,
             _ => return Err(CTAP2_ERR_INVALID_CBOR),
         };
-        let user_id = match Self::map_get(user, Value::Text("id".into())) {
+        let user_id = match cbor::map_get(user, Value::Text("id".into())) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err(CTAP2_ERR_INVALID_CBOR),
         };
-        let user_name = Self::map_get(user, Value::Text("name".into())).and_then(|v| match v {
+        let user_name = cbor::map_get(user, Value::Text("name".into())).and_then(|v| match v {
             Value::Text(text) => Some(text.clone()),
             _ => None,
         });
         let user_display_name =
-            Self::map_get(user, Value::Text("displayName".into())).and_then(|v| match v {
+            cbor::map_get(user, Value::Text("displayName".into())).and_then(|v| match v {
                 Value::Text(text) => Some(text.clone()),
                 _ => None,
             });
 
-        let params = match Self::map_get(&map, Value::Integer(Integer::from(4))) {
+        let params = match cbor::map_get(&map, Value::Integer(Integer::from(4))) {
             Some(Value::Array(params)) => params,
             _ => return Err(CTAP2_ERR_INVALID_CBOR),
         };
@@ -2064,7 +2021,7 @@ where
                 return Err(CTAP2_ERR_INVALID_CBOR);
             };
             let Some(Value::Integer(alg_value)) =
-                Self::map_get(param_map, Value::Text("alg".into()))
+                cbor::map_get(param_map, Value::Text("alg".into()))
             else {
                 continue;
             };
@@ -2076,14 +2033,14 @@ where
         }
         let alg = selected_alg.ok_or(CTAP2_ERR_UNSUPPORTED_ALGORITHM)?;
 
-        if let Some(Value::Array(exclude)) = Self::map_get(&map, Value::Integer(Integer::from(5))) {
+        if let Some(Value::Array(exclude)) = cbor::map_get(&map, Value::Integer(Integer::from(5))) {
             let credentials = self.load_credentials()?;
             for descriptor in exclude {
                 let Value::Map(descriptor_map) = descriptor else {
                     continue;
                 };
                 let Some(Value::Bytes(id)) =
-                    Self::map_get(descriptor_map, Value::Text("id".into()))
+                    cbor::map_get(descriptor_map, Value::Text("id".into()))
                 else {
                     continue;
                 };
@@ -2096,7 +2053,7 @@ where
         let mut hmac_secret_requested = false;
         let mut cred_protect_requested: Option<u8> = None;
 
-        if let Some(value) = Self::map_get(&map, Value::Integer(Integer::from(6))) {
+        if let Some(value) = cbor::map_get(&map, Value::Integer(Integer::from(6))) {
             let Value::Map(extension_map) = value else {
                 return Err(CTAP2_ERR_INVALID_CBOR);
             };
@@ -2130,24 +2087,24 @@ where
         }
 
         let mut uv_requested = false;
-        if let Some(Value::Map(options)) = Self::map_get(&map, Value::Integer(Integer::from(7))) {
-            if let Some(Value::Bool(false)) = Self::map_get(options, Value::Text("up".into())) {
+        if let Some(Value::Map(options)) = cbor::map_get(&map, Value::Integer(Integer::from(7))) {
+            if let Some(Value::Bool(false)) = cbor::map_get(options, Value::Text("up".into())) {
                 return Err(CTAP2_ERR_INVALID_OPTION);
             }
-            if let Some(Value::Bool(uv)) = Self::map_get(options, Value::Text("uv".into())) {
+            if let Some(Value::Bool(uv)) = cbor::map_get(options, Value::Text("uv".into())) {
                 if *uv {
                     uv_requested = true;
                 }
             }
         }
 
-        let pin_uv_auth_param = match Self::map_get(&map, Value::Integer(Integer::from(8))) {
+        let pin_uv_auth_param = match cbor::map_get(&map, Value::Integer(Integer::from(8))) {
             Some(Value::Bytes(bytes)) => Some(bytes.clone()),
             Some(_) => return Err(CTAP2_ERR_INVALID_CBOR),
             None => None,
         };
 
-        let pin_uv_auth_protocol = match Self::map_get(&map, Value::Integer(Integer::from(9))) {
+        let pin_uv_auth_protocol = match cbor::map_get(&map, Value::Integer(Integer::from(9))) {
             Some(Value::Integer(int)) => Some(int.clone()),
             Some(_) => return Err(CTAP2_ERR_INVALID_CBOR),
             None => None,
@@ -2317,23 +2274,23 @@ where
             _ => return Err(CTAP2_ERR_INVALID_CBOR),
         };
 
-        let rp_id = match Self::map_get(&map, Value::Integer(Integer::from(1))) {
+        let rp_id = match cbor::map_get(&map, Value::Integer(Integer::from(1))) {
             Some(Value::Text(text)) => text.clone(),
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
 
-        let client_hash = match Self::map_get(&map, Value::Integer(Integer::from(2))) {
+        let client_hash = match cbor::map_get(&map, Value::Integer(Integer::from(2))) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
 
-        let allow_list = match Self::map_get(&map, Value::Integer(Integer::from(3))) {
+        let allow_list = match cbor::map_get(&map, Value::Integer(Integer::from(3))) {
             Some(Value::Array(list)) => Some(list.clone()),
             _ => None,
         };
 
         let mut hmac_secret_request: Option<HmacSecretRequest> = None;
-        if let Some(value) = Self::map_get(&map, Value::Integer(Integer::from(4))) {
+        if let Some(value) = cbor::map_get(&map, Value::Integer(Integer::from(4))) {
             let Value::Map(extension_map) = value else {
                 return Err(CTAP2_ERR_INVALID_CBOR);
             };
@@ -2344,24 +2301,24 @@ where
                             return Err(CTAP2_ERR_INVALID_CBOR);
                         };
                         let key_agreement =
-                            match Self::map_get(params, Value::Integer(Integer::from(1))) {
+                            match cbor::map_get(params, Value::Integer(Integer::from(1))) {
                                 Some(Value::Map(entries)) => entries.clone(),
                                 _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
                             };
-                        let salt_enc = match Self::map_get(params, Value::Integer(Integer::from(2)))
+                        let salt_enc = match cbor::map_get(params, Value::Integer(Integer::from(2)))
                         {
                             Some(Value::Bytes(bytes)) => bytes.clone(),
                             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
                         };
                         let salt_auth =
-                            match Self::map_get(params, Value::Integer(Integer::from(3))) {
+                            match cbor::map_get(params, Value::Integer(Integer::from(3))) {
                                 Some(Value::Bytes(bytes)) => bytes.clone(),
                                 _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
                             };
                         if salt_auth.len() != 16 {
                             return Err(CTAP2_ERR_PIN_AUTH_INVALID);
                         }
-                        let protocol = match Self::map_get(params, Value::Integer(Integer::from(4)))
+                        let protocol = match cbor::map_get(params, Value::Integer(Integer::from(4)))
                         {
                             Some(Value::Integer(int)) => {
                                 let value: i128 = int.clone().into();
@@ -2382,22 +2339,22 @@ where
         }
 
         let mut uv_requested = false;
-        if let Some(Value::Map(options)) = Self::map_get(&map, Value::Integer(Integer::from(5))) {
-            if let Some(Value::Bool(false)) = Self::map_get(options, Value::Text("up".into())) {
+        if let Some(Value::Map(options)) = cbor::map_get(&map, Value::Integer(Integer::from(5))) {
+            if let Some(Value::Bool(false)) = cbor::map_get(options, Value::Text("up".into())) {
                 return Err(CTAP2_ERR_INVALID_OPTION);
             }
-            if let Some(Value::Bool(uv)) = Self::map_get(options, Value::Text("uv".into())) {
+            if let Some(Value::Bool(uv)) = cbor::map_get(options, Value::Text("uv".into())) {
                 uv_requested = *uv;
             }
         }
 
-        let pin_uv_auth_param = match Self::map_get(&map, Value::Integer(Integer::from(6))) {
+        let pin_uv_auth_param = match cbor::map_get(&map, Value::Integer(Integer::from(6))) {
             Some(Value::Bytes(bytes)) => Some(bytes.clone()),
             Some(_) => return Err(CTAP2_ERR_PIN_AUTH_INVALID),
             None => None,
         };
 
-        let pin_uv_auth_protocol = match Self::map_get(&map, Value::Integer(Integer::from(7))) {
+        let pin_uv_auth_protocol = match cbor::map_get(&map, Value::Integer(Integer::from(7))) {
             Some(Value::Integer(int)) => Some(int.clone().into()),
             Some(_) => return Err(CTAP2_ERR_PIN_AUTH_INVALID),
             None => None,
@@ -2451,7 +2408,7 @@ where
                 let Value::Map(desc_map) = descriptor else {
                     continue;
                 };
-                let Some(Value::Bytes(id)) = Self::map_get(desc_map, Value::Text("id".into()))
+                let Some(Value::Bytes(id)) = cbor::map_get(desc_map, Value::Text("id".into()))
                 else {
                     continue;
                 };
