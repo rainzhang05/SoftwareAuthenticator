@@ -1,4 +1,5 @@
 use super::*;
+use crate::ctap::cbor::{canonical_map, canonical_sort};
 use crate::ctap::make_credential::COSE_ALG_ES256;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::{
@@ -7,12 +8,14 @@ use crate::ctap::pin::protocol::{
 };
 use crate::ctap::pin::state::{PinState, MAX_PIN_FAILURES_BEFORE_BLOCK, MAX_PIN_RETRIES};
 use crate::{create_credential, credential_secret_from_bytes, CredentialSecretKey};
+use crate::{ClassicPinProtocol, CoseAlg, PinUvSessionKeys};
 use ciborium::{
     de::from_reader,
     ser::into_writer,
     value::{Integer, Value},
 };
 use core::task::Poll;
+use hmac::Mac;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::{
     ecdh::diffie_hellman,
