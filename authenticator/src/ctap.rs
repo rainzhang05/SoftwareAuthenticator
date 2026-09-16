@@ -7,15 +7,14 @@ mod pin;
 mod presence;
 mod reset;
 mod storage;
+#[cfg(test)]
+mod tests;
 
 use self::credential_management::CredentialManagementState;
 use self::get_assertion::PendingAssertion;
 use self::pin::protocol::PinProtocolSession;
 use self::pin::state::PinState;
 use self::presence::noop_keepalive;
-// The tests still address these through `super::`.
-#[cfg(test)]
-use self::presence::{take_waiting_log, USER_PRESENCE_MAX_WAIT_MS, USER_PRESENCE_POLL_TIMEOUT_MS};
 #[cfg(test)]
 use self::storage::StoredCredential;
 
@@ -26,9 +25,6 @@ use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use trussed::interrupt::InterruptFlag;
 
 use transport_core::{ctap::constants::*, logging::HexOption};
-
-#[cfg(test)]
-mod tests;
 
 pub struct CtapApp<C> {
     client: C,
