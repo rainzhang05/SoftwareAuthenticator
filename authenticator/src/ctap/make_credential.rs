@@ -2,7 +2,7 @@
 
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::permissions::PIN_PERMISSION_MC;
-use super::pin::protocol::pin_protocol_from_identifier;
+use super::pin::protocol::parse_pin_uv_auth_param;
 use super::storage::StoredCredential;
 use super::CtapApp;
 use crate::{create_credential, sign_challenge, CoseAlg};
@@ -191,33 +191,19 @@ where
             }
         }
 
-        let pin_uv_auth_param = match cbor::map_get(&map, Value::Integer(Integer::from(8))) {
-            Some(Value::Bytes(bytes)) => Some(bytes.clone()),
-            Some(_) => return Err(CTAP2_ERR_INVALID_CBOR),
-            None => None,
-        };
+        let pin_uv_auth = parse_pin_uv_auth_param(
+            cbor::map_get(&map, Value::Integer(Integer::from(8))),
+            cbor::map_get(&map, Value::Integer(Integer::from(9))),
+        )?;
 
-        let pin_uv_auth_protocol = match cbor::map_get(&map, Value::Integer(Integer::from(9))) {
-            Some(Value::Integer(int)) => Some(int.clone()),
-            Some(_) => return Err(CTAP2_ERR_INVALID_CBOR),
-            None => None,
-        };
-
-        if pin_uv_auth_param.is_some() != pin_uv_auth_protocol.is_some() {
-            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-        }
-
-        if uv_requested && pin_uv_auth_param.is_some() {
+        if uv_requested && pin_uv_auth.is_some() {
             return Err(CTAP2_ERR_INVALID_OPTION);
         }
 
         let mut uv_verified = false;
 
-        if let (Some(pin_uv_auth_param), Some(protocol)) =
-            (pin_uv_auth_param.as_ref(), pin_uv_auth_protocol)
-        {
-            let protocol = pin_protocol_from_identifier(protocol.into())?;
-            self.verify_pin_uv_auth_param(protocol, &client_hash, pin_uv_auth_param)?;
+        if let Some((protocol, pin_uv_auth_param)) = pin_uv_auth.as_ref() {
+            self.verify_pin_uv_auth_param(*protocol, &client_hash, pin_uv_auth_param)?;
             uv_verified = true;
         }
 

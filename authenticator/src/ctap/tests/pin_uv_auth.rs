@@ -6,9 +6,10 @@
 //! append to the presence tests' shared waiting log while those run.
 
 use super::support::{
-    client_pin, encode, es256_credential, get_assertion_request, install_pin_uv_auth_token, int,
-    make_credential_request, padded_pin, pin_hash, platform_authenticate, response_auth_data,
-    PlatformPinSession, TestClient, FLAG_UV,
+    client_pin, encode, es256_credential, get_assertion_request, get_assertion_request_with,
+    install_pin_uv_auth_token, int, make_credential_request, make_credential_request_with,
+    padded_pin, pin_hash, platform_authenticate, response_auth_data, PlatformPinSession,
+    TestClient, FLAG_UV,
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
@@ -475,4 +476,199 @@ fn hmac_secret_protocol_two_encrypts_each_output_under_its_own_iv() {
         outputs[1][..16],
         "every encryption draws a fresh IV"
     );
+}
+
+// -- pinUvAuthProtocol --------------------------------------------------------------
+
+#[test]
+#[serial]
+fn make_credential_checks_pin_uv_auth_protocol_only_with_a_pin_uv_auth_param() {
+    let token = [0x7D; 32];
+    let client_hash = [0x46; 32];
+    let param = platform_authenticate(ClassicPinProtocol::V2, &token, &client_hash);
+    let cases = [
+        // "If the pinUvAuthProtocol parameter is absent, return
+        // CTAP2_ERR_MISSING_PARAMETER error." (CTAP 2.3 §6.1.2 step 2)
+        (
+            Some(Value::Bytes(param.clone())),
+            None,
+            Err(CTAP2_ERR_MISSING_PARAMETER),
+        ),
+        // "If the pinUvAuthProtocol parameter's value is not supported, return
+        // CTAP1_ERR_INVALID_PARAMETER error."
+        (
+            Some(Value::Bytes(param.clone())),
+            Some(int(3)),
+            Err(CTAP1_ERR_INVALID_PARAMETER),
+        ),
+        (
+            Some(Value::Bytes(param)),
+            Some(Value::Text("2".into())),
+            Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+        ),
+        (
+            Some(Value::Text("param".into())),
+            Some(int(2)),
+            Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+        ),
+        // Without a pinUvAuthParam the protocol plays no part.
+        (None, Some(int(3)), Ok(false)),
+        (None, None, Ok(false)),
+    ];
+    for (param, protocol, expected) in cases {
+        let mut app = CtapApp::new(TestClient::new(), [0x67; 16]);
+        install_pin_uv_auth_token(
+            &mut app,
+            ClassicPinProtocol::V2,
+            token,
+            PIN_PERMISSION_MC,
+            None,
+        );
+        let description = format!("{param:?} {protocol:?}");
+        let request = make_credential_request_with(&client_hash, "example.com", param, protocol);
+        let result = app
+            .handle_make_credential(&request)
+            .map(|response| response_auth_data(&response)[32] & FLAG_UV == FLAG_UV);
+        assert_eq!(result, expected, "{description}");
+    }
+}
+
+#[test]
+#[serial]
+fn get_assertion_checks_pin_uv_auth_protocol_only_with_a_pin_uv_auth_param() {
+    let token = [0x7E; 32];
+    let client_hash = [0x47; 32];
+    let param = platform_authenticate(ClassicPinProtocol::V2, &token, &client_hash);
+    let cases = [
+        (
+            Some(Value::Bytes(param.clone())),
+            None,
+            Err(CTAP2_ERR_MISSING_PARAMETER),
+        ),
+        (
+            Some(Value::Bytes(param.clone())),
+            Some(int(0)),
+            Err(CTAP1_ERR_INVALID_PARAMETER),
+        ),
+        (
+            Some(Value::Bytes(param)),
+            Some(Value::Text("2".into())),
+            Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+        ),
+        (None, Some(int(2)), Ok(false)),
+        (None, Some(int(3)), Ok(false)),
+    ];
+    for (param, protocol, expected) in cases {
+        let mut app = CtapApp::new(TestClient::new(), [0x68; 16]);
+        app.stored_credentials
+            .push(es256_credential("example.com", &[0xE1]));
+        install_pin_uv_auth_token(
+            &mut app,
+            ClassicPinProtocol::V2,
+            token,
+            PIN_PERMISSION_GA,
+            None,
+        );
+        let description = format!("{param:?} {protocol:?}");
+        let request =
+            get_assertion_request_with(&client_hash, "example.com", param, protocol, None);
+        let result = app
+            .handle_get_assertion(&request)
+            .map(|response| response_auth_data(&response)[32] & FLAG_UV == FLAG_UV);
+        assert_eq!(result, expected, "{description}");
+    }
+}
+
+#[test]
+fn credential_management_requires_pin_uv_auth_param_then_protocol() {
+    let token = [0x7F; 32];
+    let param = Value::Bytes(platform_authenticate(
+        ClassicPinProtocol::V2,
+        &token,
+        &[0x01],
+    ));
+    let cases = [
+        // "If pinUvAuthParam is missing from the input map, end the operation by
+        // returning CTAP2_ERR_PUAT_REQUIRED." comes first (CTAP 2.3 §6.8.2).
+        (None, None, Err(CTAP2_ERR_PUAT_REQUIRED)),
+        (None, Some(int(3)), Err(CTAP2_ERR_PUAT_REQUIRED)),
+        (Some(param.clone()), None, Err(CTAP2_ERR_MISSING_PARAMETER)),
+        (
+            Some(param.clone()),
+            Some(int(3)),
+            Err(CTAP1_ERR_INVALID_PARAMETER),
+        ),
+        (Some(param), Some(int(2)), Ok(CTAP2_OK)),
+    ];
+    for (param, protocol, expected) in cases {
+        let mut app = CtapApp::new(TestClient::new(), [0x69; 16]);
+        install_pin_uv_auth_token(
+            &mut app,
+            ClassicPinProtocol::V2,
+            token,
+            PIN_PERMISSION_CM,
+            None,
+        );
+        let description = format!("{param:?} {protocol:?}");
+        let mut entries = vec![(int(1), int(0x01))];
+        if let Some(protocol) = protocol {
+            entries.push((int(3), protocol));
+        }
+        if let Some(param) = param {
+            entries.push((int(4), param));
+        }
+        let result = app
+            .handle_credential_management(&encode(&canonical_map(entries)))
+            .map(|response| response[0]);
+        assert_eq!(result, expected, "{description}");
+    }
+}
+
+#[test]
+#[serial]
+fn hmac_secret_defaults_to_pin_uv_auth_protocol_one() {
+    let salt = [0x98; 32];
+    for protocol in [None, Some(int(3))] {
+        let mut app = CtapApp::new(TestClient::new(), [0x6A; 16]);
+        let credential = es256_credential("example.com", &[0xE2]);
+        let cred_random = credential
+            .cred_random_without_uv
+            .clone()
+            .expect("credRandomWithoutUV");
+        app.stored_credentials.push(credential);
+        // A CTAP2.0 platform: protocol one, and no pinUvAuthProtocol member.
+        let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V1, 0x15);
+        let salt_enc = session.encrypt(&salt);
+        let salt_auth =
+            platform_authenticate(ClassicPinProtocol::V1, &session.keys.auth_key, &salt_enc);
+        let mut input = vec![
+            (int(1), session.key_agreement.clone()),
+            (int(2), Value::Bytes(salt_enc)),
+            (int(3), Value::Bytes(salt_auth)),
+        ];
+        if let Some(protocol) = protocol.clone() {
+            input.push((int(4), protocol));
+        }
+        let extensions = canonical_map(vec![(
+            Value::Text("hmac-secret".into()),
+            canonical_map(input),
+        )]);
+        let request = get_assertion_request(&[0x48; 32], "example.com", None, Some(extensions));
+
+        let result = app.handle_get_assertion(&request);
+
+        match protocol {
+            // "If pinUvAuthProtocol is absent and a pinUvAuthProtocol value of 1
+            // is supported by the authenticator, let the value of
+            // pinUvAuthProtocol be 1" (CTAP 2.3 §12.7)
+            None => {
+                let response = result.expect("getAssertion succeeds");
+                assert_eq!(
+                    session.decrypt(&encrypted_hmac_secret_output(&response)),
+                    hmac_secret_output(&cred_random, &salt)
+                );
+            }
+            Some(_) => assert_eq!(result, Err(CTAP1_ERR_INVALID_PARAMETER)),
+        }
+    }
 }

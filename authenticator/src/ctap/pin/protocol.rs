@@ -1,7 +1,7 @@
 //! PIN/UV auth protocol plumbing: protocol selection, the key-agreement
 //! session, shared-secret encryption and pinUvAuthParam verification.
 
-use crate::ctap::cbor::{self, canonical_map};
+use crate::ctap::cbor::canonical_map;
 use crate::ctap::CtapApp;
 use crate::{
     decrypt_classic_pin_block, derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
@@ -105,14 +105,48 @@ pub(crate) fn verify(
     }
 }
 
-pub(crate) fn pin_protocol_from_identifier(value: i128) -> Result<PinProtocol, u8> {
-    if value == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V1) {
-        Ok(ClassicPinProtocol::V1)
-    } else if value == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V2) {
-        Ok(ClassicPinProtocol::V2)
-    } else {
-        Err(CTAP2_ERR_PIN_AUTH_INVALID)
+/// Parse a pinUvAuthProtocol value.  "If pinUvAuthProtocol is not supported,
+/// return CTAP1_ERR_INVALID_PARAMETER." (CTAP 2.3 §6.5.5.4 to §6.5.5.7.2,
+/// §6.1.2 step 2, §6.2.2 step 2, §6.8.2 to §6.8.6)
+pub(crate) fn parse_pin_uv_auth_protocol(value: &Value) -> Result<PinProtocol, u8> {
+    let Value::Integer(identifier) = value else {
+        return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+    };
+    match i128::from(*identifier) {
+        id if id == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V1) => Ok(ClassicPinProtocol::V1),
+        id if id == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V2) => Ok(ClassicPinProtocol::V2),
+        _ => Err(CTAP1_ERR_INVALID_PARAMETER),
     }
+}
+
+/// Parse a pinUvAuthProtocol that the command requires: absent is "If the
+/// authenticator does not receive mandatory parameters for this command, it
+/// returns CTAP2_ERR_MISSING_PARAMETER error."
+pub(crate) fn parse_required_pin_uv_auth_protocol(
+    value: Option<&Value>,
+) -> Result<PinProtocol, u8> {
+    parse_pin_uv_auth_protocol(value.ok_or(CTAP2_ERR_MISSING_PARAMETER)?)
+}
+
+/// Parse the pinUvAuthParam and pinUvAuthProtocol parameters of
+/// authenticatorMakeCredential, authenticatorGetAssertion and
+/// authenticatorCredentialManagement.  `None` when pinUvAuthParam is absent,
+/// whatever pinUvAuthProtocol says.  Otherwise, per CTAP 2.3 §6.1.2 step 2 and
+/// §6.2.2 step 2: "If the pinUvAuthProtocol parameter's value is not
+/// supported, return CTAP1_ERR_INVALID_PARAMETER error. If the
+/// pinUvAuthProtocol parameter is absent, return CTAP2_ERR_MISSING_PARAMETER
+/// error."
+pub(crate) fn parse_pin_uv_auth_param(
+    pin_uv_auth_param: Option<&Value>,
+    pin_uv_auth_protocol: Option<&Value>,
+) -> Result<Option<(PinProtocol, Vec<u8>)>, u8> {
+    let param = match pin_uv_auth_param {
+        None => return Ok(None),
+        Some(Value::Bytes(param)) => param.clone(),
+        Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+    };
+    let protocol = parse_required_pin_uv_auth_protocol(pin_uv_auth_protocol)?;
+    Ok(Some((protocol, param)))
 }
 
 pub(crate) struct PinProtocolSession {
@@ -258,22 +292,6 @@ where
     ) -> Result<Vec<u8>, u8> {
         decrypt_classic_pin_block(protocol, keys, ciphertext)
             .map_err(|_| CTAP2_ERR_PIN_AUTH_INVALID)
-    }
-
-    pub(super) fn requested_pin_protocol(
-        &mut self,
-        map: &[(Value, Value)],
-    ) -> Result<PinProtocol, u8> {
-        if let Some(Value::Integer(int)) = cbor::map_get(map, Value::Integer(Integer::from(1))) {
-            let value: i128 = int.clone().into();
-            match value {
-                v if v == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V2) => Ok(ClassicPinProtocol::V2),
-                v if v == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V1) => Ok(ClassicPinProtocol::V1),
-                _ => Err(CTAP1_ERR_INVALID_PARAMETER),
-            }
-        } else {
-            Ok(ClassicPinProtocol::V2)
-        }
     }
 
     pub(crate) fn take_session(&mut self, protocol: PinProtocol) -> Result<PinProtocolSession, u8> {

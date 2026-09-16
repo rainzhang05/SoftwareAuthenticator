@@ -1,7 +1,7 @@
 //! The authenticatorCredentialManagement command and its subcommands.
 
 use super::cbor::{self, canonical_map, canonical_sort};
-use super::pin::protocol::pin_protocol_from_identifier;
+use super::pin::protocol::parse_pin_uv_auth_param;
 use super::storage::StoredCredential;
 use super::CtapApp;
 
@@ -309,17 +309,13 @@ where
             None => None,
         };
 
-        let protocol_value = match cbor::map_get(&map, Value::Integer(Integer::from(3))) {
-            Some(Value::Integer(int)) => int.clone().into(),
-            _ => return Err(CTAP2_ERR_PIN_AUTH_INVALID),
-        };
-        let protocol = pin_protocol_from_identifier(protocol_value)?;
-
-        let pin_auth_param = match cbor::map_get(&map, Value::Integer(Integer::from(4))) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            Some(_) => return Err(CTAP2_ERR_PUAT_REQUIRED),
-            None => return Err(CTAP2_ERR_PUAT_REQUIRED),
-        };
+        // "If pinUvAuthParam is missing from the input map, end the operation by
+        // returning CTAP2_ERR_PUAT_REQUIRED." (CTAP 2.3 §6.8.2 to §6.8.6)
+        let (protocol, pin_auth_param) = parse_pin_uv_auth_param(
+            cbor::map_get(&map, Value::Integer(Integer::from(4))),
+            cbor::map_get(&map, Value::Integer(Integer::from(3))),
+        )?
+        .ok_or(CTAP2_ERR_PUAT_REQUIRED)?;
 
         let mut message = vec![subcommand];
         if let Some(params) = subcommand_params.as_ref() {

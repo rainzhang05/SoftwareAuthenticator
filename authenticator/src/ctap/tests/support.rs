@@ -428,6 +428,30 @@ pub(super) fn make_credential_request(
     rp_id: &str,
     pin_uv_auth: Option<(ClassicPinProtocol, Vec<u8>)>,
 ) -> Vec<u8> {
+    let (param, protocol) = pin_uv_auth_values(pin_uv_auth);
+    make_credential_request_with(client_hash, rp_id, param, protocol)
+}
+
+fn pin_uv_auth_values(
+    pin_uv_auth: Option<(ClassicPinProtocol, Vec<u8>)>,
+) -> (Option<Value>, Option<Value>) {
+    match pin_uv_auth {
+        Some((protocol, param)) => (
+            Some(Value::Bytes(param)),
+            Some(int(protocol.identifier().into())),
+        ),
+        None => (None, None),
+    }
+}
+
+/// An authenticatorMakeCredential request with pinUvAuthParam (0x08) and
+/// pinUvAuthProtocol (0x09) exactly as given.
+pub(super) fn make_credential_request_with(
+    client_hash: &[u8],
+    rp_id: &str,
+    pin_uv_auth_param: Option<Value>,
+    pin_uv_auth_protocol: Option<Value>,
+) -> Vec<u8> {
     let mut entries = vec![
         (int(1), Value::Bytes(client_hash.to_vec())),
         (
@@ -446,9 +470,11 @@ pub(super) fn make_credential_request(
             ])]),
         ),
     ];
-    if let Some((protocol, param)) = pin_uv_auth {
-        entries.push((int(8), Value::Bytes(param)));
-        entries.push((int(9), int(protocol.identifier().into())));
+    if let Some(param) = pin_uv_auth_param {
+        entries.push((int(8), param));
+    }
+    if let Some(protocol) = pin_uv_auth_protocol {
+        entries.push((int(9), protocol));
     }
     encode(&canonical_map(entries))
 }
@@ -461,6 +487,19 @@ pub(super) fn get_assertion_request(
     pin_uv_auth: Option<(ClassicPinProtocol, Vec<u8>)>,
     extensions: Option<Value>,
 ) -> Vec<u8> {
+    let (param, protocol) = pin_uv_auth_values(pin_uv_auth);
+    get_assertion_request_with(client_hash, rp_id, param, protocol, extensions)
+}
+
+/// An authenticatorGetAssertion request with pinUvAuthParam (0x06) and
+/// pinUvAuthProtocol (0x07) exactly as given.
+pub(super) fn get_assertion_request_with(
+    client_hash: &[u8],
+    rp_id: &str,
+    pin_uv_auth_param: Option<Value>,
+    pin_uv_auth_protocol: Option<Value>,
+    extensions: Option<Value>,
+) -> Vec<u8> {
     let mut entries = vec![
         (int(1), Value::Text(rp_id.into())),
         (int(2), Value::Bytes(client_hash.to_vec())),
@@ -468,9 +507,11 @@ pub(super) fn get_assertion_request(
     if let Some(extensions) = extensions {
         entries.push((int(4), extensions));
     }
-    if let Some((protocol, param)) = pin_uv_auth {
-        entries.push((int(6), Value::Bytes(param)));
-        entries.push((int(7), int(protocol.identifier().into())));
+    if let Some(param) = pin_uv_auth_param {
+        entries.push((int(6), param));
+    }
+    if let Some(protocol) = pin_uv_auth_protocol {
+        entries.push((int(7), protocol));
     }
     encode(&canonical_map(entries))
 }

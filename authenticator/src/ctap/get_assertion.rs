@@ -4,7 +4,7 @@
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::permissions::PIN_PERMISSION_GA;
 use super::pin::protocol::{
-    decrypt, pin_protocol_from_identifier, verify, HmacSha256, PinProtocol,
+    decrypt, parse_pin_uv_auth_param, parse_pin_uv_auth_protocol, verify, HmacSha256, PinProtocol,
 };
 use super::storage::StoredCredential;
 use super::CtapApp;
@@ -225,14 +225,13 @@ where
                                 Some(Value::Bytes(bytes)) => bytes.clone(),
                                 _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
                             };
+                        // "If pinUvAuthProtocol is absent and a pinUvAuthProtocol
+                        // value of 1 is supported by the authenticator, let the
+                        // value of pinUvAuthProtocol be 1" (CTAP 2.3 §12.7).
                         let protocol = match cbor::map_get(params, Value::Integer(Integer::from(4)))
                         {
-                            Some(Value::Integer(int)) => {
-                                let value: i128 = int.clone().into();
-                                pin_protocol_from_identifier(value)?
-                            }
-                            Some(_) => return Err(CTAP2_ERR_PIN_AUTH_INVALID),
-                            None => ClassicPinProtocol::V2,
+                            Some(value) => parse_pin_uv_auth_protocol(value)?,
+                            None => ClassicPinProtocol::V1,
                         };
                         hmac_secret_request = Some(HmacSecretRequest {
                             key_agreement,
@@ -255,32 +254,21 @@ where
             }
         }
 
-        let pin_uv_auth_param = match cbor::map_get(&map, Value::Integer(Integer::from(6))) {
-            Some(Value::Bytes(bytes)) => Some(bytes.clone()),
-            Some(_) => return Err(CTAP2_ERR_PIN_AUTH_INVALID),
-            None => None,
-        };
-
-        let pin_uv_auth_protocol = match cbor::map_get(&map, Value::Integer(Integer::from(7))) {
-            Some(Value::Integer(int)) => Some(int.clone().into()),
-            Some(_) => return Err(CTAP2_ERR_PIN_AUTH_INVALID),
-            None => None,
-        };
+        let pin_uv_auth = parse_pin_uv_auth_param(
+            cbor::map_get(&map, Value::Integer(Integer::from(6))),
+            cbor::map_get(&map, Value::Integer(Integer::from(7))),
+        )?;
 
         let mut user_verified = false;
-        match (pin_uv_auth_param.as_ref(), pin_uv_auth_protocol) {
-            (Some(param), Some(protocol)) => {
-                let protocol = pin_protocol_from_identifier(protocol)?;
-                self.verify_pin_uv_auth_param(protocol, &client_hash, param)?;
+        match pin_uv_auth.as_ref() {
+            Some((protocol, param)) => {
+                self.verify_pin_uv_auth_param(*protocol, &client_hash, param)?;
                 user_verified = true;
             }
-            (None, None) => {
+            None => {
                 if uv_requested {
                     return Err(CTAP2_ERR_INVALID_OPTION);
                 }
-            }
-            _ => {
-                return Err(CTAP2_ERR_MISSING_PARAMETER);
             }
         }
 

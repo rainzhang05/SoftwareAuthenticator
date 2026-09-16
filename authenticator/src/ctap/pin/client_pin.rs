@@ -1,7 +1,9 @@
 //! The authenticatorClientPIN command and its subcommands.
 
 use super::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
-use super::protocol::{decrypt, verify, PinProtocol, PinProtocolSession};
+use super::protocol::{
+    decrypt, parse_required_pin_uv_auth_protocol, verify, PinProtocol, PinProtocolSession,
+};
 use super::state::PinState;
 use crate::ctap::cbor::{self, canonical_map, canonical_sort};
 use crate::ctap::CtapApp;
@@ -53,6 +55,22 @@ impl ClientPinSubcommand {
             0x09 => Ok(Self::GetPinUvAuthTokenUsingPinWithPermissions),
             _ => Err(CTAP2_ERR_INVALID_SUBCOMMAND),
         }
+    }
+}
+
+/// A mandatory map-valued parameter such as keyAgreement (0x03).
+fn required_map(map: &[(Value, Value)], key: i32) -> Result<&[(Value, Value)], u8> {
+    match cbor::map_get(map, Value::Integer(Integer::from(key))) {
+        Some(Value::Map(entries)) => Ok(entries),
+        _ => Err(CTAP2_ERR_MISSING_PARAMETER),
+    }
+}
+
+/// A mandatory byte-string parameter such as pinHashEnc (0x06).
+fn required_bytes(map: &[(Value, Value)], key: i32) -> Result<&[u8], u8> {
+    match cbor::map_get(map, Value::Integer(Integer::from(key))) {
+        Some(Value::Bytes(bytes)) => Ok(bytes),
+        _ => Err(CTAP2_ERR_MISSING_PARAMETER),
     }
 }
 
@@ -148,32 +166,27 @@ where
         Ok(out)
     }
 
-    fn client_pin_set_pin(
-        &mut self,
-        protocol: PinProtocol,
-        map: &[(Value, Value)],
-    ) -> Result<Vec<u8>, u8> {
+    /// setPIN (CTAP 2.3 §6.5.5.5).
+    fn client_pin_set_pin(&mut self, map: &[(Value, Value)]) -> Result<Vec<u8>, u8> {
+        // "If the authenticator does not receive mandatory parameters for this
+        // command, it returns CTAP2_ERR_MISSING_PARAMETER error. If
+        // pinUvAuthProtocol is not supported, return CTAP1_ERR_INVALID_PARAMETER.
+        // If a PIN has already been set, authenticator returns
+        // CTAP2_ERR_PIN_AUTH_INVALID error."
+        let protocol = cbor::map_get(map, Value::Integer(Integer::from(1)));
+        let key_agreement = required_map(map, 3)?;
+        let pin_auth_param = required_bytes(map, 4)?;
+        let new_pin_enc = required_bytes(map, 5)?;
+        let protocol = parse_required_pin_uv_auth_protocol(protocol)?;
         if self.pin_state.is_set() {
             return Err(CTAP2_ERR_PIN_AUTH_INVALID);
         }
-        let key_agreement = match cbor::map_get(map, Value::Integer(Integer::from(3))) {
-            Some(Value::Map(entries)) => entries,
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
-        let new_pin_enc = match cbor::map_get(map, Value::Integer(Integer::from(5))) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
-        let pin_auth_param = match cbor::map_get(map, Value::Integer(Integer::from(4))) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
 
         let session = self.take_session(protocol)?;
         let (keys, transcript_hash) = session.derive_session_keys(key_agreement)?;
-        verify(protocol, &keys.auth_key, &new_pin_enc, &pin_auth_param)?;
+        verify(protocol, &keys.auth_key, new_pin_enc, pin_auth_param)?;
         let mut plaintext =
-            Self::decrypt_pin_block_checked(protocol, &keys, &transcript_hash, &new_pin_enc)?;
+            Self::decrypt_pin_block_checked(protocol, &keys, &transcript_hash, new_pin_enc)?;
         let mut new_pin = Self::extract_new_pin(&mut plaintext)?;
         let hash = Self::hash_pin(&new_pin);
         new_pin.zeroize();
@@ -182,42 +195,30 @@ where
         Ok(vec![CTAP2_OK])
     }
 
-    fn client_pin_change_pin(
-        &mut self,
-        protocol: PinProtocol,
-        map: &[(Value, Value)],
-    ) -> Result<Vec<u8>, u8> {
-        if !self.pin_state.is_set() {
-            return Err(CTAP2_ERR_PIN_NOT_SET);
-        }
-        let key_agreement = match cbor::map_get(map, Value::Integer(Integer::from(3))) {
-            Some(Value::Map(entries)) => entries,
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
-        let new_pin_enc = match cbor::map_get(map, Value::Integer(Integer::from(5))) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
-        let pin_hash_enc = match cbor::map_get(map, Value::Integer(Integer::from(6))) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
-        let pin_auth_param = match cbor::map_get(map, Value::Integer(Integer::from(4))) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
-
+    /// changePIN (CTAP 2.3 §6.5.5.6).
+    fn client_pin_change_pin(&mut self, map: &[(Value, Value)]) -> Result<Vec<u8>, u8> {
+        // "If the authenticator does not receive mandatory parameters for this
+        // command, it returns CTAP2_ERR_MISSING_PARAMETER error. If
+        // pinUvAuthProtocol is not supported, return CTAP1_ERR_INVALID_PARAMETER.
+        // If the pinRetries counter is 0, return CTAP2_ERR_PIN_BLOCKED error."
+        let protocol = cbor::map_get(map, Value::Integer(Integer::from(1)));
+        let key_agreement = required_map(map, 3)?;
+        let pin_auth_param = required_bytes(map, 4)?;
+        let new_pin_enc = required_bytes(map, 5)?;
+        let pin_hash_enc = required_bytes(map, 6)?;
+        let protocol = parse_required_pin_uv_auth_protocol(protocol)?;
         self.pin_state.check_pin_attempt_allowed()?;
+
         let session = self.take_session(protocol)?;
         let (keys, transcript_hash) = session.derive_session_keys(key_agreement)?;
         let mut auth_data = Vec::with_capacity(new_pin_enc.len() + pin_hash_enc.len());
-        auth_data.extend_from_slice(&new_pin_enc);
-        auth_data.extend_from_slice(&pin_hash_enc);
-        verify(protocol, &keys.auth_key, &auth_data, &pin_auth_param)?;
-        self.verify_pin_hash_enc(protocol, &keys, &pin_hash_enc)?;
+        auth_data.extend_from_slice(new_pin_enc);
+        auth_data.extend_from_slice(pin_hash_enc);
+        verify(protocol, &keys.auth_key, &auth_data, pin_auth_param)?;
+        self.verify_pin_hash_enc(protocol, &keys, pin_hash_enc)?;
 
         let mut new_pin_plain =
-            Self::decrypt_pin_block_checked(protocol, &keys, &transcript_hash, &new_pin_enc)?;
+            Self::decrypt_pin_block_checked(protocol, &keys, &transcript_hash, new_pin_enc)?;
         let mut new_pin = Self::extract_new_pin(&mut new_pin_plain)?;
         let hash = Self::hash_pin(&new_pin);
         new_pin.zeroize();
@@ -226,33 +227,24 @@ where
         Ok(vec![CTAP2_OK])
     }
 
+    /// The shared tail of getPinToken and
+    /// getPinUvAuthTokenUsingPinWithPermissions, once their parameters have
+    /// been validated.  Neither takes a pinUvAuthParam (CTAP 2.3 §6.5.5.7.1 and
+    /// §6.5.5.7.2): proof of the PIN is pinHashEnc itself, so a pinUvAuthParam
+    /// sent anyway is ignored rather than verified.
     fn client_pin_get_token_common(
         &mut self,
         protocol: PinProtocol,
-        map: &[(Value, Value)],
+        key_agreement: &[(Value, Value)],
+        pin_hash_enc: &[u8],
         permissions: u8,
         rp_id: Option<String>,
     ) -> Result<Vec<u8>, u8> {
-        if !self.pin_state.is_set() {
-            return Err(CTAP2_ERR_PIN_NOT_SET);
-        }
-        let key_agreement = match cbor::map_get(map, Value::Integer(Integer::from(3))) {
-            Some(Value::Map(entries)) => entries,
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
-        let pin_hash_enc = match cbor::map_get(map, Value::Integer(Integer::from(6))) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
-        // getPinToken and getPinUvAuthTokenUsingPinWithPermissions take no
-        // pinUvAuthParam (CTAP 2.3 §6.5.5.7.1 and §6.5.5.7.2 list keyAgreement
-        // and pinHashEnc only): proof of the PIN is pinHashEnc itself, so a
-        // pinUvAuthParam sent anyway is ignored rather than verified.
-
+        // "If the pinRetries counter is 0, return CTAP2_ERR_PIN_BLOCKED error."
         self.pin_state.check_pin_attempt_allowed()?;
         let session = self.take_session(protocol)?;
         let (keys, _transcript_hash) = session.derive_session_keys(key_agreement)?;
-        self.verify_pin_hash_enc(protocol, &keys, &pin_hash_enc)?;
+        self.verify_pin_hash_enc(protocol, &keys, pin_hash_enc)?;
 
         let random = syscall!(self.client.random_bytes(32)).bytes;
         if random.len() != 32 {
@@ -278,35 +270,47 @@ where
         Ok(out)
     }
 
-    fn client_pin_get_token_legacy(
-        &mut self,
-        protocol: PinProtocol,
-        map: &[(Value, Value)],
-    ) -> Result<Vec<u8>, u8> {
+    /// getPinToken (CTAP 2.3 §6.5.5.7.1).
+    fn client_pin_get_token_legacy(&mut self, map: &[(Value, Value)]) -> Result<Vec<u8>, u8> {
+        // "If the authenticator does not receive mandatory parameters for this
+        // command, it returns CTAP2_ERR_MISSING_PARAMETER error. If
+        // pinUvAuthProtocol is not supported, return CTAP1_ERR_INVALID_PARAMETER.
+        // If authenticatorClientPIN's permissions parameter is present in the
+        // getPinToken (0x05) subcommand, return CTAP1_ERR_INVALID_PARAMETER."
+        // (And likewise for rpId.)
+        let protocol = cbor::map_get(map, Value::Integer(Integer::from(1)));
+        let key_agreement = required_map(map, 3)?;
+        let pin_hash_enc = required_bytes(map, 6)?;
+        let protocol = parse_required_pin_uv_auth_protocol(protocol)?;
         if cbor::map_get(map, Value::Integer(Integer::from(9))).is_some()
             || cbor::map_get(map, Value::Integer(Integer::from(10))).is_some()
         {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
         let permissions = PIN_PERMISSION_MC | PIN_PERMISSION_GA;
-        self.client_pin_get_token_common(protocol, map, permissions, None)
+        self.client_pin_get_token_common(protocol, key_agreement, pin_hash_enc, permissions, None)
     }
 
+    /// getPinUvAuthTokenUsingPinWithPermissions (CTAP 2.3 §6.5.5.7.2).
     fn client_pin_get_token_with_permissions(
         &mut self,
-        protocol: PinProtocol,
         map: &[(Value, Value)],
     ) -> Result<Vec<u8>, u8> {
-        let permissions_value = match cbor::map_get(map, Value::Integer(Integer::from(9))) {
-            Some(Value::Integer(value)) => {
+        let protocol = cbor::map_get(map, Value::Integer(Integer::from(1)));
+        let key_agreement = required_map(map, 3)?;
+        let pin_hash_enc = required_bytes(map, 6)?;
+        let permissions = cbor::map_get(map, Value::Integer(Integer::from(9)))
+            .ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
+        let protocol = parse_required_pin_uv_auth_protocol(protocol)?;
+        let permissions_value = match permissions {
+            Value::Integer(value) => {
                 let int_value: i128 = value.clone().into();
                 if int_value <= 0 || int_value > u8::MAX as i128 {
                     return Err(CTAP1_ERR_INVALID_PARAMETER);
                 }
                 int_value as u8
             }
-            Some(_) => return Err(CTAP1_ERR_INVALID_PARAMETER),
-            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
+            _ => return Err(CTAP1_ERR_INVALID_PARAMETER),
         };
         if permissions_value == 0 {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
@@ -332,7 +336,13 @@ where
         }
 
         let assigned_permissions = permissions_value & supported_permissions;
-        self.client_pin_get_token_common(protocol, map, assigned_permissions, rp_id_value)
+        self.client_pin_get_token_common(
+            protocol,
+            key_agreement,
+            pin_hash_enc,
+            assigned_permissions,
+            rp_id_value,
+        )
     }
 
     pub(crate) fn handle_client_pin(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
@@ -344,15 +354,26 @@ where
         };
         let subcommand =
             ClientPinSubcommand::parse(cbor::map_get(&map, Value::Integer(Integer::from(2))))?;
-        let protocol = self.requested_pin_protocol(&map)?;
         match subcommand {
+            // getPINRetries takes no pinUvAuthProtocol (CTAP 2.3 §6.5.5.2).
             ClientPinSubcommand::GetPinRetries => self.client_pin_get_retries(),
-            ClientPinSubcommand::GetKeyAgreement => self.client_pin_get_key_agreement(protocol),
-            ClientPinSubcommand::SetPin => self.client_pin_set_pin(protocol, &map),
-            ClientPinSubcommand::ChangePin => self.client_pin_change_pin(protocol, &map),
-            ClientPinSubcommand::GetPinToken => self.client_pin_get_token_legacy(protocol, &map),
+            ClientPinSubcommand::GetKeyAgreement => {
+                // "If the authenticator does not receive mandatory parameters for
+                // this subcommand, end the operation by returning
+                // CTAP2_ERR_MISSING_PARAMETER. If the authenticator does not
+                // support the selected pinUvAuthProtocol, it returns
+                // CTAP1_ERR_INVALID_PARAMETER." (CTAP 2.3 §6.5.5.4)
+                let protocol = parse_required_pin_uv_auth_protocol(cbor::map_get(
+                    &map,
+                    Value::Integer(Integer::from(1)),
+                ))?;
+                self.client_pin_get_key_agreement(protocol)
+            }
+            ClientPinSubcommand::SetPin => self.client_pin_set_pin(&map),
+            ClientPinSubcommand::ChangePin => self.client_pin_change_pin(&map),
+            ClientPinSubcommand::GetPinToken => self.client_pin_get_token_legacy(&map),
             ClientPinSubcommand::GetPinUvAuthTokenUsingPinWithPermissions => {
-                self.client_pin_get_token_with_permissions(protocol, &map)
+                self.client_pin_get_token_with_permissions(&map)
             }
         }
     }

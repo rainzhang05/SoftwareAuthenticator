@@ -2,8 +2,8 @@
 //! subcommands over both PIN/UV auth protocols.
 
 use super::support::{
-    classic_encrypt, classic_pin_auth, client_pin, derive_classic_session, int,
-    request_classic_key_agreement, TestClient,
+    classic_encrypt, classic_pin_auth, client_pin, derive_classic_session, get_pin_retries, int,
+    padded_pin, pin_hash, request_classic_key_agreement, PlatformPinSession, TestClient,
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
@@ -701,4 +701,129 @@ fn client_pin_requires_an_integer_subcommand() {
         ),
         Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE)
     );
+}
+
+#[test]
+fn get_key_agreement_requires_a_supported_pin_uv_auth_protocol() {
+    let mut app = CtapApp::new(TestClient::new(), [0x40; 16]);
+    assert_eq!(
+        client_pin(&mut app, vec![(int(2), int(0x02))]),
+        Err(CTAP2_ERR_MISSING_PARAMETER)
+    );
+    for unsupported in [0, 3, -1, 255] {
+        assert_eq!(
+            client_pin(
+                &mut app,
+                vec![(int(1), int(unsupported)), (int(2), int(0x02))]
+            ),
+            Err(CTAP1_ERR_INVALID_PARAMETER),
+            "pinUvAuthProtocol {unsupported}"
+        );
+    }
+    assert_eq!(
+        client_pin(
+            &mut app,
+            vec![(int(1), Value::Text("2".into())), (int(2), int(0x02))]
+        ),
+        Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE)
+    );
+    for protocol in [1, 2] {
+        let response = client_pin(&mut app, vec![(int(1), int(protocol)), (int(2), int(0x02))]);
+        assert_eq!(response.map(|bytes| bytes[0]), Ok(CTAP2_OK));
+    }
+}
+
+/// A request carrying every parameter `subcommand` needs, with placeholder
+/// values: the checks under test all happen before any of them is used.
+fn request_with_all_parameters(subcommand: i64, protocol: Option<Value>) -> Vec<(Value, Value)> {
+    let mut entries = vec![
+        (int(2), int(subcommand)),
+        (int(3), canonical_map(vec![(int(1), int(2))])),
+        (int(4), Value::Bytes(vec![0; 32])),
+        (int(5), Value::Bytes(vec![0; 64])),
+        (int(6), Value::Bytes(vec![0; 16])),
+    ];
+    if subcommand == 0x09 {
+        entries.push((int(9), int(0x01)));
+        entries.push((int(10), Value::Text("example.com".into())));
+    }
+    if let Some(protocol) = protocol {
+        entries.push((int(1), protocol));
+    }
+    entries
+}
+
+#[test]
+fn pin_subcommands_check_parameters_then_the_pin_uv_auth_protocol() {
+    // setPIN, changePIN, getPinToken, getPinUvAuthTokenUsingPinWithPermissions
+    for subcommand in [0x03, 0x04, 0x05, 0x09] {
+        let mut app = CtapApp::new(TestClient::new(), [0x41; 16]);
+        if subcommand != 0x03 {
+            app.pin_state.set_pin(pin_hash(b"1234"));
+        }
+        assert_eq!(
+            client_pin(&mut app, request_with_all_parameters(subcommand, None)),
+            Err(CTAP2_ERR_MISSING_PARAMETER),
+            "subCommand {subcommand:#x} without pinUvAuthProtocol"
+        );
+        assert_eq!(
+            client_pin(
+                &mut app,
+                request_with_all_parameters(subcommand, Some(int(3)))
+            ),
+            Err(CTAP1_ERR_INVALID_PARAMETER),
+            "subCommand {subcommand:#x} with pinUvAuthProtocol 3"
+        );
+        assert_eq!(
+            client_pin(
+                &mut app,
+                request_with_all_parameters(subcommand, Some(Value::Bytes(vec![2])))
+            ),
+            Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            "subCommand {subcommand:#x} with a byte-string pinUvAuthProtocol"
+        );
+        // A missing mandatory parameter is reported before the protocol.
+        let mut missing_key_agreement = request_with_all_parameters(subcommand, Some(int(3)));
+        missing_key_agreement.retain(|(key, _)| *key != int(3));
+        assert_eq!(
+            client_pin(&mut app, missing_key_agreement),
+            Err(CTAP2_ERR_MISSING_PARAMETER),
+            "subCommand {subcommand:#x} without keyAgreement"
+        );
+        // Nothing was attempted, so no retry was spent.
+        assert_eq!(app.pin_state.retries(), MAX_PIN_RETRIES);
+    }
+}
+
+#[test]
+fn get_pin_retries_needs_no_pin_uv_auth_protocol() {
+    let mut app = CtapApp::new(TestClient::new(), [0x42; 16]);
+    assert_eq!(get_pin_retries(&mut app), (MAX_PIN_RETRIES, None));
+    let response = client_pin(&mut app, vec![(int(1), int(3)), (int(2), int(0x01))]);
+    assert_eq!(response.map(|bytes| bytes[0]), Ok(CTAP2_OK));
+}
+
+#[test]
+fn set_pin_when_a_pin_is_already_set_is_pin_auth_invalid() {
+    // "If a PIN has already been set, authenticator returns
+    // CTAP2_ERR_PIN_AUTH_INVALID error." (CTAP 2.3 §6.5.5.5)
+    for protocol in [ClassicPinProtocol::V1, ClassicPinProtocol::V2] {
+        let mut app = CtapApp::new(TestClient::new(), [0x43; 16]);
+        app.pin_state.set_pin(pin_hash(b"1234"));
+        let session = PlatformPinSession::establish(&mut app, protocol, 0x44);
+        let new_pin_enc = session.encrypt(&padded_pin(b"5678"));
+        let pin_uv_auth_param = classic_pin_auth(protocol, &session.keys, &new_pin_enc);
+        let result = client_pin(
+            &mut app,
+            vec![
+                (int(1), int(protocol.identifier().into())),
+                (int(2), int(0x03)),
+                (int(3), session.key_agreement.clone()),
+                (int(4), Value::Bytes(pin_uv_auth_param)),
+                (int(5), Value::Bytes(new_pin_enc)),
+            ],
+        );
+        assert_eq!(result, Err(CTAP2_ERR_PIN_AUTH_INVALID), "{protocol:?}");
+        assert_eq!(app.pin_state.persistent().pin_hash, Some(pin_hash(b"1234")));
+    }
 }
