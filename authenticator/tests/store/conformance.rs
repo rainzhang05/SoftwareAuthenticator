@@ -3,24 +3,25 @@
 //! Each case is a function generic over a [`Backend`].  The
 //! `conformance_suite!` invocation at the bottom instantiates every case once
 //! per backend as an ordinary `#[test]`, so a failure names both the case and
-//! the store it failed on (`conformance::memory::delete_frees_capacity`).  A case
+//! the store it failed on (`conformance::file::delete_frees_capacity`).  A case
 //! added to the list runs against every store; there is no way to add it to
 //! only one.
 
 use authenticator::store::{
-    AttestationRecord, CredentialRecord, CredentialStore, MemoryStore, PinStateRecord,
+    AttestationRecord, CredentialRecord, CredentialStore, FileStore, MemoryStore, PinStateRecord,
     PrivateKeyMaterial, StoreError, DEFAULT_MAX_CREDENTIALS,
 };
 use authenticator::CoseAlg;
 
 use crate::common::{
     assert_signature_verifies, attestation_record, ids, new_record, random_bytes, with_created_at,
-    ALL_ALGS,
+    TempDir, ALL_ALGS,
 };
 
-/// A store under test.
+/// A store under test and whatever has to outlive it.
 pub struct Fixture<S> {
     pub store: S,
+    _dir: Option<TempDir>,
 }
 
 /// How to create a fresh, empty store.
@@ -36,6 +37,23 @@ impl Backend for Memory {
     fn create(max_credentials: usize) -> Fixture<MemoryStore> {
         Fixture {
             store: MemoryStore::new().with_max_credentials(max_credentials),
+            _dir: None,
+        }
+    }
+}
+
+pub struct File;
+
+impl Backend for File {
+    type Store = FileStore;
+    fn create(max_credentials: usize) -> Fixture<FileStore> {
+        let dir = TempDir::new();
+        let store = FileStore::open(dir.path().join("state"))
+            .expect("open file store")
+            .with_max_credentials(max_credentials);
+        Fixture {
+            store,
+            _dir: Some(dir),
         }
     }
 }
@@ -650,6 +668,15 @@ macro_rules! conformance_suite {
                 #[test]
                 fn $case() {
                     super::$case::<super::Memory>();
+                }
+            )+
+        }
+
+        mod file {
+            $(
+                #[test]
+                fn $case() {
+                    super::$case::<super::File>();
                 }
             )+
         }

@@ -23,7 +23,10 @@ p256 = { version = "0.13", features = ["ecdh"] }
 rand_core = "0.6"
 log = { version = "0.4", default-features = false }
 transport-core = { path = "../transport-core", default-features = false }
-# Credential store: constant-time comparison of secrets.
+# Credential store: record encryption and constant-time comparison of secrets.
+# chacha20poly1305 0.10 shares the cipher 0.4 generation already in the tree;
+# its default features only add an RNG convenience the store does not use.
+chacha20poly1305 = { version = "0.10", default-features = false }
 subtle = "2"
 
 # Use our local wrapper for ML-DSA.  By enabling all parameter set features the

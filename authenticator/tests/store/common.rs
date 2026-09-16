@@ -1,4 +1,8 @@
-//! Record builders and independent verification helpers.
+//! Temporary directories, record builders, and independent verification
+//! helpers.
+
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use authenticator::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial};
 use authenticator::{mldsa_paramset_from_alg, try_sign_challenge, CoseAlg};
@@ -18,6 +22,37 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
     OsRng.fill_bytes(&mut bytes);
     bytes
+}
+
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// A uniquely named directory under the system temporary directory, removed
+/// together with its contents when dropped.
+///
+/// This stands in for the `tempfile` crate, which would pull `rustix` into the
+/// dependency graph and with it a second, differently featured build of
+/// `bitflags`.
+pub struct TempDir(PathBuf);
+
+impl TempDir {
+    pub fn new() -> Self {
+        let name = format!("authenticator-store-test-{}", hex(&random_bytes::<16>()));
+        let path = std::env::temp_dir().join(name);
+        fs::create_dir(&path).expect("create temporary directory");
+        Self(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 /// A fresh credential with a random ID, random secrets, and `created_at`

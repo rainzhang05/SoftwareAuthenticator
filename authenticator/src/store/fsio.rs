@@ -138,6 +138,40 @@ pub(crate) fn create_file_exclusive(
     }
 }
 
+/// Remove a file if it exists, returning whether it did.  The caller is
+/// responsible for flushing the directory.
+pub(crate) fn remove_file_if_present(path: &Path) -> Result<bool, StoreError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(io_error(path, err)),
+    }
+}
+
+/// Remove every non-directory entry of `dir`, then flush it.  A missing
+/// directory counts as empty.
+pub(crate) fn remove_all_files(dir: &Path) -> Result<(), StoreError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(io_error(dir, err)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|err| io_error(dir, err))?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|err| io_error(&path, err))?;
+        if file_type.is_dir() {
+            log::warn!(
+                "credential store: leaving unexpected directory {} in place",
+                path.display()
+            );
+            continue;
+        }
+        remove_file_if_present(&path)?;
+    }
+    sync_dir(dir)
+}
+
 /// Remove leftover temporary files from `dir`, ignoring failures.
 pub(crate) fn remove_temp_files(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -303,6 +337,17 @@ mod tests {
         fs::write(&path, b"0123456789").unwrap();
         assert_eq!(read_file(&path, 64).unwrap().unwrap(), b"0123456789");
         assert_eq!(read_file(&path, 4).unwrap().unwrap(), b"01234");
+    }
+
+    #[test]
+    fn remove_all_files_empties_a_directory() {
+        let scratch = scratch_dir();
+        for name in ["a", ".tmp-1", "b"] {
+            fs::write(scratch.path().join(name), b"x").unwrap();
+        }
+        remove_all_files(scratch.path()).unwrap();
+        assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
+        remove_all_files(&scratch.path().join("missing")).unwrap();
     }
 
     #[test]

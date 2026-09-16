@@ -1,10 +1,57 @@
 //! Persistent storage for credentials, PIN state, and attestation material.
 //!
-//! [`CredentialStore`] is the interface the CTAP engine talks to.
-//! [`MemoryStore`] implements it in memory, for tests of the CTAP engine.
+//! [`CredentialStore`] is the interface the CTAP engine talks to.  It has two
+//! implementations with the same observable behaviour:
 //!
-//! There is no limit on the number of credentials other than the configurable
+//! * [`MemoryStore`] keeps everything in memory, for tests of the CTAP engine.
+//! * [`FileStore`] is the production backend: one authenticated, encrypted
+//!   file per record in a private state directory.  Its on-disk format is
+//!   specified in the [`FileStore`] documentation.
+//!
+//! There is no practical limit on record size (the file store accepts up to
+//! 1 MiB per record, and a post-quantum credential takes a few hundred bytes
+//! because ML-DSA keys are stored as their 32-byte seed), and no limit on the
+//! number of credentials other than the configurable
 //! [`CredentialStore::max_credentials`].
+//!
+//! # Threat model
+//!
+//! [`FileStore`] encrypts and authenticates every record with
+//! XChaCha20-Poly1305.  With the default [`FileKeySource`] the root keys are
+//! files in the same state directory as the data, so be precise about what
+//! that buys.
+//!
+//! **Encryption at rest does not protect against anyone who can read the whole
+//! state directory as the same user, or as root.**  Such an attacker reads the
+//! key files and decrypts everything, private keys included.  The `0700`
+//! directory and `0600` file permissions are the access control, and they only
+//! keep out other unprivileged local users.  Likewise, the stored PIN hash is
+//! `LEFT(SHA-256(PIN), 16)`, which such an attacker can brute-force offline;
+//! the PIN retry counter only limits guessing through CTAP.
+//!
+//! What the encryption does provide:
+//!
+//! * **Integrity of each file.**  The authentication tag covers the record
+//!   type and the file's name, so a modified, truncated, or swapped file is
+//!   reported as [`StoreError::Corrupt`] and never used.  It is per-file
+//!   integrity, not integrity of the store as a whole: deleting a file is not
+//!   detected, and neither is replacing a file with an older copy of itself
+//!   made since the last reset, which rolls back a signature counter or the PIN
+//!   retry counter.  Anyone holding the keys can of course forge records.
+//! * **Crypto-shredding on reset.**  [`CredentialStore::clear`] replaces the key
+//!   that protects credentials and PIN state.  Overwriting files does not
+//!   reliably destroy data on SSDs or copy-on-write filesystems, but old
+//!   ciphertext left in free blocks, snapshots, or backups is useless once its
+//!   key is gone.  The old key file is overwritten before it is released, as a
+//!   best effort; on the same kinds of media that 32-byte file can survive too,
+//!   which is the gap an OS-backed key source closes.
+//! * **No plaintext secrets in copies that leave out the key files**, such as
+//!   a backup or disk image that excludes `keys/`.  Most backup tools copy
+//!   whole directories, so this only helps if the exclusion is deliberate.
+//! * **A seam for OS-backed key storage.**  Root keys come from a
+//!   [`KeySource`].  Keeping them in systemd-creds, a TPM, or the Secret
+//!   Service changes the answer to the first point without changing
+//!   [`FileStore`].
 //!
 //! # Corruption
 //!
@@ -15,11 +62,23 @@
 //! [`CredentialStore::count`] skip it with a logged warning, so one bad file
 //! cannot hide the others.  It stays on disk until it is overwritten, deleted
 //! with [`CredentialStore::delete`], or removed by [`CredentialStore::clear`].
+//!
+//! # Concurrency
+//!
+//! A store assumes one writer at a time.  Several processes may open the same
+//! state directory: every operation re-reads the root keys, so a reset
+//! performed by one process takes effect in the others, and first-time key
+//! creation is race-free.  Mutations are not otherwise coordinated between
+//! processes, so two concurrent writers can exceed the credential limit or
+//! assign two credentials the same creation order.
 
 use core::fmt;
 use std::io;
 use std::path::PathBuf;
 
+mod codec;
+mod envelope;
+mod file;
 mod fsio;
 mod keys;
 mod memory;
@@ -27,6 +86,7 @@ mod record;
 #[cfg(test)]
 mod test_support;
 
+pub use file::FileStore;
 pub use keys::{FileKeySource, KeyDomain, KeySource, RootKey};
 pub use memory::MemoryStore;
 pub use record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKeyMaterial};
@@ -83,8 +143,9 @@ pub trait CredentialStore {
     /// [`PinStateRecord::default`].  The attestation record is kept.
     ///
     /// Afterwards [`Self::pin_state`] returns the default state, not `None`.
-    /// This is destructive by design; call it only on an explicit reset
-    /// request.
+    /// [`FileStore`] also replaces the key protecting credentials and PIN
+    /// state, so any copy of the old files becomes undecryptable.  This is
+    /// destructive by design; call it only on an explicit reset request.
     fn clear(&mut self) -> Result<(), StoreError>;
 
     /// The persistent PIN state, or `None` if it has never been written.

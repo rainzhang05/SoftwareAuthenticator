@@ -1,19 +1,44 @@
-//! Root keys and where they come from.
+//! Root keys, where they come from, and the subkeys derived from them.
+//!
+//! ```text
+//! device root key (32 random bytes)
+//! └── HKDF-SHA-256 "ftsa-store/v1/device/record-encryption"      -> attestation record key
+//!
+//! credential root key (32 random bytes, replaced by clear())
+//! ├── HKDF-SHA-256 "ftsa-store/v1/credential/record-encryption"  -> credential + PIN state key
+//! └── HKDF-SHA-256 "ftsa-store/v1/credential/index-hmac"         -> credential file name key
+//! ```
+//!
+//! HKDF uses no salt (RFC 5869's default of 32 zero bytes) and a 32-byte
+//! output, with the root key as input keying material.  Root keys are never
+//! used directly, and the domain is part of every info string, so even a key
+//! source that returned the same key for both domains would not make their
+//! subkeys collide.
 
 use core::fmt;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::fsio;
 use super::StoreError;
 
-/// Length of a root key.
+/// Length of every root key and subkey.
 pub(crate) const KEY_LEN: usize = 32;
+
+/// HKDF info string for the attestation record encryption key.
+pub(crate) const INFO_DEVICE_RECORD: &[u8] = b"ftsa-store/v1/device/record-encryption";
+/// HKDF info string for the credential and PIN state encryption key.
+pub(crate) const INFO_CREDENTIAL_RECORD: &[u8] = b"ftsa-store/v1/credential/record-encryption";
+/// HKDF info string for the key that names credential files.
+pub(crate) const INFO_CREDENTIAL_INDEX: &[u8] = b"ftsa-store/v1/credential/index-hmac";
 
 /// How often [`FileKeySource::create`] re-reads after losing a creation race
 /// before giving up.
@@ -94,7 +119,7 @@ impl fmt::Debug for RootKey {
     }
 }
 
-/// Where a file-backed store gets its root keys.
+/// Where a [`FileStore`](super::FileStore) gets its root keys.
 ///
 /// The store calls [`load`](Self::load) at the start of every operation instead
 /// of caching keys, so that a reset performed through another store instance
@@ -265,6 +290,77 @@ impl KeySource for FileKeySource {
     }
 }
 
+/// A 32-byte key derived from a root key for a single purpose.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct SubKey([u8; KEY_LEN]);
+
+impl SubKey {
+    fn derive(root: &RootKey, domain: KeyDomain, info: &[u8]) -> Result<Self, StoreError> {
+        let mut subkey = Self([0; KEY_LEN]);
+        Hkdf::<Sha256>::new(None, root.expose())
+            .expand(info, &mut subkey.0)
+            .map_err(|_| StoreError::KeyUnavailable {
+                domain,
+                detail: "HKDF key derivation failed".into(),
+            })?;
+        Ok(subkey)
+    }
+
+    pub(crate) fn expose(&self) -> &[u8; KEY_LEN] {
+        &self.0
+    }
+}
+
+/// Subkeys of the device domain.
+pub(crate) struct DeviceKeys {
+    /// Encrypts the attestation record.
+    pub(crate) record: SubKey,
+}
+
+impl DeviceKeys {
+    pub(crate) fn derive(root: &RootKey) -> Result<Self, StoreError> {
+        Ok(Self {
+            record: SubKey::derive(root, KeyDomain::Device, INFO_DEVICE_RECORD)?,
+        })
+    }
+}
+
+/// Subkeys of the credential domain.
+pub(crate) struct CredentialKeys {
+    /// Encrypts credential records and the PIN state.
+    pub(crate) record: SubKey,
+    /// Keys the HMAC that names credential files.
+    index: SubKey,
+}
+
+impl CredentialKeys {
+    pub(crate) fn derive(root: &RootKey) -> Result<Self, StoreError> {
+        Ok(Self {
+            record: SubKey::derive(root, KeyDomain::Credential, INFO_CREDENTIAL_RECORD)?,
+            index: SubKey::derive(root, KeyDomain::Credential, INFO_CREDENTIAL_INDEX)?,
+        })
+    }
+
+    /// The file name of a credential: lowercase hex of
+    /// HMAC-SHA-256(index key, credential ID).  It reveals nothing about the
+    /// credential ID or relying party without the key.
+    pub(crate) fn file_name(&self, credential_id: &[u8]) -> Result<String, StoreError> {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.index.expose()).map_err(|_| {
+            StoreError::KeyUnavailable {
+                domain: KeyDomain::Credential,
+                detail: "HMAC key setup failed".into(),
+            }
+        })?;
+        mac.update(credential_id);
+        Ok(fsio::hex(&mac.finalize().into_bytes()))
+    }
+}
+
+/// Whether `name` has the shape of a credential file name.
+pub(crate) fn is_credential_file_name(name: &str) -> bool {
+    name.len() == 2 * KEY_LEN && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +368,101 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Barrier};
+
+    fn unhex(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn fixed_root() -> RootKey {
+        let mut bytes = [0u8; KEY_LEN];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        RootKey::from_bytes(bytes)
+    }
+
+    /// Pins the key hierarchy to an independent implementation.
+    ///
+    /// The expected values were computed outside this crate with Python's
+    /// standard library, implementing RFC 5869 directly on `hmac`/`hashlib`:
+    ///
+    /// ```text
+    /// prk    = hmac.new(b"\0" * 32, root, sha256).digest()
+    /// subkey = hmac.new(prk, info + b"\x01", sha256).digest()
+    /// name   = hmac.new(index_subkey, credential_id, sha256).hexdigest()
+    /// ```
+    ///
+    /// with `root = bytes(range(32))` and
+    /// `credential_id = bytes(range(0xa0, 0xb0))`, and cross-checked against
+    /// the `HKDF` class of `pyca/cryptography`.  A change to an info string,
+    /// the salt, or the naming scheme makes every existing store unreadable,
+    /// so it must show up here.
+    #[test]
+    fn key_hierarchy_matches_independent_implementation() {
+        let root = fixed_root();
+        let device = DeviceKeys::derive(&root).unwrap();
+        let credential = CredentialKeys::derive(&root).unwrap();
+        assert_eq!(
+            device.record.expose().as_slice(),
+            unhex("44551201ddb1bd229931a7d77274fc2f9a76ed10bc8e254e4c5b3497bc13d9d5")
+        );
+        assert_eq!(
+            credential.record.expose().as_slice(),
+            unhex("51172de714c0ce276f34019208c078a11d4dfd9f97f229b1f145c63962f1bc56")
+        );
+        assert_eq!(
+            credential.index.expose().as_slice(),
+            unhex("1d634187fbd84715e4989c36021d72028133ce89e7cdd79d7694a9cbe6ac3b6f")
+        );
+        let credential_id: Vec<u8> = (0xa0..0xb0).collect();
+        assert_eq!(
+            credential.file_name(&credential_id).unwrap(),
+            "e149de70f7e7fda0653f378cac5c6c1da5eef20d294378099da36f93e2c45727"
+        );
+    }
+
+    #[test]
+    fn subkeys_are_distinct_per_purpose_and_domain() {
+        let root = fixed_root();
+        let device = DeviceKeys::derive(&root).unwrap();
+        let credential = CredentialKeys::derive(&root).unwrap();
+        let keys = [
+            root.expose(),
+            device.record.expose(),
+            credential.record.expose(),
+            credential.index.expose(),
+        ];
+        for (i, a) in keys.iter().enumerate() {
+            for b in &keys[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn credential_file_names_are_deterministic_and_keyed() {
+        let keys = CredentialKeys::derive(&fixed_root()).unwrap();
+        let other = CredentialKeys::derive(&RootKey::generate().unwrap()).unwrap();
+        let name = keys.file_name(b"credential").unwrap();
+        assert!(is_credential_file_name(&name));
+        assert_eq!(name, keys.file_name(b"credential").unwrap());
+        assert_ne!(name, keys.file_name(b"credentiaL").unwrap());
+        assert_ne!(name, other.file_name(b"credential").unwrap());
+        assert!(!name.contains(&fsio::hex(b"credential")));
+    }
+
+    #[test]
+    fn credential_file_name_shape() {
+        assert!(is_credential_file_name(&"0".repeat(64)));
+        assert!(is_credential_file_name(&"af".repeat(32)));
+        assert!(!is_credential_file_name(&"0".repeat(63)));
+        assert!(!is_credential_file_name(&"A".repeat(64)));
+        assert!(!is_credential_file_name(&format!("{}g", "0".repeat(63))));
+        assert!(!is_credential_file_name(".tmp-0123456789abcdef"));
+    }
 
     #[test]
     fn root_key_debug_is_redacted_and_generation_is_random() {
