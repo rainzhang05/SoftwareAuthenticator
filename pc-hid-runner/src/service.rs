@@ -153,23 +153,32 @@ pub fn ensure_state_dir(path: &Path) -> io::Result<()> {
     transport_core::state::ensure_state_dir(path)
 }
 
-/// Minimum PIN length enforced by the CTAP layer.
-const MIN_PIN_LENGTH: usize = 4;
-/// Maximum PIN length permitted by CTAP (63 byte UTF-8 string max).
-const MAX_PIN_LENGTH: usize = 63;
+/// Minimum PIN length in Unicode code points (CTAP 2.1 section 6.5.1).
+pub const MIN_PIN_CODE_POINTS: usize = 4;
+/// Maximum PIN length in bytes of UTF-8 (CTAP 2.1 section 6.5.1).
+pub const MAX_PIN_BYTES: usize = 63;
 
-fn validate_pin(pin: &str) -> io::Result<()> {
-    let bytes = pin.as_bytes();
-    if bytes.len() < MIN_PIN_LENGTH {
+/// Check a new PIN against the CTAP 2.1 composition rules: at least
+/// [`MIN_PIN_CODE_POINTS`] code points, at most [`MAX_PIN_BYTES`] bytes, and no
+/// trailing NUL (CTAP pads PINs with NUL bytes, so a platform could never send
+/// such a PIN).
+pub fn validate_pin(pin: &str) -> io::Result<()> {
+    if pin.chars().count() < MIN_PIN_CODE_POINTS {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("PIN must be at least {MIN_PIN_LENGTH} bytes"),
+            format!("PIN must be at least {MIN_PIN_CODE_POINTS} characters long"),
         ));
     }
-    if bytes.len() > MAX_PIN_LENGTH {
+    if pin.len() > MAX_PIN_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("PIN must be at most {MAX_PIN_LENGTH} bytes"),
+            format!("PIN must be at most {MAX_PIN_BYTES} bytes long in UTF-8"),
+        ));
+    }
+    if pin.ends_with('\0') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PIN must not end with a NUL character",
         ));
     }
     Ok(())
@@ -281,5 +290,63 @@ fn verify_current_pin(state: &mut StoredPinState, candidate: &str) -> io::Result
             io::ErrorKind::PermissionDenied,
             format!("PIN is incorrect ({} retries remaining)", state.pin_retries),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Test characters by UTF-8 width, so the boundaries below are explicit.
+    const TWO_BYTES: &str = "\u{e9}"; // e with acute accent
+    const THREE_BYTES: &str = "\u{20ac}"; // euro sign
+    const FOUR_BYTES: &str = "\u{1f511}"; // key emoji
+
+    #[test]
+    fn test_characters_have_the_expected_utf8_widths() {
+        assert_eq!(TWO_BYTES.len(), 2);
+        assert_eq!(THREE_BYTES.len(), 3);
+        assert_eq!(FOUR_BYTES.len(), 4);
+    }
+
+    #[test]
+    fn minimum_pin_length_counts_code_points_not_bytes() {
+        // Enough bytes, too few code points.
+        assert!(validate_pin(&TWO_BYTES.repeat(2)).is_err()); // 4 bytes, 2 code points
+        assert!(validate_pin(&THREE_BYTES.repeat(3)).is_err()); // 9 bytes, 3 code points
+        assert!(validate_pin(&FOUR_BYTES.repeat(3)).is_err()); // 12 bytes, 3 code points
+        assert!(validate_pin("abc").is_err());
+        assert!(validate_pin("").is_err());
+
+        // Four code points are enough however they are encoded.
+        assert!(validate_pin("abcd").is_ok());
+        assert!(validate_pin(&TWO_BYTES.repeat(4)).is_ok());
+        assert!(validate_pin(&FOUR_BYTES.repeat(4)).is_ok());
+        assert!(validate_pin(&format!("ab{TWO_BYTES}{THREE_BYTES}")).is_ok());
+    }
+
+    #[test]
+    fn maximum_pin_length_counts_bytes_not_code_points() {
+        let at_limit = THREE_BYTES.repeat(21);
+        assert_eq!(at_limit.len(), MAX_PIN_BYTES);
+        assert!(validate_pin(&at_limit).is_ok());
+
+        let at_limit_mixed = format!("{}{TWO_BYTES}", "a".repeat(61));
+        assert_eq!(at_limit_mixed.len(), MAX_PIN_BYTES);
+        assert!(validate_pin(&at_limit_mixed).is_ok());
+
+        // 63 code points, but the last one takes the encoding to 64 bytes.
+        let over_limit = format!("{}{TWO_BYTES}", "a".repeat(62));
+        assert_eq!(over_limit.chars().count(), 63);
+        assert!(validate_pin(&over_limit).is_err());
+
+        // Only 16 code points, but 64 bytes.
+        assert!(validate_pin(&FOUR_BYTES.repeat(16)).is_err());
+    }
+
+    #[test]
+    fn pin_must_not_end_with_nul() {
+        assert!(validate_pin("1234\u{0}").is_err());
+        assert!(validate_pin("12\u{0}34").is_ok());
     }
 }
