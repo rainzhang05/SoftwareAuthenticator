@@ -1,11 +1,12 @@
 use super::*;
+use crate::ctap::make_credential::COSE_ALG_ES256;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::{
     decrypt_shared_secret, encrypt_shared_secret, HmacSha256, PinProtocolSession,
     PIN_UV_AUTH_PROTOCOL_CLASSIC, PIN_UV_AUTH_PROTOCOL_CLASSIC_V1, PIN_UV_AUTH_PROTOCOL_CLASSIC_V2,
 };
 use crate::ctap::pin::state::{PinState, MAX_PIN_FAILURES_BEFORE_BLOCK, MAX_PIN_RETRIES};
-use crate::{credential_secret_from_bytes, CredentialSecretKey};
+use crate::{create_credential, credential_secret_from_bytes, CredentialSecretKey};
 use ciborium::{
     de::from_reader,
     ser::into_writer,
