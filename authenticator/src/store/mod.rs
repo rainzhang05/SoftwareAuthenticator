@@ -20,9 +20,14 @@ use core::fmt;
 use std::io;
 use std::path::PathBuf;
 
+mod fsio;
+mod keys;
 mod memory;
 mod record;
+#[cfg(test)]
+mod test_support;
 
+pub use keys::{FileKeySource, KeyDomain, KeySource, RootKey};
 pub use memory::MemoryStore;
 pub use record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKeyMaterial};
 
@@ -130,7 +135,7 @@ impl fmt::Display for Corruption {
     }
 }
 
-/// Errors reported by a [`CredentialStore`].
+/// Errors reported by a [`CredentialStore`] or a [`KeySource`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum StoreError {
@@ -150,6 +155,16 @@ pub enum StoreError {
         /// What was wrong with it.
         reason: Corruption,
     },
+    /// A root key exists but cannot be used, or is missing although data
+    /// encrypted under it exists.  Keys are never regenerated implicitly,
+    /// because that would orphan every record they protect; restore the key or
+    /// reset the store.
+    KeyUnavailable {
+        /// The key domain concerned.
+        domain: KeyDomain,
+        /// A human-readable explanation.
+        detail: String,
+    },
     /// Inserting a new credential would exceed the credential limit.
     Full {
         /// The configured limit.
@@ -167,6 +182,9 @@ impl fmt::Display for StoreError {
         match self {
             StoreError::Io { path, source } => write!(f, "{}: {source}", path.display()),
             StoreError::Corrupt { object, reason } => write!(f, "{object} is corrupt: {reason}"),
+            StoreError::KeyUnavailable { domain, detail } => {
+                write!(f, "{domain} root key unavailable: {detail}")
+            }
             StoreError::Full { max } => write!(f, "credential store is full ({max} credentials)"),
             StoreError::InvalidRecord(reason) => write!(f, "invalid record: {reason}"),
             StoreError::Random => {
