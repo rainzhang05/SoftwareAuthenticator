@@ -1,10 +1,9 @@
 name: CI
 
-# pc-hid-runner is Linux-only (it opens /dev/uhid and calls
-# nix::unistd::getgroups), so it does not compile on macOS or Windows. That
-# makes ubuntu-latest the only place the *whole* workspace is ever verified, and
-# makes this workflow the authoritative gate for the project rather than a
-# convenience.
+# The whole workspace builds and runs its unit tests on macOS too, but the
+# daemon only works on Linux (it creates the virtual key through /dev/uhid).
+# ubuntu-latest is therefore the platform that matters, and this workflow is the
+# authoritative gate for the project rather than a convenience.
 
 on:
   push:
@@ -123,9 +122,9 @@ jobs:
       - name: Check every feature combination
         run: cargo hack check --workspace --locked --all-targets --feature-powerset
 
-      # Dependencies whose code a future rustc will reject outright (currently
-      # daemonize 0.4). Surfaced in the job summary so that day arrives as a
-      # known deadline rather than a sudden build failure. Informational only.
+      # Dependencies whose code a future rustc will reject outright (none at the
+      # moment). Surfaced in the job summary so that day arrives as a known
+      # deadline rather than a sudden build failure. Informational only.
       - name: Future-incompatibility report
         if: always()
         run: |

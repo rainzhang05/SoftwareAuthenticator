@@ -18,9 +18,8 @@
 # optional, and an advisory hiding behind an off-by-default feature is still an
 # advisory.
 all-features = true
-# Deliberately NOT restricted with `targets = [...]`. pc-hid-runner only builds
-# on Linux, but authenticator/transport-core/trussed-mldsa are portable, and
-# filtering the graph by target would hide advisories in platform-specific deps.
+# Deliberately NOT restricted with `targets = [...]`: filtering the graph by
+# target would hide advisories in platform-specific dependencies.
 
 [output]
 feature-depth = 1
