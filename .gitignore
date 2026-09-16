@@ -9,3 +9,6 @@ target
 # Tooling scratch artifacts (e.g. download-ripgrepXXXXXX/)
 download-ripgrep*/
 *.tmp
+
+# Agent git worktrees
+.claude/worktrees/
