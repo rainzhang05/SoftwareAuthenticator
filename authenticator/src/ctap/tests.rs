@@ -1,4 +1,10 @@
 use super::*;
+use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
+use crate::ctap::pin::protocol::{
+    decrypt_shared_secret, encrypt_shared_secret, HmacSha256, PinProtocolSession,
+    PIN_UV_AUTH_PROTOCOL_CLASSIC, PIN_UV_AUTH_PROTOCOL_CLASSIC_V1, PIN_UV_AUTH_PROTOCOL_CLASSIC_V2,
+};
+use crate::ctap::pin::state::{PinState, MAX_PIN_FAILURES_BEFORE_BLOCK, MAX_PIN_RETRIES};
 use crate::{credential_secret_from_bytes, CredentialSecretKey};
 use ciborium::{
     de::from_reader,
@@ -6,6 +12,7 @@ use ciborium::{
     value::{Integer, Value},
 };
 use core::task::Poll;
+use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::{
     ecdh::diffie_hellman,
     ecdsa::{

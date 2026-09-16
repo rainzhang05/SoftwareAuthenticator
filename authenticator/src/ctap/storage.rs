@@ -3,7 +3,8 @@
 //! Test builds keep credentials in `CtapApp::stored_credentials` and never
 //! touch the filesystem.
 
-use super::{CtapApp, PinState};
+use super::pin::state::PinState;
+use super::CtapApp;
 #[cfg(not(test))]
 use ciborium::{de::from_reader, ser::into_writer};
 use p256::ecdsa::{signature::Signer, Signature as P256EcdsaSignature, SigningKey};
