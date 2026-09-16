@@ -1,0 +1,71 @@
+# systemd user unit for the Feitian ML-DSA software authenticator.
+#
+# The authenticator is a security key for your own desktop session: your
+# browser uses it, and its credentials live in your home directory, so it runs
+# under your user service manager rather than as a system service. It uses the
+# same state directory as the pc-hid-runner CLI does by default,
+# $XDG_DATA_HOME/feitian-mldsa-authenticator, or
+# ~/.local/share/feitian-mldsa-authenticator when XDG_DATA_HOME is unset. If
+# you set XDG_DATA_HOME in your shell, set it for the user manager as well
+# (see environment.d(5)), or the two will use different directories.
+#
+# Setup:
+#   1. Install contrib/udev/70-feitian-authenticator.rules as described in
+#      that file, add yourself to its group, and log in again.
+#   2. Install the binary where this unit expects it:
+#        install -D -m 755 target/release/pc-hid-runner ~/.local/bin/pc-hid-runner
+#   3. Install and start the unit:
+#        install -D -m 644 feitian-authenticator.service \
+#          ~/.config/systemd/user/feitian-authenticator.service
+#        systemctl --user daemon-reload
+#        systemctl --user enable --now feitian-authenticator.service
+#
+# While the service runs, "pc-hid-runner status" reports it, and "pc-hid-runner
+# pin ..." and "pc-hid-runner reset" refuse to touch its state. Stop it first
+# with "systemctl --user stop feitian-authenticator".
+
+[Unit]
+Description=Feitian ML-DSA software authenticator (virtual FIDO security key)
+Documentation=https://github.com/FeitianTech/FidoSoftwareAuthenticator
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/pc-hid-runner attach --foreground
+Environment=RUST_LOG=info
+# On SIGTERM the daemon removes the virtual device and exits with status 0, so
+# stopping the service is not a failure and does not trigger a restart.
+Restart=on-failure
+RestartSec=5s
+
+# Sandboxing. A user service manager has no privileges, so this uses only
+# settings enforced with prctl() and seccomp, which need none:
+NoNewPrivileges=yes
+# No sockets other than AF_UNIX, which NSS may use to look up group names.
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+#
+# Deliberately not used:
+#  - ProtectSystem=, ProtectHome=, ReadWritePaths=, PrivateTmp=,
+#    PrivateNetwork=, ProtectKernelTunables=, ProtectKernelModules=,
+#    ProtectKernelLogs=, ProtectClock=, ProtectHostname=,
+#    CapabilityBoundingSet=: these need mount or other namespaces, which a
+#    user manager can only set up inside a user namespace, so systemd has to
+#    add PrivateUsers= to use them. Where unprivileged user namespaces are
+#    restricted, as on Ubuntu 24.04 by default, the service may then fail to
+#    start. A user service has no capabilities to drop anyway.
+#  - PrivateDevices=: the same, and its private /dev would not contain
+#    /dev/uhid.
+#  - DeviceAllow=, DevicePolicy=, IPAddressDeny=: enforced with cgroup BPF
+#    programs, which only the system service manager can install.
+#  - ProtectControlGroups=, ProtectProc=: system services only.
+#  - SystemCallFilter=@system-service: probably fine, but not yet tested; a
+#    system call missing from the set would kill the daemon.
+
+[Install]
+WantedBy=default.target
