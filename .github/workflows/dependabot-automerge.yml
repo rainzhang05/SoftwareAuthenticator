@@ -1,0 +1,53 @@
+name: Dependabot auto-merge
+
+# Merges Dependabot's Cargo dependency PRs without human review only when they
+# are provably safe; everything else waits for a person. The decision logic is in
+# .github/scripts/dependabot-automerge.sh so it can be dry-run locally:
+#
+#   DRY_RUN=1 REPO=owner/repo HEAD_SHA=<sha> HEAD_BRANCH=<branch> \
+#     .github/scripts/dependabot-automerge.sh
+#
+# workflow_run is used because it fires after CI and Security finish, always runs
+# this file and the script from main (never code from the PR), and may be granted
+# write permissions, which a Dependabot-triggered pull_request run may not.
+#
+# Limitation: GitHub does not let GITHUB_TOKEN merge changes to workflow files, so
+# GitHub Actions version bumps from Dependabot always need a manual merge.
+
+on:
+  workflow_run:
+    workflows: [CI, Security]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: dependabot-automerge-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  automerge:
+    name: auto-merge
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/cargo/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # merge the PR
+      pull-requests: write # merge the PR
+      actions: write # dispatch CI and Security on main after merging
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Merge if safe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: .github/scripts/dependabot-automerge.sh
