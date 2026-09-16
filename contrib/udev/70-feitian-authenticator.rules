@@ -1,3 +1,45 @@
-# Restrict access to the Feitian ML-DSA software authenticator hidraw node
-# Adjust GROUP to match your local FIDO access group if different from plugdev
-KERNEL=="hidraw*", ATTRS{idVendor}=="096e", ATTRS{idProduct}=="0858", MODE="0660", GROUP="plugdev"
+# udev rules for the Feitian ML-DSA software authenticator (pc-hid-runner).
+#
+# Install with:
+#   sudo install -m 644 70-feitian-authenticator.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+# and load the uhid module at every boot, so the first rule applies before
+# anyone needs the device:
+#   echo uhid | sudo tee /etc/modules-load.d/uhid.conf
+#
+# The file name must sort before 73-seat-late.rules, which is where systemd
+# acts on the "uaccess" tag set below.
+
+ACTION=="remove", GOTO="feitian_authenticator_end"
+
+# /dev/uhid, which pc-hid-runner opens to create the virtual security key.
+# Only root can open it by default. Anyone who can open it can create any
+# kind of HID device, keyboards included, and so type into whichever session
+# is active: only add users you would trust with that to the group. The group
+# is plugdev as on Debian and Ubuntu; create it or pick another group
+# elsewhere.
+SUBSYSTEM=="misc", KERNEL=="uhid", GROUP="plugdev", MODE="0660"
+
+# The hidraw node of the virtual key itself, which browsers and other FIDO
+# clients open.
+#
+# A device created through /dev/uhid has no USB parent device, so USB
+# attributes such as ATTRS{idVendor} never match it. The kernel makes the uhid
+# misc device its parent instead, which gives the node a path like
+#   /devices/virtual/misc/uhid/0003:096E:0858.0004/hidraw/hidraw3
+# where the numbers are the bus (0003, USB), the vendor and product IDs in
+# upper-case hex, and an instance counter. 096E:0858 are pc-hid-runner's
+# defaults; change the pattern if you pass --vendor-id or --product-id. Real
+# USB security keys never match, even with the same IDs.
+#
+# systemd 244 and later already recognise any hidraw device with a FIDO
+# report descriptor, this one included (60-fido-id.rules, 70-uaccess.rules),
+# and give the user of the active local session access to it. This rule does
+# the same where that is missing, and keeps the node closed to everyone else:
+# the authenticator approves user presence by itself, so whoever can open the
+# node can use the credentials behind it.
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", DEVPATH=="/devices/virtual/misc/uhid/0003:096E:0858.*", \
+  MODE="0600", TAG+="uaccess"
+
+LABEL="feitian_authenticator_end"
