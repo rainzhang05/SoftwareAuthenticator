@@ -8,12 +8,17 @@ authors = ["Feitian Technologies <info@ftsafe.com>"]
 license = "Apache-2.0 OR MIT"
 
 [dependencies]
-fips204 = "0.4"
+fips204 = "0.4.6"
 zeroize = { version = "1", features = ["zeroize_derive"] }
+# Optional: without it `sign()`'s empty-Vec failure path is completely silent.
+log = { version = "0.4", default-features = false, optional = true }
 
 [features]
 # Enable specific ML-DSA parameter sets.  All three are enabled by default.
-default = ["mldsa44", "mldsa65", "mldsa87"]
+# `log` is also on by default so that signing failures are not silent; build
+# with `default-features = false` to drop it.
+default = ["mldsa44", "mldsa65", "mldsa87", "log"]
 mldsa44 = []
 mldsa65 = []
 mldsa87 = []
+log = ["dep:log"]
