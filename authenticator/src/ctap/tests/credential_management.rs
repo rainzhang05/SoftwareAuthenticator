@@ -1,6 +1,9 @@
 //! authenticatorCredentialManagement tests.
 
-use super::support::{install_pin_uv_auth_token, token_pin_auth, TestClient};
+use super::support::{
+    es256_credential, get_pin_uv_auth_token, install_pin_uv_auth_token, pin_hash, token_pin_auth,
+    TestClient,
+};
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA};
 use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
@@ -369,4 +372,151 @@ fn credential_management_rejects_bound_token_for_rp_enumeration() {
     into_writer(&request, &mut payload).expect("serialize enumerate RPs request");
     let result = app.handle_credential_management(&payload);
     assert_eq!(result, Err(CTAP2_ERR_PIN_AUTH_INVALID));
+}
+
+fn credential_management(
+    app: &mut CtapApp<TestClient>,
+    token: &[u8; 32],
+    subcommand: u8,
+    params: Option<Value>,
+) -> Result<Vec<u8>, u8> {
+    let mut entries = vec![
+        (
+            Value::Integer(Integer::from(1)),
+            Value::Integer(Integer::from(subcommand)),
+        ),
+        (
+            Value::Integer(Integer::from(3)),
+            Value::Integer(Integer::from(PIN_UV_AUTH_PROTOCOL_CLASSIC)),
+        ),
+        (
+            Value::Integer(Integer::from(4)),
+            Value::Bytes(cm_pin_param(token, subcommand, params.clone())),
+        ),
+    ];
+    if let Some(params) = params {
+        entries.push((Value::Integer(Integer::from(2)), params));
+    }
+    let mut payload = Vec::new();
+    into_writer(&canonical_map(entries), &mut payload).expect("serialize request");
+    app.handle_credential_management(&payload)
+}
+
+fn rp_id_hash_params(rp_id: &str) -> Value {
+    canonical_map(vec![(
+        Value::Integer(Integer::from(1)),
+        Value::Bytes(CtapApp::<TestClient>::cm_hash_rp_id(rp_id)),
+    )])
+}
+
+fn credential_id_params(credential_id: &[u8], user: Option<Value>) -> Value {
+    let mut entries = vec![(
+        Value::Integer(Integer::from(2)),
+        canonical_map(vec![
+            (Value::Text("type".into()), Value::Text("public-key".into())),
+            (
+                Value::Text("id".into()),
+                Value::Bytes(credential_id.to_vec()),
+            ),
+        ]),
+    )];
+    if let Some(user) = user {
+        entries.push((Value::Integer(Integer::from(3)), user));
+    }
+    canonical_map(entries)
+}
+
+#[test]
+fn credential_management_limits_an_rp_scoped_token_to_that_rp() {
+    let mut app = CtapApp::new(TestClient::new(), [0x27; 16]);
+    app.pin_state.set_pin(pin_hash(b"1234"));
+    app.stored_credentials
+        .push(es256_credential("example.com", &[0xA1]));
+    app.stored_credentials
+        .push(es256_credential("other.example", &[0xB1]));
+    let token = get_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        b"1234",
+        PIN_PERMISSION_CM.into(),
+        Some("example.com"),
+    )
+    .expect("cm token scoped to example.com");
+
+    // "the cm permission and no associated permissions RP ID" (CTAP 2.3 §6.8.2, §6.8.3)
+    for subcommand in [0x01, 0x02] {
+        assert_eq!(
+            credential_management(&mut app, &token, subcommand, None),
+            Err(CTAP2_ERR_PIN_AUTH_INVALID),
+            "subCommand {subcommand:#x}"
+        );
+    }
+
+    // enumerateCredentialsBegin for the token's own RP only.
+    let response = credential_management(
+        &mut app,
+        &token,
+        0x04,
+        Some(rp_id_hash_params("example.com")),
+    )
+    .expect("own RP's credentials enumerate");
+    assert_eq!(response[0], CTAP2_OK);
+    assert_eq!(
+        credential_management(
+            &mut app,
+            &token,
+            0x04,
+            Some(rp_id_hash_params("other.example"))
+        ),
+        Err(CTAP2_ERR_PIN_AUTH_INVALID)
+    );
+
+    // "the pinUvAuthToken permissions RP ID matches the RP ID of the
+    // credential" (CTAP 2.3 §6.8.5, §6.8.6)
+    let user = canonical_map(vec![
+        (Value::Text("id".into()), Value::Bytes(vec![0x01])),
+        (Value::Text("name".into()), Value::Text("renamed".into())),
+    ]);
+    assert_eq!(
+        credential_management(
+            &mut app,
+            &token,
+            0x07,
+            Some(credential_id_params(&[0xB1], Some(user.clone())))
+        ),
+        Err(CTAP2_ERR_PIN_AUTH_INVALID)
+    );
+    assert_eq!(
+        credential_management(
+            &mut app,
+            &token,
+            0x07,
+            Some(credential_id_params(&[0xA1], Some(user)))
+        ),
+        Ok(vec![CTAP2_OK])
+    );
+    assert_eq!(
+        credential_management(
+            &mut app,
+            &token,
+            0x06,
+            Some(credential_id_params(&[0xB1], None))
+        ),
+        Err(CTAP2_ERR_PIN_AUTH_INVALID)
+    );
+    assert_eq!(
+        credential_management(
+            &mut app,
+            &token,
+            0x06,
+            Some(credential_id_params(&[0xA1], None))
+        ),
+        Ok(vec![CTAP2_OK])
+    );
+    let remaining: Vec<_> = app
+        .stored_credentials
+        .iter()
+        .map(|credential| credential.rp_id.as_str())
+        .collect();
+    assert_eq!(remaining, ["other.example"]);
 }

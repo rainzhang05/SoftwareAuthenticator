@@ -393,17 +393,45 @@ pub(super) fn get_pin_token(
     protocol: ClassicPinProtocol,
     pin: &[u8],
 ) -> Result<[u8; 32], u8> {
+    request_pin_uv_auth_token(app, protocol, pin, 0x05, Vec::new())
+}
+
+/// getPinUvAuthTokenUsingPinWithPermissions (0x09) with `pin` over
+/// `protocol`: the decrypted pinUvAuthToken.
+pub(super) fn get_pin_uv_auth_token(
+    app: &mut CtapApp<TestClient>,
+    protocol: ClassicPinProtocol,
+    pin: &[u8],
+    permissions: i128,
+    rp_id: Option<&str>,
+) -> Result<[u8; 32], u8> {
+    let mut parameters = vec![(
+        int(9),
+        Value::Integer(Integer::try_from(permissions).expect("CBOR integer")),
+    )];
+    if let Some(rp_id) = rp_id {
+        parameters.push((int(10), Value::Text(rp_id.into())));
+    }
+    request_pin_uv_auth_token(app, protocol, pin, 0x09, parameters)
+}
+
+fn request_pin_uv_auth_token(
+    app: &mut CtapApp<TestClient>,
+    protocol: ClassicPinProtocol,
+    pin: &[u8],
+    subcommand: i64,
+    parameters: Vec<(Value, Value)>,
+) -> Result<[u8; 32], u8> {
     let session = PlatformPinSession::establish(app, protocol, 0x21);
     let pin_hash_enc = session.encrypt(&pin_hash(pin));
-    let response = client_pin(
-        app,
-        vec![
-            (int(1), int(protocol.identifier().into())),
-            (int(2), int(0x05)),
-            (int(3), session.key_agreement.clone()),
-            (int(6), Value::Bytes(pin_hash_enc)),
-        ],
-    )?;
+    let mut entries = vec![
+        (int(1), int(protocol.identifier().into())),
+        (int(2), int(subcommand)),
+        (int(3), session.key_agreement.clone()),
+        (int(6), Value::Bytes(pin_hash_enc)),
+    ];
+    entries.extend(parameters);
+    let response = client_pin(app, entries)?;
     assert_eq!(response[0], CTAP2_OK);
     let Value::Map(map) = from_reader(&response[1..]).expect("decode getPinToken") else {
         panic!("response must be a map");

@@ -2,8 +2,9 @@
 //! subcommands over both PIN/UV auth protocols.
 
 use super::support::{
-    classic_encrypt, classic_pin_auth, client_pin, derive_classic_session, get_pin_retries, int,
-    padded_pin, pin_hash, request_classic_key_agreement, PlatformPinSession, TestClient,
+    classic_encrypt, classic_pin_auth, client_pin, derive_classic_session, get_pin_retries,
+    get_pin_uv_auth_token, int, padded_pin, pin_hash, request_classic_key_agreement,
+    PlatformPinSession, TestClient,
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
@@ -825,5 +826,84 @@ fn set_pin_when_a_pin_is_already_set_is_pin_auth_invalid() {
         );
         assert_eq!(result, Err(CTAP2_ERR_PIN_AUTH_INVALID), "{protocol:?}");
         assert_eq!(app.pin_state.persistent().pin_hash, Some(pin_hash(b"1234")));
+    }
+}
+
+#[test]
+fn get_pin_uv_auth_token_grants_cm_scoped_to_an_rp_id() {
+    // cm: "The rpId parameter is optional, if it is present, the pinUvAuthToken
+    // can only be used for Credential Management operations on Credentials
+    // associated with that RP ID." (CTAP 2.3 §6.5.5.7)
+    let mut app = CtapApp::new(TestClient::new(), [0x45; 16]);
+    app.pin_state.set_pin(pin_hash(b"1234"));
+    let token = get_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        b"1234",
+        PIN_PERMISSION_CM.into(),
+        Some("example.com"),
+    )
+    .expect("cm with an rpId is granted");
+    assert_eq!(app.pin_state.pin_uv_auth_token(), Some(token));
+    assert_eq!(app.pin_state.pin_uv_auth_permissions, PIN_PERMISSION_CM);
+    assert_eq!(app.pin_state.permissions_rp_id(), Some("example.com"));
+}
+
+#[test]
+fn get_pin_uv_auth_token_refuses_permissions_it_cannot_grant() {
+    // be, lbw, acfg and pcmr need features this authenticator does not have.
+    for permissions in [0x08, 0x10, 0x20, 0x40, 0x04 | 0x40, 0x01 | 0x02 | 0x08] {
+        let mut app = CtapApp::new(TestClient::new(), [0x46; 16]);
+        app.pin_state.set_pin(pin_hash(b"1234"));
+        let result = get_pin_uv_auth_token(
+            &mut app,
+            ClassicPinProtocol::V2,
+            b"1234",
+            permissions,
+            Some("example.com"),
+        );
+        assert_eq!(
+            result,
+            Err(CTAP2_ERR_UNAUTHORIZED_PERMISSION),
+            "permissions {permissions:#x}"
+        );
+        assert_eq!(app.pin_state.pin_uv_auth_token(), None);
+        // Refused before the PIN is looked at.
+        assert_eq!(app.pin_state.retries(), MAX_PIN_RETRIES);
+    }
+}
+
+#[test]
+fn get_pin_uv_auth_token_rejects_zero_permissions() {
+    for permissions in [0, -1] {
+        let mut app = CtapApp::new(TestClient::new(), [0x47; 16]);
+        app.pin_state.set_pin(pin_hash(b"1234"));
+        let result =
+            get_pin_uv_auth_token(&mut app, ClassicPinProtocol::V2, b"1234", permissions, None);
+        assert_eq!(result, Err(CTAP1_ERR_INVALID_PARAMETER), "{permissions}");
+        assert_eq!(app.pin_state.retries(), MAX_PIN_RETRIES);
+    }
+}
+
+#[test]
+fn get_pin_uv_auth_token_ignores_undefined_permissions() {
+    // "Undefined permissions present in the permissions parameter are ignored."
+    let cases: [(i128, u8); 4] = [
+        (0x80 | 0x04, PIN_PERMISSION_CM),
+        (0x100 | 0x04, PIN_PERMISSION_CM),
+        (i128::from(u64::MAX) & !0x7F | 0x04, PIN_PERMISSION_CM),
+        (0x80, 0),
+    ];
+    for (requested, granted) in cases {
+        let mut app = CtapApp::new(TestClient::new(), [0x48; 16]);
+        app.pin_state.set_pin(pin_hash(b"1234"));
+        let token =
+            get_pin_uv_auth_token(&mut app, ClassicPinProtocol::V1, b"1234", requested, None)
+                .unwrap_or_else(|err| panic!("permissions {requested:#x}: {err:#04x}"));
+        assert_eq!(app.pin_state.pin_uv_auth_token(), Some(token));
+        assert_eq!(
+            app.pin_state.pin_uv_auth_permissions, granted,
+            "permissions {requested:#x}"
+        );
     }
 }

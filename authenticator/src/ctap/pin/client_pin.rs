@@ -1,6 +1,6 @@
 //! The authenticatorClientPIN command and its subcommands.
 
-use super::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
+use super::permissions::{requested_pin_permissions, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use super::protocol::{
     decrypt, parse_required_pin_uv_auth_protocol, verify, PinProtocol, PinProtocolSession,
 };
@@ -299,50 +299,31 @@ where
         let protocol = cbor::map_get(map, Value::Integer(Integer::from(1)));
         let key_agreement = required_map(map, 3)?;
         let pin_hash_enc = required_bytes(map, 6)?;
-        let permissions = cbor::map_get(map, Value::Integer(Integer::from(9)))
-            .ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
-        let protocol = parse_required_pin_uv_auth_protocol(protocol)?;
-        let permissions_value = match permissions {
-            Value::Integer(value) => {
-                let int_value: i128 = value.clone().into();
-                if int_value <= 0 || int_value > u8::MAX as i128 {
-                    return Err(CTAP1_ERR_INVALID_PARAMETER);
-                }
-                int_value as u8
-            }
-            _ => return Err(CTAP1_ERR_INVALID_PARAMETER),
+        let permissions = match cbor::map_get(map, Value::Integer(Integer::from(9))) {
+            Some(Value::Integer(permissions)) => i128::from(*permissions),
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        if permissions_value == 0 {
-            return Err(CTAP1_ERR_INVALID_PARAMETER);
-        }
-
-        let rp_id_value = match cbor::map_get(map, Value::Integer(Integer::from(10))) {
-            Some(Value::Text(text)) => Some(text.clone()),
-            Some(_) => return Err(CTAP2_ERR_INVALID_CBOR),
+        let rp_id = match cbor::map_get(map, Value::Integer(Integer::from(10))) {
+            Some(Value::Text(rp_id)) => Some(rp_id.clone()),
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
             None => None,
         };
-
-        if permissions_value & (PIN_PERMISSION_MC | PIN_PERMISSION_GA) != 0 && rp_id_value.is_none()
-        {
+        // The mc and ga permissions have "RP ID: Required" (CTAP 2.3 §6.5.5.7);
+        // cm's is optional and scopes the token to that RP's credentials.
+        let rp_scoped = i128::from(PIN_PERMISSION_MC | PIN_PERMISSION_GA);
+        if permissions > 0 && permissions & rp_scoped != 0 && rp_id.is_none() {
             return Err(CTAP2_ERR_MISSING_PARAMETER);
         }
-        if permissions_value & PIN_PERMISSION_CM != 0 && rp_id_value.is_some() {
+        let protocol = parse_required_pin_uv_auth_protocol(protocol)?;
+        // "If the authenticator receives a permissions parameter with value 0,
+        // return CTAP1_ERR_INVALID_PARAMETER."  permissions is an unsigned
+        // integer, so a negative value is invalid too.
+        if permissions <= 0 {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
-
-        let supported_permissions = PIN_PERMISSION_MC | PIN_PERMISSION_GA | PIN_PERMISSION_CM;
-        if permissions_value & !supported_permissions != 0 {
-            return Err(CTAP2_ERR_UNAUTHORIZED_PERMISSION);
-        }
-
-        let assigned_permissions = permissions_value & supported_permissions;
-        self.client_pin_get_token_common(
-            protocol,
-            key_agreement,
-            pin_hash_enc,
-            assigned_permissions,
-            rp_id_value,
-        )
+        let permissions = requested_pin_permissions(permissions)?;
+        self.client_pin_get_token_common(protocol, key_agreement, pin_hash_enc, permissions, rp_id)
     }
 
     pub(crate) fn handle_client_pin(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
