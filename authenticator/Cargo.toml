@@ -10,8 +10,6 @@ license = "Apache-2.0 OR MIT"
 [dependencies]
 trussed = "0.1.0"
 ciborium = { version = "0.2", default-features = false }
-heapless = "0.7"
-littlefs2 = "0.4"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 hkdf = "0.12"
