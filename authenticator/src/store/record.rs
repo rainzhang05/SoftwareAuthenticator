@@ -1,4 +1,4 @@
-//! The records a credential store persists.
+//! The records a [`CredentialStore`](super::CredentialStore) persists.
 //!
 //! These types are deliberately independent of the CTAP engine's in-memory
 //! structures: they describe exactly what is written to storage and nothing
@@ -131,17 +131,20 @@ impl fmt::Debug for PrivateKeyMaterial {
 ///
 /// # Creation order
 ///
-/// `created_at` is owned by the store.  When `put` inserts a credential whose
+/// `created_at` is owned by the store.  When [`put`] inserts a credential whose
 /// ID is not stored yet, the store assigns it a value greater than that of
 /// every credential it currently holds, so the credential created last is
-/// always first in `list` and two credentials never tie.  When `put`
+/// always first in [`list`] and two credentials never tie.  When [`put`]
 /// replaces an existing credential, the stored value is kept.  In both cases
-/// the value in the record passed to `put` is ignored; construct new records
+/// the value in the record passed to [`put`] is ignored; construct new records
 /// with `created_at: 0`.
 ///
 /// A sequence number is used instead of a timestamp because wall clocks can
 /// step backwards and have limited resolution, and CTAP requires the
 /// most-recently-created credential to be returned first.
+///
+/// [`put`]: super::CredentialStore::put
+/// [`list`]: super::CredentialStore::list
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct CredentialRecord {
     /// The credential ID the relying party uses to refer to this credential.
