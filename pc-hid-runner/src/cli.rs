@@ -245,7 +245,7 @@ fn process_running(pid: Pid) -> bool {
 }
 
 fn run_service(config: service::RunnerConfig) -> io::Result<()> {
-    let _ = pretty_env_logger::try_init();
+    let _ = env_logger::try_init();
     service::run(config)
 }
 
