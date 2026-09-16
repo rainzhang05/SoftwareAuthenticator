@@ -1,10 +1,11 @@
 //! The authenticatorClientPIN command and its subcommands.
 
 use super::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
-use super::protocol::{verify, PinProtocol, PinProtocolSession};
+use super::protocol::{decrypt, verify, PinProtocol, PinProtocolSession};
 use super::state::PinState;
 use crate::ctap::cbor::{self, canonical_map, canonical_sort};
 use crate::ctap::CtapApp;
+use crate::PinUvSessionKeys;
 
 use ciborium::{
     de::from_reader,
@@ -51,13 +52,32 @@ where
         out
     }
 
-    fn as_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], u8> {
-        if bytes.len() != N {
-            return Err(CTAP1_ERR_INVALID_PARAMETER);
-        }
-        let mut array = [0u8; N];
-        array.copy_from_slice(bytes);
-        Ok(array)
+    /// The PIN check of changePIN (CTAP 2.3 §6.5.5.6), getPinToken
+    /// (§6.5.5.7.1) and getPinUvAuthTokenUsingPinWithPermissions (§6.5.5.7.2):
+    ///
+    /// > The authenticator decrements the pinRetries counter by 1.
+    /// >
+    /// > The authenticator decrypts pinHashEnc using decrypt and verifies
+    /// > against its internally stored CurrentStoredPIN.
+    ///
+    /// The decremented counter is persisted before pinHashEnc is decrypted, so
+    /// cutting power part-way through the check still costs a retry.  A
+    /// pinHashEnc that fails to decrypt counts as a mismatch ("If an error
+    /// results, or a mismatch is detected").
+    fn verify_pin_hash_enc(
+        &mut self,
+        protocol: PinProtocol,
+        keys: &PinUvSessionKeys,
+        pin_hash_enc: &[u8],
+    ) -> Result<(), u8> {
+        let attempt = self.pin_state.begin_pin_attempt()?;
+        self.save_persistent_pin_state();
+        let candidate = decrypt(protocol, keys, pin_hash_enc);
+        let result = self
+            .pin_state
+            .finish_pin_attempt(attempt, candidate.as_ref().map(|hash| hash.as_slice()));
+        self.save_persistent_pin_state();
+        result
     }
 
     fn client_pin_get_key_agreement(&mut self, protocol: PinProtocol) -> Result<Vec<u8>, u8> {
@@ -151,21 +171,14 @@ where
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
 
+        self.pin_state.check_pin_attempt_allowed()?;
         let session = self.take_session(protocol)?;
         let (keys, transcript_hash) = session.derive_session_keys(key_agreement)?;
         let mut auth_data = Vec::with_capacity(new_pin_enc.len() + pin_hash_enc.len());
         auth_data.extend_from_slice(&new_pin_enc);
         auth_data.extend_from_slice(&pin_hash_enc);
         verify(protocol, &keys.auth_key, &auth_data, &pin_auth_param)?;
-
-        let mut current_plain =
-            Self::decrypt_pin_block_checked(protocol, &keys, &transcript_hash, &pin_hash_enc)?;
-        let current_hash = Self::as_array::<16>(&current_plain)?;
-        current_plain.zeroize();
-        if let Err(err) = self.pin_state.verify_pin_hash(&current_hash) {
-            self.save_persistent_pin_state();
-            return Err(err);
-        }
+        self.verify_pin_hash_enc(protocol, &keys, &pin_hash_enc)?;
 
         let mut new_pin_plain =
             Self::decrypt_pin_block_checked(protocol, &keys, &transcript_hash, &new_pin_enc)?;
@@ -200,18 +213,10 @@ where
         // and pinHashEnc only): proof of the PIN is pinHashEnc itself, so a
         // pinUvAuthParam sent anyway is ignored rather than verified.
 
+        self.pin_state.check_pin_attempt_allowed()?;
         let session = self.take_session(protocol)?;
-        let (keys, transcript_hash) = session.derive_session_keys(key_agreement)?;
-
-        let mut plain =
-            Self::decrypt_pin_block_checked(protocol, &keys, &transcript_hash, &pin_hash_enc)?;
-        let current_hash = Self::as_array::<16>(&plain)?;
-        plain.zeroize();
-        if let Err(err) = self.pin_state.verify_pin_hash(&current_hash) {
-            self.save_persistent_pin_state();
-            return Err(err);
-        }
-        self.save_persistent_pin_state();
+        let (keys, _transcript_hash) = session.derive_session_keys(key_agreement)?;
+        self.verify_pin_hash_enc(protocol, &keys, &pin_hash_enc)?;
 
         let random = syscall!(self.client.random_bytes(32)).bytes;
         if random.len() != 32 {

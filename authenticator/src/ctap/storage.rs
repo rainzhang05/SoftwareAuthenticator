@@ -1,18 +1,15 @@
 //! Persistence: stored credentials, attestation material and PIN state.
 //!
-//! Test builds keep credentials in `CtapApp::stored_credentials` and never
-//! touch the filesystem.
+//! Test builds keep credentials in `CtapApp::stored_credentials`; PIN state
+//! goes through the client's filesystem in every build.
 
-use super::pin::state::PinState;
+use super::pin::state::{PersistentPinState, PinState};
 use super::CtapApp;
-#[cfg(not(test))]
 use ciborium::{de::from_reader, ser::into_writer};
 use p256::ecdsa::{signature::Signer, Signature as P256EcdsaSignature, SigningKey};
 use serde::{Deserialize, Serialize};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
-#[cfg(not(test))]
 use trussed::try_syscall;
-#[cfg(not(test))]
 use trussed::types::{Location, Message, PathBuf};
 use zeroize::Zeroize;
 
@@ -22,8 +19,7 @@ use transport_core::ctap::constants::*;
 const CREDENTIAL_STORE_PATH: &str = "credentials.cbor";
 #[cfg(not(test))]
 const ATTESTATION_STORE_PATH: &str = "attestation.cbor";
-#[cfg(not(test))]
-const PIN_STATE_STORE_PATH: &str = "pin-state.cbor";
+pub(super) const PIN_STATE_STORE_PATH: &str = "pin-state.cbor";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct StoredCredential {
@@ -53,6 +49,12 @@ struct StoredAttestation {
 /// On-disk representation of the persistent PIN state.  Kept in sync with
 /// `transport-core::state::StoredPinState` so the CLI can read and write the
 /// same `pin-state.cbor` file the daemon uses.
+///
+/// Only the PIN hash and pinRetries are state.  The consecutive-mismatch
+/// lockout is volatile (it is what a power cycle clears), so
+/// `consecutive_failures` and `pin_auth_blocked` are never read back; they are
+/// still written so the CLI's copy of this struct parses, with
+/// `pin_auth_blocked` in the meaning the CLI gives it: blocked until reset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredPinState {
     pin_hash: Option<[u8; 16]>,
@@ -63,27 +65,22 @@ struct StoredPinState {
 
 impl StoredPinState {
     fn snapshot(state: &PinState) -> Self {
+        let persistent = state.persistent();
         Self {
-            pin_hash: state.pin_hash,
-            pin_retries: state.pin_retries,
-            consecutive_failures: state.consecutive_failures,
-            pin_auth_blocked: state.pin_auth_blocked,
+            pin_hash: persistent.pin_hash,
+            pin_retries: persistent.pin_retries,
+            consecutive_failures: 0,
+            pin_auth_blocked: persistent.pin_retries == 0,
         }
     }
 }
 
 impl PinState {
     fn from_stored(stored: StoredPinState) -> Self {
-        Self {
+        PinState::from_persistent(PersistentPinState {
             pin_hash: stored.pin_hash,
             pin_retries: stored.pin_retries,
-            consecutive_failures: stored.consecutive_failures,
-            pin_auth_blocked: stored.pin_auth_blocked,
-            pin_uv_auth_token: None,
-            pin_uv_auth_permissions: 0,
-            pin_uv_auth_rp_id: None,
-            pin_uv_auth_rp_provided: false,
-        }
+        })
     }
 }
 
@@ -94,7 +91,6 @@ where
     /// Load the persistent PIN state from `pin-state.cbor` on the internal
     /// filesystem if one exists.  Missing or unreadable files leave the
     /// in-memory state at its defaults.
-    #[cfg(not(test))]
     pub(super) fn load_persistent_pin_state(&mut self) {
         let path = match PathBuf::try_from(PIN_STATE_STORE_PATH) {
             Ok(p) => p,
@@ -118,13 +114,9 @@ where
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn load_persistent_pin_state(&mut self) {}
-
     /// Persist the current PIN state.  Called after every CTAP handler that
     /// can mutate the PIN/retries/lockout fields so the CLI and the next
     /// daemon attach observe a consistent view.
-    #[cfg(not(test))]
     pub(super) fn save_persistent_pin_state(&mut self) {
         let path = match PathBuf::try_from(PIN_STATE_STORE_PATH) {
             Ok(p) => p,
@@ -143,9 +135,6 @@ where
             .client
             .write_file(Location::Internal, path, message, None));
     }
-
-    #[cfg(test)]
-    pub(super) fn save_persistent_pin_state(&mut self) {}
 
     #[cfg(not(test))]
     pub(super) fn clear_credentials(&mut self) -> Result<(), u8> {

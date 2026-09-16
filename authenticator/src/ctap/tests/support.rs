@@ -34,12 +34,27 @@ pub(super) struct TestClient {
     pending: Option<Result<Reply, TrussedError>>,
     random_counter: u8,
     files: HashMap<Vec<u8>, Vec<u8>>,
+    writes: Vec<(Vec<u8>, Vec<u8>)>,
     presence_responses: VecDeque<consent::Result>,
 }
 
 impl TestClient {
     pub(super) fn new() -> Self {
         Self::default()
+    }
+
+    /// Put `data` at `path`, as if an earlier run had written it.
+    pub(super) fn insert_file(&mut self, path: &str, data: Vec<u8>) {
+        self.files.insert(path.as_bytes().to_vec(), data);
+    }
+
+    /// Every write to `path`, oldest first.
+    pub(super) fn writes_to(&self, path: &str) -> Vec<Vec<u8>> {
+        self.writes
+            .iter()
+            .filter(|(written, _)| written.as_slice() == path.as_bytes())
+            .map(|(_, data)| data.clone())
+            .collect()
     }
 
     pub(super) fn set_presence_responses<I>(&mut self, responses: I)
@@ -63,6 +78,7 @@ impl TestClient {
             Request::WriteFile(req) => {
                 let path_key = req.path.as_str().as_bytes().to_vec();
                 let data = req.data.as_slice().to_vec();
+                self.writes.push((path_key.clone(), data.clone()));
                 self.files.insert(path_key, data);
                 Ok(Reply::from(reply::WriteFile {}))
             }
@@ -346,6 +362,63 @@ impl PlatformPinSession {
         crate::decrypt_classic_pin_block(self.protocol, &self.keys, ciphertext)
             .expect("ciphertext decrypts")
     }
+}
+
+/// getPINRetries: `(pinRetries, powerCycleState)`.
+pub(super) fn get_pin_retries(app: &mut CtapApp<TestClient>) -> (u8, Option<bool>) {
+    let response = client_pin(app, vec![(int(2), int(0x01))]).expect("getPINRetries succeeds");
+    assert_eq!(response[0], CTAP2_OK);
+    let Value::Map(map) = from_reader(&response[1..]).expect("decode getPINRetries") else {
+        panic!("response must be a map");
+    };
+    let mut retries = None;
+    let mut power_cycle_state = None;
+    for (key, value) in map {
+        match (key, value) {
+            (Value::Integer(key), Value::Integer(value)) if key == Integer::from(3) => {
+                retries = Some(u8::try_from(value).expect("pinRetries fits a byte"));
+            }
+            (Value::Integer(key), Value::Bool(flag)) if key == Integer::from(4) => {
+                power_cycle_state = Some(flag);
+            }
+            _ => {}
+        }
+    }
+    (retries.expect("pinRetries present"), power_cycle_state)
+}
+
+/// getPinToken (0x05) with `pin` over `protocol`: the decrypted pinUvAuthToken.
+pub(super) fn get_pin_token(
+    app: &mut CtapApp<TestClient>,
+    protocol: ClassicPinProtocol,
+    pin: &[u8],
+) -> Result<[u8; 32], u8> {
+    let session = PlatformPinSession::establish(app, protocol, 0x21);
+    let pin_hash_enc = session.encrypt(&pin_hash(pin));
+    let response = client_pin(
+        app,
+        vec![
+            (int(1), int(protocol.identifier().into())),
+            (int(2), int(0x05)),
+            (int(3), session.key_agreement.clone()),
+            (int(6), Value::Bytes(pin_hash_enc)),
+        ],
+    )?;
+    assert_eq!(response[0], CTAP2_OK);
+    let Value::Map(map) = from_reader(&response[1..]).expect("decode getPinToken") else {
+        panic!("response must be a map");
+    };
+    let encrypted = map
+        .into_iter()
+        .find_map(|(key, value)| match (key, value) {
+            (Value::Integer(key), Value::Bytes(bytes)) if key == Integer::from(2) => Some(bytes),
+            _ => None,
+        })
+        .expect("pinUvAuthToken present");
+    Ok(session
+        .decrypt(&encrypted)
+        .try_into()
+        .expect("pinUvAuthToken is 32 bytes"))
 }
 
 /// An authenticatorMakeCredential request for an ES256 credential, optionally

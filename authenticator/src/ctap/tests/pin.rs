@@ -8,7 +8,7 @@ use super::support::{
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::{PinProtocolSession, PIN_UV_AUTH_PROTOCOL_CLASSIC};
-use crate::ctap::pin::state::{PinState, MAX_PIN_FAILURES_BEFORE_BLOCK, MAX_PIN_RETRIES};
+use crate::ctap::pin::state::{PinState, MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES};
 use crate::ctap::CtapApp;
 use crate::ClassicPinProtocol;
 
@@ -107,15 +107,21 @@ fn client_pin_get_retries_reports_available_attempts() {
         .any(|(k, _)| *k == Value::Integer(Integer::from(0x04))));
 }
 
+/// One complete PIN check of `candidate`, with nothing persisted in between.
+fn check_pin(state: &mut PinState, candidate: &[u8; 16]) -> Result<(), u8> {
+    let attempt = state.begin_pin_attempt()?;
+    state.finish_pin_attempt(attempt, Some(candidate))
+}
+
 #[test]
 fn client_pin_get_retries_includes_power_cycle_state_when_blocked() {
     let mut app = CtapApp::new(TestClient::new(), [0x31; 16]);
     let mut pin_hash = [0x11; 16];
     app.pin_state.set_pin(pin_hash);
     let wrong = [0x22; 16];
-    for attempt in 0..MAX_PIN_FAILURES_BEFORE_BLOCK {
-        let result = app.pin_state.verify_pin_hash(&wrong);
-        if attempt + 1 < MAX_PIN_FAILURES_BEFORE_BLOCK {
+    for attempt in 0..MAX_CONSECUTIVE_PIN_MISMATCHES {
+        let result = check_pin(&mut app.pin_state, &wrong);
+        if attempt + 1 < MAX_CONSECUTIVE_PIN_MISMATCHES {
             assert_eq!(result, Err(CTAP2_ERR_PIN_INVALID));
         } else {
             assert_eq!(result, Err(CTAP2_ERR_PIN_AUTH_BLOCKED));
@@ -150,7 +156,7 @@ fn client_pin_get_retries_includes_power_cycle_state_when_blocked() {
             _ => None,
         })
         .expect("retry count is present");
-    let expected = MAX_PIN_RETRIES - MAX_PIN_FAILURES_BEFORE_BLOCK;
+    let expected = MAX_PIN_RETRIES - MAX_CONSECUTIVE_PIN_MISMATCHES;
     assert_eq!(retries, i128::from(expected));
     let power_cycle = map
         .iter()
@@ -170,9 +176,9 @@ fn pin_auth_blocked_persists_until_power_cycle() {
     pin_state.set_pin(pin_hash);
     let wrong = [0x44; 16];
 
-    for attempt in 0..MAX_PIN_FAILURES_BEFORE_BLOCK {
-        let result = pin_state.verify_pin_hash(&wrong);
-        if attempt + 1 < MAX_PIN_FAILURES_BEFORE_BLOCK {
+    for attempt in 0..MAX_CONSECUTIVE_PIN_MISMATCHES {
+        let result = check_pin(&mut pin_state, &wrong);
+        if attempt + 1 < MAX_CONSECUTIVE_PIN_MISMATCHES {
             assert_eq!(result, Err(CTAP2_ERR_PIN_INVALID));
         } else {
             assert_eq!(result, Err(CTAP2_ERR_PIN_AUTH_BLOCKED));
@@ -183,20 +189,22 @@ fn pin_auth_blocked_persists_until_power_cycle() {
     assert!(pin_state.needs_power_cycle());
 
     assert_eq!(
-        pin_state.verify_pin_hash(&pin_hash),
+        check_pin(&mut pin_state, &pin_hash),
         Err(CTAP2_ERR_PIN_AUTH_BLOCKED)
     );
     assert_eq!(pin_state.retries(), retries_after_block);
     assert_eq!(
-        pin_state.verify_pin_hash(&wrong),
+        check_pin(&mut pin_state, &wrong),
         Err(CTAP2_ERR_PIN_AUTH_BLOCKED)
     );
     assert_eq!(pin_state.retries(), retries_after_block);
 
-    let mut restored_state = PinState::new();
-    restored_state.set_pin(pin_hash);
-    assert_eq!(restored_state.verify_pin_hash(&pin_hash), Ok(()));
+    // Power cycle: the persistent part is restored, the lockout is not.
+    let mut restored_state = PinState::from_persistent(pin_state.persistent().clone());
     assert!(!restored_state.needs_power_cycle());
+    assert_eq!(restored_state.retries(), retries_after_block);
+    assert_eq!(check_pin(&mut restored_state, &pin_hash), Ok(()));
+    assert_eq!(restored_state.retries(), MAX_PIN_RETRIES);
 }
 
 fn run_classic_pin_flow(protocol: ClassicPinProtocol) {
@@ -311,7 +319,7 @@ fn run_classic_pin_flow(protocol: ClassicPinProtocol) {
     let updated_digest = hasher.finalize();
     let mut expected_hash = [0u8; 16];
     expected_hash.copy_from_slice(&updated_digest[..16]);
-    assert_eq!(app.pin_state.verify_pin_hash(&expected_hash), Ok(()));
+    assert_eq!(app.pin_state.persistent().pin_hash, Some(expected_hash));
 
     // getPinToken (legacy)
     let token_entries = request_classic_key_agreement(&mut app, protocol);

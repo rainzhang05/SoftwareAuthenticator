@@ -233,7 +233,7 @@ fn change_pin_verifies_pin_uv_auth_param_per_protocol() {
 
         if variant == MacCase::Correct {
             assert_eq!(result, Ok(vec![CTAP2_OK]), "{protocol:?}");
-            assert_eq!(app.pin_state.pin_hash, Some(pin_hash(b"5678")));
+            assert_eq!(app.pin_state.persistent().pin_hash, Some(pin_hash(b"5678")));
         } else {
             assert_eq!(
                 result,
@@ -241,7 +241,7 @@ fn change_pin_verifies_pin_uv_auth_param_per_protocol() {
                 "{protocol:?} {variant:?}"
             );
             // pinUvAuthParam is verified before pinRetries is touched.
-            assert_eq!(app.pin_state.pin_hash, Some(pin_hash(b"1234")));
+            assert_eq!(app.pin_state.persistent().pin_hash, Some(pin_hash(b"1234")));
             assert_eq!(app.pin_state.retries(), MAX_PIN_RETRIES);
         }
     }
