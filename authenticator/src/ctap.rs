@@ -1,6 +1,8 @@
 mod cbor;
+mod storage;
 
 use self::cbor::{canonical_map, canonical_sort};
+use self::storage::StoredCredential;
 use crate::{
     create_credential, credential_secret_from_bytes, decrypt_classic_pin_block,
     derive_classic_pin_uv_session_keys, encrypt_classic_pin_block, sign_challenge,
@@ -21,20 +23,15 @@ use ctaphid_app::{App, Command, Error};
 use hmac::{Hmac, Mac};
 use log::info;
 use p256::{
-    ecdh::diffie_hellman,
-    ecdsa::{signature::Signer, Signature as P256EcdsaSignature, SigningKey},
-    elliptic_curve::sec1::ToEncodedPoint,
-    EncodedPoint, PublicKey as P256PublicKey, SecretKey as P256SecretKey,
+    ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, EncodedPoint,
+    PublicKey as P256PublicKey, SecretKey as P256SecretKey,
 };
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use trussed::interrupt::InterruptFlag;
 use trussed::syscall;
 use trussed::try_syscall;
 use trussed::types::consent;
-#[cfg(not(test))]
-use trussed::types::{Location, Message, PathBuf};
 use zeroize::Zeroize;
 
 use transport_core::{ctap::constants::*, logging::HexOption};
@@ -149,12 +146,6 @@ type HmacSha256 = Hmac<Sha256>;
 
 const COSE_ALG_ES256: i32 = -7;
 
-#[cfg(not(test))]
-const CREDENTIAL_STORE_PATH: &str = "credentials.cbor";
-#[cfg(not(test))]
-const ATTESTATION_STORE_PATH: &str = "attestation.cbor";
-#[cfg(not(test))]
-const PIN_STATE_STORE_PATH: &str = "pin-state.cbor";
 pub(crate) const PIN_UV_AUTH_PROTOCOL_CLASSIC_V1: i32 = 1;
 pub(crate) const PIN_UV_AUTH_PROTOCOL_CLASSIC_V2: i32 = 2;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -168,31 +159,6 @@ const PIN_PERMISSION_MC: u8 = 0x01;
 const PIN_PERMISSION_GA: u8 = 0x02;
 const PIN_PERMISSION_CM: u8 = 0x04;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredCredential {
-    rp_id: String,
-    user_id: Vec<u8>,
-    user_name: Option<String>,
-    user_display_name: Option<String>,
-    alg: i32,
-    credential_id: Vec<u8>,
-    public_key: Vec<u8>,
-    secret_key: Vec<u8>,
-    #[serde(default)]
-    cred_random_with_uv: Option<Vec<u8>>,
-    #[serde(default)]
-    cred_random_without_uv: Option<Vec<u8>>,
-    #[serde(default)]
-    cred_protect: Option<u8>,
-    sign_count: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredAttestation {
-    private_key: Vec<u8>,
-    certificate_chain: Vec<Vec<u8>>,
-}
-
 #[derive(Debug)]
 struct PinState {
     pin_hash: Option<[u8; 16]>,
@@ -205,28 +171,6 @@ struct PinState {
     pin_uv_auth_rp_provided: bool,
 }
 
-/// On-disk representation of the persistent PIN state.  Kept in sync with
-/// `transport-core::state::StoredPinState` so the CLI can read and write the
-/// same `pin-state.cbor` file the daemon uses.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredPinState {
-    pin_hash: Option<[u8; 16]>,
-    pin_retries: u8,
-    consecutive_failures: u8,
-    pin_auth_blocked: bool,
-}
-
-impl StoredPinState {
-    fn snapshot(state: &PinState) -> Self {
-        Self {
-            pin_hash: state.pin_hash,
-            pin_retries: state.pin_retries,
-            consecutive_failures: state.consecutive_failures,
-            pin_auth_blocked: state.pin_auth_blocked,
-        }
-    }
-}
-
 impl PinState {
     const MIN_PIN_LENGTH: usize = 4;
 
@@ -236,19 +180,6 @@ impl PinState {
             pin_retries: MAX_PIN_RETRIES,
             consecutive_failures: 0,
             pin_auth_blocked: false,
-            pin_uv_auth_token: None,
-            pin_uv_auth_permissions: 0,
-            pin_uv_auth_rp_id: None,
-            pin_uv_auth_rp_provided: false,
-        }
-    }
-
-    fn from_stored(stored: StoredPinState) -> Self {
-        Self {
-            pin_hash: stored.pin_hash,
-            pin_retries: stored.pin_retries,
-            consecutive_failures: stored.consecutive_failures,
-            pin_auth_blocked: stored.pin_auth_blocked,
             pin_uv_auth_token: None,
             pin_uv_auth_permissions: 0,
             pin_uv_auth_rp_id: None,
@@ -675,62 +606,6 @@ where
             Err(CTAP2_ERR_PIN_AUTH_INVALID)
         }
     }
-
-    /// Load the persistent PIN state from `pin-state.cbor` on the internal
-    /// filesystem if one exists.  Missing or unreadable files leave the
-    /// in-memory state at its defaults.
-    #[cfg(not(test))]
-    fn load_persistent_pin_state(&mut self) {
-        let path = match PathBuf::try_from(PIN_STATE_STORE_PATH) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let reply = match try_syscall!(self.client.read_file(Location::Internal, path)) {
-            Ok(reply) => reply,
-            Err(_) => return,
-        };
-        let data = reply.data.as_slice();
-        if data.is_empty() {
-            return;
-        }
-        match from_reader::<StoredPinState, _>(data) {
-            Ok(stored) => {
-                self.pin_state = PinState::from_stored(stored);
-            }
-            Err(_) => {
-                log::warn!("pin-state.cbor is unreadable; starting with defaults");
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn load_persistent_pin_state(&mut self) {}
-
-    /// Persist the current PIN state.  Called after every CTAP handler that
-    /// can mutate the PIN/retries/lockout fields so the CLI and the next
-    /// daemon attach observe a consistent view.
-    #[cfg(not(test))]
-    fn save_persistent_pin_state(&mut self) {
-        let path = match PathBuf::try_from(PIN_STATE_STORE_PATH) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let stored = StoredPinState::snapshot(&self.pin_state);
-        let mut encoded = Vec::new();
-        if into_writer(&stored, &mut encoded).is_err() {
-            return;
-        }
-        let message = match Message::from_slice(&encoded) {
-            Ok(m) => m,
-            Err(_) => return,
-        };
-        let _ = try_syscall!(self
-            .client
-            .write_file(Location::Internal, path, message, None));
-    }
-
-    #[cfg(test)]
-    fn save_persistent_pin_state(&mut self) {}
 
     fn as_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], u8> {
         if bytes.len() != N {
@@ -1213,19 +1088,6 @@ where
         Ok(vec![CTAP2_OK])
     }
 
-    #[cfg(not(test))]
-    fn clear_credentials(&mut self) -> Result<(), u8> {
-        let path = Self::store_path()?;
-        let _ = try_syscall!(self.client.remove_file(Location::Internal, path));
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn clear_credentials(&mut self) -> Result<(), u8> {
-        self.stored_credentials.clear();
-        Ok(())
-    }
-
     fn client_pin_get_retries(&mut self) -> Result<Vec<u8>, u8> {
         let mut entries = vec![(
             Value::Integer(Integer::from(0x03)),
@@ -1243,154 +1105,6 @@ where
         out.push(CTAP2_OK);
         out.extend_from_slice(&encoded);
         Ok(out)
-    }
-
-    fn clear_attestation_material(&mut self) {
-        if let Some(mut key) = self.attestation_private_key.take() {
-            key.zeroize();
-        }
-        self.attestation_certificate_chain = None;
-        self.attestation_material_initialized = false;
-    }
-
-    fn ensure_attestation_material(&mut self) {
-        if self.attestation_material_initialized {
-            return;
-        }
-
-        if matches!(
-            (
-                self.attestation_private_key.as_ref(),
-                self.attestation_certificate_chain.as_ref()
-            ),
-            (Some(_), Some(chain)) if !chain.is_empty()
-        ) {
-            self.attestation_material_initialized = true;
-            return;
-        }
-
-        self.attestation_material_initialized = true;
-
-        if self.load_attestation_material().is_err() {
-            self.clear_attestation_material();
-            self.attestation_material_initialized = true;
-        }
-    }
-
-    #[cfg(not(test))]
-    fn store_path() -> Result<PathBuf, u8> {
-        PathBuf::try_from(CREDENTIAL_STORE_PATH).map_err(|_| CTAP2_ERR_PROCESSING)
-    }
-
-    #[cfg(not(test))]
-    fn attestation_store_path() -> Result<PathBuf, u8> {
-        PathBuf::try_from(ATTESTATION_STORE_PATH).map_err(|_| CTAP2_ERR_PROCESSING)
-    }
-
-    #[cfg(not(test))]
-    fn load_attestation_material(&mut self) -> Result<(), u8> {
-        let path = Self::attestation_store_path()?;
-        match try_syscall!(self.client.read_file(Location::Internal, path.clone())) {
-            Ok(reply) => {
-                let data = reply.data.as_slice();
-                if data.is_empty() {
-                    self.clear_attestation_material();
-                    return Ok(());
-                }
-
-                let stored: StoredAttestation =
-                    from_reader(data).map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
-                if stored.private_key.is_empty()
-                    || stored.certificate_chain.is_empty()
-                    || stored.private_key.len() != 32
-                {
-                    self.clear_attestation_material();
-                    return Err(CTAP2_ERR_INVALID_CBOR);
-                }
-
-                self.clear_attestation_material();
-                self.attestation_private_key = Some(stored.private_key);
-                self.attestation_certificate_chain = Some(stored.certificate_chain);
-                Ok(())
-            }
-            Err(_) => {
-                self.clear_attestation_material();
-                Ok(())
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn load_attestation_material(&mut self) -> Result<(), u8> {
-        Ok(())
-    }
-
-    fn attestation_signature(
-        &mut self,
-        auth_data: &[u8],
-        client_hash: &[u8],
-    ) -> Result<Option<(Vec<u8>, Vec<Vec<u8>>)>, u8> {
-        self.ensure_attestation_material();
-
-        let (key_bytes, chain) = match (
-            self.attestation_private_key.as_ref(),
-            self.attestation_certificate_chain.as_ref(),
-        ) {
-            (Some(key), Some(chain)) if !chain.is_empty() => (key, chain),
-            _ => return Ok(None),
-        };
-
-        if key_bytes.len() != 32 {
-            return Err(CTAP2_ERR_PROCESSING);
-        }
-
-        let signing_key = SigningKey::from_slice(key_bytes).map_err(|_| CTAP2_ERR_PROCESSING)?;
-        let mut message = Vec::with_capacity(auth_data.len() + client_hash.len());
-        message.extend_from_slice(auth_data);
-        message.extend_from_slice(client_hash);
-        let signature: P256EcdsaSignature = signing_key.sign(&message);
-        let der = signature.to_der();
-        Ok(Some((der.as_bytes().to_vec(), chain.clone())))
-    }
-
-    #[cfg(not(test))]
-    fn load_credentials(&mut self) -> Result<Vec<StoredCredential>, u8> {
-        let path = Self::store_path()?;
-        match try_syscall!(self.client.read_file(Location::Internal, path.clone())) {
-            Ok(reply) => {
-                let data = reply.data.as_slice();
-                if data.is_empty() {
-                    Ok(Vec::new())
-                } else {
-                    from_reader(data).map_err(|_| CTAP2_ERR_INVALID_CBOR)
-                }
-            }
-            Err(_) => Ok(Vec::new()),
-        }
-    }
-
-    #[cfg(test)]
-    fn load_credentials(&mut self) -> Result<Vec<StoredCredential>, u8> {
-        Ok(self.stored_credentials.clone())
-    }
-
-    #[cfg(not(test))]
-    fn save_credentials(&mut self, creds: &[StoredCredential]) -> Result<(), u8> {
-        let mut encoded = Vec::new();
-        into_writer(creds, &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
-        let message = Message::from_slice(&encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
-        let path = Self::store_path()?;
-        try_syscall!(self
-            .client
-            .write_file(Location::Internal, path, message, None))
-        .map_err(|_| CTAP2_ERR_PROCESSING)?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn save_credentials(&mut self, creds: &[StoredCredential]) -> Result<(), u8> {
-        self.stored_credentials = creds.to_vec();
-        Ok(())
     }
 
     fn extract_subcommand_and_pin_protocol_for_logging(payload: &[u8]) -> (Option<u8>, Option<u8>) {
