@@ -1,55 +1,277 @@
 name: CI
 
+# pc-hid-runner is Linux-only (it opens /dev/uhid and calls
+# nix::unistd::getgroups), so it does not compile on macOS or Windows. That
+# makes ubuntu-latest the only place the *whole* workspace is ever verified, and
+# makes this workflow the authoritative gate for the project rather than a
+# convenience.
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+# Least privilege by default; each job re-states what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs. Pushes to main are allowed to finish so every
+  # commit on main keeps an attributable result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
+  # Incremental artifacts are useless across fresh CI runners and bloat the cache.
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: 1
 
 jobs:
+  # Formatting. Cheap and deterministic, so it runs without a cache or any
+  # system packages. `cargo fmt` never touches the dependency graph, which is
+  # why this is the one job with no `--locked`.
   fmt:
-    name: cargo fmt
+    name: rustfmt
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: stable
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # Lints. Currently reports without failing.
   clippy:
-    name: cargo clippy
+    name: clippy
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # ------------------------------------------------------------------
+      # THE CLIPPY GATE. The workspace still carries ~70 clippy findings
+      # (mostly authenticator and transport-core), so warnings are surfaced in
+      # the log but do not fail the build yet.
+      #
+      # To make clippy a hard gate once those are cleaned up, change this one
+      # line to:
+      #     CLIPPY_FLAGS: -D warnings
+      # Nothing else in this job needs to change.
+      # ------------------------------------------------------------------
+      CLIPPY_FLAGS: -W clippy::all
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: stable
           components: clippy
       - name: Install system dependencies
+        # libclang: littlefs2-sys runs bindgen at build time.
+        # libudev:  transitive requirement of the HID stack.
         run: |
           sudo apt-get update
           sudo apt-get install -y libudev-dev libclang-dev
-      - uses: Swatinem/rust-cache@v2
-      # Warnings are surfaced but not treated as errors yet; existing
-      # transport-core code triggers a number of clippy nits that will be
-      # cleaned up in follow-up commits.
-      - run: cargo clippy --workspace --all-targets
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo clippy --workspace --all-targets --locked -- ${{ env.CLIPPY_FLAGS }}
 
+  # The main correctness gate: the full workspace, including pc-hid-runner,
+  # which compiles nowhere else.
   test:
-    name: cargo test
+    name: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libudev-dev libclang-dev
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Test
+        run: cargo test --workspace --locked --all-targets
+
+      # `--all-targets` silently excludes doctests, so run them explicitly.
+      - name: Doctests
+        run: cargo test --workspace --locked --doc
+
+      # Every feature combination of every crate, not just "all on". trussed-mldsa
+      # dispatches per parameter set behind cfg(feature), so a build with one set
+      # compiled out is exactly where a silent break would otherwise hide until a
+      # downstream user tried it.
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2
+        with:
+          tool: cargo-hack
+      - name: Check every feature combination
+        run: cargo hack check --workspace --locked --all-targets --feature-powerset
+
+      # bindgen 0.56.0 (via littlefs2-sys 0.1 <- littlefs2 0.4) already emits a
+      # future-incompatibility warning: a future rustc will reject it outright.
+      # Surface it in the job summary so that day arrives as a known deadline
+      # rather than a sudden build failure. Informational, never fails the job.
+      - name: Future-incompatibility report
+        if: always()
+        run: |
+          {
+            echo '### Future-incompatibility report'
+            echo ''
+            echo '```'
+            cargo report future-incompatibilities 2>&1 || echo 'No report was generated for this build.'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The root Cargo.toml declares the minimum supported Rust version under
+  # [workspace.package]. This job is what makes that declaration true: it reads
+  # the version from Cargo.toml (so there is exactly one place to change it) and
+  # fails if the workspace or its locked dependency graph stops building on it.
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          version=$(sed -nE 's/^rust-version *= *"([^"]+)".*/\1/p' Cargo.toml | head -n1)
+          if [ -z "$version" ]; then
+            echo "::error file=Cargo.toml::no rust-version found in [workspace.package]"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "MSRV is $version"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libclang-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Check workspace on the declared MSRV
+        # rust-toolchain.toml pins `stable` for local development and outranks
+        # rustup's default toolchain; RUSTUP_TOOLCHAIN outranks the file.
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
+        run: cargo check --workspace --locked --all-targets
+
+  # Rustdoc, with warnings denied. Catches broken intra-doc links and malformed
+  # doc attributes, which are easy to introduce and invisible until someone
+  # builds the docs. Verified warning-free today, so it gates.
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libclang-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo doc --workspace --locked --no-deps --all-features
+
+  # pc-hid-runner ships as a release-mode daemon. Debug and release differ in
+  # ways that matter here (overflow checks, debug_assert!, LTO/codegen), and
+  # nothing else in this pipeline ever links a release binary.
+  build-release:
+    name: release build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libclang-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo build --workspace --locked --release
+
+  # Coverage. Reported, never enforced: transport-core has no tests at all
+  # today, so any threshold would either be meaningless or permanently red. The
+  # point for now is to make the number visible on every run so the trend is
+  # obvious.
+  #
+  # Deliberately no third-party upload (Codecov/Coveralls): those need a token
+  # this repo does not have. The lcov file is attached as a build artifact and
+  # the summary is printed into the job log instead.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libclang-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Collect coverage
+        run: cargo llvm-cov --workspace --locked --all-features --all-targets --no-report
+
+      - name: Generate reports
+        run: |
+          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov report --html --output-dir coverage-html
+
+      - name: Publish summary
+        run: |
+          {
+            echo '### Coverage'
+            echo ''
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # TODO: once transport-core has tests and the number stops moving, add a
+      # floor with `--fail-under-lines <N>` on the `report` invocation above and
+      # this job becomes a real gate.
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage
+          path: |
+            lcov.info
+            coverage-html
+          retention-days: 14

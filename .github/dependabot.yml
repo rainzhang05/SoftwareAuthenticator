@@ -1,0 +1,62 @@
+version: 2
+
+# Automated dependency updates. This is the piece that keeps the project moving
+# on its own: the pipeline in .github/workflows/ is what makes it safe to merge
+# what Dependabot opens.
+#
+# Because Cargo.lock is committed and every CI invocation passes --locked,
+# Dependabot updates the lockfile in its PRs and CI verifies that exact
+# resolution. Without the committed lockfile these PRs would be unverifiable.
+
+updates:
+  # ----------------------------------------------------------------------
+  # Rust dependencies
+  # ----------------------------------------------------------------------
+  # Patch and minor bumps arrive as a single weekly PR so the queue stays
+  # reviewable. Major bumps are deliberately left out of the group: several of
+  # them here (littlefs2 0.4 -> 0.6, heapless 0.7 -> 0.8, p256 0.9 -> 0.13) are
+  # cross-crate breaking changes in cryptographic code, and each deserves its
+  # own PR and its own review.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Etc/UTC
+    # Ahead of the Monday 06:17 UTC scheduled security scan, so a fresh advisory
+    # and its fix tend to show up in the same window.
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      cargo-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # ----------------------------------------------------------------------
+  # GitHub Actions
+  # ----------------------------------------------------------------------
+  # The workflows pin third-party actions to commit SHAs with a `# v4`-style
+  # comment next to each one. Dependabot understands that form and rewrites both
+  # the SHA and the comment, so pinning costs nothing in maintenance.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

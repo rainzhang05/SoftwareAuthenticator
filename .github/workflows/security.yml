@@ -1,0 +1,105 @@
+name: Security
+
+# Supply-chain auditing, split out from CI on purpose: these checks depend on
+# the state of the RustSec advisory database, not on the state of this repo, so
+# they have to run on a timer as well as on commits. A new advisory against
+# ring or littlefs2 must turn something red even in a week with no pushes.
+#
+# Neither job compiles anything - cargo-audit reads Cargo.lock directly and
+# cargo-deny only needs `cargo metadata` - so they need no system packages, no
+# build cache, and finish in well under a minute.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays, 06:17 UTC. Offset from the hour because GitHub drops scheduled
+    # runs that pile up on exact-hour boundaries.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+
+jobs:
+  # RustSec advisories against the committed Cargo.lock. cargo-audit runs with
+  # its own defaults: vulnerabilities fail the job, unmaintained/unsound
+  # advisories are printed as warnings. It is the human-readable report;
+  # deny.toml's [advisories] section is the strict gate (see the `deny` job).
+  #
+  # cargo-audit parses Cargo.lock as-is and never re-resolves, so `--locked` is
+  # implicit - it is auditing exactly what CI and releases build.
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2
+        with:
+          tool: cargo-audit
+
+      # The two --ignore entries are the vulnerabilities that exist in the tree
+      # today. They are NOT a blanket disable: any other vulnerability, present
+      # or future, still fails this job. Reasons and removal plans live in
+      # deny.toml next to the matching entries - keep the two lists in sync.
+      #
+      #   RUSTSEC-2025-0009  ring 0.16.20 <- rcgen 0.11 <- transport-core
+      #                      AES panic with overflow checks; needs rcgen >= 0.12.
+      #   RUSTSEC-2024-0006  shlex 0.1.1 <- bindgen 0.56 <- littlefs2 0.4
+      #                      build-time only; needs littlefs2 0.4 dropped.
+      #
+      # TODO: delete each flag as the corresponding dependency bump lands. When
+      # both are gone this becomes a plain `cargo audit`.
+      - name: Audit dependencies
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2025-0009 \
+            --ignore RUSTSEC-2024-0006
+
+  # cargo-deny: advisories, licenses, banned/duplicated crates, and source
+  # provenance. This is the strict half of the pair - see deny.toml, which
+  # documents every tolerated finding with a TODO for removing it.
+  #
+  # `sources` in particular matters here: the root Cargo.toml carries a
+  # [patch.crates-io] entry pinning trussed to a GitHub commit, and this check
+  # guarantees that stays the *only* non-crates.io input to the build.
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2
+        with:
+          # Version-pinned deliberately: cargo-deny's config schema changes
+          # between minor releases and a silent bump would break deny.toml.
+          # Bump this and deny.toml together.
+          tool: cargo-deny@0.20.2
+
+      # `--all-features` is already set via [graph] in deny.toml, so the four
+      # check names are the whole command.
+      - name: Check advisories, licenses, bans and sources
+        run: cargo deny --locked check advisories bans licenses sources

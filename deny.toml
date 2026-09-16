@@ -1,0 +1,195 @@
+# cargo-deny configuration.
+#
+# Run locally with:
+#     cargo install cargo-deny --locked
+#     cargo deny check
+#
+# CI runs this from .github/workflows/security.yml. cargo-deny is version-pinned
+# there on purpose: its config schema changes between minor releases, so bump the
+# pin and this file together.
+#
+# This file is the *source of truth* for which known findings are tolerated.
+# .github/workflows/security.yml mirrors the vulnerability subset into the
+# `cargo audit --ignore` flags; keep the two in sync.
+
+[graph]
+# Check the dependency graph with every feature enabled. transport-core's
+# `ctaphid` transport and trussed-mldsa's `log` / mldsa44/65/87 features are all
+# optional, and an advisory hiding behind an off-by-default feature is still an
+# advisory.
+all-features = true
+# Deliberately NOT restricted with `targets = [...]`. pc-hid-runner only builds
+# on Linux, but authenticator/transport-core/trussed-mldsa are portable, and
+# filtering the graph by target would hide advisories in platform-specific deps.
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# advisories - RustSec advisory database
+# ---------------------------------------------------------------------------
+# This is the strict gate. Every advisory kind fails the build unless it is
+# enumerated in `ignore` below, so a NEW advisory landing on any dependency
+# turns CI red even though the known ones are tolerated.
+#
+# `cargo audit` in the same workflow runs with its own defaults (vulnerabilities
+# fail, informational advisories are printed as warnings). It is the readable
+# report; this is the gate.
+[advisories]
+unmaintained = "all"
+# Stricter than cargo-deny's default of "workspace": flag unsound advisories on
+# transitive dependencies too, not just direct ones.
+unsound = "all"
+# Left at the default. A crate can be yanked upstream overnight through no fault
+# of this repo; that should be loud, not a hard stop on every open PR.
+yanked = "warn"
+
+ignore = [
+    # --- vulnerabilities -------------------------------------------------
+    # ring 0.16.20 <- rcgen 0.11.3 <- transport-core.
+    # AES functions can panic when overflow checking is enabled. Fixed in ring
+    # 0.17.12, which requires rcgen >= 0.12.
+    # TODO: bump rcgen in transport-core/Cargo.toml to drop ring 0.16 entirely.
+    { id = "RUSTSEC-2025-0009", reason = "ring 0.16.20 via rcgen 0.11; needs a rcgen >= 0.12 bump" },
+
+    # shlex 0.1.1 <- bindgen 0.56.0 <- littlefs2-sys 0.1 <- littlefs2 0.4.
+    # `shlex::quote` mis-escapes, allowing shell injection. Build-time only here
+    # (bindgen invokes it during littlefs2-sys codegen, on inputs this repo
+    # controls), but the fix is simply a newer littlefs2.
+    # TODO: drop littlefs2 0.4 so only littlefs2 0.6 / bindgen 0.70 remain.
+    { id = "RUSTSEC-2024-0006", reason = "shlex 0.1.1 via bindgen 0.56 <- littlefs2 0.4; build-time only" },
+
+    # --- unmaintained / unsound -----------------------------------------
+    # Same ring 0.16.20 as above: the 0.16 line is no longer maintained.
+    { id = "RUSTSEC-2025-0010", reason = "ring 0.16.x unmaintained; same rcgen bump as RUSTSEC-2025-0009" },
+
+    # atty 0.2.14 <- env_logger 0.7.1 <- pretty_env_logger 0.4 <- pc-hid-runner.
+    # Unmaintained, plus a potential unaligned read on Windows. pc-hid-runner is
+    # Linux-only, so the unsound path is not reachable here.
+    # TODO: bump pretty_env_logger to 0.5 (env_logger 0.10, no atty).
+    { id = "RUSTSEC-2021-0145", reason = "atty via pretty_env_logger 0.4; unsound path is Windows-only, runner is Linux-only" },
+    { id = "RUSTSEC-2024-0375", reason = "atty unmaintained; fixed by pretty_env_logger 0.5" },
+
+    # daemonize 0.4.1 <- pc-hid-runner (direct dependency), and boxfnonce 0.1.1
+    # which daemonize pulls in. Both unmaintained.
+    # TODO: bump daemonize to 0.5 (drops boxfnonce) or fork the double-fork logic.
+    { id = "RUSTSEC-2025-0069", reason = "daemonize 0.4 unmaintained; direct dep of pc-hid-runner" },
+    { id = "RUSTSEC-2019-0040", reason = "boxfnonce obsolete since Rust 1.35; comes in via daemonize 0.4" },
+
+    # atomic-polyfill 1.0.3 <- heapless 0.7. Goes away with heapless 0.8, which
+    # is a breaking change across trussed/authenticator/transport-core.
+    { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill via heapless 0.7; needs a coordinated heapless 0.8 upgrade" },
+]
+
+# ---------------------------------------------------------------------------
+# licenses
+# ---------------------------------------------------------------------------
+# The workspace is "Apache-2.0 OR MIT". Under cargo-deny's current semantics
+# every license is denied unless listed here, so copyleft (GPL/AGPL/LGPL/MPL/
+# CDDL/EPL/SSPL) and unrecognised licenses fail automatically - there is no
+# separate "copyleft = deny" knob to set.
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# The list above is the usual permissive set rather than the exact set the tree
+# happens to use today, so don't nag about entries nothing currently needs.
+unused-allowed-license = "allow"
+# Workspace members that are never published don't need a license expression.
+# Note: this only takes effect for crates marked `publish = false`; see the
+# clarifications below for why transport-core / pc-hid-runner still need one.
+private = { ignore = true }
+
+exceptions = [
+    # ring is BoringSSL-derived and carries the OpenSSL license for part of its
+    # code. Allowed for ring specifically, not tree-wide.
+    { crate = "ring", allow = ["OpenSSL"] },
+]
+
+# ring 0.16.20 ships no `license` field, only a hand-written LICENSE file that
+# no license scanner can classify. This is the clarification from cargo-deny's
+# own documentation; the hash pins it to the exact file text, so the
+# clarification stops applying if ring ever changes it.
+[[licenses.clarify]]
+crate = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# transport-core and pc-hid-runner declare no `license` at all: the root
+# Cargo.toml sets `license = "Apache-2.0 OR MIT"` under [workspace.package], but
+# these two members never inherit it with `license.workspace = true`.
+# `license-files = []` makes the clarification apply unconditionally.
+# TODO: delete both entries once the member manifests inherit the workspace
+# license (that also makes `private.ignore` above do the right thing).
+[[licenses.clarify]]
+crate = "transport-core"
+expression = "Apache-2.0 OR MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "pc-hid-runner"
+expression = "Apache-2.0 OR MIT"
+license-files = []
+
+# ---------------------------------------------------------------------------
+# bans
+# ---------------------------------------------------------------------------
+[bans]
+# The tree currently carries four duplicated major versions:
+#
+#   littlefs2  0.4.0  + 0.6.1    (authenticator pins 0.4, everything else 0.6)
+#   p256       0.9.0  + 0.13.2
+#   sha2       0.9.9  + 0.10.9
+#   hmac       0.11.0 + 0.12.1
+#   bindgen    0.56.0 + 0.70.1   (via littlefs2-sys 0.1 and 0.3)
+#
+# Duplicated crypto crates are a real hazard in an authenticator: two copies of
+# sha2 or p256 means two code paths, two audit surfaces, and larger binaries.
+# Kept at "warn" so CI is not red on day one.
+# TODO: switch to "deny" once the dependency cleanup unifies these. That single
+# word is the whole change.
+multiple-versions = "warn"
+
+# Path dependencies between workspace members are version-less, which reads as a
+# wildcard. Left at the default until the members set `publish = false` (at which
+# point `allow-wildcard-paths = true` would let this become "deny").
+wildcards = "warn"
+
+[bans.workspace-dependencies]
+# Members declare serde / sha2 / log / littlefs2 / trussed / heapless-bytes
+# independently instead of via [workspace.dependencies] + `workspace = true`,
+# which is how the duplicate versions above crept in. cargo-deny denies this by
+# default; downgraded to a warning until the manifests are unified.
+# TODO: add [workspace.dependencies] to the root Cargo.toml, then set both of
+# these back to "deny".
+duplicates = "warn"
+unused = "warn"
+
+# ---------------------------------------------------------------------------
+# sources
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# The trussed patch below pins an exact commit. Require that of any git source:
+# a bare branch dependency is an unpinned wildcard on somebody else's repo.
+required-git-spec = "rev"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    # Root Cargo.toml has:
+    #   [patch.crates-io]
+    #   trussed = { git = "...", rev = "024e0eca5fb7dbd2457831f7c7bffe4341e08775" }
+    # TODO: remove this entry when the patch is dropped in favour of a released
+    # trussed from crates.io. cargo-deny strips a trailing ".git", so the URL
+    # here is written without it.
+    "https://github.com/trussed-dev/trussed",
+]
