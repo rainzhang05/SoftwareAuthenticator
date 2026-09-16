@@ -1,6 +1,9 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+    thread,
+    time::Duration,
 };
 
 use authenticator::ctap::CtapApp;
@@ -58,17 +61,19 @@ impl<'a> TrussedApps<'a, CoreOnly> for Apps {
     type Data = AppData;
 
     fn new(
-        _service: &mut Service<Platform, CoreOnly>,
+        service: &mut Service<Platform, CoreOnly>,
         endpoints: &mut Vec<ServiceEndpoint<'static, NoId, NoData>>,
         syscall: Syscall,
         data: Self::Data,
     ) -> Self {
+        // Only one `Apps` can exist at a time; the channel is released again
+        // when the runner drops it.
         static CHANNEL: TrussedChannel = TrussedChannel::new();
         let (requester, responder) = CHANNEL.split().expect("Trussed channel split");
         let context = CoreContext::new(littlefs2::path!("authenticator").into());
         endpoints.push(ServiceEndpoint::new(responder, context, &[]));
         let client = Client::new(requester, syscall, None);
-        let mut ctap = CtapApp::new(client, data.aaguid);
+        let mut ctap = serving_syscalls(service, endpoints, || CtapApp::new(client, data.aaguid));
         ctap.set_auto_user_presence(data.auto_user_presence);
         ctap.suppress_attestation(data.suppress_attestation);
         ctap.set_keepalive_callback(set_waiting);
@@ -81,6 +86,39 @@ impl<'a> TrussedApps<'a, CoreOnly> for Apps {
     ) -> T {
         f(&mut [&mut self.ctap])
     }
+}
+
+/// Run `construct` while another thread answers Trussed requests.
+///
+/// `CtapApp::new` reads the persisted PIN state through a Trussed syscall and
+/// busy-waits for the reply, but `transport_core::Runner::exec` only starts
+/// the thread that answers syscalls after `Apps::new` has returned. Without
+/// this, startup never gets past constructing the app.
+fn serving_syscalls<T>(
+    service: &mut Service<Platform, CoreOnly>,
+    endpoints: &mut [ServiceEndpoint<'static, NoId, NoData>],
+    construct: impl FnOnce() -> T,
+) -> T {
+    /// Stops the helper thread even if `construct` panics.
+    struct SetOnDrop<'a>(&'a AtomicBool);
+
+    impl Drop for SetOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let constructed = AtomicBool::new(false);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            while !constructed.load(Ordering::Acquire) {
+                service.process(endpoints);
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        let _stop_helper = SetOnDrop(&constructed);
+        construct()
+    })
 }
 
 pub fn run(config: RunnerConfig) -> io::Result<()> {
@@ -326,6 +364,13 @@ fn hashes_match(a: &[u8; 16], b: &[u8; 16]) -> bool {
 mod tests {
     use super::*;
     use crate::test_support::TempDir;
+    use ctaphid_dispatch::{
+        app::{App, Command},
+        DEFAULT_MESSAGE_SIZE,
+    };
+    use heapless_bytes::Bytes;
+    use std::sync::mpsc;
+    use transport_core::Transport;
 
     // Test characters by UTF-8 width, so the boundaries below are explicit.
     const TWO_BYTES: &str = "\u{e9}"; // e with acute accent
@@ -500,5 +545,86 @@ mod tests {
         let state = state_on_disk(dir.path());
         assert_eq!(state.pin_retries, 5);
         assert_eq!(state.pin_hash, Some(hash_pin(PIN)));
+    }
+
+    /// Sends one CTAP request through the apps, reports its status, then
+    /// fails the way a transport does when its device goes away.
+    struct OneRequestTransport {
+        status: mpsc::Sender<Option<u8>>,
+    }
+
+    impl<'interrupt, D: trussed::backend::Dispatch> Transport<'interrupt, D> for OneRequestTransport {
+        fn poll<A: TrussedApps<'interrupt, D>>(&mut self, apps: &mut A) -> io::Result<bool> {
+            // authenticatorReset writes to storage, so it only completes if
+            // the runner's Trussed service thread is answering syscalls.
+            const CTAP_RESET: u8 = 0x07;
+            let status = apps.with_ctaphid_apps(
+                |apps: &mut [&mut dyn App<'interrupt, DEFAULT_MESSAGE_SIZE>]| {
+                    let mut response = Bytes::new();
+                    apps[0]
+                        .call(Command::Cbor, &[CTAP_RESET], &mut response)
+                        .ok()
+                        .and_then(|()| response.first().copied())
+                },
+            );
+            let _ = self.status.send(status);
+            Err(io::Error::other("device gone"))
+        }
+
+        fn send(&mut self, _waiting_for_user: bool) -> io::Result<bool> {
+            Ok(false)
+        }
+
+        fn wait(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `Runner::exec` must get through `Apps::new`, answer requests, and
+    /// return once the transport fails. Returning requires every Trussed
+    /// client (and so every syscall sender) to be dropped, or the scoped
+    /// service thread never finishes.
+    ///
+    /// This is the only test that constructs `Apps`, whose Trussed channel is
+    /// a process-wide static.
+    #[test]
+    fn runner_answers_requests_and_returns_when_the_transport_stops() {
+        let dir = TempDir::new("runner");
+        let state_dir = dir.path().to_owned();
+        let (status_tx, status_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let store = PersistentStore::new(&state_dir).expect("mount state");
+            let options = Options {
+                manufacturer: None,
+                product: None,
+                serial_number: None,
+                vid: 0,
+                pid: 0,
+                device_class: None,
+            };
+            let data = AppData {
+                aaguid: [0; 16],
+                auto_user_presence: true,
+                suppress_attestation: false,
+            };
+            let transport = OneRequestTransport { status: status_tx };
+            let result = Builder::new(options).build::<Apps>().exec(
+                Platform::new(store.store()),
+                data,
+                transport,
+            );
+            let _ = result_tx.send(result);
+        });
+
+        let timeout = Duration::from_secs(60);
+        let status = status_rx
+            .recv_timeout(timeout)
+            .expect("the runner never polled the transport");
+        assert_eq!(status, Some(0), "authenticatorReset did not succeed");
+        let result = result_rx
+            .recv_timeout(timeout)
+            .expect("Runner::exec did not return after the transport failed");
+        assert_eq!(result.unwrap_err().to_string(), "device gone");
     }
 }
