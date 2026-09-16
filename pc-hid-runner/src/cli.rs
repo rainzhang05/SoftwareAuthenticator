@@ -17,7 +17,6 @@ use nix::{
     unistd::Pid,
 };
 use transport_core::{state::default_state_dir, Options};
-use zeroize::Zeroizing;
 
 use crate::{permissions, pin_input::PinReader, service, HidDeviceDescriptor};
 
@@ -45,6 +44,11 @@ pub enum Command {
     /// Wipe all credentials and PIN state (requires the daemon to be detached)
     Reset(ResetArgs),
     /// Manage the authenticator PIN
+    ///
+    /// PINs are never taken from command-line arguments, which other local
+    /// users can read and shells save to history. On a terminal the PIN is
+    /// prompted for with echo off; otherwise it is read from standard input,
+    /// one PIN per line.
     Pin(PinCommand),
 }
 
@@ -66,31 +70,29 @@ pub struct PinCommand {
 #[derive(Subcommand, Debug, Clone)]
 pub enum PinAction {
     /// Set a new PIN on a PIN-less authenticator
+    ///
+    /// Reads the new PIN from the terminal (twice) or, when standard input is
+    /// not a terminal, as a single line from standard input.
     Set {
         #[clap(flatten)]
         state: StateArgs,
-        /// PIN value (omit to be prompted)
-        #[clap(long)]
-        pin: Option<String>,
     },
     /// Change the existing PIN
+    ///
+    /// Reads the current PIN and then the new PIN (twice) from the terminal
+    /// or, when standard input is not a terminal, as two lines from standard
+    /// input: the current PIN first, then the new one.
     Change {
         #[clap(flatten)]
         state: StateArgs,
-        /// Current PIN (omit to be prompted)
-        #[clap(long, value_name = "CURRENT_PIN")]
-        current: Option<String>,
-        /// New PIN (omit to be prompted)
-        #[clap(long, value_name = "NEW_PIN")]
-        new: Option<String>,
     },
     /// Remove the PIN entirely
+    ///
+    /// Reads the current PIN from the terminal or, when standard input is not
+    /// a terminal, as a single line from standard input.
     Remove {
         #[clap(flatten)]
         state: StateArgs,
-        /// Current PIN (omit to be prompted)
-        #[clap(long)]
-        current: Option<String>,
     },
     /// Show whether a PIN is set, retries remaining, and block status
     Status {
@@ -470,41 +472,25 @@ fn reset(args: ResetArgs) -> io::Result<()> {
 fn pin(cmd: PinCommand) -> io::Result<()> {
     match cmd.action {
         PinAction::Status { state } => pin_status(state),
-        PinAction::Set { state, pin } => {
+        PinAction::Set { state } => {
             require_daemon_stopped(&state)?;
-            let pin = match pin {
-                Some(value) => Zeroizing::new(value),
-                None => PinReader::from_stdin().new_pin()?,
-            };
+            let pin = PinReader::from_stdin().new_pin()?;
             service::pin_set(&state.state_dir, &pin)?;
             println!("PIN set.");
             Ok(())
         }
-        PinAction::Change {
-            state,
-            current,
-            new,
-        } => {
+        PinAction::Change { state } => {
             require_daemon_stopped(&state)?;
             let reader = PinReader::from_stdin();
-            let current = match current {
-                Some(value) => Zeroizing::new(value),
-                None => reader.current_pin()?,
-            };
-            let new = match new {
-                Some(value) => Zeroizing::new(value),
-                None => reader.new_pin()?,
-            };
+            let current = reader.current_pin()?;
+            let new = reader.new_pin()?;
             service::pin_change(&state.state_dir, &current, &new)?;
             println!("PIN changed.");
             Ok(())
         }
-        PinAction::Remove { state, current } => {
+        PinAction::Remove { state } => {
             require_daemon_stopped(&state)?;
-            let current = match current {
-                Some(value) => Zeroizing::new(value),
-                None => PinReader::from_stdin().current_pin()?,
-            };
+            let current = PinReader::from_stdin().current_pin()?;
             service::pin_remove(&state.state_dir, &current)?;
             println!("PIN removed.");
             Ok(())
@@ -519,4 +505,37 @@ fn pin_status(state: StateArgs) -> io::Result<()> {
     println!("Retries remaining: {}", info.retries);
     println!("Blocked:           {}", info.blocked);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{error::ErrorKind, CommandFactory};
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("pc-hid-runner").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn command_line_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn pins_are_not_accepted_as_arguments() {
+        for args in [
+            &["pin", "set", "--pin", "1234"][..],
+            &["pin", "set", "1234"],
+            &["pin", "change", "--current", "1234", "--new", "5678"],
+            &["pin", "change", "1234", "5678"],
+            &["pin", "remove", "--current", "1234"],
+            &["pin", "remove", "1234"],
+        ] {
+            let err = parse(args)
+                .err()
+                .unwrap_or_else(|| panic!("{args:?} parsed"));
+            assert_eq!(err.kind(), ErrorKind::UnknownArgument, "{args:?}: {err}");
+        }
+        assert!(parse(&["pin", "change", "--state-dir", "/tmp/x"]).is_ok());
+    }
 }

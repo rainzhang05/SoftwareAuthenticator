@@ -6,7 +6,9 @@
 //! prompt, so scripts can supply PINs without putting them on the command line.
 
 use std::{
+    fmt,
     io::{self, BufRead, IsTerminal, Read, Write},
+    ops::Deref,
     os::fd::{AsFd, AsRawFd, BorrowedFd},
     sync::atomic::{AtomicI32, Ordering},
 };
@@ -23,8 +25,29 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::service;
 
-/// A PIN as read from the user; wiped from memory when dropped.
-pub type Pin = Zeroizing<String>;
+/// A PIN as read from the user. It is wiped from memory when dropped and its
+/// `Debug` output is redacted, so it cannot end up in a log by accident.
+pub struct Pin(Zeroizing<String>);
+
+impl Pin {
+    fn new(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
+}
+
+impl Deref for Pin {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Pin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Pin(<redacted>)")
+    }
+}
 
 /// No valid PIN comes anywhere near this long; stop reading instead of
 /// buffering arbitrary amounts of input.
@@ -165,7 +188,7 @@ fn finish_line(mut line: Zeroizing<Vec<u8>>) -> io::Result<Pin> {
         ));
     }
     match String::from_utf8(std::mem::take(&mut *line)) {
-        Ok(pin) => Ok(Zeroizing::new(pin)),
+        Ok(pin) => Ok(Pin::new(pin)),
         Err(err) => {
             err.into_bytes().zeroize();
             Err(io::Error::new(
@@ -277,15 +300,21 @@ mod tests {
     };
 
     fn pin(value: &str) -> Pin {
-        Zeroizing::new(value.to_owned())
+        Pin::new(value.to_owned())
+    }
+
+    #[test]
+    fn pin_debug_output_is_redacted() {
+        let formatted = format!("{:?}", pin("8642"));
+        assert!(!formatted.contains("8642"), "{formatted}");
     }
 
     #[test]
     fn piped_input_yields_one_pin_per_line() {
         let mut input = Cursor::new(b"1234\n5678\r\nlast".to_vec());
-        assert_eq!(*read_line(&mut input).unwrap(), "1234");
-        assert_eq!(*read_line(&mut input).unwrap(), "5678");
-        assert_eq!(*read_line(&mut input).unwrap(), "last");
+        assert_eq!(&*read_line(&mut input).unwrap(), "1234");
+        assert_eq!(&*read_line(&mut input).unwrap(), "5678");
+        assert_eq!(&*read_line(&mut input).unwrap(), "last");
         let err = read_line(&mut input).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
@@ -293,9 +322,9 @@ mod tests {
     #[test]
     fn piped_input_keeps_the_pin_exactly() {
         let mut input = Cursor::new(" 12 \t34 \n".as_bytes().to_vec());
-        assert_eq!(*read_line(&mut input).unwrap(), " 12 \t34 ");
+        assert_eq!(&*read_line(&mut input).unwrap(), " 12 \t34 ");
         let mut input = Cursor::new("\u{e9}t\u{e9}!\n".as_bytes().to_vec());
-        assert_eq!(*read_line(&mut input).unwrap(), "\u{e9}t\u{e9}!");
+        assert_eq!(&*read_line(&mut input).unwrap(), "\u{e9}t\u{e9}!");
     }
 
     #[test]
@@ -323,7 +352,7 @@ mod tests {
             prompts.push(prompt.to_owned());
             Ok(lines.pop_front().unwrap())
         });
-        assert_eq!(*result.unwrap(), "1234");
+        assert_eq!(&*result.unwrap(), "1234");
         assert_eq!(prompts, ["New PIN: ", "Confirm new PIN: "]);
     }
 
@@ -338,7 +367,7 @@ mod tests {
     fn new_pin_is_read_once_when_not_interactive() {
         let (mut lines, _) = scripted(&["1234"]);
         let result = read_new_pin(false, |_| Ok(lines.pop_front().unwrap()));
-        assert_eq!(*result.unwrap(), "1234");
+        assert_eq!(&*result.unwrap(), "1234");
     }
 
     #[test]
@@ -408,7 +437,7 @@ mod tests {
         drain(&mut displayed);
 
         let (pin, prompt) = reader.join().unwrap();
-        assert_eq!(*pin.unwrap(), "s3cret-PIN");
+        assert_eq!(&*pin.unwrap(), "s3cret-PIN");
         assert_eq!(prompt, b"PIN: ");
         assert!(echo_enabled(&tty), "echo was not restored");
         let displayed = String::from_utf8_lossy(&displayed);
