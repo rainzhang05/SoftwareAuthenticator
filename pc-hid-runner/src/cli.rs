@@ -1,15 +1,16 @@
 use std::{
-    fs::{self, OpenOptions},
-    io,
-    os::unix::fs::OpenOptionsExt,
+    env,
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write},
+    os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::{Path, PathBuf},
-    process, thread,
+    process::{self, Command as ProcessCommand, Stdio},
+    thread,
     time::{Duration, Instant},
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_num::maybe_hex;
-use daemonize::Daemonize;
 use nix::unistd::{self, Gid, Group};
 use nix::{
     errno::Errno,
@@ -181,6 +182,10 @@ impl StateArgs {
     fn pid_path(&self) -> PathBuf {
         self.state_dir.join("authenticator.pid")
     }
+
+    fn log_path(&self) -> PathBuf {
+        self.state_dir.join("authenticator.log")
+    }
 }
 
 impl StartCommand {
@@ -217,24 +222,35 @@ impl StartCommand {
     }
 }
 
+/// Read the pid file. Unreadable content counts as no pid; the file is left
+/// alone, since the daemon may be writing it right now.
 fn read_pid(path: &Path) -> io::Result<Option<Pid>> {
     match fs::read_to_string(path) {
-        Ok(contents) => {
-            let trimmed = contents.trim();
-            if trimmed.is_empty() {
-                fs::remove_file(path).ok();
-                return Ok(None);
-            }
-            match trimmed.parse::<i32>() {
-                Ok(pid) => Ok(Some(Pid::from_raw(pid))),
-                Err(_) => {
-                    fs::remove_file(path).ok();
-                    Ok(None)
-                }
-            }
-        }
+        Ok(contents) => Ok(contents.trim().parse::<i32>().ok().map(Pid::from_raw)),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
+    }
+}
+
+/// Write this process's pid atomically, so readers never see a partial file.
+fn write_pid_file(path: &Path) -> io::Result<()> {
+    let pid = process::id();
+    let temporary = path.with_extension(format!("pid.{pid}.tmp"));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    writeln!(file, "{pid}")?;
+    fs::rename(&temporary, path)
+}
+
+fn remove_pid_file(path: &Path) {
+    if let Err(err) = fs::remove_file(path) {
+        if err.kind() != io::ErrorKind::NotFound {
+            log::warn!("could not remove {}: {err}", path.display());
+        }
     }
 }
 
@@ -246,11 +262,91 @@ fn process_running(pid: Pid) -> bool {
     }
 }
 
-fn run_service(config: service::RunnerConfig) -> io::Result<()> {
+/// Run the daemon in this process until it is told to stop. The pid file is
+/// written once the virtual device exists and removed again on the way out.
+fn run_foreground(state: &StateArgs, config: service::RunnerConfig) -> io::Result<()> {
     let _ = env_logger::try_init();
     let shutdown = ShutdownSignal::new();
     shutdown.install_signal_handlers()?;
-    service::run(config, shutdown)
+    let pid_path = state.pid_path();
+    let result = service::run(config, shutdown, || write_pid_file(&pid_path));
+    remove_pid_file(&pid_path);
+    result
+}
+
+/// How long `attach` waits for the background daemon to create the device.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Start the daemon in the background: run this same binary again with the
+/// same arguments plus `--foreground`, in a new session and with its output
+/// going to the log file, then wait until it has written its pid file.
+fn spawn_daemon(state: &StateArgs) -> io::Result<()> {
+    let log_path = state.log_path();
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&log_path)?;
+    let log_offset = log.metadata()?.len();
+
+    let mut command = ProcessCommand::new(env::current_exe()?);
+    command
+        .args(env::args_os().skip(1))
+        .arg("--foreground")
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    // A new session detaches the daemon from this terminal, so closing the
+    // terminal or pressing Ctrl-C in it does not reach the daemon.
+    // SAFETY: setsid is async-signal-safe and nothing here allocates.
+    unsafe {
+        command.pre_exec(|| unistd::setsid().map(drop).map_err(io::Error::from));
+    }
+    let mut child = command.spawn()?;
+    let daemon_pid = Pid::from_raw(child.id() as i32);
+
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            eprint!("{}", read_log_from(&log_path, log_offset));
+            return Err(io::Error::other(format!(
+                "authenticator failed to start ({status}); see {}",
+                log_path.display()
+            )));
+        }
+        if read_pid(&state.pid_path())? == Some(daemon_pid) {
+            println!(
+                "Authenticator attached (pid {daemon_pid}); logging to {}",
+                log_path.display()
+            );
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "authenticator (pid {daemon_pid}) has not finished starting after {}s; see {}",
+                    STARTUP_TIMEOUT.as_secs(),
+                    log_path.display()
+                ),
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// What the daemon logged after `offset`, capped to the last few kilobytes.
+fn read_log_from(path: &Path, offset: u64) -> String {
+    const MAX_BYTES: u64 = 8 * 1024;
+    let mut bytes = Vec::new();
+    if let Ok(mut file) = File::open(path) {
+        let end = file.metadata().map(|meta| meta.len()).unwrap_or(offset);
+        let start = offset.max(end.saturating_sub(MAX_BYTES));
+        if file.seek(SeekFrom::Start(start)).is_ok() {
+            let _ = file.take(MAX_BYTES).read_to_end(&mut bytes);
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn warn_device_permissions(descriptor: &HidDeviceDescriptor) {
@@ -323,17 +419,14 @@ fn group_by_name(name: &str) -> Option<Gid> {
 }
 
 fn start(cmd: StartCommand) -> io::Result<()> {
-    let state_dir = cmd.state.state_dir.clone();
-    service::ensure_state_dir(&state_dir)?;
-    let pid_path = cmd.state.pid_path();
-    if let Some(pid) = read_pid(&pid_path)? {
+    service::ensure_state_dir(&cmd.state.state_dir)?;
+    if let Some(pid) = read_pid(&cmd.state.pid_path())? {
         if process_running(pid) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("authenticator already running (pid {})", pid),
             ));
         }
-        fs::remove_file(&pid_path).ok();
     }
 
     let config = cmd
@@ -343,37 +436,10 @@ fn start(cmd: StartCommand) -> io::Result<()> {
     warn_device_permissions(&config.descriptor);
 
     if cmd.foreground {
-        fs::write(&pid_path, format!("{}\n", process::id()))?;
-        let result = run_service(config);
-        fs::remove_file(&pid_path).ok();
-        return result;
+        run_foreground(&cmd.state, config)
+    } else {
+        spawn_daemon(&cmd.state)
     }
-
-    let log_path = state_dir.join("authenticator.log");
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(&log_path)?;
-    let stderr = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(&log_path)?;
-
-    let daemon = Daemonize::new()
-        .pid_file(&pid_path)
-        .stdout(stdout)
-        .stderr(stderr)
-        .exit_action(|| println!("Authenticator daemonizing..."));
-
-    daemon
-        .start()
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
-
-    let result = run_service(config);
-    fs::remove_file(&pid_path).ok();
-    result
 }
 
 fn stop(state: StateArgs) -> io::Result<()> {

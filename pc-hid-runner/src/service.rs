@@ -126,8 +126,13 @@ fn serving_syscalls<T>(
 }
 
 /// Run the authenticator until the device fails or `shutdown` is requested.
-/// A requested shutdown returns `Ok(())`.
-pub fn run(config: RunnerConfig, shutdown: ShutdownSignal) -> io::Result<()> {
+/// A requested shutdown returns `Ok(())`. `on_ready` runs once the virtual
+/// device exists.
+pub fn run(
+    config: RunnerConfig,
+    shutdown: ShutdownSignal,
+    on_ready: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     let RunnerConfig {
         descriptor,
         options,
@@ -157,7 +162,7 @@ pub fn run(config: RunnerConfig, shutdown: ShutdownSignal) -> io::Result<()> {
     match backend {
         Backend::Uhid => {
             let runner = Builder::new(options).build::<Apps>();
-            let result = exec(runner, descriptor, platform, data, shutdown);
+            let result = exec(runner, descriptor, platform, data, shutdown, on_ready);
             if result.as_ref().is_err_and(is_shutdown) {
                 log::info!("shutdown requested; the virtual authenticator has been removed");
             }

@@ -115,12 +115,14 @@ where
 
 /// Create the uhid device and serve CTAPHID on it until the device fails or
 /// `shutdown` is requested; the latter ends with [`shutdown::shutdown_error`].
+/// `on_ready` runs once the device exists, just before requests are served.
 pub fn exec<'interrupt, D, A>(
     runner: Runner<D, A>,
     descriptor: HidDeviceDescriptor,
     platform: Platform,
     data: A::Data,
     shutdown: ShutdownSignal,
+    on_ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()>
 where
     D: Dispatch,
@@ -156,6 +158,7 @@ where
     host.set_capabilities(CAPABILITY_CBOR | CAPABILITY_NMSG);
     let dispatch = ctaphid_dispatch::Dispatch::new(responder);
     let transport = UhidTransport::new(device, host, dispatch, shutdown);
+    on_ready()?;
     runner.exec(platform, data, transport)
 }
 

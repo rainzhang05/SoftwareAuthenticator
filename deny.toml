@@ -56,12 +56,6 @@ ignore = [
     # Same ring 0.16.20 as above: the 0.16 line is no longer maintained.
     { id = "RUSTSEC-2025-0010", reason = "ring 0.16.x unmaintained; same rcgen bump as RUSTSEC-2025-0009" },
 
-    # daemonize 0.4.1 <- pc-hid-runner (direct dependency), and boxfnonce 0.1.1
-    # which daemonize pulls in. Both unmaintained.
-    # TODO: bump daemonize to 0.5 (drops boxfnonce) or fork the double-fork logic.
-    { id = "RUSTSEC-2025-0069", reason = "daemonize 0.4 unmaintained; direct dep of pc-hid-runner" },
-    { id = "RUSTSEC-2019-0040", reason = "boxfnonce obsolete since Rust 1.35; comes in via daemonize 0.4" },
-
     # atomic-polyfill 1.0.3 <- heapless 0.7. Goes away with heapless 0.8, which
     # is a breaking change across trussed/authenticator/transport-core.
     { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill via heapless 0.7; needs a coordinated heapless 0.8 upgrade" },
