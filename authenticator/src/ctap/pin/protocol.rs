@@ -4,15 +4,10 @@
 use crate::ctap::cbor::{self, canonical_map};
 use crate::ctap::CtapApp;
 use crate::{
-    decrypt_classic_pin_block, derive_classic_pin_uv_session_keys, ClassicPinProtocol,
-    PinUvSessionKeys,
+    decrypt_classic_pin_block, derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
+    ClassicPinProtocol, PinUvSessionKeys,
 };
 
-use aes::Aes256;
-use cbc::{
-    cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit},
-    Decryptor, Encryptor,
-};
 use ciborium::value::{Integer, Value};
 use hmac::{Hmac, Mac};
 use p256::{
@@ -21,33 +16,24 @@ use p256::{
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
+use trussed::syscall;
 use zeroize::Zeroizing;
 
 use transport_core::ctap::constants::*;
 
-type Aes256CbcEnc = Encryptor<Aes256>;
-type Aes256CbcDec = Decryptor<Aes256>;
-
-pub(crate) fn encrypt_shared_secret(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, u8> {
-    if plaintext.len() % 16 != 0 {
-        return Err(CTAP1_ERR_INVALID_PARAMETER);
-    }
-    let cipher =
-        Aes256CbcEnc::new_from_slices(key, &[0u8; 16]).map_err(|_| CTAP2_ERR_PROCESSING)?;
-    Ok(cipher.encrypt_padded_vec_mut::<NoPadding>(plaintext))
-}
-
-pub(crate) fn decrypt_shared_secret(key: &[u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>, u8> {
-    if ciphertext.len() % 16 != 0 {
-        return Err(CTAP1_ERR_INVALID_PARAMETER);
-    }
-    let mut buffer = ciphertext.to_vec();
-    let cipher =
-        Aes256CbcDec::new_from_slices(key, &[0u8; 16]).map_err(|_| CTAP2_ERR_PROCESSING)?;
-    let plaintext = cipher
-        .decrypt_padded_mut::<NoPadding>(&mut buffer)
-        .map_err(|_| CTAP1_ERR_INVALID_PARAMETER)?;
-    Ok(plaintext.to_vec())
+/// `decrypt(shared secret, ciphertext)` for the given PIN/UV auth protocol:
+/// AES-256-CBC with an all-zero IV for protocol one (CTAP 2.3 §6.5.6), and with
+/// the IV taken from the first 16 bytes of the ciphertext for protocol two
+/// (§6.5.7).  `None` is the spec's "error"; each caller maps it to the status
+/// code its own algorithm prescribes.
+pub(crate) fn decrypt(
+    protocol: PinProtocol,
+    keys: &PinUvSessionKeys,
+    ciphertext: &[u8],
+) -> Option<Zeroizing<Vec<u8>>> {
+    decrypt_classic_pin_block(protocol, keys, ciphertext)
+        .ok()
+        .map(Zeroizing::new)
 }
 
 pub(crate) type HmacSha256 = Hmac<Sha256>;
@@ -218,6 +204,31 @@ where
 {
     pub(crate) fn supported_pin_uv_protocols(&self) -> &'static [i32] {
         &PIN_UV_PROTOCOLS_SUPPORTED
+    }
+
+    /// `encrypt(shared secret, plaintext)` for the given PIN/UV auth protocol.
+    ///
+    /// Protocol one uses an all-zero IV (CTAP 2.3 §6.5.6).  Protocol two: "Let
+    /// iv be a 16-byte, random bytestring. [...] Return iv || ct." (§6.5.7).
+    pub(crate) fn encrypt_for_platform(
+        &mut self,
+        protocol: PinProtocol,
+        keys: &PinUvSessionKeys,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, u8> {
+        let iv = match protocol {
+            ClassicPinProtocol::V1 => None,
+            ClassicPinProtocol::V2 => {
+                let random = syscall!(self.client.random_bytes(16)).bytes;
+                let iv: [u8; 16] = random
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| CTAP2_ERR_PROCESSING)?;
+                Some(iv)
+            }
+        };
+        encrypt_classic_pin_block(protocol, keys, iv.as_ref(), plaintext)
+            .map_err(|_| CTAP2_ERR_PROCESSING)
     }
     /// `verify(pinUvAuthToken, message, pinUvAuthParam)` as used by
     /// authenticatorMakeCredential (CTAP 2.3 §6.1.2 step 11.1.1),

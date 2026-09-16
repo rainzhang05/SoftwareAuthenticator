@@ -356,17 +356,29 @@ fn hmac_secret_output(cred_random: &[u8], salt: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
+/// The encrypted "hmac-secret" extension output of a getAssertion or
+/// getNextAssertion response.
+fn encrypted_hmac_secret_output(response: &[u8]) -> Vec<u8> {
+    let auth_data = response_auth_data(response);
+    // rpIdHash (32) || flags (1) || signCount (4) || extensions
+    let Value::Map(outputs) = from_reader(&auth_data[37..]).expect("extension outputs") else {
+        panic!("extension outputs must be a map");
+    };
+    match outputs
+        .into_iter()
+        .find(|(key, _)| *key == Value::Text("hmac-secret".into()))
+    {
+        Some((_, Value::Bytes(encrypted))) => encrypted,
+        _ => panic!("hmac-secret output present"),
+    }
+}
+
 #[test]
 #[serial]
 fn hmac_secret_verifies_salt_auth_per_protocol() {
     let client_hash = [0x44; 32];
     let salt = [0x99; 32];
     for (protocol, variant) in CASES {
-        // hmac-secret does not yet encrypt with protocol two's IV; that
-        // success case is covered once it does.
-        if (protocol, variant) == (ClassicPinProtocol::V2, MacCase::Correct) {
-            continue;
-        }
         let mut app = CtapApp::new(TestClient::new(), [0x65; 16]);
         let credential = es256_credential("example.com", &[0xC3]);
         let cred_random_without_uv = credential
@@ -392,17 +404,7 @@ fn hmac_secret_verifies_salt_auth_per_protocol() {
 
         if variant == MacCase::Correct {
             let response = result.unwrap_or_else(|err| panic!("{protocol:?}: {err:#04x}"));
-            let auth_data = response_auth_data(&response);
-            let Value::Map(outputs) = from_reader(&auth_data[37..]).expect("extension outputs")
-            else {
-                panic!("extension outputs must be a map");
-            };
-            let Some((_, Value::Bytes(encrypted))) = outputs
-                .into_iter()
-                .find(|(key, _)| *key == Value::Text("hmac-secret".into()))
-            else {
-                panic!("hmac-secret output present");
-            };
+            let encrypted = encrypted_hmac_secret_output(&response);
             assert_eq!(
                 session.decrypt(&encrypted),
                 hmac_secret_output(&cred_random_without_uv, &salt)
@@ -415,4 +417,62 @@ fn hmac_secret_verifies_salt_auth_per_protocol() {
             );
         }
     }
+}
+
+#[test]
+#[serial]
+fn hmac_secret_protocol_two_encrypts_each_output_under_its_own_iv() {
+    let mut app = CtapApp::new(TestClient::new(), [0x66; 16]);
+    let first = es256_credential("example.com", &[0xD1]);
+    let mut second = es256_credential("example.com", &[0xD2]);
+    second.cred_random_without_uv = Some(vec![0x30; 32]);
+    let cred_randoms = [
+        first.cred_random_without_uv.clone().expect("credRandom"),
+        second.cred_random_without_uv.clone().expect("credRandom"),
+    ];
+    app.stored_credentials.push(first);
+    app.stored_credentials.push(second);
+
+    let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V2, 0x14);
+    let (salt1, salt2) = ([0x51; 32], [0x52; 32]);
+    let salt_enc = session.encrypt(&[salt1, salt2].concat());
+    let salt_auth =
+        platform_authenticate(ClassicPinProtocol::V2, &session.keys.auth_key, &salt_enc);
+    let extensions = canonical_map(vec![(
+        Value::Text("hmac-secret".into()),
+        canonical_map(vec![
+            (int(1), session.key_agreement.clone()),
+            (int(2), Value::Bytes(salt_enc)),
+            (int(3), Value::Bytes(salt_auth)),
+            (int(4), protocol_id(ClassicPinProtocol::V2)),
+        ]),
+    )]);
+    let request = get_assertion_request(&[0x45; 32], "example.com", None, Some(extensions));
+
+    let first_response = app
+        .handle_get_assertion(&request)
+        .expect("getAssertion succeeds");
+    let next_response = app
+        .handle_get_next_assertion()
+        .expect("getNextAssertion succeeds");
+
+    let outputs = [
+        encrypted_hmac_secret_output(&first_response),
+        encrypted_hmac_secret_output(&next_response),
+    ];
+    for (encrypted, cred_random) in outputs.iter().zip(&cred_randoms) {
+        // iv (16) || AES-256-CBC(output1 || output2) (64)
+        assert_eq!(encrypted.len(), 16 + 64);
+        let expected = [
+            hmac_secret_output(cred_random, &salt1),
+            hmac_secret_output(cred_random, &salt2),
+        ]
+        .concat();
+        assert_eq!(session.decrypt(encrypted), expected);
+    }
+    assert_ne!(
+        outputs[0][..16],
+        outputs[1][..16],
+        "every encryption draws a fresh IV"
+    );
 }

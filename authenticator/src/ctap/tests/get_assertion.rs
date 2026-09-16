@@ -2,14 +2,12 @@
 //! hmac-secret and credProtect.
 
 use super::support::{
-    classic_pin_auth, corrupt_mac, derive_classic_session, install_pin_uv_auth_token,
-    request_classic_key_agreement, token_pin_auth, TestClient,
+    classic_encrypt, classic_pin_auth, corrupt_mac, derive_classic_session,
+    install_pin_uv_auth_token, request_classic_key_agreement, token_pin_auth, TestClient,
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
-use crate::ctap::pin::protocol::{
-    decrypt_shared_secret, encrypt_shared_secret, HmacSha256, PIN_UV_AUTH_PROTOCOL_CLASSIC,
-};
+use crate::ctap::pin::protocol::{HmacSha256, PIN_UV_AUTH_PROTOCOL_CLASSIC};
 use crate::ctap::storage::StoredCredential;
 use crate::ctap::CtapApp;
 use crate::{create_credential, ClassicPinProtocol, CoseAlg, CredentialSecretKey};
@@ -561,17 +559,19 @@ fn get_assertion_produces_hmac_secret_output() {
     app.handle_make_credential(&payload)
         .expect("makeCredential succeeds");
 
-    // The hmac-secret shared secret uses PIN/UV auth protocol one: an all-zero
-    // IV and a 16-byte saltAuth (CTAP 2.3 §6.5.6).
-    let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V1);
+    let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
     let platform_secret = P256SecretKey::from_slice(&[0x23; 32]).expect("valid secret key");
     let (session_keys, _transcript_hash, platform_entries) =
-        derive_classic_session(ClassicPinProtocol::V1, &auth_entries, &platform_secret);
+        derive_classic_session(ClassicPinProtocol::V2, &auth_entries, &platform_secret);
 
     let salt = vec![0x99; 32];
-    let salt_enc = encrypt_shared_secret(&session_keys.encryption_key, &salt)
-        .expect("salt encryption succeeds");
-    let salt_auth = classic_pin_auth(ClassicPinProtocol::V1, &session_keys, &salt_enc);
+    let salt_enc = classic_encrypt(
+        ClassicPinProtocol::V2,
+        &session_keys,
+        &salt,
+        Some([0x3C; 16]),
+    );
+    let salt_auth = classic_pin_auth(ClassicPinProtocol::V2, &session_keys, &salt_enc);
 
     let client_hash_assert = vec![0x88; 32];
     let pin_uv_auth_param_assert =
@@ -592,7 +592,7 @@ fn get_assertion_produces_hmac_secret_output() {
         ),
         (
             Value::Integer(Integer::from(4)),
-            Value::Integer(Integer::from(ClassicPinProtocol::V1.identifier())),
+            Value::Integer(Integer::from(PIN_UV_AUTH_PROTOCOL_CLASSIC)),
         ),
     ]);
     let extensions = canonical_map(vec![(Value::Text("hmac-secret".into()), hmac_extension)]);
@@ -650,8 +650,11 @@ fn get_assertion_produces_hmac_secret_output() {
         })
         .expect("encrypted output present");
 
-    let decrypted = decrypt_shared_secret(&session_keys.encryption_key, &encrypted_output)
-        .expect("decrypt hmac-secret output");
+    // Protocol two: a random 16-byte IV followed by the 32-byte ciphertext.
+    assert_eq!(encrypted_output.len(), 16 + 32);
+    let decrypted =
+        crate::decrypt_classic_pin_block(ClassicPinProtocol::V2, &session_keys, &encrypted_output)
+            .expect("decrypt hmac-secret output");
     assert_eq!(decrypted.len(), 32);
 
     let credential = &app.stored_credentials[0];

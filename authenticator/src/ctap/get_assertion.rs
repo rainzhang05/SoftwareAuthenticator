@@ -4,8 +4,7 @@
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::permissions::PIN_PERMISSION_GA;
 use super::pin::protocol::{
-    decrypt_shared_secret, encrypt_shared_secret, pin_protocol_from_identifier, verify, HmacSha256,
-    PinProtocol,
+    decrypt, pin_protocol_from_identifier, verify, HmacSha256, PinProtocol,
 };
 use super::storage::StoredCredential;
 use super::CtapApp;
@@ -21,48 +20,32 @@ use ciborium::{
 use hmac::Mac;
 use sha2::{Digest, Sha256};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use transport_core::ctap::constants::*;
 
 use std::collections::VecDeque;
 
 struct PendingHmacSecret {
+    protocol: PinProtocol,
     keys: PinUvSessionKeys,
-    salt_plaintext: Vec<u8>,
+    salt_plaintext: Zeroizing<Vec<u8>>,
 }
 
 impl PendingHmacSecret {
-    fn new(keys: PinUvSessionKeys, salt_plaintext: Vec<u8>) -> Self {
-        Self {
-            keys,
-            salt_plaintext,
-        }
-    }
-
-    fn encrypt_output_for(&self, cred_random: Option<&Vec<u8>>) -> Result<Option<Vec<u8>>, u8> {
-        if let Some(random) = cred_random {
-            let mut outputs = Vec::new();
+    /// `output1 [|| output2]` with `outputN = HMAC-SHA-256(CredRandom, saltN)`,
+    /// or `None` when the credential has no CredRandom (CTAP 2.3 §12.7).
+    fn outputs_for(&self, cred_random: Option<&Vec<u8>>) -> Result<Option<Zeroizing<Vec<u8>>>, u8> {
+        let Some(random) = cred_random else {
+            return Ok(None);
+        };
+        let mut outputs = Zeroizing::new(Vec::with_capacity(self.salt_plaintext.len()));
+        for salt in self.salt_plaintext.chunks(32) {
             let mut hmac = HmacSha256::new_from_slice(random).map_err(|_| CTAP2_ERR_PROCESSING)?;
-            hmac.update(&self.salt_plaintext[..32]);
+            hmac.update(salt);
             outputs.extend_from_slice(&hmac.finalize().into_bytes());
-            if self.salt_plaintext.len() == 64 {
-                let mut hmac =
-                    HmacSha256::new_from_slice(random).map_err(|_| CTAP2_ERR_PROCESSING)?;
-                hmac.update(&self.salt_plaintext[32..]);
-                outputs.extend_from_slice(&hmac.finalize().into_bytes());
-            }
-            let encrypted = encrypt_shared_secret(&self.keys.encryption_key, &outputs)?;
-            Ok(Some(encrypted))
-        } else {
-            Ok(None)
         }
-    }
-}
-
-impl Drop for PendingHmacSecret {
-    fn drop(&mut self) {
-        self.salt_plaintext.zeroize();
+        Ok(Some(outputs))
     }
 }
 
@@ -124,10 +107,12 @@ where
             &request.salt_auth,
         )?;
 
-        let plaintext = decrypt_shared_secret(&keys.encryption_key, &request.salt_enc)?;
-        if plaintext.len() != 32 && plaintext.len() != 64 {
-            return Err(CTAP1_ERR_INVALID_PARAMETER);
-        }
+        // "The authenticator obtains salt1 and salt2 by calling decrypt(shared
+        // secret, saltEnc). If the decryption fails, or if the result is not 32
+        // or 64 bytes long, return CTAP1_ERR_INVALID_PARAMETER."
+        let salt_plaintext = decrypt(request.protocol, &keys, &request.salt_enc)
+            .filter(|salts| salts.len() == 32 || salts.len() == 64)
+            .ok_or(CTAP1_ERR_INVALID_PARAMETER)?;
 
         let cred_random = if user_verified {
             cred_random_with_uv
@@ -135,9 +120,28 @@ where
             cred_random_without_uv
         };
 
-        let pending = PendingHmacSecret::new(keys, plaintext);
-        let encrypted = pending.encrypt_output_for(cred_random)?;
+        let pending = PendingHmacSecret {
+            protocol: request.protocol,
+            keys,
+            salt_plaintext,
+        };
+        let encrypted = self.encrypt_hmac_secret_outputs(&pending, cred_random)?;
         Ok((encrypted, pending))
+    }
+
+    /// `encrypt(shared secret, output1 [|| output2])` with the protocol the
+    /// platform selected for hmac-secret (CTAP 2.3 §12.7).
+    fn encrypt_hmac_secret_outputs(
+        &mut self,
+        pending: &PendingHmacSecret,
+        cred_random: Option<&Vec<u8>>,
+    ) -> Result<Option<Vec<u8>>, u8> {
+        match pending.outputs_for(cred_random)? {
+            Some(outputs) => self
+                .encrypt_for_platform(pending.protocol, &pending.keys, &outputs)
+                .map(Some),
+            None => Ok(None),
+        }
     }
 
     fn assertion_auth_data(
@@ -481,7 +485,7 @@ where
             } else {
                 cred_random_without_uv.as_ref()
             };
-            if let Some(encrypted) = hmac_state.encrypt_output_for(cred_random)? {
+            if let Some(encrypted) = self.encrypt_hmac_secret_outputs(hmac_state, cred_random)? {
                 extension_entries
                     .push((Value::Text("hmac-secret".into()), Value::Bytes(encrypted)));
             }

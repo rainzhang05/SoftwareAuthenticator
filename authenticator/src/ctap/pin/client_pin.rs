@@ -5,7 +5,6 @@ use super::protocol::{verify, PinProtocol, PinProtocolSession};
 use super::state::PinState;
 use crate::ctap::cbor::{self, canonical_map, canonical_sort};
 use crate::ctap::CtapApp;
-use crate::{encrypt_classic_pin_block, ClassicPinProtocol};
 
 use ciborium::{
     de::from_reader,
@@ -220,22 +219,7 @@ where
         }
         let mut token = [0u8; 32];
         token.copy_from_slice(random.as_slice());
-        let encrypted = match protocol {
-            ClassicPinProtocol::V1 => {
-                encrypt_classic_pin_block(ClassicPinProtocol::V1, &keys, None, &token)
-                    .map_err(|_| CTAP2_ERR_PROCESSING)?
-            }
-            ClassicPinProtocol::V2 => {
-                let iv_bytes = syscall!(self.client.random_bytes(16)).bytes;
-                if iv_bytes.len() != 16 {
-                    return Err(CTAP2_ERR_PROCESSING);
-                }
-                let mut iv = [0u8; 16];
-                iv.copy_from_slice(iv_bytes.as_slice());
-                encrypt_classic_pin_block(ClassicPinProtocol::V2, &keys, Some(&iv), &token)
-                    .map_err(|_| CTAP2_ERR_PROCESSING)?
-            }
-        };
+        let encrypted = self.encrypt_for_platform(protocol, &keys, &token)?;
         self.pin_state
             .set_pin_uv_auth_token(token, permissions, rp_id);
         let response = canonical_map(vec![
