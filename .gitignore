@@ -12,3 +12,4 @@ download-ripgrep*/
 
 # Agent git worktrees
 .claude/worktrees/
+__pycache__/
