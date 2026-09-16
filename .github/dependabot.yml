@@ -13,10 +13,10 @@ updates:
   # Rust dependencies
   # ----------------------------------------------------------------------
   # Patch and minor bumps arrive as a single weekly PR so the queue stays
-  # reviewable. Major bumps are deliberately left out of the group: several of
-  # them here (littlefs2 0.4 -> 0.6, heapless 0.7 -> 0.8, p256 0.9 -> 0.13) are
-  # cross-crate breaking changes in cryptographic code, and each deserves its
-  # own PR and its own review.
+  # reviewable. Major bumps are deliberately left out of the group: in this
+  # tree they are typically cross-crate breaking changes in cryptographic code
+  # (e.g. the RustCrypto digest 0.10 -> 0.11 generation, which sha2, hmac, hkdf,
+  # aes and cbc must cross together), and each deserves its own review.
   - package-ecosystem: cargo
     directory: "/"
     schedule:

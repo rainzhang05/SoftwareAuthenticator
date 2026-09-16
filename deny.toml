@@ -52,13 +52,6 @@ ignore = [
     # TODO: bump rcgen in transport-core/Cargo.toml to drop ring 0.16 entirely.
     { id = "RUSTSEC-2025-0009", reason = "ring 0.16.20 via rcgen 0.11; needs a rcgen >= 0.12 bump" },
 
-    # shlex 0.1.1 <- bindgen 0.56.0 <- littlefs2-sys 0.1 <- littlefs2 0.4.
-    # `shlex::quote` mis-escapes, allowing shell injection. Build-time only here
-    # (bindgen invokes it during littlefs2-sys codegen, on inputs this repo
-    # controls), but the fix is simply a newer littlefs2.
-    # TODO: drop littlefs2 0.4 so only littlefs2 0.6 / bindgen 0.70 remain.
-    { id = "RUSTSEC-2024-0006", reason = "shlex 0.1.1 via bindgen 0.56 <- littlefs2 0.4; build-time only" },
-
     # --- unmaintained / unsound -----------------------------------------
     # Same ring 0.16.20 as above: the 0.16 line is no longer maintained.
     { id = "RUSTSEC-2025-0010", reason = "ring 0.16.x unmaintained; same rcgen bump as RUSTSEC-2025-0009" },
@@ -144,13 +137,13 @@ license-files = []
 # bans
 # ---------------------------------------------------------------------------
 [bans]
-# The tree currently carries four duplicated major versions:
+# The tree currently carries duplicated major versions of crypto crates, all
+# pulled in by the patched trussed (p256-cortex-m4 depends on the 2021-era
+# RustCrypto generation):
 #
-#   littlefs2  0.4.0  + 0.6.1    (authenticator pins 0.4, everything else 0.6)
 #   p256       0.9.0  + 0.13.2
 #   sha2       0.9.9  + 0.10.9
 #   hmac       0.11.0 + 0.12.1
-#   bindgen    0.56.0 + 0.70.1   (via littlefs2-sys 0.1 and 0.3)
 #
 # Duplicated crypto crates are a real hazard in an authenticator: two copies of
 # sha2 or p256 means two code paths, two audit surfaces, and larger binaries.

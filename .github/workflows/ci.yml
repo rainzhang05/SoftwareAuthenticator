@@ -119,10 +119,9 @@ jobs:
       - name: Check every feature combination
         run: cargo hack check --workspace --locked --all-targets --feature-powerset
 
-      # bindgen 0.56.0 (via littlefs2-sys 0.1 <- littlefs2 0.4) already emits a
-      # future-incompatibility warning: a future rustc will reject it outright.
-      # Surface it in the job summary so that day arrives as a known deadline
-      # rather than a sudden build failure. Informational, never fails the job.
+      # Dependencies whose code a future rustc will reject outright (currently
+      # daemonize 0.4). Surfaced in the job summary so that day arrives as a
+      # known deadline rather than a sudden build failure. Informational only.
       - name: Future-incompatibility report
         if: always()
         run: |
