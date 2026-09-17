@@ -17,7 +17,7 @@ use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
-use hmac::Mac;
+use hmac::{KeyInit, Mac};
 use p256::{
     ecdsa::{signature::Verifier, Signature as P256EcdsaSignature},
     SecretKey as P256SecretKey,

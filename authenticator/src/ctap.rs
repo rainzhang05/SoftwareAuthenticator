@@ -47,7 +47,7 @@ use ciborium::{de::from_reader, value::Value};
 use core::fmt;
 use ctaphid_app::{App, Command, Error};
 use log::info;
-use rand_core::{CryptoRngCore, OsRng};
+use rand_core::CryptoRng;
 use std::time::Duration;
 
 use self::constants::*;
@@ -71,7 +71,7 @@ impl fmt::Display for HexOption {
 /// uses to cancel a request.
 pub struct CtapApp<'interrupt> {
     store: Box<dyn CredentialStore + Send>,
-    rng: Box<dyn CryptoRngCore + Send>,
+    rng: Box<dyn CryptoRng + Send>,
     presence: Box<dyn UserPresence + Send>,
     interrupt: &'interrupt InterruptFlag,
     aaguid: [u8; 16],
@@ -106,7 +106,7 @@ impl<'interrupt> CtapApp<'interrupt> {
     /// [`PrivateKeyMaterial::generate`]: crate::store::PrivateKeyMaterial::generate
     pub fn new(
         store: impl CredentialStore + Send + 'static,
-        rng: impl CryptoRngCore + Send + 'static,
+        rng: impl CryptoRng + Send + 'static,
         presence: impl UserPresence + Send + 'static,
         interrupt: &'interrupt InterruptFlag,
         aaguid: [u8; 16],
@@ -138,7 +138,7 @@ impl<'interrupt> CtapApp<'interrupt> {
         interrupt: &'interrupt InterruptFlag,
         aaguid: [u8; 16],
     ) -> Self {
-        Self::new(store, OsRng, presence, interrupt, aaguid)
+        Self::new(store, crate::os_rng(), presence, interrupt, aaguid)
     }
 
     /// Call `callback` with `true` when the engine starts waiting for the

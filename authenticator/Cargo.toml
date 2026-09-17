@@ -9,25 +9,28 @@ license = "Apache-2.0 OR MIT"
 
 [dependencies]
 ciborium = { version = "0.2", default-features = false, features = ["std"] }
-aes = "0.8"
-cbc = { version = "0.1", features = ["alloc"] }
-hkdf = "0.12"
-sha2 = "0.10"
-hmac = "0.12"
+# `zeroize` wipes key schedules and HMAC/SHA-256 state on drop.
+aes = { version = "0.9", features = ["zeroize"] }
+cbc = { version = "0.2", features = ["alloc", "zeroize"] }
+hkdf = "0.13"
+sha2 = { version = "0.11", features = ["zeroize"] }
+hmac = { version = "0.13", features = ["zeroize"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
 serde = { version = "1", features = ["derive"] }
 ctaphid-app = "0.1"
 # `InterruptFlag`, through which the CTAPHID dispatcher cancels a request.
 trussed-core = "0.1"
 heapless-bytes = "0.3"
-p256 = { version = "0.13", features = ["ecdh"] }
-# `getrandom` provides `OsRng`, which key generation uses.
-rand_core = { version = "0.6", features = ["getrandom"] }
+p256 = { version = "0.14", features = ["ecdh"] }
+rand_core = "0.10"
+# `SysRng`, the operating system RNG that key generation uses.
+getrandom = { version = "0.4", features = ["sys_rng"] }
 log = { version = "0.4", default-features = false }
 # Credential store: record encryption and constant-time comparison of secrets.
-# chacha20poly1305 0.10 shares the cipher 0.4 generation already in the tree;
-# its default features only add an RNG convenience the store does not use.
-chacha20poly1305 = { version = "0.10", default-features = false }
+# chacha20poly1305 0.11 shares the cipher 0.5 generation already in the tree;
+# its default features only add an RNG convenience the store does not use, and
+# `zeroize` (unconditional before 0.11) wipes the key on drop.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
 subtle = "2"
 
 # Use our local wrapper for ML-DSA.  By enabling all parameter set features the

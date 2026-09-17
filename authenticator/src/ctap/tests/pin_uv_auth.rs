@@ -17,7 +17,7 @@ use crate::ctap::pin::state::MAX_PIN_RETRIES;
 use crate::ClassicPinProtocol;
 
 use ciborium::{de::from_reader, value::Value};
-use hmac::Mac as _;
+use hmac::{KeyInit as _, Mac as _};
 
 use crate::ctap::constants::*;
 

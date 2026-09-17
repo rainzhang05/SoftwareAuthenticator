@@ -19,7 +19,7 @@ use ciborium::{
     value::{Integer, Value},
 };
 use core::time::Duration;
-use hmac::Mac;
+use hmac::{KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 

@@ -20,9 +20,10 @@ use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use getrandom::SysRng;
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
-use rand_core::{OsRng, RngCore};
+use hmac::{Hmac, KeyInit, Mac};
+use rand_core::TryRng;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -94,7 +95,7 @@ impl RootKey {
     /// Generate a key from the operating system's random number generator.
     pub fn generate() -> Result<Self, StoreError> {
         let mut key = Self([0; KEY_LEN]);
-        OsRng
+        SysRng
             .try_fill_bytes(&mut key.0)
             .map_err(|_| StoreError::Random)?;
         Ok(key)
@@ -345,12 +346,13 @@ impl CredentialKeys {
     /// HMAC-SHA-256(index key, credential ID).  It reveals nothing about the
     /// credential ID or relying party without the key.
     pub(crate) fn file_name(&self, credential_id: &[u8]) -> Result<String, StoreError> {
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.index.expose()).map_err(|_| {
-            StoreError::KeyUnavailable {
-                domain: KeyDomain::Credential,
-                detail: "HMAC key setup failed".into(),
-            }
-        })?;
+        let mut mac =
+            <Hmac<Sha256> as KeyInit>::new_from_slice(self.index.expose()).map_err(|_| {
+                StoreError::KeyUnavailable {
+                    domain: KeyDomain::Credential,
+                    detail: "HMAC key setup failed".into(),
+                }
+            })?;
         mac.update(credential_id);
         Ok(fsio::hex(&mac.finalize().into_bytes()))
     }

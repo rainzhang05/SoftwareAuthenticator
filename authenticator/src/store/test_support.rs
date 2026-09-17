@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rand_core::{OsRng, RngCore};
+use rand_core::Rng;
 
 use super::fsio::hex;
 
@@ -18,7 +18,7 @@ pub(crate) struct TempDir(PathBuf);
 impl TempDir {
     pub(crate) fn new() -> Self {
         let mut random = [0u8; 16];
-        OsRng.fill_bytes(&mut random);
+        crate::os_rng().fill_bytes(&mut random);
         let path = std::env::temp_dir().join(format!("authenticator-store-{}", hex(&random)));
         fs::create_dir(&path).expect("create temporary directory");
         Self(path)

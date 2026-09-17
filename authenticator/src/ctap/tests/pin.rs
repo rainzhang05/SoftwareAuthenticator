@@ -19,7 +19,7 @@ use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
-use p256::{elliptic_curve::sec1::ToEncodedPoint, SecretKey as P256SecretKey};
+use p256::{elliptic_curve::sec1::ToSec1Point, SecretKey as P256SecretKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -28,7 +28,7 @@ use crate::ctap::constants::*;
 #[test]
 fn classic_key_agreement_value_is_canonical() {
     let secret_key = P256SecretKey::from_slice(&[0x13; 32]).expect("valid secret key");
-    let public_key = secret_key.public_key().to_encoded_point(false);
+    let public_key = secret_key.public_key().to_sec1_point(false);
     let key = KeyAgreementKey::new(secret_key);
 
     let value = key.cose_key();

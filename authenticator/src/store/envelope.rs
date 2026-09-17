@@ -21,8 +21,9 @@
 //! Copying one object over another therefore fails authentication even when
 //! both are encrypted under the same key.
 
-use chacha20poly1305::{AeadInPlace, Key, KeyInit, Tag, XChaCha20Poly1305, XNonce};
-use rand_core::{OsRng, RngCore};
+use chacha20poly1305::{AeadInOut, Key, KeyInit, Tag, XChaCha20Poly1305, XNonce};
+use getrandom::SysRng;
+use rand_core::TryRng;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::keys::SubKey;
@@ -62,7 +63,7 @@ pub(crate) fn seal(
     plaintext: &[u8],
 ) -> Result<Vec<u8>, StoreError> {
     let mut nonce = [0u8; NONCE_LEN];
-    OsRng
+    SysRng
         .try_fill_bytes(&mut nonce)
         .map_err(|_| StoreError::Random)?;
     seal_with_nonce(key, record_type, name, &nonce, plaintext)
@@ -88,12 +89,12 @@ fn seal_with_nonce(
     envelope.push(record_type as u8);
     envelope.extend_from_slice(nonce);
     envelope.extend_from_slice(plaintext);
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key.expose()));
+    let cipher = XChaCha20Poly1305::new(<&Key>::from(key.expose()));
     let aad = associated_data(record_type, name);
-    match cipher.encrypt_in_place_detached(
-        XNonce::from_slice(nonce),
+    match cipher.encrypt_inout_detached(
+        <&XNonce>::from(nonce),
         &aad,
-        &mut envelope[HEADER_LEN..],
+        (&mut envelope[HEADER_LEN..]).into(),
     ) {
         Ok(tag) => {
             envelope.extend_from_slice(&tag);
@@ -124,16 +125,18 @@ pub(crate) fn open(
     {
         return Err(Corruption::Header);
     }
-    let nonce = XNonce::from_slice(&header[MAGIC.len() + 2..]);
+    // Both conversions are infallible: the lengths were checked above.
+    let nonce = <&XNonce>::try_from(&header[MAGIC.len() + 2..]).map_err(|_| Corruption::Length)?;
     let (ciphertext, tag) = body.split_at(body.len() - TAG_LEN);
+    let tag = <&Tag>::try_from(tag).map_err(|_| Corruption::Length)?;
     let mut buffer = Zeroizing::new(ciphertext.to_vec());
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key.expose()));
+    let cipher = XChaCha20Poly1305::new(<&Key>::from(key.expose()));
     cipher
-        .decrypt_in_place_detached(
+        .decrypt_inout_detached(
             nonce,
             &associated_data(record_type, name),
-            &mut buffer,
-            Tag::from_slice(tag),
+            buffer.as_mut_slice().into(),
+            tag,
         )
         .map_err(|_| Corruption::Authentication)?;
     Ok(buffer)

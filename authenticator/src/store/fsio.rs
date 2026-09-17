@@ -14,7 +14,8 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use rand_core::{OsRng, RngCore};
+use getrandom::SysRng;
+use rand_core::TryRng;
 
 use super::StoreError;
 
@@ -238,7 +239,7 @@ fn write_temp_file(dir: &Path, contents: &[u8]) -> Result<PathBuf, StoreError> {
 
 fn temp_name() -> Result<String, StoreError> {
     let mut random = [0u8; 8];
-    OsRng
+    SysRng
         .try_fill_bytes(&mut random)
         .map_err(|_| StoreError::Random)?;
     Ok(format!("{TEMP_PREFIX}{}", hex(&random)))

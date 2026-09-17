@@ -1,15 +1,17 @@
 use aes::Aes256;
-use cbc::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cbc::cipher::{block_padding::NoPadding, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use cbc::{Decryptor, Encryptor};
 use ciborium::ser::into_writer;
 use ciborium::value::{Integer, Value};
 use core::fmt;
+use getrandom::SysRng;
 use hkdf::Hkdf;
 use p256::ecdsa::{
     signature::Signer, Signature as P256EcdsaSignature, SigningKey as P256SigningKey,
 };
-use p256::EncodedPoint;
-use rand_core::OsRng;
+use p256::elliptic_curve::Generate;
+use p256::Sec1Point;
+use rand_core::UnwrapErr;
 use sha2::{Digest, Sha256};
 use trussed_mldsa::{
     try_keypair, try_sign, try_sign_from_seed, MlDsaError, ParamSet, PublicKey, SecretKey, SEED_LEN,
@@ -18,6 +20,14 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub mod ctap;
 pub mod store;
+
+/// The operating system's random number generator, for the infallible
+/// `rand_core::Rng` interface.  Like `rand_core` 0.6's `OsRng`, it panics if the
+/// operating system cannot provide randomness; use [`SysRng`] directly with
+/// `TryRng` where that failure should be reported instead.
+pub(crate) fn os_rng() -> UnwrapErr<SysRng> {
+    UnwrapErr(SysRng)
+}
 
 type Aes256CbcEncryptor = Encryptor<Aes256>;
 type Aes256CbcDecryptor = Decryptor<Aes256>;
@@ -215,7 +225,7 @@ pub fn encrypt_classic_pin_block(
             let iv = [0u8; 16];
             let cipher =
                 Aes256CbcEncryptor::new_from_slices(&keys.encryption_key, &iv).map_err(|_| ())?;
-            Ok(cipher.encrypt_padded_vec_mut::<NoPadding>(plaintext))
+            Ok(cipher.encrypt_padded_vec::<NoPadding>(plaintext))
         }
         ClassicPinProtocol::V2 => {
             let iv = iv.ok_or(())?;
@@ -224,7 +234,7 @@ pub fn encrypt_classic_pin_block(
             }
             let cipher =
                 Aes256CbcEncryptor::new_from_slices(&keys.encryption_key, iv).map_err(|_| ())?;
-            let mut ciphertext = cipher.encrypt_padded_vec_mut::<NoPadding>(plaintext);
+            let mut ciphertext = cipher.encrypt_padded_vec::<NoPadding>(plaintext);
             let mut out = Vec::with_capacity(16 + ciphertext.len());
             out.extend_from_slice(iv);
             out.append(&mut ciphertext);
@@ -248,7 +258,7 @@ pub fn decrypt_classic_pin_block(
                 return Err(());
             }
             cipher
-                .decrypt_padded_vec_mut::<NoPadding>(ciphertext)
+                .decrypt_padded_vec::<NoPadding>(ciphertext)
                 .map_err(|_| ())
         }
         ClassicPinProtocol::V2 => {
@@ -261,9 +271,7 @@ pub fn decrypt_classic_pin_block(
             if body.len() % 16 != 0 {
                 return Err(());
             }
-            cipher
-                .decrypt_padded_vec_mut::<NoPadding>(body)
-                .map_err(|_| ())
+            cipher.decrypt_padded_vec::<NoPadding>(body).map_err(|_| ())
         }
     }
 }
@@ -346,7 +354,7 @@ pub fn try_cose_public_key(ps: ParamSet, pk: &PublicKey) -> Result<Vec<u8>, Cryp
 /// infinity or is a compressed/short encoding without both affine coordinates,
 /// and [`CryptoError::CborEncoding`] if serialization fails.  `point` is
 /// attacker-influenced in some code paths, so neither case may panic.
-pub fn try_cose_es256_public_key(point: &EncodedPoint) -> Result<Vec<u8>, CryptoError> {
+pub fn try_cose_es256_public_key(point: &Sec1Point) -> Result<Vec<u8>, CryptoError> {
     if point.is_identity() {
         return Err(CryptoError::InvalidPublicKey);
     }
@@ -481,8 +489,8 @@ pub fn try_credential_secret_from_bytes(
 pub fn try_create_credential(alg: CoseAlg) -> Result<(Vec<u8>, CredentialSecretKey), CryptoError> {
     match alg {
         CoseAlg::ES256 => {
-            let signing_key = P256SigningKey::random(&mut OsRng);
-            let public_key = signing_key.verifying_key().to_encoded_point(false);
+            let signing_key = P256SigningKey::generate_from_rng(&mut os_rng());
+            let public_key = signing_key.verifying_key().to_sec1_point(false);
             let cose = try_cose_es256_public_key(&public_key)?;
             Ok((cose, CredentialSecretKey::Es256(signing_key)))
         }
@@ -948,7 +956,7 @@ mod tests {
 
     #[test]
     fn try_cose_es256_public_key_rejects_identity_point() {
-        let identity = EncodedPoint::identity();
+        let identity = Sec1Point::identity();
         assert!(identity.is_identity());
         assert_eq!(
             try_cose_es256_public_key(&identity),
@@ -958,9 +966,9 @@ mod tests {
 
     #[test]
     fn try_cose_es256_public_key_rejects_point_without_y_coordinate() {
-        let signing_key = P256SigningKey::random(&mut OsRng);
+        let signing_key = P256SigningKey::generate_from_rng(&mut os_rng());
         // A compressed SEC1 encoding carries X but no Y.
-        let compressed = signing_key.verifying_key().to_encoded_point(true);
+        let compressed = signing_key.verifying_key().to_sec1_point(true);
         assert!(!compressed.is_identity());
         assert!(compressed.y().is_none());
         assert_eq!(

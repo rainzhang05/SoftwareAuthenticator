@@ -12,7 +12,8 @@
 use core::fmt;
 
 use p256::ecdsa::SigningKey as P256SigningKey;
-use rand_core::{OsRng, RngCore};
+use p256::elliptic_curve::Generate;
+use rand_core::Rng;
 use subtle::ConstantTimeEq;
 use trussed_mldsa::{try_public_key_from_seed, SEED_LEN};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -66,9 +67,9 @@ impl PrivateKeyMaterial {
     pub fn generate(alg: CoseAlg) -> Self {
         match alg {
             CoseAlg::ES256 => {
-                // `SecretKey::random` only yields scalars in [1, n), so the
+                // `SecretKey::generate_from_rng` only yields scalars in [1, n), so the
                 // material is valid by construction.
-                let secret = p256::SecretKey::random(&mut OsRng);
+                let secret = p256::SecretKey::generate_from_rng(&mut crate::os_rng());
                 let mut encoded = secret.to_bytes();
                 let mut scalar = [0u8; 32];
                 scalar.copy_from_slice(&encoded);
@@ -77,7 +78,7 @@ impl PrivateKeyMaterial {
             }
             CoseAlg::MLDSA44 | CoseAlg::MLDSA65 | CoseAlg::MLDSA87 => {
                 let mut seed = [0u8; SEED_LEN];
-                OsRng.fill_bytes(&mut seed);
+                crate::os_rng().fill_bytes(&mut seed);
                 PrivateKeyMaterial::MlDsa { seed }
             }
         }
@@ -200,7 +201,7 @@ impl CredentialRecord {
                 let CredentialSecretKey::Es256(signing_key) = &secret else {
                     return Err(CryptoError::KeyTypeMismatch);
                 };
-                let point = signing_key.verifying_key().to_encoded_point(false);
+                let point = signing_key.verifying_key().to_sec1_point(false);
                 let cose = try_cose_es256_public_key(&point)?;
                 Ok((secret, cose))
             }
@@ -577,7 +578,7 @@ mod tests {
             panic!("ES256 record must hold a scalar");
         };
         let signing_key = P256SigningKey::from_slice(scalar).unwrap();
-        let point = signing_key.verifying_key().to_encoded_point(false);
+        let point = signing_key.verifying_key().to_sec1_point(false);
         assert_eq!(
             record.cose_public_key().unwrap(),
             try_cose_es256_public_key(&point).unwrap()

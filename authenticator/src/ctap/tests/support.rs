@@ -17,12 +17,12 @@ use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
-use hmac::Mac;
+use hmac::{KeyInit, Mac};
 use p256::{
-    ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, EncodedPoint,
-    PublicKey as P256PublicKey, SecretKey as P256SecretKey,
+    ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey as P256PublicKey, Sec1Point,
+    SecretKey as P256SecretKey,
 };
-use rand_core::{CryptoRng, RngCore};
+use rand_core::{Infallible, TryCryptoRng, TryRng};
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -202,13 +202,15 @@ impl TestRng {
     }
 }
 
-impl RngCore for TestRng {
-    fn next_u32(&mut self) -> u32 {
-        self.next_u64() as u32
+impl TryRng for TestRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        Ok(self.try_next_u64()? as u32)
     }
 
-    fn next_u64(&mut self) -> u64 {
-        match self {
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        Ok(match self {
             TestRng::SplitMix(state) => {
                 *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
                 let mut z = *state;
@@ -217,23 +219,19 @@ impl RngCore for TestRng {
                 z ^ (z >> 31)
             }
             TestRng::Constant(fill) => u64::from_le_bytes([*fill; 8]),
-        }
+        })
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Infallible> {
         for chunk in dest.chunks_mut(8) {
-            let bytes = self.next_u64().to_le_bytes();
+            let bytes = self.try_next_u64()?.to_le_bytes();
             chunk.copy_from_slice(&bytes[..chunk.len()]);
         }
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
         Ok(())
     }
 }
 
-impl CryptoRng for TestRng {}
+impl TryCryptoRng for TestRng {}
 
 /// Store operations a [`TestStore`] can be told to fail.
 #[derive(Debug, Default)]
@@ -483,7 +481,7 @@ fn authenticator_public_key(entries: &[(Value, Value)]) -> P256PublicKey {
     P256PublicKey::from_sec1_bytes(&encoded).expect("authenticator public key is valid")
 }
 
-fn classic_platform_key_entries(point: &EncodedPoint) -> Vec<(Value, Value)> {
+fn classic_platform_key_entries(point: &Sec1Point) -> Vec<(Value, Value)> {
     let x_field = point.x().expect("x coordinate present");
     let x_slice: &[u8] = x_field.as_ref();
     let x = x_slice.to_vec();
@@ -519,7 +517,7 @@ pub(super) fn derive_classic_session(
     platform_secret: &P256SecretKey,
 ) -> (PinUvSessionKeys, Vec<(Value, Value)>) {
     let auth_public = authenticator_public_key(auth_entries);
-    let platform_public = platform_secret.public_key().to_encoded_point(false);
+    let platform_public = platform_secret.public_key().to_sec1_point(false);
     let shared = diffie_hellman(platform_secret.to_nonzero_scalar(), auth_public.as_affine());
     let shared_bytes = shared.raw_secret_bytes();
     let keys = crate::derive_classic_pin_uv_session_keys(protocol, shared_bytes.as_ref());

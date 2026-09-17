@@ -18,7 +18,6 @@ use ciborium::value::{Integer, Value};
 use ctaphid_app::{App, Command};
 use heapless_bytes::Bytes;
 use p256::ecdsa::{signature::Verifier, Signature, SigningKey, VerifyingKey};
-use rand_core::{OsRng, RngCore};
 
 /// CTAPHID's largest message: 64 - 7 + 128 * (64 - 5) bytes (CTAP 2.3
 /// §11.2.4).
@@ -41,7 +40,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         let mut random = [0u8; 16];
-        OsRng.fill_bytes(&mut random);
+        getrandom::fill(&mut random).expect("operating system RNG");
         let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let path = std::env::temp_dir().join(format!("authenticator-ctap-test-{name}"));
         fs::create_dir(&path).expect("create temporary directory");
@@ -161,7 +160,7 @@ struct Registration {
 
 fn random_32() -> [u8; 32] {
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("operating system RNG");
     bytes
 }
 
@@ -287,7 +286,7 @@ fn attestation_record(certificate_len: usize) -> (AttestationRecord, VerifyingKe
     };
     let verifying_key = *SigningKey::from_slice(&scalar).unwrap().verifying_key();
     let mut certificate = vec![0u8; certificate_len];
-    OsRng.fill_bytes(&mut certificate);
+    getrandom::fill(&mut certificate).expect("operating system RNG");
     certificate[0] = 0x30;
     (
         AttestationRecord {

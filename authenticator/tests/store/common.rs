@@ -8,7 +8,6 @@ use authenticator::store::{AttestationRecord, CredentialRecord, PrivateKeyMateri
 use authenticator::{mldsa_paramset_from_alg, try_sign_challenge, CoseAlg};
 use ciborium::value::Value;
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-use rand_core::{OsRng, RngCore};
 use trussed_mldsa::PublicKey;
 
 pub const ALL_ALGS: [CoseAlg; 4] = [
@@ -20,7 +19,7 @@ pub const ALL_ALGS: [CoseAlg; 4] = [
 
 pub fn random_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
-    OsRng.fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("operating system RNG");
     bytes
 }
 
@@ -91,7 +90,7 @@ pub fn attestation_record(certificates: &[usize]) -> AttestationRecord {
             .iter()
             .map(|&len| {
                 let mut certificate = vec![0u8; len];
-                OsRng.fill_bytes(&mut certificate);
+                getrandom::fill(&mut certificate).expect("operating system RNG");
                 certificate
             })
             .collect(),

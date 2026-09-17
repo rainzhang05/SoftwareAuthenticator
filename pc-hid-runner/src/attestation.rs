@@ -7,7 +7,7 @@
 use std::io;
 
 use p256::ecdsa::{signature::Signer, DerSignature, SigningKey as EcdsaSigningKey};
-use rand::rngs::OsRng;
+use p256::elliptic_curve::Generate;
 use rcgen::{
     CertificateParams, DnType, IsCa, KeyIdMethod, PublicKeyData, SanType, SerialNumber,
     SignatureAlgorithm, SigningKey, PKCS_ECDSA_P256_SHA256,
@@ -34,7 +34,7 @@ impl P256Key {
     fn new(signing_key: EcdsaSigningKey) -> Self {
         let public_key = signing_key
             .verifying_key()
-            .to_encoded_point(false)
+            .to_sec1_point(false)
             .as_bytes()
             .to_vec();
         Self {
@@ -72,7 +72,7 @@ fn certificate_error(err: rcgen::Error) -> io::Error {
 pub fn generate_attestation_certificate(
     identity: &IdentityConfig<'_>,
 ) -> io::Result<(Zeroizing<[u8; 32]>, Vec<u8>)> {
-    let key = P256Key::new(EcdsaSigningKey::random(&mut OsRng));
+    let key = P256Key::new(EcdsaSigningKey::generate());
     let private_key = Zeroizing::new(key.signing_key.to_bytes().into());
 
     let mut params =
@@ -172,7 +172,7 @@ mod tests {
             .expect("the signature verifies with the attestation key");
 
         let tbs = tbs.contents;
-        let public_key = verifying_key.to_encoded_point(false);
+        let public_key = verifying_key.to_sec1_point(false);
         assert!(contains(tbs, public_key.as_bytes()));
         assert!(contains(tbs, IDENTITY.manufacturer.as_bytes()));
         assert!(contains(tbs, IDENTITY.product.as_bytes()));

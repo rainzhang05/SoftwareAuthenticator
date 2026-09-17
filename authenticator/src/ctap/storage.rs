@@ -12,7 +12,7 @@ use crate::store::{
     AttestationRecord, CredentialRecord, CredentialStore, PinStateRecord, StoreError,
 };
 
-use rand_core::RngCore;
+use rand_core::Rng;
 use zeroize::Zeroize;
 
 use crate::ctap::constants::*;
@@ -43,10 +43,7 @@ pub(super) fn store_status(action: &str, err: StoreError) -> u8 {
 /// checks are refused with CTAP2_ERR_PIN_BLOCKED before any comparison and
 /// only authenticatorReset recovers.  Nothing is written back over the
 /// unreadable record until then.
-pub(super) fn load_pin_state(
-    store: &dyn CredentialStore,
-    rng: &mut dyn RngCore,
-) -> (PinState, bool) {
+pub(super) fn load_pin_state(store: &dyn CredentialStore, rng: &mut dyn Rng) -> (PinState, bool) {
     match store.pin_state() {
         Ok(Some(record)) => (
             PinState::from_persistent(PersistentPinState {
@@ -69,7 +66,7 @@ pub(super) fn load_pin_state(
 /// Set and blocked: no retries left, and a random PIN hash.  The platform
 /// supplies the PIN hash itself (pinHashEnc), so a fixed placeholder could be
 /// sent directly; a random one cannot be guessed.
-fn unreadable_pin_state(rng: &mut dyn RngCore) -> PinState {
+fn unreadable_pin_state(rng: &mut dyn Rng) -> PinState {
     let mut hash = [0u8; 16];
     rng.fill_bytes(&mut hash);
     let state = PinState::from_persistent(PersistentPinState {

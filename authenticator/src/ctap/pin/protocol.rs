@@ -9,10 +9,10 @@ use crate::{
 };
 
 use ciborium::value::{Integer, Value};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use p256::{
-    ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, EncodedPoint,
-    PublicKey as P256PublicKey, SecretKey as P256SecretKey,
+    ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey as P256PublicKey, Sec1Point,
+    SecretKey as P256SecretKey,
 };
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -153,12 +153,12 @@ pub(crate) fn parse_pin_uv_auth_param(
 /// it, §6.5.7).
 pub(crate) struct KeyAgreementKey {
     secret_key: P256SecretKey,
-    public_key: EncodedPoint,
+    public_key: Sec1Point,
 }
 
 impl KeyAgreementKey {
     pub(crate) fn new(secret_key: P256SecretKey) -> Self {
-        let public_key = secret_key.public_key().to_encoded_point(false);
+        let public_key = secret_key.public_key().to_sec1_point(false);
         Self {
             secret_key,
             public_key,
