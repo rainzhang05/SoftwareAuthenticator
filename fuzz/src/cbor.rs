@@ -6,11 +6,44 @@ use ciborium::value::{Integer, Value};
 /// How deeply [`arbitrary_value`] nests arrays, maps and tags.
 pub const MAX_DEPTH: u32 = 4;
 
-/// Encode `value` as CBOR.
+/// Encode `value` as CBOR with the keys of every map in the order of the
+/// CTAP2 canonical CBOR encoding form (CTAP 2.3 §8), as platforms send it.
+/// The engine rejects anything else, so requests built from values reach
+/// their command's logic; the raw-byte targets and steps cover other
+/// encodings.  Duplicate keys are kept.
 pub fn encode(value: &Value) -> Vec<u8> {
     let mut encoded = Vec::new();
-    ciborium::ser::into_writer(value, &mut encoded).expect("a Value always encodes");
+    ciborium::ser::into_writer(&canonical(value.clone()), &mut encoded)
+        .expect("a Value always encodes");
     encoded
+}
+
+/// `value` with the entries of every map sorted by key: by major type, then
+/// by encoded length, then bytewise.
+fn canonical(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical).collect()),
+        Value::Tag(tag, inner) => Value::Tag(tag, Box::new(canonical(*inner))),
+        Value::Map(entries) => {
+            let mut entries: Vec<(Vec<u8>, (Value, Value))> = entries
+                .into_iter()
+                .map(|(key, value)| {
+                    let key = canonical(key);
+                    let mut encoded = Vec::new();
+                    ciborium::ser::into_writer(&key, &mut encoded).expect("a Value always encodes");
+                    (encoded, (key, canonical(value)))
+                })
+                .collect();
+            entries.sort_by(|(left, _), (right, _)| {
+                (left[0] >> 5)
+                    .cmp(&(right[0] >> 5))
+                    .then(left.len().cmp(&right.len()))
+                    .then(left.cmp(right))
+            });
+            Value::Map(entries.into_iter().map(|(_, entry)| entry).collect())
+        }
+        other => other,
+    }
 }
 
 pub fn int(value: i64) -> Value {

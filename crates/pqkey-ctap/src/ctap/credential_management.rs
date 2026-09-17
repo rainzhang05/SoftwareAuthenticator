@@ -364,11 +364,7 @@ impl CtapApp<'_> {
     }
 
     pub(super) fn handle_credential_management(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
-        let request: Value = from_reader(payload).map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
-        let map = match request {
-            Value::Map(map) => map,
-            _ => return Err(CTAP2_ERR_INVALID_CBOR),
-        };
+        let map = cbor::request_parameters(payload)?;
 
         let subcommand = match cbor::map_get(&map, Value::Integer(Integer::from(1))) {
             // "If the authenticator implements a command code having

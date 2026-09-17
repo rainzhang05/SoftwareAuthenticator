@@ -11,7 +11,6 @@ use crate::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial, Stor
 use crate::try_sign_challenge;
 
 use ciborium::{
-    de::from_reader,
     ser::into_writer,
     value::{Integer, Value},
 };
@@ -91,11 +90,7 @@ impl CtapApp<'_> {
     /// protected by some form of user verification" exactly when a PIN is
     /// set.
     pub(super) fn handle_make_credential(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
-        let request: Value = from_reader(payload).map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
-        let map = match request {
-            Value::Map(map) => map,
-            _ => return Err(CTAP2_ERR_INVALID_CBOR),
-        };
+        let map = cbor::request_parameters(payload)?;
         let parameter = |key: i64| cbor::map_get(&map, Value::Integer(Integer::from(key)));
 
         // Step 1: a zero length pinUvAuthParam asks the user to select this

@@ -35,20 +35,16 @@ pub fn field(
     })
 }
 
-/// A map from `(key, value)` pairs whose value is present, sometimes
-/// reordered, with a duplicated key or an unknown extra key.
+/// A map from `(key, value)` pairs whose value is present, sometimes with a
+/// duplicated key or an unknown extra key.  (Its entries are encoded in
+/// canonical order whatever their order here; see [`encode`].)
 pub fn map(u: &mut Unstructured<'_>, entries: Vec<(Value, Option<Value>)>) -> Result<Value> {
     let mut entries: Vec<(Value, Value)> = entries
         .into_iter()
         .filter_map(|(key, value)| value.map(|value| (key, value)))
         .collect();
     match u.int_in_range(0u8..=11)? {
-        0 if !entries.is_empty() => {
-            let from = u.choose_index(entries.len())?;
-            let to = u.choose_index(entries.len())?;
-            entries.swap(from, to);
-        }
-        1 if !entries.is_empty() => {
+        0 | 1 if !entries.is_empty() => {
             let index = u.choose_index(entries.len())?;
             let duplicate = (entries[index].0.clone(), arbitrary_value(u, 1)?);
             entries.push(duplicate);

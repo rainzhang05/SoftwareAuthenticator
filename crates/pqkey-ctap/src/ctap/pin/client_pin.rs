@@ -8,7 +8,6 @@ use crate::ctap::CtapApp;
 use crate::PinUvSessionKeys;
 
 use ciborium::{
-    de::from_reader,
     ser::into_writer,
     value::{Integer, Value},
 };
@@ -329,11 +328,7 @@ impl CtapApp<'_> {
     }
 
     pub(crate) fn handle_client_pin(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
-        let request: Value = from_reader(payload).map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
-        let map = match request {
-            Value::Map(map) => map,
-            _ => return Err(CTAP2_ERR_INVALID_CBOR),
-        };
+        let map = cbor::request_parameters(payload)?;
         let subcommand =
             ClientPinSubcommand::parse(cbor::map_get(&map, Value::Integer(Integer::from(2))))?;
         match subcommand {

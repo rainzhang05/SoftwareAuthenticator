@@ -669,11 +669,13 @@ fn unknown_subcommands_are_invalid_subcommands() {
     }
 }
 
-/// The pinUvAuthParam covers `subCommand || subCommandParams` with
-/// subCommandParams exactly as the platform encoded it, even when that is not
-/// the canonical encoding this engine would produce.
+/// subCommandParams that are not in the CTAP2 canonical CBOR encoding form
+/// are rejected like any other non-canonical request, even when the
+/// pinUvAuthParam covers them exactly as encoded: "All decoders SHOULD reject
+/// CBOR that is not validly encoded in the CTAP2 canonical CBOR encoding form"
+/// (CTAP 2.3 §8).
 #[test]
-fn pin_uv_auth_param_covers_the_received_sub_command_params_bytes() {
+fn non_canonical_sub_command_params_are_rejected() {
     let (mut app, _, token) = app_with_cm_token(0x36);
     insert_owned(&mut app, es256_credential("a.example", &[0xA1]));
 
@@ -691,10 +693,10 @@ fn pin_uv_auth_param_covers_the_received_sub_command_params_bytes() {
     payload.extend_from_slice(&[0x03, 0x02, 0x04, 0x58, 0x20]);
     payload.extend_from_slice(&pin_uv_auth_param);
 
-    let response = app
-        .handle_credential_management(&payload)
-        .expect("enumerateCredentialsBegin with non-canonical params");
-    assert_eq!(credential_id_of(&response), [0xA1]);
+    assert_eq!(
+        app.handle_credential_management(&payload),
+        Err(CTAP2_ERR_INVALID_CBOR)
+    );
 }
 
 /// The examples of CTAP 2.3 §6.8.7.
