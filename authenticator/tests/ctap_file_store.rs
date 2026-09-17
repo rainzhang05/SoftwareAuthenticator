@@ -404,11 +404,11 @@ fn ml_dsa_87_make_credential_response_sizes() {
         )
         .len()
     };
-    // 610 bytes is the size of the certificate the daemon generates with its
+    // 641 bytes is the largest certificate the daemon generates with its
     // default identity strings.
     let packed_with_certificate = {
         let dir = TempDir::new();
-        let (record, _) = attestation_record(610);
+        let (record, _) = attestation_record(641);
         FileStore::open(dir.state())
             .unwrap()
             .set_attestation(&record)
@@ -423,7 +423,7 @@ fn ml_dsa_87_make_credential_response_sizes() {
     };
     println!(
         "ML-DSA-87 makeCredential response: self attestation {self_attested} bytes, \
-         packed attestation with a 610-byte certificate {packed_with_certificate} bytes \
+         packed attestation with a 641-byte certificate {packed_with_certificate} bytes \
          (CTAPHID limit {CTAPHID_MAX_MESSAGE})"
     );
     assert!(self_attested <= CTAPHID_MAX_MESSAGE);
