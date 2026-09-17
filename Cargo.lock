@@ -813,7 +813,6 @@ dependencies = [
  "nix",
  "p256",
  "rand",
- "rand_core",
  "rcgen",
  "sha2",
  "signal-hook",
@@ -1317,10 +1316,6 @@ dependencies = [
  "tracing-core",
  "tracing-log",
 ]
-
-[[package]]
-name = "transport-core"
-version = "0.1.0"
 
 [[package]]
 name = "trussed-core"

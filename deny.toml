@@ -13,10 +13,9 @@
 # `cargo audit --ignore` flag in .github/workflows/security.yml; none is today.
 
 [graph]
-# Check the dependency graph with every feature enabled. transport-core's
-# `ctaphid` transport and trussed-mldsa's `log` / mldsa44/65/87 features are all
-# optional, and an advisory hiding behind an off-by-default feature is still an
-# advisory.
+# Check the dependency graph with every feature enabled. trussed-mldsa's `log`
+# and mldsa44/65/87 features are optional, and an advisory hiding behind an
+# off-by-default feature is still an advisory.
 all-features = true
 # Deliberately NOT restricted with `targets = [...]`: filtering the graph by
 # target would hide advisories in platform-specific dependencies.
@@ -45,8 +44,10 @@ yanked = "warn"
 
 ignore = [
     # --- unmaintained / unsound -----------------------------------------
-    # atomic-polyfill 1.0.3 <- heapless 0.7. Goes away with heapless 0.8, which
-    # is a breaking change across trussed/authenticator/transport-core.
+    # atomic-polyfill 1.0.3 <- heapless 0.7, through heapless-bytes 0.3 (used by
+    # authenticator, pc-hid-runner, ctaphid-app, ctaphid-dispatch and
+    # trussed-core) and postcard 0.7 (trussed-core). Goes away with heapless 0.8,
+    # which needs new releases of those crates.
     { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill via heapless 0.7; needs a coordinated heapless 0.8 upgrade" },
 ]
 
@@ -75,20 +76,15 @@ allow = [
 unused-allowed-license = "allow"
 # Workspace members that are never published don't need a license expression.
 # Note: this only takes effect for crates marked `publish = false`; see the
-# clarifications below for why transport-core / pc-hid-runner still need one.
+# clarification below for why pc-hid-runner still needs one.
 private = { ignore = true }
 
-# transport-core and pc-hid-runner declare no `license` at all: the root
-# Cargo.toml sets `license = "Apache-2.0 OR MIT"` under [workspace.package], but
-# these two members never inherit it with `license.workspace = true`.
-# `license-files = []` makes the clarification apply unconditionally.
-# TODO: delete both entries once the member manifests inherit the workspace
+# pc-hid-runner declares no `license` at all: the root Cargo.toml sets
+# `license = "Apache-2.0 OR MIT"` under [workspace.package], but the member never
+# inherits it with `license.workspace = true`. `license-files = []` makes the
+# clarification apply unconditionally.
+# TODO: delete this entry once the member manifest inherits the workspace
 # license (that also makes `private.ignore` above do the right thing).
-[[licenses.clarify]]
-crate = "transport-core"
-expression = "Apache-2.0 OR MIT"
-license-files = []
-
 [[licenses.clarify]]
 crate = "pc-hid-runner"
 expression = "Apache-2.0 OR MIT"
@@ -98,19 +94,12 @@ license-files = []
 # bans
 # ---------------------------------------------------------------------------
 [bans]
-# The tree currently carries duplicated major versions of crypto crates, all
-# pulled in by the patched trussed (p256-cortex-m4 depends on the 2021-era
-# RustCrypto generation):
-#
-#   p256       0.9.0  + 0.13.2
-#   sha2       0.9.9  + 0.10.9
-#   hmac       0.11.0 + 0.12.1
-#
 # Duplicated crypto crates are a real hazard in an authenticator: two copies of
 # sha2 or p256 means two code paths, two audit surfaces, and larger binaries.
-# Kept at "warn" so CI is not red on day one.
-# TODO: switch to "deny" once the dependency cleanup unifies these. That single
-# word is the whole change.
+# The duplicates Trussed brought in (p256 0.9, sha2 0.9, hmac 0.11) are gone;
+# the only duplicate left is syn 2 + 3, a build-time proc-macro dependency.
+# TODO: switch to "deny" once syn is unified. That single word is the whole
+# change.
 multiple-versions = "warn"
 
 # Path dependencies between workspace members are version-less, which reads as a
@@ -119,7 +108,7 @@ multiple-versions = "warn"
 wildcards = "warn"
 
 [bans.workspace-dependencies]
-# Members declare serde / sha2 / log / littlefs2 / trussed / heapless-bytes
+# Members declare sha2 / p256 / log / zeroize / heapless-bytes
 # independently instead of via [workspace.dependencies] + `workspace = true`,
 # which is how the duplicate versions above crept in. cargo-deny denies this by
 # default; downgraded to a warning until the manifests are unified.

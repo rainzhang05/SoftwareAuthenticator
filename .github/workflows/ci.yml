@@ -60,7 +60,7 @@ jobs:
     env:
       # ------------------------------------------------------------------
       # THE CLIPPY GATE. The workspace still carries ~70 clippy findings
-      # (mostly authenticator and transport-core), so warnings are surfaced in
+      # (mostly authenticator and pc-hid-runner), so warnings are surfaced in
       # the log but do not fail the build yet.
       #
       # To make clippy a hard gate once those are cleaned up, change this one
@@ -77,7 +77,8 @@ jobs:
           toolchain: stable
           components: clippy
       - name: Install system dependencies
-        # libclang: littlefs2-sys runs bindgen at build time.
+        # libclang: needed by littlefs2-sys, which is no longer in the tree;
+        #           removing it from every job is a follow-up.
         # libudev:  transitive requirement of the HID stack.
         run: |
           sudo apt-get update
@@ -217,8 +218,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo build --workspace --locked --release
 
-  # Coverage. Reported, never enforced: transport-core has no tests at all
-  # today, so any threshold would either be meaningless or permanently red. The
+  # Coverage. Reported, never enforced: parts of pc-hid-runner (the uhid device
+  # and the CLI) cannot be exercised by unit tests, so any threshold would either
+  # be meaningless or permanently red. The
   # point for now is to make the number visible on every run so the trend is
   # obvious.
   #
@@ -265,7 +267,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # TODO: once transport-core has tests and the number stops moving, add a
+      # TODO: once the number stops moving, add a
       # floor with `--fail-under-lines <N>` on the `report` invocation above and
       # this job becomes a real gate.
 

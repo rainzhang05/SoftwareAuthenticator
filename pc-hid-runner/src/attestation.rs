@@ -7,7 +7,7 @@
 use std::io;
 
 use p256::ecdsa::{signature::Signer, DerSignature, SigningKey as EcdsaSigningKey};
-use rand_core::OsRng;
+use rand::rngs::OsRng;
 use rcgen::{
     CertificateParams, DnType, IsCa, KeyIdMethod, PublicKeyData, SanType, SerialNumber,
     SignatureAlgorithm, SigningKey, PKCS_ECDSA_P256_SHA256,

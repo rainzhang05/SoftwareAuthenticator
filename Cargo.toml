@@ -3,7 +3,6 @@ members = [
     "trussed-mldsa",
     "authenticator",
     "pc-hid-runner",
-    "transport-core"
 ]
 
 resolver = "2"

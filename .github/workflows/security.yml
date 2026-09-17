@@ -3,7 +3,7 @@ name: Security
 # Supply-chain auditing, split out from CI on purpose: these checks depend on
 # the state of the RustSec advisory database, not on the state of this repo, so
 # they have to run on a timer as well as on commits. A new advisory against
-# ring or littlefs2 must turn something red even in a week with no pushes.
+# any dependency must turn something red even in a week with no pushes.
 #
 # Neither job compiles anything - cargo-audit reads Cargo.lock directly and
 # cargo-deny only needs `cargo metadata` - so they need no system packages, no
@@ -65,9 +65,8 @@ jobs:
   # provenance. This is the strict half of the pair - see deny.toml, which
   # documents every tolerated finding with a TODO for removing it.
   #
-  # `sources` in particular matters here: the root Cargo.toml carries a
-  # [patch.crates-io] entry pinning trussed to a GitHub commit, and this check
-  # guarantees that stays the *only* non-crates.io input to the build.
+  # `sources` in particular matters here: it guarantees that crates.io stays
+  # the *only* input to the build, with no git dependency or patch.
   deny:
     name: cargo deny
     runs-on: ubuntu-latest
