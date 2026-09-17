@@ -62,3 +62,13 @@ PIN_PROTOCOL_2_AUTH_PARAM = (
     "bug 2: setPIN and changePIN reject protocol 2's 32-byte pinUvAuthParam "
     "with CTAP2_ERR_PIN_AUTH_INVALID"
 )
+
+# Bug 3. The CTAPHID layer answers CANCEL on an idle channel with an ERROR
+# packet, and writes error responses for one channel into the buffer that
+# holds another channel's partially received request.
+CTAPHID_CANCEL_WHILE_IDLE = "bug 3: CTAPHID answers CANCEL on an idle channel with ERROR 0x04 (invalid sequence)"
+CTAPHID_INTERLEAVED_REQUESTS = (
+    "bug 3: an error sent to another channel overwrites the first byte of a "
+    "request still being received, turning makeCredential (0x01) into clientPIN "
+    "(0x06), which fails with CTAP2_ERR_MISSING_PARAMETER"
+)
