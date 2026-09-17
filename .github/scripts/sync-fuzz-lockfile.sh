@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Make sure fuzz/Cargo.lock resolves the fuzz crate before it is built. Invoked
-# by .github/workflows/fuzz.yml, with NIGHTLY naming the toolchain.
+# Make sure fuzz/Cargo.lock resolves the fuzz crate before anything reads it.
+# Invoked by .github/workflows/fuzz.yml, with NIGHTLY naming the toolchain, and
+# by ci.yml, with TOOLCHAIN naming it (TOOLCHAIN wins when both are set).
 #
 # The fuzz crate is a workspace of its own whose path dependencies are the
 # crates of the main workspace, so a change to one of their manifests (a new
@@ -14,13 +15,14 @@
 #     warning names the difference to commit. Fuzzing goes on.
 set -euo pipefail
 
-: "${NIGHTLY:?}"
+toolchain="${TOOLCHAIN:-${NIGHTLY:-}}"
+: "${toolchain:?set TOOLCHAIN or NIGHTLY to the toolchain that resolves the lockfile}"
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 manifest="$root/fuzz/Cargo.toml"
 lockfile="$root/fuzz/Cargo.lock"
 
-if cargo "+$NIGHTLY" metadata --locked --format-version 1 --manifest-path "$manifest" > /dev/null; then
+if cargo "+$toolchain" metadata --locked --format-version 1 --manifest-path "$manifest" > /dev/null; then
   echo "fuzz/Cargo.lock is up to date"
   exit 0
 fi
@@ -32,6 +34,6 @@ fi
 
 before=$(mktemp)
 cp "$lockfile" "$before"
-cargo "+$NIGHTLY" metadata --format-version 1 --manifest-path "$manifest" > /dev/null
+cargo "+$toolchain" metadata --format-version 1 --manifest-path "$manifest" > /dev/null
 echo "::warning file=fuzz/Cargo.lock::fuzz/Cargo.lock was out of date and has been brought up to date for this run; run 'cargo metadata --manifest-path fuzz/Cargo.toml' and commit it"
 diff -u "$before" "$lockfile" || true

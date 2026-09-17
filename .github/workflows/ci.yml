@@ -36,7 +36,8 @@ env:
 jobs:
   # Formatting. Cheap and deterministic, so it runs without a cache or any
   # system packages. `cargo fmt` never touches the dependency graph, which is
-  # why this is the one job with no `--locked`.
+  # why this is the one job with no `--locked`. The fuzz crate is a workspace of
+  # its own that `--all` does not reach, so it is checked separately.
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
@@ -50,6 +51,9 @@ jobs:
           toolchain: stable
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - name: Check the fuzz crate's formatting
+        if: ${{ !cancelled() }}
+        run: cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
 
   # The Python tests of the Dependabot auto-merge decision
   # (.github/scripts/test_dependabot_automerge.py). The runner image has
@@ -67,6 +71,14 @@ jobs:
   # lints in the root Cargo.toml and the crate-level ones in each crate root.
   # A finding that is deliberately kept carries an `#[allow]` with a comment
   # saying why.
+  #
+  # The fuzz crate (fuzz/, its own workspace) is linted here too, on stable:
+  # linting needs neither nightly nor the sanitizer build that fuzz.yml does,
+  # and fuzz.yml builds the crate only after changes reach main, while this job
+  # holds every pull request to the same lints. It costs one more check build
+  # (fuzz/target, cached like the workspace's target). fuzz/Cargo.lock is
+  # checked as committed on pull requests and brought up to date elsewhere, as
+  # in fuzz.yml (see .github/scripts/sync-fuzz-lockfile.sh).
   clippy:
     name: clippy
     runs-on: ubuntu-latest
@@ -82,7 +94,23 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            . -> target
+            fuzz -> target
       - run: cargo clippy --workspace --all-targets --locked -- ${{ env.CLIPPY_FLAGS }}
+
+      - name: Check fuzz/Cargo.lock
+        id: fuzz-lockfile
+        if: ${{ !cancelled() }}
+        env:
+          TOOLCHAIN: stable
+        run: .github/scripts/sync-fuzz-lockfile.sh
+      # No --locked: the step above has either verified the lockfile or brought
+      # it up to date for this run.
+      - name: Lint the fuzz crate
+        if: ${{ !cancelled() && steps.fuzz-lockfile.outcome == 'success' }}
+        run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- ${{ env.CLIPPY_FLAGS }}
 
   # The main correctness gate: the full workspace on Linux, the platform where
   # the pqkey daemon actually runs.

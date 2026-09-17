@@ -2,8 +2,9 @@ name: Fuzz
 
 # libFuzzer targets in fuzz/ (see fuzz/src/lib.rs): the CTAPHID framing and the
 # CTAP2 engine, which parse whatever any local process writes to the key's
-# hidraw node. The fuzz crate is its own workspace and needs nightly, so the CI
-# workflow never compiles it; this one does.
+# hidraw node. The fuzz crate is its own workspace and needs nightly to build
+# its targets, so the CI workflow only formats and lints it (on stable); this
+# one builds and runs it.
 #
 # * Weekly and on demand, every target fuzzes for a bounded time (30 minutes by
 #   default) in its own job. This is where bugs are found.
