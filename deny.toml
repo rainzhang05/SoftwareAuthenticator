@@ -82,32 +82,33 @@ private = { ignore = true }
 # bans
 # ---------------------------------------------------------------------------
 [bans]
-# Duplicated crypto crates are a real hazard in an authenticator: two copies of
-# sha2 or p256 means two code paths, two audit surfaces, and larger binaries.
-# The duplicates Trussed brought in (p256 0.9, sha2 0.9, hmac 0.11) are gone,
-# and every RustCrypto crate is on a single generation (digest 0.11, cipher
-# 0.5, elliptic-curve 0.14, signature 3). The duplicates left are:
-# - syn 2 + 3, a build-time proc-macro dependency;
-# - rand_core 0.6 + 0.10: trussed-core (every release up to 0.2.2) still
-#   requires rand_core 0.6; it is the only path to it.
-# TODO: switch to "deny" once these are unified. That single word is the whole
-# change.
-multiple-versions = "warn"
+# Duplicated crates are a real hazard in an authenticator: two copies of sha2 or
+# p256 mean two code paths, two audit surfaces and larger binaries. A second
+# version of anything fails the check; each exception below names the crate
+# that forces it and is removed once that crate moves on.
+multiple-versions = "deny"
+skip = [
+    # trussed-core (through ctaphid-app, every release up to 0.2.2) requires
+    # rand_core 0.6; everything else is on 0.10. Compiled, but pqkey never
+    # calls into it: it only uses trussed-core's `InterruptFlag`.
+    { crate = "rand_core@0.6", reason = "trussed-core requires rand_core 0.6" },
+    # Build time only: proc macros (zeroize_derive, serde-indexed via
+    # trussed-core, zerocopy-derive, enumflags2_derive, x509-parser's asn1-rs
+    # derives, ...) that have not moved to syn 3 yet.
+    { crate = "syn@2", reason = "proc-macro crates that still use syn 2" },
+]
 
-# Path dependencies between workspace members are version-less, which reads as a
-# wildcard. Left at the default until the members set `publish = false` (at which
-# point `allow-wildcard-paths = true` would let this become "deny").
-wildcards = "warn"
+# Path dependencies between workspace members carry no version, which reads as
+# a wildcard. Every member sets `publish = false`, so they are allowed; a
+# wildcard on a registry dependency is not.
+wildcards = "deny"
+allow-wildcard-paths = true
 
 [bans.workspace-dependencies]
-# Members declare sha2 / p256 / getrandom / rand_core / log / zeroize / heapless-bytes
-# / ciborium independently instead of via [workspace.dependencies] + `workspace = true`,
-# which is how the duplicate versions above crept in. cargo-deny denies this by
-# default; downgraded to a warning until the manifests are unified.
-# TODO: add [workspace.dependencies] to the root Cargo.toml, then set both of
-# these back to "deny".
-duplicates = "warn"
-unused = "warn"
+# A crate used by more than one member is declared once in the root
+# Cargo.toml's [workspace.dependencies] and inherited with `workspace = true`.
+duplicates = "deny"
+unused = "deny"
 
 # ---------------------------------------------------------------------------
 # sources
