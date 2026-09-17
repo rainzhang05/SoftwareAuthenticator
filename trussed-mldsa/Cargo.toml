@@ -8,7 +8,14 @@ authors = ["Feitian Technologies <info@ftsafe.com>"]
 license = "Apache-2.0 OR MIT"
 
 [dependencies]
-fips204 = "0.4.6"
+# RustCrypto's ML-DSA.  0.1.0 and later include the fixes for RUSTSEC-2025-0144
+# (timing side-channel in Decompose) and GHSA-5x2r-hc65-25f9 (repeated hint
+# indices accepted by verification).  `alloc` keeps the large key structures
+# off the stack, `rand_core` provides hedged signing, `zeroize` wipes keys on
+# drop.  The default `pkcs8` and `getrandom` features are not needed.
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "rand_core", "zeroize"] }
+# The operating system RNG: key-generation seeds and the hedged-signing `rnd`.
+getrandom = { version = "0.4", features = ["sys_rng"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
 # Optional: without it `sign()`'s empty-Vec failure path is completely silent.
 log = { version = "0.4", default-features = false, optional = true }
@@ -24,7 +31,6 @@ mldsa87 = []
 log = ["dep:log"]
 
 [dev-dependencies]
-# Differential test (tests/differential.rs): RustCrypto's `ml-dsa` is checked
-# byte for byte against the current `fips204` backend before replacing it.
-ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "rand_core", "zeroize"] }
-getrandom = { version = "0.4", features = ["sys_rng"] }
+# Differential test (tests/differential.rs): the previous backend, kept only to
+# hold `ml-dsa` to it byte for byte.
+fips204 = "0.4.6"
