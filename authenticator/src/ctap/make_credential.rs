@@ -214,6 +214,8 @@ where
         let cred_protect_value = cred_protect_requested.unwrap_or(1);
 
         let user_present = self.await_user_presence()?;
+        self.pin_state
+            .consume_pin_uv_auth_token_after_user_presence();
 
         let (cose_key, secret_key) = create_credential(alg);
         let secret_key_bytes = secret_key.to_bytes();

@@ -1,7 +1,6 @@
 //! The authenticatorReset command.
 
 use super::credential_management::CredentialManagementState;
-use super::pin::state::PinState;
 use super::CtapApp;
 
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
@@ -23,7 +22,7 @@ where
         // The PIN, pinRetries, the pinUvAuthToken and each protocol's key
         // agreement key go back to their initial values, as at power-up
         // (CTAP 2.3 §6.5.5.1).
-        self.pin_state = PinState::new();
+        self.pin_state.reset();
         self.save_persistent_pin_state();
         self.cred_mgmt_state = CredentialManagementState::new();
         self.pending_assertion = None;

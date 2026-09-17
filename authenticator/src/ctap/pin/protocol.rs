@@ -315,17 +315,13 @@ where
     /// including the absence of a pinUvAuthToken, is
     /// `CTAP2_ERR_PIN_AUTH_INVALID`.
     pub(crate) fn verify_pin_uv_auth_param(
-        &self,
+        &mut self,
         protocol: PinProtocol,
         message: &[u8],
         pin_uv_auth_param: &[u8],
     ) -> Result<(), u8> {
-        let token = Zeroizing::new(
-            self.pin_state
-                .pin_uv_auth_token()
-                .ok_or(CTAP2_ERR_PIN_AUTH_INVALID)?,
-        );
-        verify(protocol, &token, message, pin_uv_auth_param)
+        self.pin_state
+            .verify_pin_uv_auth_token(protocol, message, pin_uv_auth_param)
     }
 
     /// The key agreement key of `protocol`, drawn from the RNG if it has not

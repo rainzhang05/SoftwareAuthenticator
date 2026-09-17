@@ -559,6 +559,16 @@ fn get_assertion_produces_hmac_secret_output() {
     app.handle_make_credential(&payload)
         .expect("makeCredential succeeds");
 
+    // makeCredential collected user presence, which strips the token of its
+    // permissions (CTAP 2.3 §6.1.2 step 14); the platform fetches a new one.
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        pin_token,
+        PIN_PERMISSION_MC | PIN_PERMISSION_GA,
+        None,
+    );
+
     let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
     let platform_secret = P256SecretKey::from_slice(&[0x23; 32]).expect("valid secret key");
     let (session_keys, platform_entries) =

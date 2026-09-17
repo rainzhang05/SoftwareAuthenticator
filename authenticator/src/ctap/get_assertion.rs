@@ -314,6 +314,8 @@ where
         }
 
         let user_present = self.await_user_presence()?;
+        self.pin_state
+            .consume_pin_uv_auth_token_after_user_presence();
 
         let chosen_index = matching_indices[0];
         let remaining_credentials: VecDeque<Vec<u8>> = matching_indices

@@ -44,21 +44,7 @@ where
         permission: u8,
         rp_id: &str,
     ) -> Result<(), u8> {
-        if !self.pin_state.has_permission(permission) {
-            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-        }
-        if !self.pin_state.should_bind_pin_token_to_rp() {
-            return Ok(());
-        }
-        match self.pin_state.permissions_rp_id() {
-            Some(existing) => {
-                if existing != rp_id {
-                    return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-                }
-            }
-            None => self.pin_state.set_permissions_rp_id(rp_id),
-        }
-        Ok(())
+        self.pin_state.authorize_rp_operation(permission, rp_id)
     }
 
     /// The pinUvAuthToken permission check of authenticatorCredentialManagement
@@ -82,11 +68,7 @@ where
         if !self.pin_state.has_permission(PIN_PERMISSION_CM) {
             return Err(CTAP2_ERR_PIN_AUTH_INVALID);
         }
-        let Some(binding) = self
-            .pin_state
-            .permissions_rp_id()
-            .map(|value| value.to_string())
-        else {
+        let Some(binding) = self.pin_state.permissions_rp_id() else {
             return Ok(());
         };
         match subcommand {

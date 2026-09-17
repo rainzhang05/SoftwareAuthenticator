@@ -438,7 +438,10 @@ fn client_pin_token_with_permissions_sets_metadata() {
     assert!(app.pin_state.has_permission(PIN_PERMISSION_MC));
     assert!(app.pin_state.has_permission(PIN_PERMISSION_GA));
     assert!(!app.pin_state.has_permission(PIN_PERMISSION_CM));
-    assert_eq!(app.pin_state.permissions_rp_id(), Some("example.com"));
+    assert_eq!(
+        app.pin_state.permissions_rp_id().as_deref(),
+        Some("example.com")
+    );
 }
 
 #[test]
@@ -581,7 +584,10 @@ fn client_pin_token_with_permissions_accepts_missing_pin_uv_auth_param() {
     assert!(app.pin_state.has_permission(PIN_PERMISSION_MC));
     assert!(app.pin_state.has_permission(PIN_PERMISSION_GA));
     assert!(!app.pin_state.has_permission(PIN_PERMISSION_CM));
-    assert_eq!(app.pin_state.permissions_rp_id(), Some("example.org"));
+    assert_eq!(
+        app.pin_state.permissions_rp_id().as_deref(),
+        Some("example.org")
+    );
 }
 
 #[test]
@@ -841,8 +847,11 @@ fn get_pin_uv_auth_token_grants_cm_scoped_to_an_rp_id() {
     )
     .expect("cm with an rpId is granted");
     assert_eq!(app.pin_state.pin_uv_auth_token(), Some(token));
-    assert_eq!(app.pin_state.pin_uv_auth_permissions, PIN_PERMISSION_CM);
-    assert_eq!(app.pin_state.permissions_rp_id(), Some("example.com"));
+    assert_eq!(app.pin_state.pin_uv_auth_permissions(), PIN_PERMISSION_CM);
+    assert_eq!(
+        app.pin_state.permissions_rp_id().as_deref(),
+        Some("example.com")
+    );
 }
 
 #[test]
@@ -898,7 +907,8 @@ fn get_pin_uv_auth_token_ignores_undefined_permissions() {
                 .unwrap_or_else(|err| panic!("permissions {requested:#x}: {err:#04x}"));
         assert_eq!(app.pin_state.pin_uv_auth_token(), Some(token));
         assert_eq!(
-            app.pin_state.pin_uv_auth_permissions, granted,
+            app.pin_state.pin_uv_auth_permissions(),
+            granted,
             "permissions {requested:#x}"
         );
     }

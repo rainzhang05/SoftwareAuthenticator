@@ -2,7 +2,8 @@
 
 use core::fmt;
 
-use super::protocol::KeyAgreementKeys;
+use super::protocol::{KeyAgreementKeys, PinProtocol};
+use super::token::{Clock, MonotonicClock, PinUvAuthTokenState};
 
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -191,10 +192,8 @@ impl PinRetryState {
 pub(crate) struct PinState {
     pin: PinRetryState,
     pub(crate) key_agreement: KeyAgreementKeys,
-    pub(crate) pin_uv_auth_token: Option<[u8; 32]>,
-    pub(crate) pin_uv_auth_permissions: u8,
-    pub(crate) pin_uv_auth_rp_id: Option<String>,
-    pub(crate) pin_uv_auth_rp_provided: bool,
+    token: PinUvAuthTokenState,
+    clock: Box<dyn Clock>,
 }
 
 impl PinState {
@@ -209,11 +208,23 @@ impl PinState {
         Self {
             pin: PinRetryState::power_up(persistent),
             key_agreement: KeyAgreementKeys::default(),
-            pin_uv_auth_token: None,
-            pin_uv_auth_permissions: 0,
-            pin_uv_auth_rp_id: None,
-            pin_uv_auth_rp_provided: false,
+            token: PinUvAuthTokenState::default(),
+            clock: Box::new(MonotonicClock::new()),
         }
+    }
+
+    /// Back to the state of a fresh authenticator (authenticatorReset): no PIN,
+    /// maximum retries, no key agreement keys and no pinUvAuthToken.  The
+    /// clock is kept.
+    pub(crate) fn reset(&mut self) {
+        self.pin = PinRetryState::default();
+        self.key_agreement = KeyAgreementKeys::default();
+        self.token.stop_using();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_clock(&mut self, clock: Box<dyn Clock>) {
+        self.clock = clock;
     }
 
     pub(crate) fn persistent(&self) -> &PersistentPinState {
@@ -224,9 +235,12 @@ impl PinState {
         self.pin.is_set()
     }
 
+    /// Store a new PIN.  Any pinUvAuthToken stops being usable: changePIN
+    /// "calls resetPinUvAuthToken() for all pinUvAuthProtocols supported by
+    /// this authenticator" (CTAP 2.3 §6.5.5.6).
     pub(crate) fn set_pin(&mut self, hash: [u8; 16]) {
         self.pin.set_pin(hash);
-        self.clear_pin_uv_auth_token();
+        self.token.stop_using();
     }
 
     pub(crate) fn retries(&self) -> u8 {
@@ -253,63 +267,110 @@ impl PinState {
         self.pin.finish_attempt(attempt, candidate)
     }
 
-    fn clear_pin_uv_auth_token(&mut self) {
-        if let Some(mut token) = self.pin_uv_auth_token.take() {
-            token.zeroize();
-        }
-        self.pin_uv_auth_permissions = 0;
-        self.pin_uv_auth_rp_provided = false;
-        if let Some(mut rp_id) = self.pin_uv_auth_rp_id.take() {
-            rp_id.zeroize();
-        }
-    }
-
-    pub(crate) fn set_pin_uv_auth_token(
+    /// Issue a new pinUvAuthToken over `protocol` after a successful PIN
+    /// check: `resetPinUvAuthToken()`, `beginUsingPinUvAuthToken(userIsPresent:
+    /// false)`, the permissions and the optional permissions RP ID (CTAP 2.3
+    /// §6.5.5.7.1, §6.5.5.7.2).
+    pub(crate) fn issue_pin_uv_auth_token(
         &mut self,
+        protocol: PinProtocol,
         token: [u8; 32],
         permissions: u8,
         rp_id: Option<String>,
     ) {
-        self.clear_pin_uv_auth_token();
-        self.pin_uv_auth_token = Some(token);
-        self.pin_uv_auth_permissions = permissions;
-        self.pin_uv_auth_rp_id = rp_id;
-        self.pin_uv_auth_rp_provided = self.pin_uv_auth_rp_id.is_some();
+        let now = self.clock.now();
+        self.token
+            .begin_using(now, protocol, token, false, permissions, rp_id);
     }
 
-    pub(crate) fn pin_uv_auth_token(&self) -> Option<[u8; 32]> {
-        self.pin_uv_auth_token.as_ref().map(|token| {
-            let mut copy = [0u8; 32];
-            copy.copy_from_slice(token);
-            copy
-        })
+    /// `verify(pinUvAuthToken, message, pinUvAuthParam)`.
+    pub(crate) fn verify_pin_uv_auth_token(
+        &mut self,
+        protocol: PinProtocol,
+        message: &[u8],
+        pin_uv_auth_param: &[u8],
+    ) -> Result<(), u8> {
+        let now = self.clock.now();
+        self.token.verify(now, protocol, message, pin_uv_auth_param)
     }
 
-    pub(crate) fn has_permission(&self, permission: u8) -> bool {
-        (self.pin_uv_auth_permissions & permission) != 0
-    }
-
-    pub(crate) fn permissions_rp_id(&self) -> Option<&str> {
-        self.pin_uv_auth_rp_id.as_deref()
-    }
-
-    pub(super) fn should_bind_pin_token_to_rp(&self) -> bool {
-        self.pin_uv_auth_rp_provided
-    }
-
-    pub(super) fn set_permissions_rp_id(&mut self, rp_id: &str) {
-        if !self.should_bind_pin_token_to_rp() {
-            return;
+    /// The pinUvAuthToken checks of authenticatorMakeCredential (CTAP 2.3
+    /// §6.1.2 step 11.1) and authenticatorGetAssertion (§6.2.2 step 6.1),
+    /// once the pinUvAuthParam has been verified: the token must have
+    /// `permission`, its permissions RP ID (if any) must be `rp_id`, and its
+    /// userVerified flag must be set; all failures are
+    /// CTAP2_ERR_PIN_AUTH_INVALID.  A token without a permissions RP ID is
+    /// then bound to `rp_id`.
+    pub(crate) fn authorize_rp_operation(&mut self, permission: u8, rp_id: &str) -> Result<(), u8> {
+        let now = self.clock.now();
+        if !self.token.has_permission(now, permission) {
+            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
         }
-        if let Some(mut existing) = self.pin_uv_auth_rp_id.take() {
-            existing.zeroize();
+        if self
+            .token
+            .permissions_rp_id(now)
+            .is_some_and(|bound| bound != rp_id)
+        {
+            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
         }
-        self.pin_uv_auth_rp_id = Some(rp_id.to_string());
+        if !self.token.user_verified_flag(now) {
+            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
+        }
+        self.token.bind_permissions_rp_id(now, rp_id);
+        Ok(())
     }
-}
 
-impl Drop for PinState {
-    fn drop(&mut self) {
-        self.clear_pin_uv_auth_token();
+    /// After user presence is collected by makeCredential or getAssertion:
+    /// "Call clearUserPresentFlag(), clearUserVerifiedFlag(), and
+    /// clearPinUvAuthTokenPermissionsExceptLbw()."
+    pub(crate) fn consume_pin_uv_auth_token_after_user_presence(&mut self) {
+        let now = self.clock.now();
+        self.token.consume_after_user_presence(now);
+    }
+
+    pub(crate) fn has_permission(&mut self, permission: u8) -> bool {
+        let now = self.clock.now();
+        self.token.has_permission(now, permission)
+    }
+
+    pub(crate) fn permissions_rp_id(&mut self) -> Option<String> {
+        let now = self.clock.now();
+        self.token.permissions_rp_id(now).map(str::to_string)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pin_uv_auth_token(&mut self) -> Option<[u8; 32]> {
+        let now = self.clock.now();
+        self.token.value(now).map(|value| *value)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pin_uv_auth_permissions(&mut self) -> u8 {
+        let now = self.clock.now();
+        self.token.permissions(now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn user_present_flag(&mut self) -> bool {
+        let now = self.clock.now();
+        self.token.user_present_flag(now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn user_verified_flag(&mut self) -> bool {
+        let now = self.clock.now();
+        self.token.user_verified_flag(now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_using_pin_uv_auth_token_with_user_presence(
+        &mut self,
+        protocol: PinProtocol,
+        token: [u8; 32],
+        permissions: u8,
+    ) {
+        let now = self.clock.now();
+        self.token
+            .begin_using(now, protocol, token, true, permissions, None);
     }
 }

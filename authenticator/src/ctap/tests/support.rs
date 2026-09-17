@@ -638,11 +638,11 @@ pub(super) const FLAG_UV: u8 = 0x04;
 /// getPinUvAuthTokenUsingPinWithPermissions over `protocol` would.
 pub(super) fn install_pin_uv_auth_token(
     app: &mut CtapApp<TestClient>,
-    _protocol: ClassicPinProtocol,
+    protocol: ClassicPinProtocol,
     token: [u8; 32],
     permissions: u8,
     rp_id: Option<&str>,
 ) {
     app.pin_state
-        .set_pin_uv_auth_token(token, permissions, rp_id.map(str::to_string));
+        .issue_pin_uv_auth_token(protocol, token, permissions, rp_id.map(str::to_string));
 }

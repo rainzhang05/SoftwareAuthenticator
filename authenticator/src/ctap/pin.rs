@@ -5,3 +5,4 @@ mod client_pin;
 pub(super) mod permissions;
 pub(super) mod protocol;
 pub(super) mod state;
+pub(super) mod token;

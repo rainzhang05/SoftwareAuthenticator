@@ -266,7 +266,7 @@ where
         token.copy_from_slice(random.as_slice());
         let encrypted = self.encrypt_for_platform(protocol, &keys, &token)?;
         self.pin_state
-            .set_pin_uv_auth_token(token, permissions, rp_id);
+            .issue_pin_uv_auth_token(protocol, token, permissions, rp_id);
         let response = canonical_map(vec![
             (Value::Integer(Integer::from(2)), Value::Bytes(encrypted)),
             (
