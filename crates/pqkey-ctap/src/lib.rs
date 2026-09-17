@@ -66,6 +66,9 @@ pub enum CryptoError {
     KeyDerivation,
     /// Signature generation failed.
     SigningFailed,
+    /// A PIN/UV auth protocol block is not a whole number of AES blocks, or
+    /// protocol two was asked to encrypt without an IV.
+    InvalidPinBlock,
     /// The underlying ML-DSA implementation reported an error.
     MlDsa(MlDsaError),
 }
@@ -88,6 +91,7 @@ impl fmt::Display for CryptoError {
             CryptoError::CborEncoding => f.write_str("COSE_Key CBOR encoding failed"),
             CryptoError::KeyDerivation => f.write_str("key derivation failed"),
             CryptoError::SigningFailed => f.write_str("signature generation failed"),
+            CryptoError::InvalidPinBlock => f.write_str("malformed PIN/UV auth protocol block"),
             CryptoError::MlDsa(err) => write!(f, "ML-DSA error: {err:?}"),
         }
     }
@@ -216,24 +220,24 @@ pub fn encrypt_classic_pin_block(
     keys: &PinUvSessionKeys,
     iv: Option<&[u8; 16]>,
     plaintext: &[u8],
-) -> Result<Vec<u8>, ()> {
+) -> Result<Vec<u8>, CryptoError> {
     match protocol {
         ClassicPinProtocol::V1 => {
-            if plaintext.len() % 16 != 0 {
-                return Err(());
+            if !plaintext.len().is_multiple_of(16) {
+                return Err(CryptoError::InvalidPinBlock);
             }
             let iv = [0u8; 16];
-            let cipher =
-                Aes256CbcEncryptor::new_from_slices(&keys.encryption_key, &iv).map_err(|_| ())?;
+            let cipher = Aes256CbcEncryptor::new_from_slices(&keys.encryption_key, &iv)
+                .map_err(|_| CryptoError::InvalidKey)?;
             Ok(cipher.encrypt_padded_vec::<NoPadding>(plaintext))
         }
         ClassicPinProtocol::V2 => {
-            let iv = iv.ok_or(())?;
-            if plaintext.len() % 16 != 0 {
-                return Err(());
+            let iv = iv.ok_or(CryptoError::InvalidPinBlock)?;
+            if !plaintext.len().is_multiple_of(16) {
+                return Err(CryptoError::InvalidPinBlock);
             }
-            let cipher =
-                Aes256CbcEncryptor::new_from_slices(&keys.encryption_key, iv).map_err(|_| ())?;
+            let cipher = Aes256CbcEncryptor::new_from_slices(&keys.encryption_key, iv)
+                .map_err(|_| CryptoError::InvalidKey)?;
             let mut ciphertext = cipher.encrypt_padded_vec::<NoPadding>(plaintext);
             let mut out = Vec::with_capacity(16 + ciphertext.len());
             out.extend_from_slice(iv);
@@ -248,30 +252,32 @@ pub fn decrypt_classic_pin_block(
     protocol: ClassicPinProtocol,
     keys: &PinUvSessionKeys,
     ciphertext: &[u8],
-) -> Result<Vec<u8>, ()> {
+) -> Result<Vec<u8>, CryptoError> {
     match protocol {
         ClassicPinProtocol::V1 => {
             let iv = [0u8; 16];
-            let cipher =
-                Aes256CbcDecryptor::new_from_slices(&keys.encryption_key, &iv).map_err(|_| ())?;
-            if ciphertext.len() % 16 != 0 {
-                return Err(());
+            let cipher = Aes256CbcDecryptor::new_from_slices(&keys.encryption_key, &iv)
+                .map_err(|_| CryptoError::InvalidKey)?;
+            if !ciphertext.len().is_multiple_of(16) {
+                return Err(CryptoError::InvalidPinBlock);
             }
             cipher
                 .decrypt_padded_vec::<NoPadding>(ciphertext)
-                .map_err(|_| ())
+                .map_err(|_| CryptoError::InvalidPinBlock)
         }
         ClassicPinProtocol::V2 => {
             if ciphertext.len() < 16 {
-                return Err(());
+                return Err(CryptoError::InvalidPinBlock);
             }
             let (iv, body) = ciphertext.split_at(16);
-            let cipher =
-                Aes256CbcDecryptor::new_from_slices(&keys.encryption_key, iv).map_err(|_| ())?;
-            if body.len() % 16 != 0 {
-                return Err(());
+            let cipher = Aes256CbcDecryptor::new_from_slices(&keys.encryption_key, iv)
+                .map_err(|_| CryptoError::InvalidKey)?;
+            if !body.len().is_multiple_of(16) {
+                return Err(CryptoError::InvalidPinBlock);
             }
-            cipher.decrypt_padded_vec::<NoPadding>(body).map_err(|_| ())
+            cipher
+                .decrypt_padded_vec::<NoPadding>(body)
+                .map_err(|_| CryptoError::InvalidPinBlock)
         }
     }
 }
@@ -442,12 +448,6 @@ impl CredentialSecretKey {
 ///
 /// `bytes` comes from persistent storage and is therefore not trusted: a
 /// corrupted or truncated record must produce an error, never a panic.
-pub fn credential_secret_from_bytes(alg: CoseAlg, bytes: &[u8]) -> Result<CredentialSecretKey, ()> {
-    try_credential_secret_from_bytes(alg, bytes).map_err(|_| ())
-}
-
-/// Fallible form of [`credential_secret_from_bytes`] that reports a typed
-/// [`CryptoError`] instead of `()`.
 ///
 /// Returns [`CryptoError::InvalidKey`] when the bytes are not a valid scalar
 /// for the requested algorithm (wrong length, zero, or >= the group order for
@@ -696,10 +696,10 @@ mod tests {
         let value: ciborium::value::Value = ciborium::de::from_reader(cbor).expect("valid CBOR");
         if let ciborium::value::Value::Map(map) = value {
             for (k, v) in map {
-                if k == ciborium::value::Value::Integer(Integer::from(COSE_KEY_PARAM_AKP_KEY)) {
-                    if let ciborium::value::Value::Bytes(bytes) = v {
-                        return bytes;
-                    }
+                if k == ciborium::value::Value::Integer(Integer::from(COSE_KEY_PARAM_AKP_KEY))
+                    && let ciborium::value::Value::Bytes(bytes) = v
+                {
+                    return bytes;
                 }
             }
         }
@@ -950,8 +950,6 @@ mod tests {
         assert_eq!(err(&[0x00; 32]), CryptoError::InvalidKey);
         // Correct length but above the group order.
         assert_eq!(err(&[0xFF; 32]), CryptoError::InvalidKey);
-        // The `()`-returning wrapper must agree.
-        assert!(credential_secret_from_bytes(CoseAlg::ES256, &[0x11; 5]).is_err());
     }
 
     #[test]

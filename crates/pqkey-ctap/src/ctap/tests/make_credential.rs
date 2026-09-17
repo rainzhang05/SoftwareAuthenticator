@@ -130,7 +130,7 @@ fn make_credential_includes_extensions() {
         .iter()
         .find(|(k, _)| *k == Value::Text("credProtect".into()))
         .and_then(|(_, v)| match v {
-            Value::Integer(int) => Some(int.clone().into()),
+            Value::Integer(int) => Some((*int).into()),
             _ => None,
         })
         .expect("credProtect extension present");
@@ -194,7 +194,7 @@ fn make_credential_supports_es256() {
 
     for (key, value) in entries {
         if let Value::Integer(label) = key {
-            let label_value: i128 = label.clone().into();
+            let label_value: i128 = label.into();
             match label_value {
                 1 => kty = Some(value),
                 3 => alg = Some(value),
@@ -312,7 +312,7 @@ fn make_credential_uses_attestation_certificate_when_available() {
             _ => false,
         })
         .and_then(|(_, v)| match v {
-            Value::Integer(int) => Some(int.clone()),
+            Value::Integer(int) => Some(*int),
             _ => None,
         })
         .expect("alg value present");
@@ -427,7 +427,7 @@ fn make_credential_self_attestation_without_attestation_key() {
             _ => false,
         })
         .and_then(|(_, v)| match v {
-            Value::Integer(int) => Some(int.clone()),
+            Value::Integer(int) => Some(*int),
             _ => None,
         })
         .expect("alg value present");

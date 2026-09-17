@@ -43,18 +43,19 @@ impl Attestation {
 }
 
 impl CtapApp<'_> {
+    /// The authenticator data for the new credential `record`, with its
+    /// attested credential data.
     fn attested_auth_data(
         &self,
-        rp_id: &str,
-        credential_id: &[u8],
+        record: &CredentialRecord,
         cose_key: &[u8],
         user_present: bool,
         uv: bool,
-        sign_count: u32,
         extensions: Option<&[u8]>,
     ) -> Vec<u8> {
+        let credential_id = &record.credential_id;
         let mut hasher = Sha256::new();
-        hasher.update(rp_id.as_bytes());
+        hasher.update(record.rp_id.as_bytes());
         let rp_hash = hasher.finalize();
 
         let mut auth_data =
@@ -71,7 +72,7 @@ impl CtapApp<'_> {
             flags |= 0x80;
         }
         auth_data.push(flags);
-        auth_data.extend_from_slice(&sign_count.to_be_bytes());
+        auth_data.extend_from_slice(&record.sign_count.to_be_bytes());
         auth_data.extend_from_slice(&self.aaguid);
         auth_data.extend_from_slice(&(credential_id.len() as u16).to_be_bytes());
         auth_data.extend_from_slice(credential_id);
@@ -243,12 +244,10 @@ impl CtapApp<'_> {
         // bit stays false.  (No pinUvAuthToken can be in use then, since only
         // a PIN issues one.)
         let mut uv_bit = false;
-        if protected {
-            if let Some((protocol, pin_uv_auth_param)) = pin_uv_auth.as_ref() {
-                self.verify_pin_uv_auth_param(*protocol, &client_hash, pin_uv_auth_param)?;
-                self.ensure_pin_token_permission_for_rp(PIN_PERMISSION_MC, &rp_id)?;
-                uv_bit = true;
-            }
+        if protected && let Some((protocol, pin_uv_auth_param)) = pin_uv_auth.as_ref() {
+            self.verify_pin_uv_auth_param(*protocol, &client_hash, pin_uv_auth_param)?;
+            self.ensure_pin_token_permission_for_rp(PIN_PERMISSION_MC, &rp_id)?;
+            uv_bit = true;
         }
 
         let cred_protect_value = cred_protect_requested.unwrap_or(1);
@@ -346,12 +345,10 @@ impl CtapApp<'_> {
         };
 
         let auth_data = self.attested_auth_data(
-            &record.rp_id,
-            &record.credential_id,
+            &record,
             &cose_key,
             up_bit,
             uv_bit,
-            record.sign_count,
             extension_bytes.as_deref(),
         );
         // Steps 18 and 19.  "If attestationFormatsPreference is present and

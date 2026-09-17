@@ -274,12 +274,12 @@ pub(crate) fn validate_credential(record: &CredentialRecord) -> Result<(), Store
             "alg does not match the private key material",
         ));
     }
-    if let PrivateKeyMaterial::Es256 { scalar } = &record.private_key {
-        if p256::SecretKey::from_slice(scalar).is_err() {
-            return Err(StoreError::InvalidRecord(
-                "ES256 private key is not a valid P-256 scalar",
-            ));
-        }
+    if let PrivateKeyMaterial::Es256 { scalar } = &record.private_key
+        && p256::SecretKey::from_slice(scalar).is_err()
+    {
+        return Err(StoreError::InvalidRecord(
+            "ES256 private key is not a valid P-256 scalar",
+        ));
     }
     if !(1..=3).contains(&record.cred_protect) {
         return Err(StoreError::InvalidRecord(

@@ -268,10 +268,10 @@ impl PinUvAuthTokenState {
     /// as its permissions RP ID." (§6.1.2 step 11.1.6, §6.2.2 step 6.1.7)
     pub(crate) fn bind_permissions_rp_id(&mut self, now: Duration, rp_id: &str) {
         self.observe(now);
-        if let Some(token) = self.in_use.as_mut() {
-            if token.permissions_rp_id.is_none() {
-                token.permissions_rp_id = Some(rp_id.to_string());
-            }
+        if let Some(token) = self.in_use.as_mut()
+            && token.permissions_rp_id.is_none()
+        {
+            token.permissions_rp_id = Some(rp_id.to_string());
         }
     }
 

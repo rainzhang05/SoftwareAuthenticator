@@ -92,18 +92,15 @@ fn get_assertion_response_encoding_is_canonical() {
     let mut signature_value = None;
     let mut user_value = None;
     for (key, value) in entries {
-        match key {
-            Value::Integer(int) => {
-                let label: i128 = int.into();
-                match label {
-                    1 => credential_value = Some(value),
-                    2 => auth_data_value = Some(value),
-                    3 => signature_value = Some(value),
-                    4 => user_value = Some(value),
-                    _ => {}
-                }
+        if let Value::Integer(int) = key {
+            let label: i128 = int.into();
+            match label {
+                1 => credential_value = Some(value),
+                2 => auth_data_value = Some(value),
+                3 => signature_value = Some(value),
+                4 => user_value = Some(value),
+                _ => {}
             }
-            _ => {}
         }
     }
 
@@ -184,10 +181,10 @@ fn get_next_assertion_preserves_new_credentials() {
     };
     let mut total_credentials_value = None;
     for (key, value) in entries {
-        if let Value::Integer(label) = key {
-            if label == Integer::from(5) {
-                total_credentials_value = Some(value);
-            }
+        if let Value::Integer(label) = key
+            && label == Integer::from(5)
+        {
+            total_credentials_value = Some(value);
         }
     }
     let total_credentials = match total_credentials_value.expect("total credential count present") {
@@ -390,10 +387,10 @@ fn get_assertion_es256_signature_verifies() {
             if let Value::Bytes(bytes) = value {
                 auth_data_bytes = Some(bytes);
             }
-        } else if key == Value::Integer(Integer::from(3)) {
-            if let Value::Bytes(bytes) = value {
-                signature_bytes = Some(bytes);
-            }
+        } else if key == Value::Integer(Integer::from(3))
+            && let Value::Bytes(bytes) = value
+        {
+            signature_bytes = Some(bytes);
         }
     }
 

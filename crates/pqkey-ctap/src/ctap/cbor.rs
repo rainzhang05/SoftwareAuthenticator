@@ -38,7 +38,7 @@ fn canonical_key_cmp(left: &Value, right: &Value) -> Ordering {
     }
 }
 
-pub(super) fn canonical_sort(entries: &mut Vec<(Value, Value)>) {
+pub(super) fn canonical_sort(entries: &mut [(Value, Value)]) {
     entries.sort_by(|(left_key, _), (right_key, _)| canonical_key_cmp(left_key, right_key));
 }
 
@@ -47,7 +47,7 @@ pub(super) fn canonical_map(mut entries: Vec<(Value, Value)>) -> Value {
     Value::Map(entries)
 }
 
-pub(super) fn map_get<'a>(map: &'a [(Value, Value)], key: Value) -> Option<&'a Value> {
+pub(super) fn map_get(map: &[(Value, Value)], key: Value) -> Option<&Value> {
     map.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
 }
 

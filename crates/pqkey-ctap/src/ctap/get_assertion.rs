@@ -221,10 +221,10 @@ impl CtapApp<'_> {
                 return Err(CTAP2_ERR_INVALID_CBOR);
             };
             for (key, value) in extension_map.iter() {
-                if let Value::Text(text) = key {
-                    if text == "hmac-secret" {
-                        hmac_secret_request = Some(parse_hmac_secret_request(value)?);
-                    }
+                if let Value::Text(text) = key
+                    && text == "hmac-secret"
+                {
+                    hmac_secret_request = Some(parse_hmac_secret_request(value)?);
                 }
             }
         }
@@ -248,13 +248,13 @@ impl CtapApp<'_> {
         // not verified and the "uv" bit stays false.
         let mut user_verified = false;
         let mut token = None;
-        if self.pin_state.is_set() {
-            if let Some((protocol, param)) = pin_uv_auth.as_ref() {
-                self.verify_pin_uv_auth_param(*protocol, &client_hash, param)?;
-                self.ensure_pin_token_permission_for_rp(PIN_PERMISSION_GA, &rp_id)?;
-                user_verified = true;
-                token = self.pin_state.pin_uv_auth_token_id();
-            }
+        if self.pin_state.is_set()
+            && let Some((protocol, param)) = pin_uv_auth.as_ref()
+        {
+            self.verify_pin_uv_auth_param(*protocol, &client_hash, param)?;
+            self.ensure_pin_token_permission_for_rp(PIN_PERMISSION_GA, &rp_id)?;
+            user_verified = true;
+            token = self.pin_state.pin_uv_auth_token_id();
         }
 
         // Step 7: locate the applicable credentials.
@@ -267,10 +267,11 @@ impl CtapApp<'_> {
                 if applicable.iter().any(|cred| cred.credential_id == *id) {
                     continue;
                 }
-                if let Some(cred) = self.stored_credential(id)? {
-                    if cred.rp_id == rp_id && Self::credential_allows(&cred, user_verified, true) {
-                        applicable.push(cred);
-                    }
+                if let Some(cred) = self.stored_credential(id)?
+                    && cred.rp_id == rp_id
+                    && Self::credential_allows(&cred, user_verified, true)
+                {
+                    applicable.push(cred);
                 }
             }
             sort_newest_first(&mut applicable);

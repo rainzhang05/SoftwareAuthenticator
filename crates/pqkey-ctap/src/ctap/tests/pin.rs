@@ -95,7 +95,7 @@ fn client_pin_get_retries_reports_available_attempts() {
         .iter()
         .find(|(k, _)| *k == Value::Integer(Integer::from(0x03)))
         .and_then(|(_, v)| match v {
-            Value::Integer(int) => Some(int.clone().into()),
+            Value::Integer(int) => Some((*int).into()),
             _ => None,
         })
         .expect("retry count is present");
@@ -151,7 +151,7 @@ fn client_pin_get_retries_includes_power_cycle_state_when_blocked() {
         .iter()
         .find(|(k, _)| *k == Value::Integer(Integer::from(0x03)))
         .and_then(|(_, v)| match v {
-            Value::Integer(int) => Some(int.clone().into()),
+            Value::Integer(int) => Some((*int).into()),
             _ => None,
         })
         .expect("retry count is present");

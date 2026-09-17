@@ -68,7 +68,7 @@ impl CtapApp<'_> {
             return Ok(());
         };
         match subcommand {
-            0x01 | 0x02 | 0x03 => Err(CTAP2_ERR_PIN_AUTH_INVALID),
+            0x01..=0x03 => Err(CTAP2_ERR_PIN_AUTH_INVALID),
             0x04 => {
                 let params = params.ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
                 let rp_hash = match cbor::map_get(params, Value::Integer(Integer::from(1))) {

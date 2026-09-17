@@ -279,10 +279,10 @@ impl KeySource for FileKeySource {
         };
         let key = RootKey::generate()?;
         fsio::replace_file(&self.dir, Self::file_name(domain), key.expose())?;
-        if let Some(previous) = previous {
-            if let Err(err) = fsio::overwrite_with_zeros(&previous) {
-                log::warn!("credential store: could not overwrite the old {domain} key: {err}");
-            }
+        if let Some(previous) = previous
+            && let Err(err) = fsio::overwrite_with_zeros(&previous)
+        {
+            log::warn!("credential store: could not overwrite the old {domain} key: {err}");
         }
         // A crash during an earlier creation or rotation can leave a temporary
         // file holding a key; do not let one outlive a rotation.

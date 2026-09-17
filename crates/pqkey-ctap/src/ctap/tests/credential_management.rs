@@ -92,7 +92,7 @@ fn credential_management_commands() {
         .iter()
         .find(|(k, _)| *k == Value::Integer(Integer::from(1)))
         .and_then(|(_, v)| match v {
-            Value::Integer(int) => Some(int.clone().into()),
+            Value::Integer(int) => Some((*int).into()),
             _ => None,
         })
         .expect("existing count");
@@ -183,7 +183,7 @@ fn credential_management_commands() {
         .iter()
         .find(|(k, _)| *k == Value::Integer(Integer::from(9)))
         .and_then(|(_, v)| match v {
-            Value::Integer(int) => Some(int.clone().into()),
+            Value::Integer(int) => Some((*int).into()),
             _ => None,
         })
         .expect("total credentials");

@@ -267,10 +267,10 @@ impl<K: KeySource> FileStore<K> {
         let mut names = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|err| fsio::io_error(dir, err))?;
-            if let Some(name) = entry.file_name().to_str() {
-                if is_credential_file_name(name) {
-                    names.push(name.to_owned());
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && is_credential_file_name(name)
+            {
+                names.push(name.to_owned());
             }
         }
         Ok(names)

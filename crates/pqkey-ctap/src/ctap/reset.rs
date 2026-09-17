@@ -32,10 +32,10 @@ impl CtapApp<'_> {
     /// in-memory PIN state is kept, so a PIN still guards whatever is left.
     pub(super) fn handle_reset(&mut self) -> Result<Vec<u8>, u8> {
         // The clock the engine's timers share starts at power-up.
-        if let Some(window) = self.reset_window {
-            if self.pin_state.now() > window {
-                return Err(CTAP2_ERR_NOT_ALLOWED);
-            }
+        if let Some(window) = self.reset_window
+            && self.pin_state.now() > window
+        {
+            return Err(CTAP2_ERR_NOT_ALLOWED);
         }
         let timeout = self.presence_timeout;
         self.confirm_user_presence(PresenceRequest::new(PresenceOperation::Reset, timeout))?;
