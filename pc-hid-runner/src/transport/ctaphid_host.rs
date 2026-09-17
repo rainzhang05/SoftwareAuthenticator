@@ -49,14 +49,6 @@ impl Response {
             length: size as u16,
         }
     }
-
-    fn error_on_channel(channel: u32) -> Self {
-        Self {
-            channel,
-            command: Command::Error,
-            length: 1,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -597,10 +589,17 @@ where
         }
     }
 
+    /// Queue a CTAPHID_ERROR response. It is built as a packet of its own:
+    /// the message buffer may hold another channel's request that is still
+    /// being received.
     fn enqueue_error_on_channel(&mut self, channel: u32, error: AuthenticatorError) {
-        self.buffer[0] = error.into();
-        let response = Response::error_on_channel(channel);
-        self.enqueue_response(response);
+        let mut frame = [0u8; PACKET_SIZE];
+        frame[..4].copy_from_slice(&channel.to_be_bytes());
+        frame[4] = Command::Error.into_u8() | 0x80;
+        frame[5..7].copy_from_slice(&1u16.to_be_bytes());
+        frame[7] = error.into();
+        debug!("TX error cid={channel:08x} code=0x{:02x}", frame[7]);
+        self.pending.push_back(CtapHidFrame::new(frame));
     }
 
     fn start_sending_error(&mut self, request: Request, error: AuthenticatorError) {
@@ -753,6 +752,66 @@ mod tests {
     }
 
     impl CryptoRng for TestRng {}
+
+    /// A CTAPHID message split into its initialization and continuation
+    /// packets, as a host sends it.
+    fn message_packets(channel: u32, command: Command, payload: &[u8]) -> Vec<CtapHidFrame> {
+        let mut first = [0u8; PACKET_SIZE];
+        first[..4].copy_from_slice(&channel.to_be_bytes());
+        first[4] = command.into_u8() | 0x80;
+        first[5..7].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        let (head, mut rest) = payload.split_at(payload.len().min(PACKET_SIZE - 7));
+        first[7..7 + head.len()].copy_from_slice(head);
+        let mut packets = vec![CtapHidFrame::new(first)];
+        let mut sequence = 0;
+        while !rest.is_empty() {
+            let mut packet = [0u8; PACKET_SIZE];
+            packet[..4].copy_from_slice(&channel.to_be_bytes());
+            packet[4] = sequence;
+            let (chunk, tail) = rest.split_at(rest.len().min(PACKET_SIZE - 5));
+            packet[5..5 + chunk.len()].copy_from_slice(chunk);
+            packets.push(CtapHidFrame::new(packet));
+            rest = tail;
+            sequence += 1;
+        }
+        packets
+    }
+
+    /// CTAP 2.3 §11.2.5.1: a request from another channel while a request is
+    /// being received fails with ERR_CHANNEL_BUSY. That error must leave the
+    /// request being received alone; it used to be written into the first
+    /// byte of the message buffer, turning makeCredential (0x01) into
+    /// clientPIN (0x06).
+    #[test]
+    fn an_error_for_another_channel_leaves_a_request_being_received_intact() {
+        let (mut host, mut dispatch, mut app) = init_host();
+        let (first, second) = (0x0A0A_0A0Au32, 0x0B0B_0B0Bu32);
+        let request: Vec<u8> = (0..100u8).map(|i| if i == 0 { 0x01 } else { i }).collect();
+        let packets = message_packets(first, Command::Cbor, &request);
+        assert_eq!(packets.len(), 2);
+
+        host.handle_frame(&packets[0], 0);
+        host.handle_frame(&message_packets(second, Command::Cbor, &[0x04])[0], 1);
+        let busy = take_frame_bytes(&mut host);
+        assert_eq!(busy.len(), 1);
+        assert_eq!(busy[0][..4], second.to_be_bytes());
+        assert_eq!(busy[0][4], Command::Error.into_u8() | 0x80);
+        assert_eq!(
+            busy[0][5..8],
+            [0, 1, u8::from(AuthenticatorError::ChannelBusy)]
+        );
+
+        host.handle_frame(&packets[1], 2);
+        let mut apps: [&mut dyn App<'static, DEFAULT_MESSAGE_SIZE>; 1] = [&mut app];
+        let _ = host.poll_dispatch(&mut dispatch, &mut apps);
+        let frames = take_frame_bytes(&mut host);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0][..4], first.to_be_bytes());
+        assert_eq!(frames[0][4], Command::Cbor.into_u8() | 0x80);
+        let mut echoed = frames[0][7..].to_vec();
+        echoed.extend_from_slice(&frames[1][5..]);
+        assert_eq!(echoed[..request.len()], request[..]);
+    }
 
     #[test]
     fn broadcast_init_skips_reserved_ids() {
