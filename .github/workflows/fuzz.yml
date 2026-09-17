@@ -13,8 +13,17 @@ name: Fuzz
 #   fuzz crate silently until the weekly run; the half-minute runs also replay
 #   the seeds, which include the inputs of every crash fixed so far. It costs
 #   about five minutes of runner time per push, most of it the build. Pull
-#   requests do not run it: the weekly run and the push to main catch the
-#   same breakage, and PR runs would double the cost.
+#   requests do not run it, except those that change the fuzz crate's own
+#   dependencies (Dependabot's fuzz/Cargo.lock updates): the auto-merge
+#   (.github/scripts/dependabot-automerge.sh) waits for this job, the only one
+#   that builds that lockfile. For other pull requests the weekly run and the
+#   push to main catch the same breakage, and PR runs would double the cost.
+#
+# fuzz/Cargo.lock is checked as committed on pull requests. Elsewhere, when a
+# change to a manifest of the main workspace (a new dependency, a raised version
+# requirement) has left it behind, Cargo brings it up to date with the fewest
+# changes it can and the job warns instead of failing: fuzzing the code as it
+# is matters more than the lockfile, which Dependabot keeps current.
 #
 # A crash fails the job and its input is uploaded as an artifact. Reproduce it
 # locally with
@@ -32,6 +41,11 @@ on:
         description: How long each target fuzzes, in seconds
         required: false
         default: "1800"
+  pull_request:
+    branches: [main]
+    paths:
+      - fuzz/Cargo.lock
+      - fuzz/Cargo.toml
   push:
     branches: [main]
     paths:
@@ -51,7 +65,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   # A newer push supersedes a smoke run; a long scheduled or manual run is
   # never cancelled by another.
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
 
 env:
   # cargo-fuzz defaults to the target it was itself built for, and the prebuilt
@@ -75,7 +89,7 @@ env:
 jobs:
   smoke:
     name: build and smoke-run all targets
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -94,9 +108,9 @@ jobs:
         with:
           tool: cargo-fuzz@0.13.2
 
-      # cargo fuzz has no --locked; this fails if fuzz/Cargo.lock is stale.
-      - name: Check fuzz/Cargo.lock is up to date
-        run: cargo "+$NIGHTLY" metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
+      # cargo fuzz has no --locked; see the top of this file.
+      - name: Check fuzz/Cargo.lock
+        run: .github/scripts/sync-fuzz-lockfile.sh
 
       - name: Build every target
         working-directory: fuzz
@@ -156,7 +170,7 @@ jobs:
 
       - name: Build
         working-directory: fuzz
-        run: cargo "+$NIGHTLY" metadata --locked --format-version 1 > /dev/null && cargo "+$NIGHTLY" fuzz build -O -a --target "$FUZZ_TARGET_TRIPLE" "$TARGET"
+        run: ../.github/scripts/sync-fuzz-lockfile.sh && cargo "+$NIGHTLY" fuzz build -O -a --target "$FUZZ_TARGET_TRIPLE" "$TARGET"
         env:
           TARGET: ${{ matrix.target }}
 
