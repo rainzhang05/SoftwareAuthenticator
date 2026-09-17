@@ -10,24 +10,24 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-ciborium = { version = "0.2", default-features = false, features = ["std"] }
+ciborium.workspace = true
 # `zeroize` wipes key schedules and HMAC/SHA-256 state on drop.
 aes = { version = "0.9", features = ["zeroize"] }
 cbc = { version = "0.2", features = ["alloc", "zeroize"] }
 hkdf = "0.13"
-sha2 = { version = "0.11", features = ["zeroize"] }
+sha2 = { workspace = true, features = ["zeroize"] }
 hmac = { version = "0.13", features = ["zeroize"] }
-zeroize = { version = "1", features = ["zeroize_derive"] }
+zeroize = { workspace = true, features = ["zeroize_derive"] }
 serde = { version = "1", features = ["derive"] }
-ctaphid-app = "0.1"
+ctaphid-app.workspace = true
 # `InterruptFlag`, through which the CTAPHID dispatcher cancels a request.
 trussed-core = "0.1"
-heapless-bytes = "0.3"
-p256 = { version = "0.14", features = ["ecdh"] }
-rand_core = "0.10"
+heapless-bytes.workspace = true
+p256 = { workspace = true, features = ["ecdh"] }
+rand_core.workspace = true
 # `SysRng`, the operating system RNG that key generation uses.
-getrandom = { version = "0.4", features = ["sys_rng"] }
-log = { version = "0.4", default-features = false }
+getrandom.workspace = true
+log.workspace = true
 # Credential store: record encryption and constant-time comparison of secrets.
 # chacha20poly1305 0.11 shares the cipher 0.5 generation already in the tree;
 # its default features only add an RNG convenience the store does not use, and

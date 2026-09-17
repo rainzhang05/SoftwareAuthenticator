@@ -12,25 +12,25 @@ publish = false
 [dependencies]
 # The CTAPHID app interface the CTAP engine implements. The transport frames
 # CTAPHID itself and runs the app on a worker thread.
-ctaphid-app = "0.1"
-heapless-bytes = "0.3"
+ctaphid-app.workspace = true
+heapless-bytes.workspace = true
 nix = { version = "0.27", default-features = false, features = ["fs", "poll", "signal", "term", "user"] }
 signal-hook = { version = "0.3", default-features = false }
 clap = { version = "4", features = ["derive"] }
 clap-num = "1.0"
-log = { version = "0.4", default-features = false }
+log.workspace = true
 env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
 pqkey-ctap = { path = "../pqkey-ctap" }
 # CTAPHID channel allocation: the operating system RNG behind rand_core's
 # `CryptoRng`, so tests can inject a deterministic one.
-rand_core = "0.10"
-getrandom = { version = "0.4", features = ["sys_rng"] }
-sha2 = "0.11"
+rand_core.workspace = true
+getrandom.workspace = true
+sha2.workspace = true
 # Attestation certificate generation. rcgen is built without a crypto backend;
 # the certificate is signed with p256, which the CTAP engine already uses.
 rcgen = { version = "0.14", default-features = false }
-p256 = { version = "0.14", features = ["ecdsa"] }
-zeroize = "1"
+p256 = { workspace = true, features = ["ecdsa"] }
+zeroize.workspace = true
 # Desktop notifications for user presence, over the D-Bus session bus. Pure
 # Rust: the blocking API on zbus's own async-io runtime, nothing else.
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
@@ -38,6 +38,6 @@ futures-lite = { version = "2", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # CBOR requests and responses in the CTAP-level tests.
-ciborium = { version = "0.2", default-features = false, features = ["std"] }
+ciborium.workspace = true
 # Reads the attestation certificate back independently of rcgen, which wrote it.
 x509-parser = "0.18"

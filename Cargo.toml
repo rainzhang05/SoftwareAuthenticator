@@ -14,3 +14,17 @@ authors = ["Rain Zhang"]
 repository = "https://github.com/rainzhang05/SoftwareAuthenticator"
 # The newest `rust-version` in the locked dependency graph: aes 0.9.3.
 rust-version = "1.89"
+
+# Dependencies used by more than one member, declared once so their versions
+# cannot drift apart. Members add the features they need on top; a crate used
+# by a single member stays in that member's manifest.
+[workspace.dependencies]
+ciborium = { version = "0.2", default-features = false, features = ["std"] }
+ctaphid-app = "0.1"
+getrandom = { version = "0.4", features = ["sys_rng"] }
+heapless-bytes = "0.3"
+log = { version = "0.4", default-features = false }
+p256 = "0.14"
+rand_core = "0.10"
+sha2 = "0.11"
+zeroize = "1"

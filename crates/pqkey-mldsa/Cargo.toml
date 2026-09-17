@@ -17,10 +17,10 @@ publish = false
 # drop.  The default `pkcs8` and `getrandom` features are not needed.
 ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "rand_core", "zeroize"] }
 # The operating system RNG: key-generation seeds and the hedged-signing `rnd`.
-getrandom = { version = "0.4", features = ["sys_rng"] }
-zeroize = { version = "1", features = ["zeroize_derive"] }
+getrandom.workspace = true
+zeroize = { workspace = true, features = ["zeroize_derive"] }
 # Optional: without it `sign()`'s empty-Vec failure path is completely silent.
-log = { version = "0.4", default-features = false, optional = true }
+log = { workspace = true, optional = true }
 
 [features]
 # Enable specific ML-DSA parameter sets.  All three are enabled by default.
