@@ -51,8 +51,8 @@ test_token_list() {
   local listing
   listing=$(fido2-token -L)
   echo "$listing"
-  grep -qE "^${device}: vendor=0x096e, product=0x0858" <<<"$listing" \
-    || fail "fido2-token -L does not list $device as 096e:0858"
+  grep -qE "^${device}: vendor=0x1209, product=0x0001" <<<"$listing" \
+    || fail "fido2-token -L does not list $device as 1209:0001"
 }
 
 test_token_info() {
@@ -65,7 +65,7 @@ test_token_info() {
   # parameter sets show up as unknown public-key algorithms.
   local expected='algorithms: es256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key)'
   grep -qxF "$expected" <<<"$info" || fail "expected '$expected'"
-  grep -qE '^aaguid: 4645495449414e980616525a30310000$' <<<"$info" || fail "unexpected AAGUID"
+  grep -qE '^aaguid: 5931e805a1664eb7845a7f6aa93d9cd8$' <<<"$info" || fail "unexpected AAGUID"
   grep -qE '^pin protocols: .*\b1\b' <<<"$info" || fail "PIN/UV auth protocol 1 is not advertised"
   grep -qE '^pin protocols: .*\b2\b' <<<"$info" || fail "PIN/UV auth protocol 2 is not advertised"
 }

@@ -34,6 +34,18 @@ const CTAPHID_REPORT_DESCRIPTOR: [u8; 34] = [
     0x91, 0x02, //   Output (Data, Variable, Absolute)
     0xC0, // End Collection
 ];
+/// The USB vendor ID the virtual key reports unless `--vendor-id` says
+/// otherwise: 0x1209, the vendor ID pid.codes shares out to open source
+/// projects.
+pub const DEFAULT_VENDOR_ID: u32 = 0x1209;
+
+/// The USB product ID the virtual key reports unless `--product-id` says
+/// otherwise: 0x0001, the first of pid.codes' test product IDs (0x0001 to
+/// 0x0010 under vendor 0x1209). pid.codes reserves them for private testing,
+/// and they are not unique to this project; this is an interim default until
+/// the project has a product ID of its own.
+pub const DEFAULT_PRODUCT_ID: u32 = 0x0001;
+
 #[derive(Debug, Clone)]
 pub struct HidDeviceDescriptor {
     pub name: String,
@@ -48,8 +60,8 @@ impl Default for HidDeviceDescriptor {
     fn default() -> Self {
         Self {
             name: "Virtual FIDO Authenticator".to_string(),
-            vendor_id: 0x096e,
-            product_id: 0x0858,
+            vendor_id: DEFAULT_VENDOR_ID,
+            product_id: DEFAULT_PRODUCT_ID,
             version: 0x0001,
             country: 0,
             feature_report: vec![0; CTAPHID_FRAME_LEN],

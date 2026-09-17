@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 description = "Safe Rust wrapper around pure-Rust ML-DSA (FIPS 204) signatures"
-authors = ["Feitian Technologies <info@ftsafe.com>"]
+authors.workspace = true
+repository.workspace = true
 license = "Apache-2.0 OR MIT"
 
 [dependencies]

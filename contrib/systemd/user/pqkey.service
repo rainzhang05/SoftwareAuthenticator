@@ -1,13 +1,12 @@
-# systemd user unit for the Feitian ML-DSA software authenticator.
+# systemd user unit for pqkey, the ML-DSA software authenticator.
 #
 # The authenticator is a security key for your own desktop session: your
 # browser uses it, and its credentials live in your home directory, so it runs
 # under your user service manager rather than as a system service. It uses the
-# same state directory as the pqkey CLI does by default,
-# $XDG_DATA_HOME/feitian-mldsa-authenticator, or
-# ~/.local/share/feitian-mldsa-authenticator when XDG_DATA_HOME is unset. If
-# you set XDG_DATA_HOME in your shell, set it for the user manager as well
-# (see environment.d(5)), or the two will use different directories.
+# same state directory as the pqkey CLI does by default, $XDG_DATA_HOME/pqkey,
+# or ~/.local/share/pqkey when XDG_DATA_HOME is unset. If you set
+# XDG_DATA_HOME in your shell, set it for the user manager as well (see
+# environment.d(5)), or the two will use different directories.
 #
 # Setup:
 #   1. Install contrib/udev/70-pqkey.rules as described in that file, add
@@ -46,8 +45,8 @@
 # "systemctl --user stop pqkey".
 
 [Unit]
-Description=Feitian ML-DSA software authenticator (virtual FIDO security key)
-Documentation=https://github.com/FeitianTech/FidoSoftwareAuthenticator
+Description=pqkey ML-DSA software authenticator (virtual FIDO security key)
+Documentation=https://github.com/rainzhang05/SoftwareAuthenticator
 
 [Service]
 Type=exec

@@ -24,15 +24,49 @@ use pqkey_ctap::store::{CredentialStore, FileStore, PinStateRecord};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+/// The name of the default state directory.
+const STATE_DIR_NAME: &str = "pqkey";
+
+/// The name the default state directory had before the project was renamed
+/// to pqkey. Nothing reads that directory any more.
+const LEGACY_STATE_DIR_NAME: &str = "feitian-mldsa-authenticator";
+
+/// `name` in the user's data directory: `$XDG_DATA_HOME/name`, or
+/// `~/.local/share/name` when XDG_DATA_HOME is unset.
+fn data_dir(name: &str) -> PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
+        PathBuf::from(dir).join(name)
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".local/share").join(name)
+    } else {
+        PathBuf::from(".").join(name)
+    }
+}
+
 /// Where the state lives unless `--state-dir` says otherwise.
 pub fn default_state_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
-        PathBuf::from(dir).join("feitian-mldsa-authenticator")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".local/share/feitian-mldsa-authenticator")
-    } else {
-        PathBuf::from("./feitian-mldsa-authenticator")
-    }
+    data_dir(STATE_DIR_NAME)
+}
+
+/// A one-line note for someone about to use the default state directory for
+/// the first time while the default state directory from before the rename
+/// is still there. Its state is not migrated.
+pub fn unused_legacy_state_dir_notice(state_dir: &Path) -> Option<String> {
+    legacy_state_dir_notice(
+        state_dir,
+        &default_state_dir(),
+        &data_dir(LEGACY_STATE_DIR_NAME),
+    )
+}
+
+fn legacy_state_dir_notice(state_dir: &Path, default: &Path, legacy: &Path) -> Option<String> {
+    (state_dir == default && !state_dir.exists() && legacy.is_dir()).then(|| {
+        format!(
+            "note: {} is no longer used and can be deleted; pqkey keeps its state in {}",
+            legacy.display(),
+            state_dir.display()
+        )
+    })
 }
 
 /// Create the state directory if needed and make it private to this user.
@@ -621,6 +655,35 @@ mod tests {
 
         // Nothing left to remove.
         assert!(remove_legacy_state(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_default_state_dir_is_named_pqkey() {
+        assert_eq!(default_state_dir().file_name().unwrap(), "pqkey");
+    }
+
+    #[test]
+    fn the_old_default_state_dir_is_pointed_out_once() {
+        let dir = TempDir::new("legacy-dir");
+        let default = dir.path().join("pqkey");
+        let legacy = dir.path().join("feitian-mldsa-authenticator");
+
+        // No old directory: nothing to say.
+        assert_eq!(legacy_state_dir_notice(&default, &default, &legacy), None);
+
+        fs::create_dir(&legacy).unwrap();
+        let notice = legacy_state_dir_notice(&default, &default, &legacy).unwrap();
+        assert!(!notice.contains('\n'), "{notice}");
+        assert!(notice.contains(&*legacy.to_string_lossy()), "{notice}");
+        assert!(notice.contains("can be deleted"), "{notice}");
+
+        // Only for the default state directory.
+        let other = dir.path().join("elsewhere");
+        assert_eq!(legacy_state_dir_notice(&other, &default, &legacy), None);
+
+        // Once the new directory exists it has been said.
+        fs::create_dir(&default).unwrap();
+        assert_eq!(legacy_state_dir_notice(&default, &default, &legacy), None);
     }
 
     #[test]

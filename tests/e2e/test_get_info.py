@@ -10,8 +10,10 @@ def test_ctaphid_init_reports_cbor_and_no_msg(device):
     assert device.version == 2
     assert device.capabilities & CAPABILITY.CBOR
     assert device.capabilities & CAPABILITY.NMSG
-    assert device.descriptor.vid == 0x096E
-    assert device.descriptor.pid == 0x0858
+    # The default IDs: pid.codes' open source vendor ID and its first test
+    # product ID.
+    assert device.descriptor.vid == 0x1209
+    assert device.descriptor.pid == 0x0001
     assert device.descriptor.report_size_in == 64
     assert device.descriptor.report_size_out == 64
 

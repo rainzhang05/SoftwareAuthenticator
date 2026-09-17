@@ -29,9 +29,18 @@ use crate::{
     HidDeviceDescriptor,
 };
 
+/// The AAGUID pqkey reports unless `--aaguid` says otherwise: a random
+/// (version 4) UUID of its own.
+pub const DEFAULT_AAGUID: &str = "5931e805-a166-4eb7-845a-7f6aa93d9cd8";
+
+/// The HID product name, and the product a newly provisioned attestation
+/// certificate names, unless `--name` and `--product` say otherwise.
+pub const DEFAULT_NAME: &str = "pqkey FIDO2 Software Authenticator (ML-DSA)";
+
 #[derive(Parser, Debug)]
 #[clap(
-    about = "Feitian ML-DSA authenticator service controller",
+    name = "pqkey",
+    about = "pqkey: a FIDO2 security key with post-quantum ML-DSA, as a virtual USB HID device",
     version,
     author
 )]
@@ -169,7 +178,7 @@ pub struct StateArgs {
 #[derive(Args, Debug, Clone)]
 pub struct DeviceArgs {
     /// HID product name
-    #[clap(long, default_value = "Feitian FIDO2 Software Authenticator (ML-DSA)")]
+    #[clap(long, default_value = DEFAULT_NAME)]
     pub name: String,
     /// The attestation statement registrations get
     #[clap(long, value_enum, default_value_t = AttestationArg::SelfAttestation)]
@@ -179,7 +188,7 @@ pub struct DeviceArgs {
     #[clap(long, required_if_eq("attestation", "certificate"))]
     pub manufacturer: Option<String>,
     /// Product named in a newly provisioned attestation certificate
-    #[clap(long, default_value = "Feitian FIDO2 Software Authenticator (ML-DSA)")]
+    #[clap(long, default_value = DEFAULT_NAME)]
     pub product: String,
     /// Country (ISO 3166-1 alpha-2 code) where the manufacturer is
     /// incorporated, named in a newly provisioned attestation certificate.
@@ -194,23 +203,26 @@ pub struct DeviceArgs {
     /// attestation certificate's serial number is random.
     #[clap(long, hide = true)]
     pub serial: Option<String>,
-    /// Vendor ID for the virtual HID device
-    #[clap(long, value_parser = maybe_hex::<u32>, default_value_t = 0x096e)]
+    /// USB vendor ID for the virtual HID device (default: pid.codes' open
+    /// source vendor ID)
+    #[clap(long, value_parser = maybe_hex::<u32>, default_value = "0x1209")]
     pub vendor_id: u32,
-    /// Product ID for the virtual HID device
-    #[clap(long, value_parser = maybe_hex::<u32>, default_value_t = 0x0858)]
+    /// USB product ID for the virtual HID device (default: a pid.codes test
+    /// product ID, which is not unique to pqkey)
+    #[clap(long, value_parser = maybe_hex::<u32>, default_value = "0x0001")]
     pub product_id: u32,
     /// Version reported by the HID descriptor
     #[clap(long, value_parser = maybe_hex::<u32>, default_value_t = 0x0001)]
     pub version: u32,
     /// Ignored; accepted so that existing command lines keep working
-    #[clap(short, long, hide = true, value_parser = maybe_hex::<u16>, default_value_t = 0x1998)]
-    pub vid: u16,
+    #[clap(short, long, hide = true, value_parser = maybe_hex::<u16>)]
+    pub vid: Option<u16>,
     /// Ignored; accepted so that existing command lines keep working
-    #[clap(short, long, hide = true, value_parser = maybe_hex::<u16>, default_value_t = 0x0616)]
-    pub pid: u16,
-    /// Authenticator AAGUID
-    #[clap(long, default_value = "4645495449414E980616525A30310000")]
+    #[clap(short, long, hide = true, value_parser = maybe_hex::<u16>)]
+    pub pid: Option<u16>,
+    /// Authenticator AAGUID, reported in authenticatorGetInfo and in every
+    /// registration
+    #[clap(long, default_value = DEFAULT_AAGUID)]
     pub aaguid: String,
     /// Accept authenticatorReset at any time instead of only within 10 seconds
     /// of start-up. Does not conform to CTAP 2.3 section 6.6; for test rigs that
@@ -560,8 +572,28 @@ fn status(state: StateArgs) -> io::Result<()> {
     Ok(())
 }
 
+impl Command {
+    /// The state directory the command works on.
+    fn state_dir(&self) -> &Path {
+        match self {
+            Command::Attach(cmd) => &cmd.state.state_dir,
+            Command::Detach(state) | Command::Status(state) => &state.state_dir,
+            Command::Reset(args) => &args.state.state_dir,
+            Command::Pin(cmd) => match &cmd.action {
+                PinAction::Set { state }
+                | PinAction::Change { state }
+                | PinAction::Remove { state }
+                | PinAction::Status { state } => &state.state_dir,
+            },
+        }
+    }
+}
+
 pub fn run_cli() -> io::Result<()> {
     let cli = Cli::parse();
+    if let Some(notice) = state::unused_legacy_state_dir_notice(cli.command.state_dir()) {
+        eprintln!("{notice}");
+    }
     match cli.command {
         Command::Attach(cmd) => start(cmd),
         Command::Detach(state) => stop(state),
@@ -731,6 +763,53 @@ mod tests {
             Command::Attach(cmd) => Ok(cmd.to_runner_config().unwrap()),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn the_defaults_name_no_vendor() {
+        let config = attach_config(&[]).unwrap();
+        assert_eq!(
+            config.aaguid,
+            [
+                0x59, 0x31, 0xe8, 0x05, 0xa1, 0x66, 0x4e, 0xb7, 0x84, 0x5a, 0x7f, 0x6a, 0xa9, 0x3d,
+                0x9c, 0xd8
+            ]
+        );
+        // A version 4 (random) UUID of the RFC 4122 variant.
+        assert_eq!(config.aaguid[6] >> 4, 4);
+        assert_eq!(config.aaguid[8] >> 6, 0b10);
+        assert_eq!(config.descriptor.vendor_id, 0x1209);
+        assert_eq!(config.descriptor.product_id, 0x0001);
+        assert_eq!(config.descriptor.vendor_id, crate::uhid::DEFAULT_VENDOR_ID);
+        assert_eq!(
+            config.descriptor.product_id,
+            crate::uhid::DEFAULT_PRODUCT_ID
+        );
+        assert_eq!(
+            config.descriptor.name,
+            "pqkey FIDO2 Software Authenticator (ML-DSA)"
+        );
+        let Command::Attach(start) = parse(&["attach"]).unwrap().command else {
+            panic!("not attach");
+        };
+        assert_eq!(start.device.manufacturer, None);
+        assert_eq!(start.device.country, None);
+        assert_eq!(start.device.product, DEFAULT_NAME);
+
+        let config = attach_config(&[
+            "--vendor-id",
+            "0x1234",
+            "--product-id",
+            "0x5678",
+            "--aaguid",
+            "00112233445566778899aabbccddeeff",
+        ])
+        .unwrap();
+        assert_eq!(config.descriptor.vendor_id, 0x1234);
+        assert_eq!(config.descriptor.product_id, 0x5678);
+        assert_eq!(config.aaguid[..4], [0x00, 0x11, 0x22, 0x33]);
+        // The ignored legacy flags still parse.
+        assert!(attach_config(&["--vid", "0x1998", "-p", "0x0616"]).is_ok());
     }
 
     #[test]

@@ -306,12 +306,12 @@ mod tests {
     };
 
     const IDENTITY: IdentityConfig<'static> = IdentityConfig {
-        manufacturer: "Feitian Technologies Co., Ltd.",
-        product: "Feitian FIDO2 Software Authenticator (ML-DSA)",
+        manufacturer: "Example Manufacturer Co., Ltd.",
+        product: "pqkey FIDO2 Software Authenticator (ML-DSA)",
         country: "CN",
         aaguid: [
-            0x46, 0x45, 0x49, 0x54, 0x49, 0x41, 0x4e, 0x98, 0x06, 0x16, 0x52, 0x5a, 0x30, 0x31,
-            0x00, 0x00,
+            0x59, 0x31, 0xe8, 0x05, 0xa1, 0x66, 0x4e, 0xb7, 0x84, 0x5a, 0x7f, 0x6a, 0xa9, 0x3d,
+            0x9c, 0xd8,
         ],
     };
 
@@ -487,7 +487,7 @@ mod tests {
     fn a_certificate_without_the_extension_has_no_aaguid() {
         let key = P256Key::new(EcdsaSigningKey::generate());
         let mut params = CertificateParams::new(vec!["example".to_owned()]).unwrap();
-        params.serial_number = Some(SerialNumber::from(b"FEITIAN-PQC-001".to_vec()));
+        params.serial_number = Some(SerialNumber::from(b"LEGACY-SERIAL-01".to_vec()));
         params.is_ca = IsCa::ExplicitNoCa;
         params.key_identifier_method = KeyIdMethod::PreSpecified(vec![1; 20]);
         let der = params.self_signed(&key).unwrap().der().to_vec();

@@ -5,7 +5,7 @@
 #   tests/e2e/daemon.sh stop NAME PRODUCT_ID
 #
 # NAME keeps the state directory, log and exit status of instances apart;
-# PRODUCT_ID (four hex digits, e.g. 0858) tells their virtual keys apart. Each
+# PRODUCT_ID (four hex digits, e.g. 0001) tells their virtual keys apart. Each
 # instance must use a different one. `start` runs `pqkey attach
 # --foreground` in the background and prints the key's hidraw node once it is
 # accessible. `stop` detaches the instance and checks that it exited with
@@ -35,7 +35,7 @@ state_dir="$work/$name-state"
 status_file="$work/$name.status"
 diagnostics="$work/e2e-diagnostics"
 log="$diagnostics/$name.log"
-device_glob="/sys/devices/virtual/misc/uhid/0003:096E:$product_id.*"
+device_glob="/sys/devices/virtual/misc/uhid/0003:1209:$product_id.*"
 
 start() {
   mkdir -p "$diagnostics"

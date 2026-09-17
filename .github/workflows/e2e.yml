@@ -67,7 +67,7 @@ jobs:
           user=$(id -un)
           sudo tee /etc/udev/rules.d/99-e2e-virtual-key.rules >/dev/null <<EOF
           KERNEL=="uhid", SUBSYSTEM=="misc", OWNER="$user", MODE="0600"
-          SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/0003:096E:085[89AB].*", OWNER="$user", MODE="0600"
+          SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/0003:1209:000[1-4].*", OWNER="$user", MODE="0600"
           EOF
           sudo udevadm control --reload-rules
           if ! sudo modprobe uhid; then
@@ -84,20 +84,21 @@ jobs:
             exit 1
           fi
 
-      # Each virtual key is a pqkey instance of its own, told apart by
-      # its product ID; tests/e2e/daemon.sh starts and stops them.
+      # Each virtual key is a pqkey instance of its own, told apart by its
+      # product ID, one of the pid.codes test product IDs 0001 to 0004 under
+      # the pid.codes vendor ID 1209; tests/e2e/daemon.sh starts and stops them.
       - name: Attach the virtual security key
         run: |
           echo "E2E_WORK=$RUNNER_TEMP" >> "$GITHUB_ENV"
           export E2E_WORK=$RUNNER_TEMP
-          node=$(tests/e2e/daemon.sh start auto-approve 0858 --presence auto-approve --allow-late-reset)
+          node=$(tests/e2e/daemon.sh start auto-approve 0001 --presence auto-approve --allow-late-reset)
           echo "E2E_HIDRAW=$node" >> "$GITHUB_ENV"
 
       # The same with certificate attestation, for the attestation certificate
       # tests.
       - name: Attach the certificate key
         run: |
-          node=$(tests/e2e/daemon.sh start certificate 085B --presence auto-approve --allow-late-reset \
+          node=$(tests/e2e/daemon.sh start certificate 0002 --presence auto-approve --allow-late-reset \
             --attestation certificate --manufacturer "pqkey E2E" --product "pqkey E2E key" --country US)
           echo "E2E_CERTIFICATE_HIDRAW=$node" >> "$GITHUB_ENV"
 
@@ -115,14 +116,14 @@ jobs:
       # --allow-late-reset: with notifications a reset is accepted at any time.
       - name: Attach the notify key
         run: |
-          node=$(tests/e2e/daemon.sh start notify 0859 --presence notify --presence-timeout 3)
+          node=$(tests/e2e/daemon.sh start notify 0003 --presence notify --presence-timeout 3)
           echo "E2E_NOTIFY_HIDRAW=$node" >> "$GITHUB_ENV"
 
       # Asks for presence and never gets an answer, so tests can watch the
       # transport while a prompt is showing.
       - name: Attach the unanswered key
         run: |
-          node=$(tests/e2e/daemon.sh start unanswered 085A --presence unanswered)
+          node=$(tests/e2e/daemon.sh start unanswered 0004 --presence unanswered)
           echo "E2E_UNANSWERED_HIDRAW=$node" >> "$GITHUB_ENV"
 
       - name: libfido2 tests
@@ -152,15 +153,15 @@ jobs:
         if: always() && env.E2E_WORK != ''
         run: |
           failed=0
-          tests/e2e/daemon.sh stop auto-approve 0858 || failed=1
+          tests/e2e/daemon.sh stop auto-approve 0001 || failed=1
           if [ -n "${E2E_CERTIFICATE_HIDRAW:-}" ]; then
-            tests/e2e/daemon.sh stop certificate 085B || failed=1
+            tests/e2e/daemon.sh stop certificate 0002 || failed=1
           fi
           if [ -n "${E2E_NOTIFY_HIDRAW:-}" ]; then
-            tests/e2e/daemon.sh stop notify 0859 || failed=1
+            tests/e2e/daemon.sh stop notify 0003 || failed=1
           fi
           if [ -n "${E2E_UNANSWERED_HIDRAW:-}" ]; then
-            tests/e2e/daemon.sh stop unanswered 085A || failed=1
+            tests/e2e/daemon.sh stop unanswered 0004 || failed=1
           fi
           if [ -e "$E2E_WORK/session-bus.pid" ]; then
             kill "$(cat "$E2E_WORK/session-bus.pid")" || true

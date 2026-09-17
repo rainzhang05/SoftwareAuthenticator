@@ -44,7 +44,7 @@ COSE_KTY_AKP = 7
 COSE_CRV_P256 = 1
 
 # The AAGUID pqkey uses unless --aaguid is given.
-DEFAULT_AAGUID = bytes.fromhex("4645495449414E980616525A30310000")
+DEFAULT_AAGUID = bytes.fromhex("5931e805a1664eb7845a7f6aa93d9cd8")
 
 FLAG_UP = 0x01
 FLAG_UV = 0x04

@@ -1,4 +1,4 @@
-# udev rules for the Feitian ML-DSA software authenticator (pqkey).
+# udev rules for pqkey, the ML-DSA software authenticator.
 #
 # Install with:
 #   sudo install -m 644 70-pqkey.rules /etc/udev/rules.d/
@@ -27,11 +27,12 @@ SUBSYSTEM=="misc", KERNEL=="uhid", GROUP="plugdev", MODE="0660"
 # A device created through /dev/uhid has no USB parent device, so USB
 # attributes such as ATTRS{idVendor} never match it. The kernel makes the uhid
 # misc device its parent instead, which gives the node a path like
-#   /devices/virtual/misc/uhid/0003:096E:0858.0004/hidraw/hidraw3
+#   /devices/virtual/misc/uhid/0003:1209:0001.0004/hidraw/hidraw3
 # where the numbers are the bus (0003, USB), the vendor and product IDs in
-# upper-case hex, and an instance counter. 096E:0858 are pqkey's
-# defaults; change the pattern if you pass --vendor-id or --product-id. Real
-# USB security keys never match, even with the same IDs.
+# upper-case hex, and an instance counter. 1209:0001 are pqkey's defaults
+# (pid.codes' open source vendor ID and a test product ID); change the pattern
+# if you pass --vendor-id or --product-id. Real USB security keys never match,
+# even with the same IDs.
 #
 # systemd 244 and later already recognise any hidraw device with a FIDO
 # report descriptor, this one included (60-fido-id.rules, 70-uaccess.rules),
@@ -39,7 +40,7 @@ SUBSYSTEM=="misc", KERNEL=="uhid", GROUP="plugdev", MODE="0660"
 # the same where that is missing, and keeps the node closed to everyone else:
 # the authenticator approves user presence by itself, so whoever can open the
 # node can use the credentials behind it.
-SUBSYSTEM=="hidraw", KERNEL=="hidraw*", DEVPATH=="/devices/virtual/misc/uhid/0003:096E:0858.*", \
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", DEVPATH=="/devices/virtual/misc/uhid/0003:1209:0001.*", \
   MODE="0600", TAG+="uaccess"
 
 LABEL="pqkey_end"

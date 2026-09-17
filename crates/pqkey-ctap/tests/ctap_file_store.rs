@@ -479,8 +479,8 @@ fn ml_dsa_87_make_credential_response_sizes() {
         )
         .len()
     };
-    // 641 bytes is the largest certificate the daemon generates with its
-    // default identity strings.
+    // 641 bytes is a generous size for a certificate the daemon generates
+    // with typical identity strings.
     let packed_with_certificate = {
         let dir = TempDir::new();
         let (record, _) = attestation_record(641);

@@ -2,6 +2,8 @@
 name = "pqkey"
 version = "0.1.0"
 edition = "2021"
+authors.workspace = true
+repository.workspace = true
 
 [dependencies]
 # The CTAPHID app interface the CTAP engine implements. The transport frames
