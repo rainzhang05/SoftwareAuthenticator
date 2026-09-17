@@ -339,9 +339,10 @@ More commands for debugging on Linux are in
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for building, testing, fuzzing and the
-checks CI runs, and [docs/architecture.md](docs/architecture.md) for how the
-code is organised. Security issues: see [SECURITY.md](SECURITY.md).
+See [docs/development-notes.md](docs/development-notes.md) for building,
+testing, fuzzing and the checks CI runs, and
+[docs/architecture.md](docs/architecture.md) for how the code is organised.
+Security issues: see [SECURITY.md](SECURITY.md).
 
 ## License
 

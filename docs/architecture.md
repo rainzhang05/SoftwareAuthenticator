@@ -368,4 +368,4 @@ the stored record cannot be read, registrations fall back to self attestation.
 | End to end | `tests/e2e/`, `.github/workflows/e2e.yml` | The release daemon on a GitHub Actions Ubuntu runner, driven through its hidraw node by libfido2's tools and python-fido2: getInfo, ES256 and ML-DSA credentials, PINs with both protocols, CTAPHID edge cases, certificate attestation, notification presence on a private session bus |
 | Fuzzing | `fuzz/`, `.github/workflows/fuzz.yml` | libFuzzer targets `ctaphid_packets`, `ctap_request`, `ctap_request_structured`, `ctap_sequence`, `credential_key` |
 
-How to run each of these is in [CONTRIBUTING.md](../CONTRIBUTING.md).
+How to run each of these is in [development-notes.md](development-notes.md).

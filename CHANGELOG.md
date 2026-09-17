@@ -92,7 +92,7 @@ Upgrading from `867a591` or earlier is not an in-place update:
   lockfiles, and formatting and lints of the fuzz crate.
 - Dependabot with automatic merging of semver-compatible Cargo updates once CI,
   Security and E2E (and Fuzz, for the fuzz crate) pass.
-- `LICENSE` (MIT); README, SECURITY.md and docs/architecture.md.
+- `LICENSE` (MIT); README, SECURITY.md and docs/.
 
 ### Changed
 
