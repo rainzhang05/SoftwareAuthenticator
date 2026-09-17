@@ -746,3 +746,45 @@ fn cred_protect_enforced_for_user_verification() {
         .expect("credential id present");
     assert_eq!(credential_id, vec![0xAA]);
 }
+
+/// An allowList descriptor whose type is not "public-key" does not denote
+/// one of this authenticator's credentials.
+#[test]
+fn get_assertion_allow_list_ignores_other_credential_types() {
+    let mut app = new_app(TestStore::new(), [0x75; 16]);
+    insert(
+        &mut app,
+        &credential("example.com", &[0x01], &[0xC1], CoseAlg::ES256),
+    );
+    let request = |credential_type: &str| {
+        let allow_list = Value::Array(vec![canonical_map(vec![
+            (
+                Value::Text("type".into()),
+                Value::Text(credential_type.into()),
+            ),
+            (Value::Text("id".into()), Value::Bytes(vec![0xC1])),
+        ])]);
+        let mut payload = Vec::new();
+        into_writer(
+            &canonical_map(vec![
+                (
+                    Value::Integer(Integer::from(1)),
+                    Value::Text("example.com".into()),
+                ),
+                (
+                    Value::Integer(Integer::from(2)),
+                    Value::Bytes(vec![0x75; 32]),
+                ),
+                (Value::Integer(Integer::from(3)), allow_list),
+            ]),
+            &mut payload,
+        )
+        .expect("serialize getAssertion");
+        payload
+    };
+    assert_eq!(
+        app.handle_get_assertion(&request("not-public-key")),
+        Err(CTAP2_ERR_NO_CREDENTIALS)
+    );
+    assert!(app.handle_get_assertion(&request("public-key")).is_ok());
+}

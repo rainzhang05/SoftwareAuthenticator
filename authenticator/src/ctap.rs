@@ -27,6 +27,7 @@ mod get_info;
 mod make_credential;
 mod pin;
 pub mod presence;
+mod request;
 mod reset;
 mod storage;
 #[cfg(test)]

@@ -568,3 +568,152 @@ fn make_credential_requires_mc_permission() {
     let result = app.handle_make_credential(&payload);
     assert_eq!(result, Err(CTAP2_ERR_PIN_AUTH_INVALID));
 }
+
+fn text(value: &str) -> Value {
+    Value::Text(value.into())
+}
+
+fn param(credential_type: &str, alg: Value) -> Value {
+    canonical_map(vec![
+        (text("type"), text(credential_type)),
+        (text("alg"), alg),
+    ])
+}
+
+fn public_key(alg: i64) -> Value {
+    param("public-key", Value::Integer(Integer::from(alg)))
+}
+
+/// A makeCredential request with `pub_key_cred_params` and, if given, an
+/// excludeList.
+fn request_with_params(pub_key_cred_params: Vec<Value>, exclude_list: Option<Value>) -> Vec<u8> {
+    let mut entries = vec![
+        (
+            Value::Integer(Integer::from(1)),
+            Value::Bytes(vec![0x5C; 32]),
+        ),
+        (
+            Value::Integer(Integer::from(2)),
+            canonical_map(vec![(text("id"), text("example.com"))]),
+        ),
+        (
+            Value::Integer(Integer::from(3)),
+            canonical_map(vec![(text("id"), Value::Bytes(vec![0x01]))]),
+        ),
+        (
+            Value::Integer(Integer::from(4)),
+            Value::Array(pub_key_cred_params),
+        ),
+    ];
+    if let Some(exclude_list) = exclude_list {
+        entries.push((Value::Integer(Integer::from(5)), exclude_list));
+    }
+    let mut payload = Vec::new();
+    into_writer(&canonical_map(entries), &mut payload).expect("serialize makeCredential");
+    payload
+}
+
+/// "If the element specifies an algorithm that is supported by the
+/// authenticator, and no algorithm has yet been chosen by this loop, then let
+/// the algorithm specified by the current element be the chosen algorithm."
+/// (CTAP 2.3 §6.1.2 step 3.1.3)
+#[test]
+fn make_credential_chooses_the_first_supported_algorithm_in_rp_order() {
+    for (params, expected) in [
+        (
+            vec![public_key(-8), public_key(-49), public_key(-7)],
+            CoseAlg::MLDSA65,
+        ),
+        (
+            vec![public_key(-257), public_key(-7), public_key(-50)],
+            CoseAlg::ES256,
+        ),
+        (vec![public_key(-50), public_key(-7)], CoseAlg::MLDSA87),
+    ] {
+        let mut app = new_app(TestStore::new(), [0x71; 16]);
+        app.handle_make_credential(&request_with_params(params, None))
+            .expect("makeCredential succeeds");
+        assert_eq!(stored(&app)[0].alg, expected);
+    }
+}
+
+/// An alg outside `i32` whose low 32 bits read -7 is not ES256, an element of
+/// another credential type is not a supported algorithm, and ESP256 (-9) is
+/// not treated as ES256.
+#[test]
+fn make_credential_rejects_algorithms_it_does_not_support() {
+    for params in [
+        vec![public_key((1_i64 << 32) - 7)],
+        vec![public_key(-(1_i64 << 32) - 7)],
+        vec![param("not-public-key", Value::Integer(Integer::from(-7)))],
+        vec![public_key(-9)],
+        vec![],
+    ] {
+        let mut app = new_app(TestStore::new(), [0x72; 16]);
+        assert_eq!(
+            app.handle_make_credential(&request_with_params(params.clone(), None)),
+            Err(CTAP2_ERR_UNSUPPORTED_ALGORITHM),
+            "{params:?}"
+        );
+        assert!(stored(&app).is_empty());
+    }
+}
+
+/// "This loop chooses the first occurrence of an algorithm identifier
+/// supported by this authenticator but always iterates over every element of
+/// pubKeyCredParams to validate them." (CTAP 2.3 §6.1.2 step 3)
+#[test]
+fn make_credential_validates_every_pub_key_cred_params_element() {
+    let missing_alg = canonical_map(vec![(text("type"), text("public-key"))]);
+    let missing_type = canonical_map(vec![(text("alg"), Value::Integer(Integer::from(-7)))]);
+    for (params, status) in [
+        (vec![public_key(-7), missing_alg], CTAP2_ERR_INVALID_CBOR),
+        (vec![public_key(-7), missing_type], CTAP2_ERR_INVALID_CBOR),
+        (
+            vec![public_key(-7), param("public-key", text("-7"))],
+            CTAP2_ERR_CBOR_UNEXPECTED_TYPE,
+        ),
+        (
+            vec![public_key(-7), Value::Integer(Integer::from(-7))],
+            CTAP2_ERR_CBOR_UNEXPECTED_TYPE,
+        ),
+    ] {
+        let mut app = new_app(TestStore::new(), [0x73; 16]);
+        assert_eq!(
+            app.handle_make_credential(&request_with_params(params.clone(), None)),
+            Err(status),
+            "{params:?}"
+        );
+    }
+}
+
+/// A descriptor whose type is not "public-key" does not denote one of this
+/// authenticator's credentials, whatever its id.
+#[test]
+fn make_credential_exclude_list_ignores_other_credential_types() {
+    let mut app = new_app(TestStore::new(), [0x74; 16]);
+    app.handle_make_credential(&request_with_params(vec![public_key(-7)], None))
+        .expect("first registration");
+    let existing = stored(&app)[0].credential_id.clone();
+
+    let descriptor = |credential_type: &str| {
+        Value::Array(vec![canonical_map(vec![
+            (text("type"), text(credential_type)),
+            (text("id"), Value::Bytes(existing.clone())),
+        ])])
+    };
+    let response = app
+        .handle_make_credential(&request_with_params(
+            vec![public_key(-7)],
+            Some(descriptor("not-public-key")),
+        ))
+        .expect("the excludeList names no credential of this authenticator");
+    assert_eq!(response[0], CTAP2_OK);
+    assert_eq!(
+        app.handle_make_credential(&request_with_params(
+            vec![public_key(-7)],
+            Some(descriptor("public-key")),
+        )),
+        Err(CTAP2_ERR_CREDENTIAL_EXCLUDED)
+    );
+}

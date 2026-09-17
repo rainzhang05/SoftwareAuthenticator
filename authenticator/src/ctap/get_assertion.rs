@@ -7,6 +7,7 @@ use super::pin::protocol::{
     decrypt, parse_pin_uv_auth_param, parse_pin_uv_auth_protocol, verify, HmacSha256, PinProtocol,
 };
 use super::presence::{PresenceOperation, PresenceRequest};
+use super::request;
 use super::storage::{is_discoverable, store_status};
 use super::CtapApp;
 use crate::store::{sort_newest_first, CredentialRecord};
@@ -185,10 +186,9 @@ impl CtapApp<'_> {
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
 
-        let allow_list = match cbor::map_get(&map, Value::Integer(Integer::from(3))) {
-            Some(Value::Array(list)) => Some(list.clone()),
-            _ => None,
-        };
+        let allow_list = cbor::map_get(&map, Value::Integer(Integer::from(3)))
+            .map(request::credential_ids)
+            .transpose()?;
 
         let mut hmac_secret_request: Option<HmacSecretRequest> = None;
         if let Some(value) = cbor::map_get(&map, Value::Integer(Integer::from(4))) {
@@ -270,14 +270,7 @@ impl CtapApp<'_> {
         // CTAP 2.3 §6.2.2 step 7: locate the applicable credentials.
         let mut applicable: Vec<CredentialRecord> = Vec::new();
         if let Some(list) = allow_list.as_ref() {
-            for descriptor in list {
-                let Value::Map(desc_map) = descriptor else {
-                    continue;
-                };
-                let Some(Value::Bytes(id)) = cbor::map_get(desc_map, Value::Text("id".into()))
-                else {
-                    continue;
-                };
+            for id in list {
                 if applicable.iter().any(|cred| cred.credential_id == *id) {
                     continue;
                 }

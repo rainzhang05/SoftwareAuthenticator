@@ -4,10 +4,11 @@ use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::permissions::PIN_PERMISSION_MC;
 use super::pin::protocol::parse_pin_uv_auth_param;
 use super::presence::{PresenceOperation, PresenceRequest};
+use super::request;
 use super::storage::{is_discoverable, store_status};
 use super::CtapApp;
 use crate::store::{CredentialRecord, PrivateKeyMaterial, StoreError};
-use crate::{try_sign_challenge, CoseAlg};
+use crate::try_sign_challenge;
 
 use ciborium::{
     de::from_reader,
@@ -101,47 +102,24 @@ impl CtapApp<'_> {
                 _ => None,
             });
 
-        let params = match cbor::map_get(&map, Value::Integer(Integer::from(4))) {
-            Some(Value::Array(params)) => params,
-            _ => return Err(CTAP2_ERR_INVALID_CBOR),
+        let alg = match cbor::map_get(&map, Value::Integer(Integer::from(4))) {
+            Some(Value::Array(params)) => request::chosen_algorithm(params)?,
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
 
-        let mut selected_alg = None;
-        for entry in params {
-            let Value::Map(param_map) = entry else {
-                return Err(CTAP2_ERR_INVALID_CBOR);
-            };
-            let Some(Value::Integer(alg_value)) =
-                cbor::map_get(param_map, Value::Text("alg".into()))
-            else {
-                continue;
-            };
-            let alg_i128: i128 = alg_value.clone().into();
-            if let Ok(alg) = CoseAlg::try_from(alg_i128 as i32) {
-                selected_alg = Some(alg);
-                break;
-            }
-        }
-        let alg = selected_alg.ok_or(CTAP2_ERR_UNSUPPORTED_ALGORITHM)?;
-
-        if let Some(Value::Array(exclude)) = cbor::map_get(&map, Value::Integer(Integer::from(5))) {
-            for descriptor in exclude {
-                let Value::Map(descriptor_map) = descriptor else {
-                    continue;
-                };
-                let Some(Value::Bytes(id)) =
-                    cbor::map_get(descriptor_map, Value::Text("id".into()))
-                else {
-                    continue;
-                };
-                // CTAP 2.3 §6.1.2 step 12: a credential "bound to the
-                // specified rp.id".
-                if self
-                    .stored_credential(id)?
-                    .is_some_and(|credential| credential.rp_id == rp_id)
-                {
-                    return Err(CTAP2_ERR_CREDENTIAL_EXCLUDED);
-                }
+        let exclude_list = cbor::map_get(&map, Value::Integer(Integer::from(5)))
+            .map(request::credential_ids)
+            .transpose()?
+            .unwrap_or_default();
+        for id in &exclude_list {
+            // CTAP 2.3 §6.1.2 step 12: a credential "bound to the specified
+            // rp.id".
+            if self
+                .stored_credential(id)?
+                .is_some_and(|credential| credential.rp_id == rp_id)
+            {
+                return Err(CTAP2_ERR_CREDENTIAL_EXCLUDED);
             }
         }
 
