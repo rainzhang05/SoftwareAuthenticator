@@ -3,7 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use authenticator::ctap::{presence::AutoApprove, CtapApp, InterruptFlag};
+use authenticator::ctap::{
+    presence::{AutoApprove, UserPresence},
+    CtapApp, InterruptFlag,
+};
 use authenticator::store::{AttestationRecord, CredentialStore, FileStore};
 
 use crate::{
@@ -131,22 +134,35 @@ pub fn run(
 /// fails or `shutdown` is requested; the latter ends with
 /// [`shutdown_error`](crate::shutdown::shutdown_error). `on_ready` runs just
 /// before requests are served.
-///
-/// The app runs on this thread, inside the loop: a request that waits for the
-/// user blocks the loop until it is answered.
 pub fn serve_ctap(
     device: UhidDevice,
     data: AppData,
     shutdown: ShutdownSignal,
     on_ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
-    // Through this the CTAPHID dispatcher cancels the request being processed.
-    let interrupt = InterruptFlag::new();
-    let waiting = WaitingForUser::new();
     if !data.auto_user_presence {
         log::warn!("asking the user for presence is not implemented yet; approving every request");
     }
-    let mut ctap = CtapApp::with_file_store(data.store, AutoApprove, &interrupt, data.aaguid);
+    serve_ctap_with_presence(device, data, AutoApprove, shutdown, on_ready)
+}
+
+/// [`serve_ctap`] with `presence` asking the user for presence.
+///
+/// The app runs on a worker thread (see [`exec`]), so `presence` may block
+/// while the user decides: the transport keeps sending keepalives meanwhile,
+/// and CTAPHID_CANCEL, resynchronisation of the channel and shutdown reach
+/// `presence` through its [`Cancellation`](authenticator::ctap::presence::Cancellation).
+pub fn serve_ctap_with_presence(
+    device: UhidDevice,
+    data: AppData,
+    presence: impl UserPresence + Send + 'static,
+    shutdown: ShutdownSignal,
+    on_ready: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    // Through this the transport cancels the request the app is processing.
+    let interrupt = InterruptFlag::new();
+    let waiting = WaitingForUser::new();
+    let mut ctap = CtapApp::with_file_store(data.store, presence, &interrupt, data.aaguid);
     ctap.suppress_attestation(data.suppress_attestation);
     if data.allow_late_reset {
         log::warn!("accepting authenticatorReset at any time (--allow-late-reset); this does not conform to CTAP");
@@ -154,7 +170,7 @@ pub fn serve_ctap(
     }
     let app_waiting = waiting.clone();
     ctap.set_keepalive_callback(move |waiting| app_waiting.set(waiting));
-    exec(device, &mut [&mut ctap], &waiting, shutdown, on_ready)
+    exec(device, &mut ctap, &waiting, shutdown, on_ready)
 }
 
 pub fn descriptor(
@@ -191,25 +207,97 @@ pub fn parse_aaguid(input: &str) -> Result<[u8; 16], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_support::TempDir, uhid};
+    use crate::{test_support::TempDir, tests::socket_device, uhid};
+    use authenticator::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest};
     use std::{
         io::{Read, Write},
-        os::{fd::OwnedFd, unix::net::UnixStream},
+        os::unix::net::UnixStream,
         sync::mpsc,
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     const BROADCAST_CID: u32 = 0xffff_ffff;
+    const CTAPHID_PING: u8 = 0x81;
     const CTAPHID_INIT: u8 = 0x86;
     const CTAPHID_CBOR: u8 = 0x90;
+    const CTAPHID_CANCEL: u8 = 0x91;
     const CTAPHID_KEEPALIVE: u8 = 0xbb;
+    const CTAPHID_ERROR: u8 = 0xbf;
+    const ERR_CHANNEL_BUSY: u8 = 0x06;
+    const STATUS_PROCESSING: u8 = 1;
+    const STATUS_UPNEEDED: u8 = 2;
+    const CTAP_GET_INFO: u8 = 0x04;
+    const CTAP_RESET: u8 = 0x07;
+    const CTAP2_OK: u8 = 0x00;
+    const CTAP2_ERR_KEEPALIVE_CANCEL: u8 = 0x2d;
 
-    /// The host side of a uhid device: one end of a socket pair that speaks
-    /// uhid events.
-    struct Host(UnixStream);
+    /// Long enough for anything that is going to happen to have happened.
+    const TIMEOUT: Duration = Duration::from_secs(20);
+    /// How long the tests watch for packets that must not come.
+    const QUIET: Duration = Duration::from_millis(300);
+
+    /// What the device side of the socket produced.
+    #[derive(Debug)]
+    enum Event {
+        /// A CTAPHID message, when its last packet arrived: channel, command
+        /// byte and payload.
+        Message(Instant, u32, u8, Vec<u8>),
+        Destroyed,
+    }
+
+    /// The host side of a uhid device: sends packets into the socket and
+    /// reads what the daemon writes on a thread of its own, timestamped as
+    /// it arrives.
+    struct Host {
+        stream: UnixStream,
+        events: mpsc::Receiver<Event>,
+    }
 
     impl Host {
+        fn new(stream: UnixStream) -> Self {
+            let mut reader = stream.try_clone().unwrap();
+            let (sender, events) = mpsc::channel();
+            thread::spawn(move || {
+                let mut next_event = || {
+                    let mut event = vec![0u8; uhid::UHID_EVENT_SIZE];
+                    reader.read_exact(&mut event).ok()?;
+                    Some(match uhid::input_report(&event) {
+                        Some(frame) => Ok(frame),
+                        None => {
+                            let event_type = u32::from_ne_bytes(event[..4].try_into().unwrap());
+                            assert_eq!(event_type, uhid::UHID_EVENT_TYPE_DESTROY);
+                            Err(Event::Destroyed)
+                        }
+                    })
+                };
+                while let Some(event) = next_event() {
+                    let event = match event {
+                        Ok(frame) => {
+                            let cid = u32::from_be_bytes(frame[..4].try_into().unwrap());
+                            assert_ne!(frame[4] & 0x80, 0, "a stray continuation packet");
+                            let length = u16::from_be_bytes([frame[5], frame[6]]) as usize;
+                            let mut payload = frame[7..7 + length.min(57)].to_vec();
+                            while payload.len() < length {
+                                let Some(Ok(next)) = next_event() else {
+                                    panic!("a message was cut short");
+                                };
+                                assert_eq!(next[..4], cid.to_be_bytes(), "interleaved messages");
+                                let missing = length - payload.len();
+                                payload.extend_from_slice(&next[5..5 + missing.min(59)]);
+                            }
+                            Event::Message(Instant::now(), cid, frame[4], payload)
+                        }
+                        Err(destroyed) => destroyed,
+                    };
+                    if sender.send(event).is_err() {
+                        return;
+                    }
+                }
+            });
+            Self { stream, events }
+        }
+
         /// Send a single-packet CTAPHID request.
         fn send(&mut self, cid: u32, command: u8, payload: &[u8]) {
             let mut frame = [0u8; uhid::CTAPHID_FRAME_LEN];
@@ -217,96 +305,351 @@ mod tests {
             frame[4] = command;
             frame[5..7].copy_from_slice(&(payload.len() as u16).to_be_bytes());
             frame[7..7 + payload.len()].copy_from_slice(payload);
-            self.0.write_all(&uhid::output_event(&frame)).unwrap();
+            self.stream.write_all(&uhid::output_event(&frame)).unwrap();
         }
 
-        /// The next single-packet CTAPHID response that is not a keepalive:
-        /// its command and payload.
-        fn receive(&mut self, cid: u32) -> (u8, Vec<u8>) {
+        fn next(&self, timeout: Duration) -> Option<Event> {
+            match self.events.recv_timeout(timeout) {
+                Ok(event) => Some(event),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the socket closed"),
+            }
+        }
+
+        /// The next message that is not a keepalive on `cid`.
+        fn receive(&self, cid: u32) -> (u8, Vec<u8>) {
             loop {
-                let mut event = vec![0u8; uhid::UHID_EVENT_SIZE];
-                self.0.read_exact(&mut event).unwrap();
-                let frame = uhid::input_report(&event).expect("an input report");
-                assert_eq!(u32::from_be_bytes(frame[..4].try_into().unwrap()), cid);
-                if frame[4] == CTAPHID_KEEPALIVE {
-                    continue;
+                match self.next(TIMEOUT).expect("no response") {
+                    Event::Message(_, channel, CTAPHID_KEEPALIVE, _) if channel == cid => {}
+                    Event::Message(_, channel, command, payload) => {
+                        assert_eq!(channel, cid, "{command:#04x} {payload:02x?}");
+                        return (command, payload);
+                    }
+                    Event::Destroyed => panic!("the device was destroyed"),
                 }
-                let length = u16::from_be_bytes([frame[5], frame[6]]) as usize;
-                assert!(length <= frame.len() - 7, "a multi-packet response");
-                return (frame[4], frame[7..7 + length].to_vec());
+            }
+        }
+
+        /// Allocate a channel.
+        fn init(&mut self) -> u32 {
+            let nonce = [1, 2, 3, 4, 5, 6, 7, 8];
+            self.send(BROADCAST_CID, CTAPHID_INIT, &nonce);
+            let (command, payload) = self.receive(BROADCAST_CID);
+            assert_eq!(command, CTAPHID_INIT);
+            assert_eq!(payload[..8], nonce);
+            u32::from_be_bytes(payload[8..12].try_into().unwrap())
+        }
+
+        /// Assert that nothing arrives for a while.
+        fn assert_quiet(&self) {
+            if let Some(event) = self.next(QUIET) {
+                panic!("unexpected {event:?}");
             }
         }
     }
 
-    /// The daemon loop must build the CTAP app, answer a request that goes
-    /// through the whole stack (uhid events, CTAPHID framing, the dispatcher,
-    /// the app and its credential store), and return once shutdown is
-    /// requested, destroying the device on the way out.
-    #[test]
-    fn runner_answers_requests_and_returns_when_shutdown_is_requested() {
-        let dir = TempDir::new("runner");
-        let (device_end, host_end) = UnixStream::pair().unwrap();
-        device_end.set_nonblocking(true).unwrap();
-        host_end
-            .set_read_timeout(Some(Duration::from_secs(60)))
-            .unwrap();
-        let mut host = Host(host_end);
-        let device = UhidDevice::from_fd(OwnedFd::from(device_end), HidDeviceDescriptor::default());
-        let data = AppData {
+    fn app_data(dir: &TempDir) -> AppData {
+        AppData {
             store: FileStore::open(dir.path()).expect("open credential store"),
             aaguid: [0; 16],
             auto_user_presence: true,
             suppress_attestation: false,
             allow_late_reset: false,
-        };
+        }
+    }
 
-        let shutdown = ShutdownSignal::new();
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let (result_tx, result_rx) = mpsc::channel();
-        let loop_shutdown = shutdown.clone();
+    /// Run `serve` with a fresh device on a thread, and return the host side
+    /// once requests are served, and the loop's result.
+    fn start(
+        serve: impl FnOnce(UhidDevice, Box<dyn FnOnce() -> io::Result<()>>) -> io::Result<()>
+            + Send
+            + 'static,
+    ) -> (Host, mpsc::Receiver<io::Result<()>>) {
+        let (device, host_end) = socket_device();
+        let host = Host::new(host_end);
+        let (ready_sender, ready) = mpsc::channel();
+        let (result_sender, result) = mpsc::channel();
         thread::spawn(move || {
-            let result = serve_ctap(device, data, loop_shutdown, || {
-                ready_tx.send(()).unwrap();
+            let on_ready = Box::new(move || {
+                ready_sender.send(()).unwrap();
                 Ok(())
             });
-            let _ = result_tx.send(result);
+            let result = serve(device, on_ready);
+            if let Err(err) = &result {
+                if !is_shutdown(err) {
+                    // A test waiting for a packet would only see it missing.
+                    eprintln!("the loop failed: {err}");
+                }
+            }
+            let _ = result_sender.send(result);
         });
-        let timeout = Duration::from_secs(60);
-        ready_rx
-            .recv_timeout(timeout)
+        ready
+            .recv_timeout(TIMEOUT)
             .expect("the loop never became ready");
+        (host, result)
+    }
 
-        let nonce = [1, 2, 3, 4, 5, 6, 7, 8];
-        host.send(BROADCAST_CID, CTAPHID_INIT, &nonce);
-        let (command, payload) = host.receive(BROADCAST_CID);
-        assert_eq!(command, CTAPHID_INIT);
-        assert_eq!(payload[..8], nonce);
-        let cid = u32::from_be_bytes(payload[8..12].try_into().unwrap());
-
-        // authenticatorReset clears the credential store, so this also checks
-        // the store handed to the app works.
-        const CTAP_RESET: u8 = 0x07;
-        host.send(cid, CTAPHID_CBOR, &[CTAP_RESET]);
-        let (command, payload) = host.receive(cid);
-        assert_eq!(command, CTAPHID_CBOR);
-        assert_eq!(payload, [0], "authenticatorReset did not succeed");
-
+    /// Stop the loop and check it returned for that reason and destroyed the
+    /// device on the way out.
+    fn shut_down(host: &Host, shutdown: &ShutdownSignal, result: mpsc::Receiver<io::Result<()>>) {
         shutdown.request();
-        let result = result_rx
-            .recv_timeout(timeout)
+        let result = result
+            .recv_timeout(TIMEOUT)
             .expect("the loop did not return after shutdown was requested");
         let err = result.unwrap_err();
         assert!(is_shutdown(&err), "{err:?}");
         assert!(ok_if_shutdown(Err(err)).is_ok());
+        loop {
+            match host.next(TIMEOUT).expect("the device was not destroyed") {
+                Event::Destroyed => break,
+                // A keepalive may cross the shutdown request.
+                Event::Message(_, _, CTAPHID_KEEPALIVE, _) => {}
+                event => panic!("unexpected {event:?}"),
+            }
+        }
+    }
 
-        let mut rest = Vec::new();
-        host.0.read_to_end(&mut rest).unwrap();
-        assert_eq!(
-            rest.len(),
-            uhid::UHID_EVENT_SIZE,
-            "one event after the response"
+    /// The daemon loop must build the CTAP app, answer a request that goes
+    /// through the whole stack (uhid events, CTAPHID framing, the worker
+    /// thread, the app and its credential store), and return once shutdown is
+    /// requested, destroying the device on the way out.
+    #[test]
+    fn runner_answers_requests_and_returns_when_shutdown_is_requested() {
+        let dir = TempDir::new("runner");
+        let data = app_data(&dir);
+        let shutdown = ShutdownSignal::new();
+        let loop_shutdown = shutdown.clone();
+        let (mut host, result) =
+            start(move |device, on_ready| serve_ctap(device, data, loop_shutdown, on_ready));
+
+        let cid = host.init();
+        // authenticatorReset clears the credential store, so this also checks
+        // the store handed to the app works.
+        host.send(cid, CTAPHID_CBOR, &[CTAP_RESET]);
+        assert_eq!(host.receive(cid), (CTAPHID_CBOR, vec![CTAP2_OK]));
+
+        shut_down(&host, &shutdown, result);
+    }
+
+    /// A presence double that waits like a prompt: until the test answers,
+    /// the request is cancelled, or a minute passes. It reports when it is
+    /// asked and how each request ended.
+    struct Prompt {
+        asked: mpsc::Sender<()>,
+        answers: mpsc::Receiver<PresenceOutcome>,
+        outcomes: mpsc::Sender<PresenceOutcome>,
+    }
+
+    impl UserPresence for Prompt {
+        fn confirm(
+            &mut self,
+            _request: &PresenceRequest<'_>,
+            cancellation: Cancellation<'_>,
+        ) -> PresenceOutcome {
+            let _ = self.asked.send(());
+            let deadline = Instant::now() + TIMEOUT;
+            let outcome = loop {
+                if cancellation.is_cancelled() {
+                    break PresenceOutcome::Cancelled;
+                }
+                match self.answers.recv_timeout(Duration::from_millis(5)) {
+                    Ok(answer) => break answer,
+                    Err(_) if Instant::now() > deadline => break PresenceOutcome::TimedOut,
+                    Err(_) => {}
+                }
+            };
+            let _ = self.outcomes.send(outcome);
+            outcome
+        }
+    }
+
+    struct PromptHandle {
+        asked: mpsc::Receiver<()>,
+        answers: mpsc::Sender<PresenceOutcome>,
+        outcomes: mpsc::Receiver<PresenceOutcome>,
+    }
+
+    impl PromptHandle {
+        fn wait_until_asked(&self) {
+            self.asked
+                .recv_timeout(TIMEOUT)
+                .expect("the user was never asked");
+        }
+
+        fn outcome(&self) -> PresenceOutcome {
+            self.outcomes
+                .recv_timeout(TIMEOUT)
+                .expect("the prompt never ended")
+        }
+    }
+
+    /// Serve the CTAP app with a [`Prompt`] for presence.
+    fn start_with_prompt(
+        dir: &TempDir,
+    ) -> (
+        Host,
+        mpsc::Receiver<io::Result<()>>,
+        ShutdownSignal,
+        PromptHandle,
+    ) {
+        let (asked_sender, asked) = mpsc::channel();
+        let (answer_sender, answers) = mpsc::channel();
+        let (outcome_sender, outcomes) = mpsc::channel();
+        let prompt = Prompt {
+            asked: asked_sender,
+            answers,
+            outcomes: outcome_sender,
+        };
+        let data = app_data(dir);
+        let shutdown = ShutdownSignal::new();
+        let loop_shutdown = shutdown.clone();
+        let (host, result) = start(move |device, on_ready| {
+            serve_ctap_with_presence(device, data, prompt, loop_shutdown, on_ready)
+        });
+        let handle = PromptHandle {
+            asked,
+            answers: answer_sender,
+            outcomes,
+        };
+        (host, result, shutdown, handle)
+    }
+
+    /// While the user is asked, the device keeps talking: keepalives with
+    /// STATUS_UPNEEDED at least every 100 ms (CTAP 2.3 §11.2.9.1.7) but not
+    /// in a flood, and a request on another channel is refused with
+    /// ERR_CHANNEL_BUSY (§11.2.5.1) instead of waiting for the prompt. The
+    /// app used to run on the loop's thread, so nothing was sent at all.
+    #[test]
+    fn keepalives_report_the_prompt_and_other_channels_are_busy() {
+        let dir = TempDir::new("keepalive");
+        let (mut host, result, shutdown, prompt) = start_with_prompt(&dir);
+        let cid = host.init();
+        let other = host.init();
+
+        host.send(cid, CTAPHID_CBOR, &[CTAP_RESET]);
+        let sent_at = Instant::now();
+        prompt.wait_until_asked();
+
+        let mut keepalives: Vec<(Instant, [u8; 1])> = Vec::new();
+        let mut busy = false;
+        while sent_at.elapsed() < Duration::from_millis(1_000) {
+            match host.next(TIMEOUT).expect("no keepalive") {
+                Event::Message(at, channel, CTAPHID_KEEPALIVE, status) if channel == cid => {
+                    keepalives.push((at, status[..].try_into().unwrap()));
+                    if keepalives.len() == 5 {
+                        host.send(other, CTAPHID_PING, b"are you there?");
+                    }
+                }
+                Event::Message(_, channel, CTAPHID_ERROR, code) if channel == other => {
+                    assert_eq!(code, [ERR_CHANNEL_BUSY]);
+                    busy = true;
+                }
+                event => panic!("unexpected {event:?}"),
+            }
+        }
+        assert!(busy, "the PING on the other channel was not answered");
+
+        let statuses: Vec<[u8; 1]> = keepalives.iter().map(|(_, status)| *status).collect();
+        let first_up_needed = statuses
+            .iter()
+            .position(|s| *s == [STATUS_UPNEEDED])
+            .unwrap();
+        assert!(statuses[..first_up_needed]
+            .iter()
+            .all(|s| *s == [STATUS_PROCESSING]));
+        assert!(
+            statuses[first_up_needed..]
+                .iter()
+                .all(|s| *s == [STATUS_UPNEEDED]),
+            "{statuses:?}"
         );
-        let event_type = u32::from_ne_bytes(rest[..4].try_into().unwrap());
-        assert_eq!(event_type, uhid::UHID_EVENT_TYPE_DESTROY);
+        let mut previous = sent_at;
+        for (at, _) in &keepalives {
+            let gap = at.duration_since(previous);
+            assert!(
+                gap <= Duration::from_millis(100),
+                "{gap:?} without a keepalive"
+            );
+            previous = *at;
+        }
+        let rate_limited = keepalives
+            .windows(2)
+            .all(|pair| pair[1].0.duration_since(pair[0].0) >= Duration::from_millis(20));
+        assert!(rate_limited, "{} keepalives in a second", keepalives.len());
+
+        prompt.answers.send(PresenceOutcome::Approved).unwrap();
+        assert_eq!(prompt.outcome(), PresenceOutcome::Approved);
+        assert_eq!(host.receive(cid), (CTAPHID_CBOR, vec![CTAP2_OK]));
+        host.assert_quiet();
+        shut_down(&host, &shutdown, result);
+    }
+
+    /// CTAP 2.3 §11.2.9.1.5: CTAPHID_CANCEL during the prompt cancels it, "the
+    /// authenticator MUST NOT reply to the CTAPHID_CANCEL message itself", and
+    /// "The CTAP2_ERR_KEEPALIVE_CANCEL response MUST be the response to that
+    /// request, not an error response in the HID transport."
+    #[test]
+    fn cancel_during_the_prompt_answers_the_request_with_keepalive_cancel() {
+        let dir = TempDir::new("cancel");
+        let (mut host, result, shutdown, prompt) = start_with_prompt(&dir);
+        let cid = host.init();
+
+        host.send(cid, CTAPHID_CBOR, &[CTAP_RESET]);
+        prompt.wait_until_asked();
+        host.send(cid, CTAPHID_CANCEL, &[]);
+        assert_eq!(prompt.outcome(), PresenceOutcome::Cancelled);
+        assert_eq!(
+            host.receive(cid),
+            (CTAPHID_CBOR, vec![CTAP2_ERR_KEEPALIVE_CANCEL])
+        );
+        host.assert_quiet();
+
+        // The device is free again, and CANCEL while idle is ignored.
+        host.send(cid, CTAPHID_CANCEL, &[]);
+        host.send(cid, CTAPHID_PING, b"still there");
+        assert_eq!(host.receive(cid), (CTAPHID_PING, b"still there".to_vec()));
+        shut_down(&host, &shutdown, result);
+    }
+
+    /// CTAP 2.3 §11.2.5.3: INIT on the channel whose request waits for the
+    /// user aborts the transaction. The prompt is cancelled, its late answer
+    /// is discarded, and the next request on the channel is served once the
+    /// app is free.
+    #[test]
+    fn init_during_the_prompt_aborts_it_and_the_channel_is_served_again() {
+        let dir = TempDir::new("resync");
+        let (mut host, result, shutdown, prompt) = start_with_prompt(&dir);
+        let cid = host.init();
+
+        host.send(cid, CTAPHID_CBOR, &[CTAP_RESET]);
+        prompt.wait_until_asked();
+        let nonce = [8, 7, 6, 5, 4, 3, 2, 1];
+        host.send(cid, CTAPHID_INIT, &nonce);
+        host.send(cid, CTAPHID_CBOR, &[CTAP_GET_INFO]);
+        let (command, payload) = host.receive(cid);
+        assert_eq!(command, CTAPHID_INIT);
+        assert_eq!(payload[..8], nonce);
+        assert_eq!(payload[8..12], cid.to_be_bytes());
+        assert_eq!(prompt.outcome(), PresenceOutcome::Cancelled);
+
+        let (command, payload) = host.receive(cid);
+        assert_eq!(command, CTAPHID_CBOR);
+        assert_eq!(payload[0], CTAP2_OK, "getInfo");
+        host.assert_quiet();
+        shut_down(&host, &shutdown, result);
+    }
+
+    /// Shutting down while the user is asked cancels the prompt, so the
+    /// worker thread can be joined and the loop returns.
+    #[test]
+    fn shutdown_during_the_prompt_cancels_it() {
+        let dir = TempDir::new("shutdown");
+        let (mut host, result, shutdown, prompt) = start_with_prompt(&dir);
+        let cid = host.init();
+
+        host.send(cid, CTAPHID_CBOR, &[CTAP_RESET]);
+        prompt.wait_until_asked();
+        shut_down(&host, &shutdown, result);
+        assert_eq!(prompt.outcome(), PresenceOutcome::Cancelled);
     }
 }

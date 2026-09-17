@@ -4,7 +4,7 @@ use nix::poll::{poll, PollFd, PollFlags};
 use nix::unistd::{read, write};
 use std::fs::OpenOptions;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::thread;
 use std::time::Duration;
 
@@ -214,7 +214,12 @@ impl UhidDevice {
     }
 
     pub fn wait(&self, timeout: Option<Duration>) -> io::Result<bool> {
-        self.inner.wait(timeout)
+        self.inner.wait(timeout, None)
+    }
+
+    /// Like [`wait`](Self::wait), but also return once `other` is readable.
+    pub fn wait_with(&self, other: BorrowedFd<'_>, timeout: Option<Duration>) -> io::Result<bool> {
+        self.inner.wait(timeout, Some(other))
     }
 }
 
@@ -231,8 +236,11 @@ impl UhidInner {
         }
     }
 
-    fn wait(&self, timeout: Option<Duration>) -> io::Result<bool> {
-        let mut fds = [PollFd::new(&self.fd, PollFlags::POLLIN)];
+    fn wait(&self, timeout: Option<Duration>, other: Option<BorrowedFd<'_>>) -> io::Result<bool> {
+        let mut fds = vec![PollFd::new(&self.fd, PollFlags::POLLIN)];
+        if let Some(other) = &other {
+            fds.push(PollFd::new(other, PollFlags::POLLIN));
+        }
         let timeout_ms = timeout
             .map(|d| d.as_millis().min(i32::MAX as u128) as i32)
             .unwrap_or(-1);
@@ -580,7 +588,7 @@ mod raw {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ctaphid_dispatch::app::Command;
+    use ctaphid_app::Command;
 
     fn init_frame() -> [u8; CTAPHID_FRAME_LEN] {
         let mut frame = [0u8; CTAPHID_FRAME_LEN];
