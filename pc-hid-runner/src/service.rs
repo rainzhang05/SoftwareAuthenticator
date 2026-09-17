@@ -29,7 +29,7 @@ pub enum Backend {
 pub struct IdentityStrings {
     pub manufacturer: String,
     pub product: String,
-    pub serial: String,
+    pub country: String,
 }
 
 pub struct RunnerConfig {
@@ -117,7 +117,8 @@ pub fn run(
         IdentityConfig {
             manufacturer: &identity.manufacturer,
             product: &identity.product,
-            serial: &identity.serial,
+            country: &identity.country,
+            aaguid,
         },
     )?;
     let data = AppData {

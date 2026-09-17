@@ -19,7 +19,7 @@ use nix::{
 };
 
 use crate::{
-    permissions,
+    attestation, permissions,
     pin_input::PinReader,
     presence::PresenceMode,
     service,
@@ -177,8 +177,13 @@ pub struct DeviceArgs {
     /// Product named in a newly provisioned attestation certificate
     #[clap(long, default_value = "Feitian FIDO2 Software Authenticator (ML-DSA)")]
     pub product: String,
-    /// Serial number of a newly provisioned attestation certificate
-    #[clap(long, default_value = "FEITIAN-PQC-001")]
+    /// Country (ISO 3166-1 alpha-2 code) where the manufacturer is
+    /// incorporated, named in a newly provisioned attestation certificate
+    #[clap(long, value_parser = attestation::parse_country, default_value = "CN")]
+    pub country: String,
+    /// Ignored; accepted so that existing command lines keep working. The
+    /// attestation certificate's serial number is random.
+    #[clap(long, hide = true, default_value = "FEITIAN-PQC-001")]
     pub serial: String,
     /// Vendor ID for the virtual HID device
     #[clap(long, value_parser = maybe_hex::<u32>, default_value_t = 0x096e)]
@@ -272,7 +277,7 @@ impl StartCommand {
             identity: service::IdentityStrings {
                 manufacturer: self.device.manufacturer.clone(),
                 product: self.device.product.clone(),
-                serial: self.device.serial.clone(),
+                country: self.device.country.clone(),
             },
             presence: self.presence.presence.into_mode(),
             presence_timeout: self.presence.presence_timeout.map(Duration::from_secs),
@@ -682,5 +687,28 @@ mod tests {
     fn the_old_manual_user_presence_flag_is_gone() {
         let err = parse(&["attach", "--manual-user-presence"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    fn attach_config(args: &[&str]) -> Result<service::RunnerConfig, clap::Error> {
+        let args: Vec<&str> = std::iter::once("attach")
+            .chain(args.iter().copied())
+            .collect();
+        match parse(&args)?.command {
+            Command::Attach(cmd) => Ok(cmd.to_runner_config().unwrap()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_certificate_country_is_an_iso_3166_code() {
+        assert_eq!(attach_config(&[]).unwrap().identity.country, "CN");
+        let config = attach_config(&["--country", "us"]).unwrap();
+        assert_eq!(config.identity.country, "US");
+        for country in ["USA", "EU", "1"] {
+            let err = attach_config(&["--country", country]).err().unwrap();
+            assert_eq!(err.kind(), ErrorKind::ValueValidation, "{country}: {err}");
+        }
+        // The serial number is random now; --serial is still accepted.
+        assert!(attach_config(&["--serial", "FEITIAN-PQC-001"]).is_ok());
     }
 }

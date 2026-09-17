@@ -1,26 +1,60 @@
 //! Provisioning the attestation key and its certificate.
 //!
-//! The certificate is self-signed by the attestation key, with the product
-//! named in the subject. The signature is made with the `p256` crate the CTAP
-//! engine already uses, so rcgen is built without a crypto backend.
+//! The certificate is self-signed by the attestation key and meets the
+//! requirements WebAuthn Level 3 §8.2.1 sets for the attestation certificate
+//! of a packed attestation statement:
+//!
+//! * version 3;
+//! * subject C (PrintableString), O, OU "Authenticator Attestation" and CN
+//!   (UTF8String);
+//! * the id-fido-gen-ce-aaguid extension, not critical, holding the AAGUID
+//!   as an OCTET STRING inside the extension's OCTET STRING, so a relying
+//!   party can check it against the AAGUID in authenticatorData;
+//! * basic constraints with cA false.
+//!
+//! The serial number is 20 random octets made positive (RFC 5280 §4.1.2.2).
+//! The certificate is meant to last as long as the installation, so it has no
+//! well-defined expiration date (RFC 5280 §4.1.2.5). It has no subject
+//! alternative name: the subject names it, and a product name is not a DNS
+//! name. It rides in every makeCredential response with attestation, so it is
+//! kept to what is needed.
+//!
+//! The signature is ECDSA P-256 with SHA-256, made with the `p256` crate the
+//! CTAP engine already uses, so rcgen is built without a crypto backend.
 
-use std::io;
+use std::{
+    io,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use p256::ecdsa::{signature::Signer, DerSignature, SigningKey as EcdsaSigningKey};
 use p256::elliptic_curve::Generate;
 use rcgen::{
-    CertificateParams, DnType, IsCa, KeyIdMethod, PublicKeyData, SanType, SerialNumber,
-    SignatureAlgorithm, SigningKey, PKCS_ECDSA_P256_SHA256,
+    date_time_ymd, string::PrintableString, CertificateParams, CustomExtension, DistinguishedName,
+    DnType, DnValue, IsCa, KeyIdMethod, PublicKeyData, SerialNumber, SignatureAlgorithm,
+    SigningKey, PKCS_ECDSA_P256_SHA256,
 };
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-/// Who the attestation certificate names.
+/// id-fido-gen-ce-aaguid (WebAuthn Level 3 §8.2.1).
+pub const ID_FIDO_GEN_CE_AAGUID: &[u64] = &[1, 3, 6, 1, 4, 1, 45724, 1, 1, 4];
+
+/// The subject organizational unit WebAuthn Level 3 §8.2.1 prescribes.
+pub const ORGANIZATIONAL_UNIT: &str = "Authenticator Attestation";
+
+/// Who the attestation certificate names, and the AAGUID it carries.
 #[derive(Clone, Copy)]
 pub struct IdentityConfig<'a> {
+    /// Subject O: the legal name of the authenticator vendor.
     pub manufacturer: &'a str,
+    /// Subject CN.
     pub product: &'a str,
-    pub serial: &'a str,
+    /// Subject C: where the vendor is incorporated, an ISO 3166-1 alpha-2
+    /// code (see [`parse_country`]).
+    pub country: &'a str,
+    /// The AAGUID the authenticator reports in authenticatorData.
+    pub aaguid: [u8; 16],
 }
 
 /// A P-256 key that rcgen signs certificates with.
@@ -100,29 +134,67 @@ fn certificate_error(err: rcgen::Error) -> io::Error {
     ))
 }
 
+/// A random serial number: 20 octets (the most RFC 5280 §4.1.2.2 allows),
+/// with the top bit clear so the INTEGER is positive and the next bit set so
+/// it keeps all 20 octets. 158 random bits make it unique.
+fn random_serial_number() -> io::Result<SerialNumber> {
+    let mut serial = [0u8; 20];
+    getrandom::fill(&mut serial).map_err(|err| {
+        io::Error::other(format!(
+            "cannot generate a certificate serial number: {err}"
+        ))
+    })?;
+    serial[0] = (serial[0] & 0x7f) | 0x40;
+    Ok(SerialNumber::from_slice(&serial))
+}
+
 /// Generate a P-256 attestation key and a self-signed certificate for it.
 /// Returns the 32-byte private scalar and the DER certificate.
 pub fn generate_attestation_certificate(
     identity: &IdentityConfig<'_>,
 ) -> io::Result<(Zeroizing<[u8; 32]>, Vec<u8>)> {
+    let country = parse_country(identity.country)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
     let key = P256Key::new(EcdsaSigningKey::generate());
     let private_key = Zeroizing::new(key.signing_key.to_bytes().into());
 
-    let mut params =
-        CertificateParams::new(vec![identity.product.to_string()]).map_err(certificate_error)?;
-    params
-        .distinguished_name
-        .push(DnType::OrganizationName, identity.manufacturer);
-    params
-        .distinguished_name
-        .push(DnType::CommonName, identity.product);
-    params.subject_alt_names.push(SanType::DnsName(
-        identity.product.try_into().map_err(certificate_error)?,
-    ));
-    params.serial_number = Some(SerialNumber::from(identity.serial.as_bytes().to_vec()));
+    let mut params = CertificateParams::default();
+    let mut subject = DistinguishedName::new();
+    subject.push(
+        DnType::CountryName,
+        DnValue::PrintableString(PrintableString::try_from(country).map_err(certificate_error)?),
+    );
+    subject.push(DnType::OrganizationName, identity.manufacturer);
+    subject.push(DnType::OrganizationalUnitName, ORGANIZATIONAL_UNIT);
+    subject.push(DnType::CommonName, identity.product);
+    params.distinguished_name = subject;
+    params.serial_number = Some(random_serial_number()?);
+
+    // Valid from the start of the day before it is made, so a relying party
+    // whose clock is somewhat behind still accepts it, without recording
+    // when it was made more precisely than that. There is no well-defined
+    // expiration date: RFC 5280 §4.1.2.5 "the notAfter SHOULD be assigned the
+    // GeneralizedTime value of 99991231235959Z".
+    const DAY: u64 = 24 * 60 * 60;
+    let today = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() / DAY);
+    params.not_before =
+        date_time_ymd(1970, 1, 1) + Duration::from_secs(today.saturating_sub(1) * DAY);
+    params.not_after = date_time_ymd(9999, 12, 31) + Duration::from_secs(DAY - 1);
+
+    // AAGUID OCTET STRING; rcgen wraps it in the extension's OCTET STRING.
+    let mut aaguid = vec![0x04, 16];
+    aaguid.extend_from_slice(&identity.aaguid);
+    let mut aaguid_extension = CustomExtension::from_oid_content(ID_FIDO_GEN_CE_AAGUID, aaguid);
+    aaguid_extension.set_criticality(false);
+    params.custom_extensions.push(aaguid_extension);
+
+    // Writes basic constraints (critical, cA false) and a subject key
+    // identifier, which RFC 5280 §4.2.1.2 says SHOULD be in every end entity
+    // certificate: here the first 20 bytes of SHA-256 over the
+    // subjectPublicKeyInfo, as rcgen computes it with a crypto backend.
     params.is_ca = IsCa::ExplicitNoCa;
-    // The subject key identifier rcgen computes with a crypto backend: the
-    // first 20 bytes of SHA-256 over the subjectPublicKeyInfo.
     params.key_identifier_method =
         KeyIdMethod::PreSpecified(Sha256::digest(key.subject_public_key_info())[..20].to_vec());
 
@@ -134,96 +206,224 @@ pub fn generate_attestation_certificate(
 mod tests {
     use super::*;
     use p256::ecdsa::signature::Verifier;
-
-    /// One DER element: its tag, its contents, and the whole encoding.
-    struct Tlv<'a> {
-        tag: u8,
-        contents: &'a [u8],
-        encoding: &'a [u8],
-    }
-
-    /// Split the first DER element off `input`.
-    fn next_tlv<'a>(input: &mut &'a [u8]) -> Tlv<'a> {
-        let tag = input[0];
-        let (length, header) = match input[1] {
-            short if short < 0x80 => (short as usize, 2),
-            long => {
-                let count = (long & 0x7f) as usize;
-                let length = input[2..2 + count]
-                    .iter()
-                    .fold(0usize, |acc, byte| (acc << 8) | *byte as usize);
-                (length, 2 + count)
-            }
-        };
-        let encoding = &input[..header + length];
-        let contents = &encoding[header..];
-        *input = &input[header + length..];
-        Tlv {
-            tag,
-            contents,
-            encoding,
-        }
-    }
-
-    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-        haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
-    }
+    use x509_parser::{
+        certificate::X509Certificate, der_parser::asn1_rs::Tag, oid_registry, prelude::FromDer,
+    };
 
     const IDENTITY: IdentityConfig<'static> = IdentityConfig {
         manufacturer: "Feitian Technologies Co., Ltd.",
         product: "Feitian FIDO2 Software Authenticator (ML-DSA)",
-        serial: "FEITIAN-PQC-001",
+        country: "CN",
+        aaguid: [
+            0x46, 0x45, 0x49, 0x54, 0x49, 0x41, 0x4e, 0x98, 0x06, 0x16, 0x52, 0x5a, 0x30, 0x31,
+            0x00, 0x00,
+        ],
     };
 
+    fn parse(der: &[u8]) -> X509Certificate<'_> {
+        let (rest, certificate) = X509Certificate::from_der(der).expect("a valid certificate");
+        assert!(rest.is_empty(), "trailing bytes after the certificate");
+        certificate
+    }
+
+    /// Every field and extension WebAuthn Level 3 §8.2.1 requires, read back
+    /// with x509-parser, and the signature checked with the attestation key.
     #[test]
-    fn certificate_is_self_signed_by_the_returned_key() {
+    fn certificate_meets_the_packed_attestation_requirements() {
         let (private_key, der) = generate_attestation_certificate(&IDENTITY).unwrap();
-        let verifying_key = *EcdsaSigningKey::from_bytes(&(*private_key).into())
-            .unwrap()
-            .verifying_key();
+        let signing_key = EcdsaSigningKey::from_bytes(&(*private_key).into()).unwrap();
+        let verifying_key = *signing_key.verifying_key();
+        let certificate = parse(&der);
+        let tbs = &certificate.tbs_certificate;
 
-        let mut input = der.as_slice();
-        let certificate = next_tlv(&mut input);
-        assert_eq!(certificate.tag, 0x30);
-        assert!(input.is_empty());
-        let mut fields = certificate.contents;
-        let tbs = next_tlv(&mut fields);
-        let algorithm = next_tlv(&mut fields);
-        let signature = next_tlv(&mut fields);
-        assert!(fields.is_empty());
+        // "Version MUST be set to 3 (which is indicated by an ASN.1 INTEGER
+        // with value 2)."
+        assert_eq!(tbs.version.0, 2);
 
-        // ecdsa-with-SHA256
-        let ecdsa_with_sha256 = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
-        assert_eq!(algorithm.contents, ecdsa_with_sha256);
-        assert_eq!(signature.tag, 0x03);
-        assert_eq!(signature.contents[0], 0, "no unused bits");
-        let signature = DerSignature::from_bytes(&signature.contents[1..]).unwrap();
-        verifying_key
-            .verify(tbs.encoding, &signature)
-            .expect("the signature verifies with the attestation key");
+        // Subject C, O, OU and CN, in that order, with the string types
+        // §8.2.1 names; and self-issued.
+        let subject: Vec<_> = tbs
+            .subject
+            .iter_attributes()
+            .map(|attribute| {
+                (
+                    attribute.attr_type().clone(),
+                    attribute.attr_value().tag(),
+                    attribute.as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            subject,
+            [
+                (
+                    oid_registry::OID_X509_COUNTRY_NAME,
+                    Tag::PrintableString,
+                    "CN"
+                ),
+                (
+                    oid_registry::OID_X509_ORGANIZATION_NAME,
+                    Tag::Utf8String,
+                    IDENTITY.manufacturer
+                ),
+                (
+                    oid_registry::OID_X509_ORGANIZATIONAL_UNIT,
+                    Tag::Utf8String,
+                    "Authenticator Attestation"
+                ),
+                (
+                    oid_registry::OID_X509_COMMON_NAME,
+                    Tag::Utf8String,
+                    IDENTITY.product
+                ),
+            ]
+        );
+        assert_eq!(tbs.issuer.as_raw(), tbs.subject.as_raw());
 
-        let tbs = tbs.contents;
-        let public_key = verifying_key.to_sec1_point(false);
-        assert!(contains(tbs, public_key.as_bytes()));
-        assert!(contains(tbs, IDENTITY.manufacturer.as_bytes()));
-        assert!(contains(tbs, IDENTITY.product.as_bytes()));
-        // The serial number is the serial string's bytes.
-        let mut serial = vec![0x02, IDENTITY.serial.len() as u8];
-        serial.extend_from_slice(IDENTITY.serial.as_bytes());
-        assert!(contains(tbs, &serial));
-        // Basic constraints, critical, CA:FALSE (the default, so an empty
-        // sequence in DER).
-        let basic_constraints = [
-            0x06, 0x03, 0x55, 0x1d, 0x13, 0x01, 0x01, 0xff, 0x04, 0x02, 0x30, 0x00,
+        // Exactly these extensions: nothing else, in particular no subject
+        // alternative name.
+        let extensions: Vec<_> = tbs
+            .extensions()
+            .iter()
+            .map(|extension| (extension.oid.to_id_string(), extension.critical))
+            .collect();
+        assert_eq!(
+            extensions,
+            [
+                ("2.5.29.14".to_owned(), false),
+                ("2.5.29.19".to_owned(), true),
+                ("1.3.6.1.4.1.45724.1.1.4".to_owned(), false),
+            ]
+        );
+
+        // The AAGUID: "The extension MUST NOT be marked as critical" and "the
+        // AAGUID MUST be wrapped in two OCTET STRINGS".
+        let aaguid = tbs
+            .extensions()
+            .iter()
+            .find(|extension| extension.oid.to_id_string() == "1.3.6.1.4.1.45724.1.1.4")
+            .unwrap();
+        let mut expected = vec![0x04, 0x10];
+        expected.extend_from_slice(&IDENTITY.aaguid);
+        assert_eq!(aaguid.value, expected);
+        // The whole extension as the example in §8.2.1 lays it out: SEQUENCE,
+        // the OID, no critical flag, the extension's OCTET STRING and the
+        // AAGUID's OCTET STRING inside it.
+        let mut extension = vec![
+            0x30, 0x21, 0x06, 0x0b, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0xe5, 0x1c, 0x01, 0x01,
+            0x04, 0x04, 0x12,
         ];
-        assert!(contains(tbs, &basic_constraints));
+        extension.extend_from_slice(&expected);
+        assert!(der
+            .windows(extension.len())
+            .any(|window| window == extension));
+
+        // "The Basic Constraints extension MUST have the CA component set to
+        // false."
+        let basic_constraints = tbs.basic_constraints().unwrap().unwrap();
+        assert!(basic_constraints.critical);
+        assert!(!basic_constraints.value.ca);
+        assert!(!certificate.is_ca());
+
         // Subject key identifier: SHA-256 of the subjectPublicKeyInfo, 20 bytes.
-        let spki = P256Key::new(EcdsaSigningKey::from_bytes(&(*private_key).into()).unwrap())
-            .subject_public_key_info();
-        assert!(contains(tbs, &spki));
-        assert!(contains(tbs, &Sha256::digest(&spki)[..20]));
+        let spki = P256Key::new(signing_key).subject_public_key_info();
+        assert_eq!(tbs.subject_pki.raw, spki);
+        let ski = tbs
+            .extensions()
+            .iter()
+            .find(|extension| extension.oid.to_id_string() == "2.5.29.14")
+            .unwrap();
+        let mut expected = vec![0x04, 20];
+        expected.extend_from_slice(&Sha256::digest(&spki)[..20]);
+        assert_eq!(ski.value, expected);
+
+        // A positive serial number of 20 octets (RFC 5280 §4.1.2.2).
+        let serial = tbs.raw_serial();
+        assert_eq!(serial.len(), 20);
+        assert_eq!(
+            serial[0] & 0xc0,
+            0x40,
+            "positive, and no leading zero octet"
+        );
+
+        // From the start of the day before, to 99991231235959Z.
+        let validity = &tbs.validity;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let not_before = validity.not_before.timestamp();
+        assert_eq!(not_before % 86_400, 0);
+        assert!((now - 2 * 86_400..=now - 86_400).contains(&not_before));
+        assert!(validity.not_before.is_utctime());
+        assert!(validity.not_after.is_generalizedtime());
+        assert_eq!(validity.not_after.timestamp(), 253_402_300_799);
+
+        // ecdsa-with-SHA256 over the TBS certificate, with the attestation
+        // key.
+        assert_eq!(
+            certificate.signature_algorithm.algorithm,
+            oid_registry::OID_SIG_ECDSA_WITH_SHA256
+        );
+        assert_eq!(
+            tbs.subject_pki.algorithm.algorithm,
+            oid_registry::OID_KEY_TYPE_EC_PUBLIC_KEY
+        );
+        assert_eq!(certificate.signature_value.unused_bits, 0);
+        let signature = DerSignature::from_bytes(&certificate.signature_value.data).unwrap();
+        verifying_key
+            .verify(tbs.as_ref(), &signature)
+            .expect("the signature verifies with the attestation key");
+    }
+
+    #[test]
+    fn every_certificate_has_a_new_key_and_serial_number() {
+        let (first_key, first) = generate_attestation_certificate(&IDENTITY).unwrap();
+        let (second_key, second) = generate_attestation_certificate(&IDENTITY).unwrap();
+        assert_ne!(*first_key, *second_key);
+        assert_ne!(
+            parse(&first).tbs_certificate.raw_serial(),
+            parse(&second).tbs_certificate.raw_serial()
+        );
+    }
+
+    #[test]
+    fn the_configured_aaguid_and_country_are_used() {
+        let identity = IdentityConfig {
+            country: "us",
+            aaguid: [0xa5; 16],
+            ..IDENTITY
+        };
+        let (_, der) = generate_attestation_certificate(&identity).unwrap();
+        let certificate = parse(&der);
+        let tbs = &certificate.tbs_certificate;
+        let country = tbs.subject.iter_country().next().unwrap();
+        assert_eq!(country.as_str().unwrap(), "US");
+        let mut expected = vec![0x04, 0x10];
+        expected.extend_from_slice(&[0xa5; 16]);
+        assert!(tbs
+            .extensions()
+            .iter()
+            .any(|extension| extension.value == expected));
+    }
+
+    #[test]
+    fn an_invalid_country_is_refused() {
+        let identity = IdentityConfig {
+            country: "China",
+            ..IDENTITY
+        };
+        let err = generate_attestation_certificate(&identity).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// The certificate is sent in every makeCredential response with basic
+    /// attestation, so its size matters. Run with `--nocapture` to see it.
+    #[test]
+    fn certificate_is_compact() {
+        let (_, der) = generate_attestation_certificate(&IDENTITY).unwrap();
+        println!("attestation certificate: {} bytes", der.len());
+        assert!(der.len() <= 700, "{} bytes", der.len());
     }
 
     #[test]
@@ -240,12 +440,5 @@ mod tests {
         ] {
             assert!(parse_country(rejected).is_err(), "{rejected:?}");
         }
-    }
-
-    #[test]
-    fn every_certificate_has_a_new_key() {
-        let (first, _) = generate_attestation_certificate(&IDENTITY).unwrap();
-        let (second, _) = generate_attestation_certificate(&IDENTITY).unwrap();
-        assert_ne!(*first, *second);
     }
 }

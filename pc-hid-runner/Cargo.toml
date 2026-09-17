@@ -29,3 +29,7 @@ zeroize = "1"
 # Rust: the blocking API on zbus's own async-io runtime, nothing else.
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 futures-lite = { version = "2", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# Reads the attestation certificate back independently of rcgen, which wrote it.
+x509-parser = "0.18"
