@@ -63,24 +63,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 
-  # Lints. Currently reports without failing.
+  # Lints: any clippy or rustc warning fails the job, including the workspace
+  # lints in the root Cargo.toml and the crate-level ones in each crate root.
+  # A finding that is deliberately kept carries an `#[allow]` with a comment
+  # saying why.
   clippy:
     name: clippy
     runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
-      # ------------------------------------------------------------------
-      # THE CLIPPY GATE. The workspace still carries ~70 clippy findings
-      # (mostly pqkey-ctap and pqkey), so warnings are surfaced in
-      # the log but do not fail the build yet.
-      #
-      # To make clippy a hard gate once those are cleaned up, change this one
-      # line to:
-      #     CLIPPY_FLAGS: -D warnings
-      # Nothing else in this job needs to change.
-      # ------------------------------------------------------------------
-      CLIPPY_FLAGS: -W clippy::all
+      CLIPPY_FLAGS: -D warnings
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
@@ -173,7 +166,9 @@ jobs:
 
   # Rustdoc, with warnings denied. Catches broken intra-doc links and malformed
   # doc attributes, which are easy to introduce and invisible until someone
-  # builds the docs. Verified warning-free today, so it gates.
+  # builds the docs. Built twice: the public API as a reader of the crates sees
+  # it (where a link to a private item is an error), and with private items,
+  # which is most of the documentation in a daemon.
   docs:
     name: rustdoc
     runs-on: ubuntu-latest
@@ -189,6 +184,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo doc --workspace --locked --no-deps --all-features
+      - run: cargo doc --workspace --locked --no-deps --all-features --document-private-items
 
   # pqkey ships as a release-mode daemon. Debug and release differ in
   # ways that matter here (overflow checks, debug_assert!, LTO/codegen), and
