@@ -9,7 +9,9 @@ use super::support::{
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA};
 use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
+use crate::ctap::pin::token::{ManualClock, MAX_USAGE_TIME_PERIOD};
 use crate::ctap::CtapApp;
+use crate::store::CredentialStore;
 use crate::{ClassicPinProtocol, CoseAlg};
 
 use ciborium::{
@@ -491,4 +493,205 @@ fn credential_management_limits_an_rp_scoped_token_to_that_rp() {
         .map(|credential| credential.rp_id.clone())
         .collect();
     assert_eq!(remaining, ["other.example"]);
+}
+
+/// A credential management request with only a subCommand, as platforms send
+/// enumerateRPsGetNextRP and enumerateCredentialsGetNextCredential.
+fn get_next(app: &mut TestApp, subcommand: u8) -> Result<Vec<u8>, u8> {
+    let request = canonical_map(vec![(
+        Value::Integer(Integer::from(1)),
+        Value::Integer(Integer::from(subcommand)),
+    )]);
+    let mut payload = Vec::new();
+    into_writer(&request, &mut payload).expect("serialize request");
+    app.handle_credential_management(&payload)
+}
+
+fn response_map(response: &[u8]) -> Vec<(Value, Value)> {
+    assert_eq!(response[0], CTAP2_OK);
+    let Value::Map(map) = from_reader(&response[1..]).expect("decode response") else {
+        panic!("response must be a map");
+    };
+    map
+}
+
+fn response_bytes(response: &[u8], key: i64) -> Vec<u8> {
+    response_map(response)
+        .into_iter()
+        .find_map(|(k, v)| match v {
+            Value::Bytes(bytes) if k == Value::Integer(Integer::from(key)) => Some(bytes),
+            _ => None,
+        })
+        .expect("byte string member present")
+}
+
+fn credential_id_of(response: &[u8]) -> Vec<u8> {
+    response_map(response)
+        .into_iter()
+        .find_map(|(k, v)| match v {
+            Value::Map(descriptor) if k == Value::Integer(Integer::from(7)) => {
+                descriptor.into_iter().find_map(|(k, v)| match v {
+                    Value::Bytes(id) if k == Value::Text("id".into()) => Some(id),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("credentialID present")
+}
+
+fn app_with_cm_token(aaguid: u8) -> (TestApp, TestStore, [u8; 32]) {
+    let store = TestStore::new();
+    let mut app = new_app(store.clone(), [aaguid; 16]);
+    app.pin_state.set_pin(pin_hash(b"1234"));
+    let token = [aaguid; 32];
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        token,
+        PIN_PERMISSION_CM,
+        None,
+    );
+    (app, store, token)
+}
+
+/// "Platform sends authenticatorCredentialManagement command with following
+/// parameters: subCommand (0x01): enumerateRPsGetNextRP (0x03)." (CTAP 2.3
+/// §6.8.3), and likewise enumerateCredentialsGetNextCredential (§6.8.4):
+/// no pinUvAuthParam, as libfido2 and `ssh-keygen -K` send them.
+#[test]
+fn get_next_subcommands_need_no_pin_uv_auth_param() {
+    let (mut app, _, token) = app_with_cm_token(0x31);
+    insert_owned(&mut app, es256_credential("a.example", &[0xA1]));
+    insert_owned(&mut app, es256_credential("b.example", &[0xB1]));
+    insert_owned(&mut app, es256_credential("b.example", &[0xB2]));
+
+    let first = credential_management(&mut app, &token, 0x02, None).expect("enumerateRPsBegin");
+    let next = get_next(&mut app, 0x03).expect("enumerateRPsGetNextRP");
+    let mut hashes = vec![response_bytes(&first, 4), response_bytes(&next, 4)];
+    hashes.sort();
+    let mut expected = vec![
+        CtapApp::cm_hash_rp_id("a.example"),
+        CtapApp::cm_hash_rp_id("b.example"),
+    ];
+    expected.sort();
+    assert_eq!(hashes, expected);
+
+    let first = credential_management(&mut app, &token, 0x04, Some(rp_id_hash_params("b.example")))
+        .expect("enumerateCredentialsBegin");
+    let next = get_next(&mut app, 0x05).expect("enumerateCredentialsGetNextCredential");
+    let mut ids = vec![credential_id_of(&first), credential_id_of(&next)];
+    ids.sort();
+    assert_eq!(ids, [vec![0xB1], vec![0xB2]]);
+
+    // Both enumerations are exhausted.
+    assert_eq!(get_next(&mut app, 0x03), Err(CTAP2_ERR_NOT_ALLOWED));
+    assert_eq!(get_next(&mut app, 0x05), Err(CTAP2_ERR_NOT_ALLOWED));
+}
+
+#[test]
+fn get_next_subcommands_without_an_enumeration_are_not_allowed() {
+    let (mut app, _, _) = app_with_cm_token(0x32);
+    insert_owned(&mut app, es256_credential("a.example", &[0xA1]));
+    assert_eq!(get_next(&mut app, 0x03), Err(CTAP2_ERR_NOT_ALLOWED));
+    assert_eq!(get_next(&mut app, 0x05), Err(CTAP2_ERR_NOT_ALLOWED));
+}
+
+/// "An authenticator MUST discard the state for a stateful command command
+/// if the pinUvAuthToken that authenticated the state initializing command
+/// expires" (CTAP 2.3 §6).
+#[test]
+fn enumerations_end_when_the_authenticating_token_expires() {
+    let (mut app, _, token) = app_with_cm_token(0x33);
+    let clock = ManualClock::default();
+    app.pin_state.set_clock(Box::new(clock.clone()));
+    let install = |app: &mut TestApp| {
+        install_pin_uv_auth_token(app, ClassicPinProtocol::V2, token, PIN_PERMISSION_CM, None)
+    };
+    install(&mut app);
+    insert_owned(&mut app, es256_credential("a.example", &[0xA1]));
+    insert_owned(&mut app, es256_credential("a.example", &[0xA2]));
+    insert_owned(&mut app, es256_credential("b.example", &[0xB1]));
+
+    credential_management(&mut app, &token, 0x02, None).expect("enumerateRPsBegin");
+    credential_management(&mut app, &token, 0x04, Some(rp_id_hash_params("a.example")))
+        .expect("enumerateCredentialsBegin");
+    clock.advance(MAX_USAGE_TIME_PERIOD);
+    assert_eq!(get_next(&mut app, 0x03), Err(CTAP2_ERR_NOT_ALLOWED));
+    assert_eq!(get_next(&mut app, 0x05), Err(CTAP2_ERR_NOT_ALLOWED));
+
+    // A token issued since does not continue an enumeration begun with an
+    // earlier one.
+    install(&mut app);
+    credential_management(&mut app, &token, 0x02, None).expect("enumerateRPsBegin");
+    install(&mut app);
+    assert_eq!(get_next(&mut app, 0x03), Err(CTAP2_ERR_NOT_ALLOWED));
+}
+
+/// A credential deleted between enumerateCredentialsBegin and
+/// enumerateCredentialsGetNextCredential is skipped rather than indexed.
+#[test]
+fn credential_enumeration_survives_the_store_shrinking() {
+    let (mut app, store, token) = app_with_cm_token(0x34);
+    for id in [0xA1, 0xA2, 0xA3] {
+        insert_owned(&mut app, es256_credential("a.example", &[id]));
+    }
+    let first = credential_management(&mut app, &token, 0x04, Some(rp_id_hash_params("a.example")))
+        .expect("enumerateCredentialsBegin");
+    let first_id = credential_id_of(&first);
+    let mut other_process = store.clone();
+    let deleted = [0xA1u8, 0xA2, 0xA3]
+        .into_iter()
+        .find(|id| first_id != [*id])
+        .expect("another credential");
+    CredentialStore::delete(&mut other_process, &[deleted]).expect("delete");
+
+    let next = get_next(&mut app, 0x05).expect("the credential still stored");
+    let next_id = credential_id_of(&next);
+    assert_ne!(next_id, [deleted]);
+    assert_ne!(next_id, first_id);
+    assert_eq!(get_next(&mut app, 0x05), Err(CTAP2_ERR_NOT_ALLOWED));
+}
+
+/// "If the authenticator implements a command code having subcommands, but
+/// does not implement an invoked subcommand, it MUST return
+/// CTAP2_ERR_INVALID_SUBCOMMAND." (CTAP 2.3 §8.1)
+#[test]
+fn unknown_subcommands_are_invalid_subcommands() {
+    let (mut app, _, token) = app_with_cm_token(0x35);
+    for subcommand in [0x00, 0x08, 0x41, 0xFF] {
+        assert_eq!(
+            credential_management(&mut app, &token, subcommand, None),
+            Err(CTAP2_ERR_INVALID_SUBCOMMAND),
+            "subCommand {subcommand:#x}"
+        );
+    }
+}
+
+/// The pinUvAuthParam covers `subCommand || subCommandParams` with
+/// subCommandParams exactly as the platform encoded it, even when that is not
+/// the canonical encoding this engine would produce.
+#[test]
+fn pin_uv_auth_param_covers_the_received_sub_command_params_bytes() {
+    let (mut app, _, token) = app_with_cm_token(0x36);
+    insert_owned(&mut app, es256_credential("a.example", &[0xA1]));
+
+    // {1: rpIDHash}, with the key 1 encoded in two bytes (0x18 0x01).
+    let rp_hash = CtapApp::cm_hash_rp_id("a.example");
+    let mut params = vec![0xA1, 0x18, 0x01, 0x58, 0x20];
+    params.extend_from_slice(&rp_hash);
+    let mut message = vec![0x04];
+    message.extend_from_slice(&params);
+    let pin_uv_auth_param = token_pin_auth(ClassicPinProtocol::V2, &token, &message);
+
+    // {1: 4, 2: params, 3: 2, 4: pinUvAuthParam}
+    let mut payload = vec![0xA4, 0x01, 0x04, 0x02];
+    payload.extend_from_slice(&params);
+    payload.extend_from_slice(&[0x03, 0x02, 0x04, 0x58, 0x20]);
+    payload.extend_from_slice(&pin_uv_auth_param);
+
+    let response = app
+        .handle_credential_management(&payload)
+        .expect("enumerateCredentialsBegin with non-canonical params");
+    assert_eq!(credential_id_of(&response), [0xA1]);
 }

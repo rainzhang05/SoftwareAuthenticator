@@ -98,6 +98,9 @@ struct InUseToken {
     permissions_rp_id: Option<String>,
     #[zeroize(skip)]
     started_at: Duration,
+    /// Which issuance this is; see [`PinUvAuthTokenState::in_use_id`].
+    #[zeroize(skip)]
+    id: u64,
     /// The platform has used the token within the initial usage time limit.
     used: bool,
     user_present: bool,
@@ -109,6 +112,8 @@ struct InUseToken {
 #[derive(Default)]
 pub(crate) struct PinUvAuthTokenState {
     in_use: Option<InUseToken>,
+    /// How many tokens have been issued, so each gets a distinct id.
+    issued: u64,
 }
 
 impl PinUvAuthTokenState {
@@ -127,12 +132,14 @@ impl PinUvAuthTokenState {
         permissions: u8,
         permissions_rp_id: Option<String>,
     ) {
+        self.issued = self.issued.wrapping_add(1);
         self.in_use = Some(InUseToken {
             value,
             protocol,
             permissions,
             permissions_rp_id,
             started_at: now,
+            id: self.issued,
             used: false,
             user_present: user_is_present,
             user_verified: true,
@@ -201,6 +208,17 @@ impl PinUvAuthTokenState {
     pub(crate) fn user_present_flag(&mut self, now: Duration) -> bool {
         self.observe(now);
         self.in_use.as_ref().is_some_and(|token| token.user_present)
+    }
+
+    /// An identifier of the in-use token, distinct for every issuance, or
+    /// `None` if no token is in use.  State initialized by a command the
+    /// token authenticated must be discarded once this changes (CTAP 2.3 §6:
+    /// "An authenticator MUST discard the state for a stateful command
+    /// command if the pinUvAuthToken that authenticated the state
+    /// initializing command expires").
+    pub(crate) fn in_use_id(&mut self, now: Duration) -> Option<u64> {
+        self.observe(now);
+        self.in_use.as_ref().map(|token| token.id)
     }
 
     /// `getUserVerifiedFlagValue()`: the userVerified flag if the token is in

@@ -15,13 +15,31 @@ use sha2::{Digest, Sha256};
 
 use crate::ctap::constants::*;
 
+const GET_CREDS_METADATA: u8 = 0x01;
+const ENUMERATE_RPS_BEGIN: u8 = 0x02;
+const ENUMERATE_RPS_GET_NEXT_RP: u8 = 0x03;
+const ENUMERATE_CREDENTIALS_BEGIN: u8 = 0x04;
+const ENUMERATE_CREDENTIALS_GET_NEXT_CREDENTIAL: u8 = 0x05;
+const DELETE_CREDENTIAL: u8 = 0x06;
+const UPDATE_USER_INFORMATION: u8 = 0x07;
+
+/// The state of the two stateful subcommands, enumerateRPsGetNextRP and
+/// enumerateCredentialsGetNextCredential (CTAP 2.3 §6).
+///
+/// Each enumeration remembers the pinUvAuthToken that authenticated its
+/// begin subcommand, because the get-next subcommands carry no
+/// pinUvAuthParam of their own and "An authenticator MUST discard the state
+/// for a stateful command command if the pinUvAuthToken that authenticated
+/// the state initializing command expires".
 pub(super) struct CredentialManagementState {
     rp_list: Vec<String>,
     rp_index: usize,
+    rp_token: Option<u64>,
     /// The IDs of the credentials being enumerated, looked up again for each
     /// enumerateCredentialsGetNextCredential so no private key is kept.
     credential_list: Vec<Vec<u8>>,
     credential_index: usize,
+    credential_token: Option<u64>,
     pub(super) current_rp: Option<String>,
 }
 
@@ -30,15 +48,24 @@ impl CredentialManagementState {
         Self {
             rp_list: Vec::new(),
             rp_index: 0,
+            rp_token: None,
             credential_list: Vec::new(),
             credential_index: 0,
+            credential_token: None,
             current_rp: None,
         }
+    }
+
+    fn reset_rps(&mut self) {
+        self.rp_list.clear();
+        self.rp_index = 0;
+        self.rp_token = None;
     }
 
     fn reset_credentials(&mut self) {
         self.credential_list.clear();
         self.credential_index = 0;
+        self.credential_token = None;
         self.current_rp = None;
     }
 }
@@ -81,7 +108,7 @@ impl CtapApp<'_> {
         let first = rp_ids[0].clone();
         self.cred_mgmt_state.rp_list = rp_ids;
         self.cred_mgmt_state.rp_index = 1;
-        self.cred_mgmt_state.reset_credentials();
+        self.cred_mgmt_state.rp_token = self.pin_state.pin_uv_auth_token_id();
 
         let rp_entry = canonical_map(vec![(Value::Text("id".into()), Value::Text(first.clone()))]);
         let hash = Self::cm_hash_rp_id(&first);
@@ -95,12 +122,22 @@ impl CtapApp<'_> {
         ])
     }
 
+    /// enumerateRPsGetNextRP.  CTAP2_ERR_NOT_ALLOWED without an enumeration
+    /// to continue: none was begun, it has returned every RP, or the
+    /// pinUvAuthToken that authenticated enumerateRPsBegin has expired
+    /// (CTAP 2.3 §6).
     fn cm_enumerate_rps_next(&mut self) -> Result<Vec<(Value, Value)>, u8> {
-        if self.cred_mgmt_state.rp_index >= self.cred_mgmt_state.rp_list.len() {
-            return Err(CTAP2_ERR_NO_CREDENTIALS);
+        let token = self.pin_state.pin_uv_auth_token_id();
+        let state = &mut self.cred_mgmt_state;
+        if state.rp_token.is_none() || state.rp_token != token {
+            state.reset_rps();
+            return Err(CTAP2_ERR_NOT_ALLOWED);
         }
-        let rp_id = self.cred_mgmt_state.rp_list[self.cred_mgmt_state.rp_index].clone();
-        self.cred_mgmt_state.rp_index += 1;
+        let Some(rp_id) = state.rp_list.get(state.rp_index).cloned() else {
+            state.reset_rps();
+            return Err(CTAP2_ERR_NOT_ALLOWED);
+        };
+        state.rp_index += 1;
         let rp_entry = canonical_map(vec![(Value::Text("id".into()), Value::Text(rp_id.clone()))]);
         let hash = Self::cm_hash_rp_id(&rp_id);
         Ok(vec![
@@ -183,20 +220,34 @@ impl CtapApp<'_> {
             .map(|credential| credential.credential_id.clone())
             .collect();
         self.cred_mgmt_state.credential_index = 1;
+        self.cred_mgmt_state.credential_token = self.pin_state.pin_uv_auth_token_id();
 
         Ok(response)
     }
 
+    /// enumerateCredentialsGetNextCredential.  CTAP2_ERR_NOT_ALLOWED without
+    /// an enumeration to continue, as for [`Self::cm_enumerate_rps_next`].  A
+    /// credential deleted since enumerateCredentialsBegin is skipped.
     fn cm_enumerate_credentials_next(&mut self) -> Result<Vec<(Value, Value)>, u8> {
-        let index = self.cred_mgmt_state.credential_index;
-        let Some(credential_id) = self.cred_mgmt_state.credential_list.get(index).cloned() else {
-            return Err(CTAP2_ERR_NO_CREDENTIALS);
-        };
-        self.cred_mgmt_state.credential_index += 1;
-        let credential = self
-            .stored_credential(&credential_id)?
-            .ok_or(CTAP2_ERR_NO_CREDENTIALS)?;
-        Self::cm_credential_response(&credential, self.cred_mgmt_state.credential_list.len())
+        let token = self.pin_state.pin_uv_auth_token_id();
+        let state = &self.cred_mgmt_state;
+        if state.credential_token.is_none() || state.credential_token != token {
+            self.cred_mgmt_state.reset_credentials();
+            return Err(CTAP2_ERR_NOT_ALLOWED);
+        }
+        loop {
+            let index = self.cred_mgmt_state.credential_index;
+            let Some(credential_id) = self.cred_mgmt_state.credential_list.get(index).cloned()
+            else {
+                self.cred_mgmt_state.reset_credentials();
+                return Err(CTAP2_ERR_NOT_ALLOWED);
+            };
+            self.cred_mgmt_state.credential_index += 1;
+            if let Some(credential) = self.stored_credential(&credential_id)? {
+                let total = self.cred_mgmt_state.credential_list.len();
+                return Self::cm_credential_response(&credential, total);
+            }
+        }
     }
 
     fn cm_delete_credential(&mut self, params: &[(Value, Value)]) -> Result<(), u8> {
@@ -214,8 +265,7 @@ impl CtapApp<'_> {
         if !deleted {
             return Err(CTAP2_ERR_NO_CREDENTIALS);
         }
-        self.cred_mgmt_state.rp_list.clear();
-        self.cred_mgmt_state.rp_index = 0;
+        self.cred_mgmt_state.reset_rps();
         self.cred_mgmt_state.reset_credentials();
         Ok(())
     }
@@ -265,70 +315,75 @@ impl CtapApp<'_> {
         };
 
         let subcommand = match cbor::map_get(&map, Value::Integer(Integer::from(1))) {
-            Some(Value::Integer(int)) => {
-                let value: i128 = int.clone().into();
-                if value < 0 || value > u8::MAX as i128 {
-                    return Err(CTAP1_ERR_INVALID_PARAMETER);
-                }
-                value as u8
-            }
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
+            // "If the authenticator implements a command code having
+            // subcommands, but does not implement an invoked subcommand, it
+            // MUST return CTAP2_ERR_INVALID_SUBCOMMAND." (CTAP 2.3 §8.1)
+            Some(Value::Integer(int)) => u8::try_from(i128::from(*int))
+                .ok()
+                .filter(|sub| (GET_CREDS_METADATA..=UPDATE_USER_INFORMATION).contains(sub))
+                .ok_or(CTAP2_ERR_INVALID_SUBCOMMAND)?,
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
 
         let subcommand_params = match cbor::map_get(&map, Value::Integer(Integer::from(2))) {
             Some(Value::Map(entries)) => Some(entries.clone()),
-            Some(_) => return Err(CTAP2_ERR_INVALID_CBOR),
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
             None => None,
         };
 
-        // "If pinUvAuthParam is missing from the input map, end the operation by
-        // returning CTAP2_ERR_PUAT_REQUIRED." (CTAP 2.3 §6.8.2 to §6.8.6)
-        let (protocol, pin_auth_param) = parse_pin_uv_auth_param(
-            cbor::map_get(&map, Value::Integer(Integer::from(4))),
-            cbor::map_get(&map, Value::Integer(Integer::from(3))),
-        )?
-        .ok_or(CTAP2_ERR_PUAT_REQUIRED)?;
-
-        let mut message = vec![subcommand];
-        if let Some(params) = subcommand_params.as_ref() {
-            let map_value = canonical_map(params.clone());
-            let mut encoded = Vec::new();
-            into_writer(&map_value, &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
-            message.extend_from_slice(&encoded);
-        }
-        self.verify_pin_uv_auth_param(protocol, &message, &pin_auth_param)?;
-
-        self.ensure_pin_token_permission_for_cm(
-            subcommand,
-            subcommand_params.as_ref().map(|params| params.as_slice()),
-        )?;
-
+        // enumerateRPsGetNextRP and enumerateCredentialsGetNextCredential
+        // carry no pinUvAuthParam (CTAP 2.3 §6.8.3, §6.8.4): the platform
+        // sends only the subCommand, and the enumeration's begin subcommand
+        // was authenticated instead.
         let response_entries = match subcommand {
-            0x01 => Some(self.cm_get_metadata()?),
-            0x02 => Some(self.cm_enumerate_rps_begin()?),
-            0x03 => Some(self.cm_enumerate_rps_next()?),
-            0x04 => {
+            ENUMERATE_RPS_GET_NEXT_RP => Some(self.cm_enumerate_rps_next()?),
+            ENUMERATE_CREDENTIALS_GET_NEXT_CREDENTIAL => {
+                Some(self.cm_enumerate_credentials_next()?)
+            }
+            _ => {
+                // "If pinUvAuthParam is missing from the input map, end the
+                // operation by returning CTAP2_ERR_PUAT_REQUIRED." (CTAP 2.3
+                // §6.8.2 to §6.8.6)
+                let (protocol, pin_auth_param) = parse_pin_uv_auth_param(
+                    cbor::map_get(&map, Value::Integer(Integer::from(4))),
+                    cbor::map_get(&map, Value::Integer(Integer::from(3))),
+                )?
+                .ok_or(CTAP2_ERR_PUAT_REQUIRED)?;
+
+                // "verify(pinUvAuthToken, enumerateCredentialsBegin (0x04) ||
+                // subCommandParams, pinUvAuthParam)": subCommandParams as the
+                // platform encoded them, not as this engine would re-encode
+                // them.
+                let mut message = vec![subcommand];
+                if let Some(raw_params) =
+                    cbor::raw_map_value(payload, 2).map_err(|()| CTAP2_ERR_INVALID_CBOR)?
+                {
+                    message.extend_from_slice(raw_params);
+                }
+                self.verify_pin_uv_auth_param(protocol, &message, &pin_auth_param)?;
+
+                self.ensure_pin_token_permission_for_cm(subcommand, subcommand_params.as_deref())?;
+
                 let params = subcommand_params
                     .as_ref()
-                    .ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
-                Some(self.cm_enumerate_credentials_begin(params)?)
+                    .ok_or(CTAP2_ERR_MISSING_PARAMETER);
+                match subcommand {
+                    GET_CREDS_METADATA => Some(self.cm_get_metadata()?),
+                    ENUMERATE_RPS_BEGIN => Some(self.cm_enumerate_rps_begin()?),
+                    ENUMERATE_CREDENTIALS_BEGIN => {
+                        Some(self.cm_enumerate_credentials_begin(params?)?)
+                    }
+                    DELETE_CREDENTIAL => {
+                        self.cm_delete_credential(params?)?;
+                        None
+                    }
+                    _ => {
+                        self.cm_update_user_information(params?)?;
+                        None
+                    }
+                }
             }
-            0x05 => Some(self.cm_enumerate_credentials_next()?),
-            0x06 => {
-                let params = subcommand_params
-                    .as_ref()
-                    .ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
-                self.cm_delete_credential(params)?;
-                None
-            }
-            0x07 => {
-                let params = subcommand_params
-                    .as_ref()
-                    .ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
-                self.cm_update_user_information(params)?;
-                None
-            }
-            _ => return Err(CTAP1_ERR_INVALID_PARAMETER),
         };
 
         if let Some(mut entries) = response_entries {

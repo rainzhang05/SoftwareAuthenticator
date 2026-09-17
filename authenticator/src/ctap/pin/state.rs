@@ -333,6 +333,12 @@ impl PinState {
         self.token.has_permission(now, permission)
     }
 
+    /// See [`PinUvAuthTokenState::in_use_id`].
+    pub(crate) fn pin_uv_auth_token_id(&mut self) -> Option<u64> {
+        let now = self.clock.now();
+        self.token.in_use_id(now)
+    }
+
     pub(crate) fn permissions_rp_id(&mut self) -> Option<String> {
         let now = self.clock.now();
         self.token.permissions_rp_id(now).map(str::to_string)
