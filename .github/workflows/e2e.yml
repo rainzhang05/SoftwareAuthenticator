@@ -47,7 +47,7 @@ jobs:
         # fido2-tools: libfido2's fido2-token/fido2-cred/fido2-assert clients.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libudev-dev libclang-dev fido2-tools
+          sudo apt-get install -y fido2-tools
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # Release mode, as the daemon ships.
