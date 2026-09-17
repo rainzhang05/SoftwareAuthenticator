@@ -61,6 +61,39 @@ impl SigningKey for P256Key {
     }
 }
 
+/// The officially assigned ISO 3166-1 alpha-2 country codes, in order.
+///
+/// WebAuthn Level 3 §8.2.1 wants Subject-C to be the "ISO 3166 code
+/// specifying the country where the Authenticator vendor is incorporated".
+/// User-assigned codes (AA, QM to QZ, XA to XZ, ZZ), and so XK, are not
+/// countries and are left out.
+const ISO_3166_ALPHA_2: &str = "\
+    AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ \
+    BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM \
+    DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS \
+    GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN \
+    KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ \
+    MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM \
+    PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV \
+    SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI \
+    VN VU WF WS YE YT ZA ZM ZW";
+
+/// Parse the country named in the attestation certificate's subject: an ISO
+/// 3166-1 alpha-2 code, in either case. Returns it in upper case.
+pub fn parse_country(input: &str) -> Result<String, String> {
+    let code = input.to_ascii_uppercase();
+    let is_assigned = code.len() == 2
+        && code.bytes().all(|byte| byte.is_ascii_uppercase())
+        && ISO_3166_ALPHA_2.split_ascii_whitespace().any(|c| c == code);
+    if is_assigned {
+        Ok(code)
+    } else {
+        Err(format!(
+            "{input:?} is not an ISO 3166-1 alpha-2 country code, such as US or CN"
+        ))
+    }
+}
+
 fn certificate_error(err: rcgen::Error) -> io::Error {
     io::Error::other(format!(
         "cannot generate the attestation certificate: {err}"
@@ -191,6 +224,22 @@ mod tests {
             .subject_public_key_info();
         assert!(contains(tbs, &spki));
         assert!(contains(tbs, &Sha256::digest(&spki)[..20]));
+    }
+
+    #[test]
+    fn countries_are_assigned_iso_3166_alpha_2_codes() {
+        let codes: Vec<&str> = ISO_3166_ALPHA_2.split_ascii_whitespace().collect();
+        assert_eq!(codes.len(), 249);
+        assert!(codes.windows(2).all(|pair| pair[0] < pair[1]), "sorted");
+
+        assert_eq!(parse_country("CN").unwrap(), "CN");
+        assert_eq!(parse_country("us").unwrap(), "US");
+        assert_eq!(parse_country("Gb").unwrap(), "GB");
+        for rejected in [
+            "", "U", "USA", "U1", "12", "ÜS", "UK", "EU", "XK", "AA", "QZ", "ZZ", " US",
+        ] {
+            assert!(parse_country(rejected).is_err(), "{rejected:?}");
+        }
     }
 
     #[test]
