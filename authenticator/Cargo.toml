@@ -13,7 +13,7 @@ aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 hkdf = "0.12"
 sha2 = "0.10"
-hmac = "0.12"
+hmac = "0.13"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 serde = { version = "1", features = ["derive"] }
 ctaphid-app = "0.1"
