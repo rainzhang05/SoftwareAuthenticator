@@ -1,60 +1,69 @@
 # Development notes
 
-Useful shell commands collected while developing the authenticator. These are
-the manual procedures the maintainers used during bring-up; the unified CLI
-(`pqkey`) hides most of them in everyday use.
+Commands that help when working on the authenticator on a Linux host. The
+README covers installing and running it.
 
-## Rebuild and relaunch the daemon
+## Build and run the daemon with debug logs
+
+Set up `/dev/uhid` access once, with the shipped udev rules (the comments in
+[`contrib/udev/70-pqkey.rules`](../contrib/udev/70-pqkey.rules) explain them),
+exactly as in step 2 of the README:
 
 ```bash
-sudo pkill -f pqkey || true
-
-git pull
-cargo clean
-cargo build --release
-
-sudo rmmod uhid 2>/dev/null || true
-sudo modprobe uhid
-
-echo 'KERNEL=="uhid", MODE="0660", GROUP="plugdev"' \
-    | sudo tee /etc/udev/rules.d/70-uhid.rules
+sudo install -m 644 contrib/udev/70-pqkey.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
+echo uhid | sudo tee /etc/modules-load.d/uhid.conf
+sudo modprobe uhid
 sudo udevadm trigger
-sudo chown root:plugdev /dev/uhid
-sudo chmod 660 /dev/uhid
-newgrp plugdev
-
-RUST_LOG=pqkey=debug cargo run -p pqkey -- start --foreground
+sudo usermod -aG plugdev "$USER"   # then log in again, or `newgrp plugdev`
 ```
+
+Then build and run in the foreground. Debug logs include the relying party
+and user names of presence prompts and CTAPHID channel IDs; info logs do not.
+
+```bash
+pqkey detach 2>/dev/null || true
+cargo build --release
+RUST_LOG=pqkey=debug,pqkey_ctap=debug cargo run --release -p pqkey -- attach --foreground
+```
+
+`pqkey status` shows whether a daemon runs on the state directory, `pqkey
+detach` stops it. `--presence auto-approve` approves every request without
+asking and is only for tests.
+
+## Checks CI runs
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --document-private-items
+cargo hack check --workspace --locked --all-targets --feature-powerset
+cargo deny --locked check
+cargo deny --manifest-path fuzz/Cargo.toml --locked check
+cargo audit && cargo audit --file fuzz/Cargo.lock
+```
+
+The fuzz targets need nightly: `cargo +nightly fuzz run <target>` from the
+repository root (see `.github/workflows/fuzz.yml`).
 
 ## Confirm the virtual HID device is visible to userspace
 
 ```bash
-ls -l /dev/hidraw*
+ls -l /dev/uhid /dev/hidraw*
 fido2-token -L
-FIDO_DEBUG=1 fido2-token -I /dev/hidraw3
+FIDO_DEBUG=1 fido2-token -I /dev/hidrawN
 ```
 
 ## Kernel-level introspection
 
-```bash
-sudo lsmod | grep uhid
-cat /sys/class/hidraw/hidraw*/device/uevent
-sudo cat /sys/kernel/debug/hid/0003:1209:0001.0005/rdesc | hexdump -C
-```
-
-## Full diagnostic walk-through
+The virtual key's HID ID is `0003:1209:0001` unless `--vendor-id` or
+`--product-id` says otherwise.
 
 ```bash
-sudo -i
 lsmod | grep uhid
-ls -l /dev/uhid
-ps aux | grep pqkey
-sudo lsof /dev/uhid
-cat /proc/bus/input/devices | grep -A5 -i 1209
 dmesg | grep -i uhid | tail -n 20
-ls -ld /sys/kernel/debug/hid
-ls -d /sys/kernel/debug/hid/*1209:0001* 2>/dev/null
-stat -c "rdesc size: %s bytes" $(ls -d /sys/kernel/debug/hid/*1209:0001* | tail -1)/rdesc
-cat $(ls -d /sys/kernel/debug/hid/*1209:0001* | tail -1)/rdesc | hexdump -C | head -n 20
+cat /sys/class/hidraw/hidraw*/device/uevent
+sudo lsof /dev/uhid
+sudo sh -c 'cat /sys/kernel/debug/hid/0003:1209:0001.*/rdesc'
 ```
