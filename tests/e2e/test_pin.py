@@ -12,7 +12,6 @@ from fido2.ctap import CtapError
 from fido2.ctap2 import ClientPin, Ctap2
 from fido2.ctap2.pin import PinProtocolV1, PinProtocolV2
 
-import bugs
 import ctap as client
 from bugs import known_bug
 
@@ -44,7 +43,7 @@ def _retries(ctap: Ctap2) -> int:
 
 @pytest.mark.parametrize(
     "protocol",
-    _protocols(reason=bugs.PIN_PROTOCOL_2_AUTH_PARAM, status=CtapError.ERR.PIN_AUTH_INVALID),
+    _protocols(),
 )
 def test_set_pin(ctap: Ctap2, protocol):
     _client_pin(ctap, protocol).set_pin(PIN)
@@ -58,7 +57,7 @@ def test_set_pin(ctap: Ctap2, protocol):
 
 @pytest.mark.parametrize(
     "protocol",
-    _protocols(reason=bugs.PIN_PROTOCOL_2_AUTH_PARAM, status=CtapError.ERR.PIN_AUTH_INVALID),
+    _protocols(),
 )
 def test_change_pin(ctap: Ctap2, protocol):
     _client_pin(ctap, PinProtocolV1).set_pin(PIN)
