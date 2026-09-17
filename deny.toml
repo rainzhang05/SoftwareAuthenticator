@@ -54,10 +54,11 @@ ignore = [
 # ---------------------------------------------------------------------------
 # licenses
 # ---------------------------------------------------------------------------
-# The workspace is "Apache-2.0 OR MIT". Under cargo-deny's current semantics
-# every license is denied unless listed here, so copyleft (GPL/AGPL/LGPL/MPL/
-# CDDL/EPL/SSPL) and unrecognised licenses fail automatically - there is no
-# separate "copyleft = deny" knob to set.
+# The workspace itself is "MIT"; the list below is what its dependencies may
+# be under, which is a wider set. Under cargo-deny's current semantics every
+# license is denied unless listed here, so copyleft (GPL/AGPL/LGPL/MPL/CDDL/
+# EPL/SSPL) and unrecognised licenses fail automatically - there is no separate
+# "copyleft = deny" knob to set.
 [licenses]
 allow = [
     "Apache-2.0",
