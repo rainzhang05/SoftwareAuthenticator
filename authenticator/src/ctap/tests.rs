@@ -9,5 +9,6 @@ mod get_assertion;
 mod get_info;
 mod make_credential;
 mod pin;
+mod pin_uv_auth;
 mod presence;
 mod support;

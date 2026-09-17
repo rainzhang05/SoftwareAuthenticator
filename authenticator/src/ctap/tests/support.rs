@@ -1,9 +1,10 @@
 //! Test doubles and PIN/UV auth protocol helpers shared by the test modules.
 
 use crate::ctap::cbor::{canonical_map, canonical_sort};
-use crate::ctap::pin::protocol::{HmacSha256, PIN_UV_AUTH_PROTOCOL_CLASSIC};
+use crate::ctap::pin::protocol::HmacSha256;
+use crate::ctap::storage::StoredCredential;
 use crate::ctap::CtapApp;
-use crate::{ClassicPinProtocol, PinUvSessionKeys};
+use crate::{ClassicPinProtocol, CoseAlg, PinUvSessionKeys};
 
 use ciborium::{
     de::from_reader,
@@ -175,9 +176,10 @@ fn classic_platform_key_entries(point: &EncodedPoint) -> Vec<(Value, Value)> {
     let y_slice: &[u8] = y_field.as_ref();
     let y = y_slice.to_vec();
     let mut entries = vec![
+        // kty: EC2
         (
             Value::Integer(Integer::from(1)),
-            Value::Integer(Integer::from(PIN_UV_AUTH_PROTOCOL_CLASSIC)),
+            Value::Integer(Integer::from(2)),
         ),
         (
             Value::Integer(Integer::from(3)),
@@ -229,15 +231,224 @@ pub(super) fn classic_encrypt(
     }
 }
 
+/// Platform-side `authenticate(key, message)`, written independently of the
+/// authenticator's implementation: protocol one keeps the first 16 bytes of
+/// HMAC-SHA-256 (CTAP 2.3 §6.5.6), protocol two keeps all 32 (§6.5.7).
+pub(super) fn platform_authenticate(
+    protocol: ClassicPinProtocol,
+    key: &[u8; 32],
+    message: &[u8],
+) -> Vec<u8> {
+    let mut mac = HmacSha256::new_from_slice(key).expect("valid MAC key");
+    mac.update(message);
+    let full = mac.finalize().into_bytes();
+    match protocol {
+        ClassicPinProtocol::V1 => full[..16].to_vec(),
+        ClassicPinProtocol::V2 => full.to_vec(),
+    }
+}
+
+/// `authenticate(shared secret, message)`: the pinUvAuthParam of setPIN and
+/// changePIN, and hmac-secret's saltAuth.
 pub(super) fn classic_pin_auth(
     protocol: ClassicPinProtocol,
     keys: &PinUvSessionKeys,
     data: &[u8],
 ) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(&keys.auth_key).expect("valid MAC key");
-    mac.update(data);
-    let full = mac.finalize().into_bytes();
-    match protocol {
-        ClassicPinProtocol::V1 | ClassicPinProtocol::V2 => full[..16].to_vec(),
+    platform_authenticate(protocol, &keys.auth_key, data)
+}
+
+/// `authenticate(pinUvAuthToken, message)`: the pinUvAuthParam of
+/// makeCredential, getAssertion and credential management.
+pub(super) fn token_pin_auth(
+    protocol: ClassicPinProtocol,
+    token: &[u8; 32],
+    message: &[u8],
+) -> Vec<u8> {
+    platform_authenticate(protocol, token, message)
+}
+
+/// Flip the last bit of a MAC so it has the right length but the wrong value.
+pub(super) fn corrupt_mac(mut mac: Vec<u8>) -> Vec<u8> {
+    let last = mac.last_mut().expect("MAC is not empty");
+    *last ^= 0x01;
+    mac
+}
+
+pub(super) fn int(value: i64) -> Value {
+    Value::Integer(Integer::from(value))
+}
+
+pub(super) fn encode(value: &Value) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    into_writer(value, &mut encoded).expect("encode CBOR");
+    encoded
+}
+
+/// Send an authenticatorClientPIN request built from `entries`.
+pub(super) fn client_pin(
+    app: &mut CtapApp<TestClient>,
+    entries: Vec<(Value, Value)>,
+) -> Result<Vec<u8>, u8> {
+    app.handle_client_pin(&encode(&canonical_map(entries)))
+}
+
+/// `newPin` right-padded with 0x00 to the 64-byte paddedPin (CTAP 2.3 §6.5.5.5).
+pub(super) fn padded_pin(pin: &[u8]) -> [u8; 64] {
+    let mut padded = [0u8; 64];
+    padded[..pin.len()].copy_from_slice(pin);
+    padded
+}
+
+/// `LEFT(SHA-256(pin), 16)`.
+pub(super) fn pin_hash(pin: &[u8]) -> [u8; 16] {
+    let digest = Sha256::digest(pin);
+    let mut hash = [0u8; 16];
+    hash.copy_from_slice(&digest[..16]);
+    hash
+}
+
+/// The platform's side of one PIN/UV auth protocol exchange: it has called
+/// getKeyAgreement and encapsulated against the authenticator's key.
+pub(super) struct PlatformPinSession {
+    pub(super) protocol: ClassicPinProtocol,
+    pub(super) keys: PinUvSessionKeys,
+    pub(super) key_agreement: Value,
+}
+
+impl PlatformPinSession {
+    pub(super) fn establish(
+        app: &mut CtapApp<TestClient>,
+        protocol: ClassicPinProtocol,
+        platform_secret: u8,
+    ) -> Self {
+        let authenticator_key = request_classic_key_agreement(app, protocol);
+        let secret = P256SecretKey::from_slice(&[platform_secret; 32]).expect("valid secret key");
+        let (keys, _transcript_hash, platform_key) =
+            derive_classic_session(protocol, &authenticator_key, &secret);
+        Self {
+            protocol,
+            keys,
+            key_agreement: canonical_map(platform_key),
+        }
     }
+
+    /// `encrypt(shared secret, plaintext)`; protocol two uses a fixed IV.
+    pub(super) fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
+        let iv = match self.protocol {
+            ClassicPinProtocol::V1 => None,
+            ClassicPinProtocol::V2 => Some([0x5A; 16]),
+        };
+        classic_encrypt(self.protocol, &self.keys, plaintext, iv)
+    }
+
+    pub(super) fn decrypt(&self, ciphertext: &[u8]) -> Vec<u8> {
+        crate::decrypt_classic_pin_block(self.protocol, &self.keys, ciphertext)
+            .expect("ciphertext decrypts")
+    }
+}
+
+/// An authenticatorMakeCredential request for an ES256 credential, optionally
+/// carrying `(pinUvAuthProtocol, pinUvAuthParam)`.
+pub(super) fn make_credential_request(
+    client_hash: &[u8],
+    rp_id: &str,
+    pin_uv_auth: Option<(ClassicPinProtocol, Vec<u8>)>,
+) -> Vec<u8> {
+    let mut entries = vec![
+        (int(1), Value::Bytes(client_hash.to_vec())),
+        (
+            int(2),
+            canonical_map(vec![(Value::Text("id".into()), Value::Text(rp_id.into()))]),
+        ),
+        (
+            int(3),
+            canonical_map(vec![(Value::Text("id".into()), Value::Bytes(vec![0x01]))]),
+        ),
+        (
+            int(4),
+            Value::Array(vec![canonical_map(vec![
+                (Value::Text("type".into()), Value::Text("public-key".into())),
+                (Value::Text("alg".into()), int(CoseAlg::ES256 as i64)),
+            ])]),
+        ),
+    ];
+    if let Some((protocol, param)) = pin_uv_auth {
+        entries.push((int(8), Value::Bytes(param)));
+        entries.push((int(9), int(protocol.identifier().into())));
+    }
+    encode(&canonical_map(entries))
+}
+
+/// An authenticatorGetAssertion request, optionally carrying
+/// `(pinUvAuthProtocol, pinUvAuthParam)` and an extensions map.
+pub(super) fn get_assertion_request(
+    client_hash: &[u8],
+    rp_id: &str,
+    pin_uv_auth: Option<(ClassicPinProtocol, Vec<u8>)>,
+    extensions: Option<Value>,
+) -> Vec<u8> {
+    let mut entries = vec![
+        (int(1), Value::Text(rp_id.into())),
+        (int(2), Value::Bytes(client_hash.to_vec())),
+    ];
+    if let Some(extensions) = extensions {
+        entries.push((int(4), extensions));
+    }
+    if let Some((protocol, param)) = pin_uv_auth {
+        entries.push((int(6), Value::Bytes(param)));
+        entries.push((int(7), int(protocol.identifier().into())));
+    }
+    encode(&canonical_map(entries))
+}
+
+/// A discoverable ES256 credential bound to `rp_id`.
+pub(super) fn es256_credential(rp_id: &str, credential_id: &[u8]) -> StoredCredential {
+    let (public_key, secret_key) = crate::create_credential(CoseAlg::ES256);
+    StoredCredential {
+        rp_id: rp_id.into(),
+        user_id: vec![0x01],
+        user_name: None,
+        user_display_name: None,
+        alg: CoseAlg::ES256 as i32,
+        credential_id: credential_id.to_vec(),
+        public_key,
+        secret_key: secret_key.to_bytes(),
+        cred_random_with_uv: Some(vec![0x10; 32]),
+        cred_random_without_uv: Some(vec![0x20; 32]),
+        cred_protect: Some(1),
+        sign_count: 0,
+    }
+}
+
+/// The authenticator data of a makeCredential or getAssertion response.
+pub(super) fn response_auth_data(response: &[u8]) -> Vec<u8> {
+    assert_eq!(response[0], CTAP2_OK);
+    let Value::Map(entries) = from_reader(&response[1..]).expect("decode response") else {
+        panic!("response must be a map");
+    };
+    entries
+        .into_iter()
+        .find(|(k, _)| *k == int(2))
+        .and_then(|(_, v)| match v {
+            Value::Bytes(bytes) => Some(bytes),
+            _ => None,
+        })
+        .expect("authData present")
+}
+
+/// The user verified (UV) bit of the authenticator data flags.
+pub(super) const FLAG_UV: u8 = 0x04;
+
+/// Give `app` an in-use pinUvAuthToken, as a successful
+/// getPinUvAuthTokenUsingPinWithPermissions over `protocol` would.
+pub(super) fn install_pin_uv_auth_token(
+    app: &mut CtapApp<TestClient>,
+    _protocol: ClassicPinProtocol,
+    token: [u8; 32],
+    permissions: u8,
+    rp_id: Option<&str>,
+) {
+    app.pin_state
+        .set_pin_uv_auth_token(token, permissions, rp_id.map(str::to_string));
 }

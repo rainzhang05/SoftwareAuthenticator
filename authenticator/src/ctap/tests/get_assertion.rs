@@ -1,7 +1,10 @@
 //! authenticatorGetAssertion / authenticatorGetNextAssertion tests, including
 //! hmac-secret and credProtect.
 
-use super::support::{derive_classic_session, request_classic_key_agreement, TestClient};
+use super::support::{
+    classic_pin_auth, corrupt_mac, derive_classic_session, install_pin_uv_auth_token,
+    request_classic_key_agreement, token_pin_auth, TestClient,
+};
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::{
@@ -31,12 +34,15 @@ fn get_assertion_response_encoding_is_canonical() {
     let rp_id = "example.com";
     let client_hash = vec![0x22; 32];
     let pin_token = [0x33; 32];
-    app.pin_state
-        .set_pin_uv_auth_token(pin_token, PIN_PERMISSION_MC | PIN_PERMISSION_GA, None);
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        pin_token,
+        PIN_PERMISSION_MC | PIN_PERMISSION_GA,
+        None,
+    );
 
-    let mut mac = HmacSha256::new_from_slice(&pin_token).expect("valid token");
-    mac.update(&client_hash);
-    let pin_uv_auth_param: Vec<u8> = mac.finalize().into_bytes()[..16].to_vec();
+    let pin_uv_auth_param = token_pin_auth(ClassicPinProtocol::V2, &pin_token, &client_hash);
 
     let user_id = vec![0x44, 0x55];
     let user_name = "user".to_string();
@@ -351,8 +357,13 @@ fn get_assertion_with_invalid_pin_uv_auth_param_fails() {
     let rp_id = "example.com";
     let client_hash = vec![0x22; 32];
     let pin_token = [0x33; 32];
-    app.pin_state
-        .set_pin_uv_auth_token(pin_token, PIN_PERMISSION_MC | PIN_PERMISSION_GA, None);
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        pin_token,
+        PIN_PERMISSION_MC | PIN_PERMISSION_GA,
+        None,
+    );
 
     let user_id = vec![0x01, 0x02];
     let credential_id = vec![0xAA, 0xBB, 0xCC];
@@ -375,7 +386,12 @@ fn get_assertion_with_invalid_pin_uv_auth_param_fails() {
         sign_count: 0,
     });
 
-    let pin_uv_auth_param = vec![0xFF; 16];
+    // Right length for protocol two, wrong value.
+    let pin_uv_auth_param = corrupt_mac(token_pin_auth(
+        ClassicPinProtocol::V2,
+        &pin_token,
+        &client_hash,
+    ));
 
     let request_map = canonical_map(vec![
         (
@@ -493,13 +509,16 @@ fn get_assertion_produces_hmac_secret_output() {
     app.pin_state.set_pin(pin_hash);
 
     let pin_token = [0x55; 32];
-    app.pin_state
-        .set_pin_uv_auth_token(pin_token, PIN_PERMISSION_MC | PIN_PERMISSION_GA, None);
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        pin_token,
+        PIN_PERMISSION_MC | PIN_PERMISSION_GA,
+        None,
+    );
 
     let client_hash = vec![0x77; 32];
-    let mut mac = HmacSha256::new_from_slice(&pin_token).expect("valid token MAC");
-    mac.update(&client_hash);
-    let pin_uv_auth_param: Vec<u8> = mac.finalize().into_bytes()[..16].to_vec();
+    let pin_uv_auth_param = token_pin_auth(ClassicPinProtocol::V2, &pin_token, &client_hash);
 
     let rp = canonical_map(vec![(
         Value::Text("id".into()),
@@ -542,22 +561,21 @@ fn get_assertion_produces_hmac_secret_output() {
     app.handle_make_credential(&payload)
         .expect("makeCredential succeeds");
 
-    let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
+    // The hmac-secret shared secret uses PIN/UV auth protocol one: an all-zero
+    // IV and a 16-byte saltAuth (CTAP 2.3 §6.5.6).
+    let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V1);
     let platform_secret = P256SecretKey::from_slice(&[0x23; 32]).expect("valid secret key");
     let (session_keys, _transcript_hash, platform_entries) =
-        derive_classic_session(ClassicPinProtocol::V2, &auth_entries, &platform_secret);
+        derive_classic_session(ClassicPinProtocol::V1, &auth_entries, &platform_secret);
 
     let salt = vec![0x99; 32];
     let salt_enc = encrypt_shared_secret(&session_keys.encryption_key, &salt)
         .expect("salt encryption succeeds");
-    let mut salt_mac = HmacSha256::new_from_slice(&session_keys.auth_key).expect("valid MAC key");
-    salt_mac.update(&salt_enc);
-    let salt_auth: Vec<u8> = salt_mac.finalize().into_bytes()[..16].to_vec();
+    let salt_auth = classic_pin_auth(ClassicPinProtocol::V1, &session_keys, &salt_enc);
 
     let client_hash_assert = vec![0x88; 32];
-    let mut mac = HmacSha256::new_from_slice(&pin_token).expect("valid token MAC");
-    mac.update(&client_hash_assert);
-    let pin_uv_auth_param_assert: Vec<u8> = mac.finalize().into_bytes()[..16].to_vec();
+    let pin_uv_auth_param_assert =
+        token_pin_auth(ClassicPinProtocol::V2, &pin_token, &client_hash_assert);
 
     let hmac_extension = canonical_map(vec![
         (
@@ -574,7 +592,7 @@ fn get_assertion_produces_hmac_secret_output() {
         ),
         (
             Value::Integer(Integer::from(4)),
-            Value::Integer(Integer::from(PIN_UV_AUTH_PROTOCOL_CLASSIC)),
+            Value::Integer(Integer::from(ClassicPinProtocol::V1.identifier())),
         ),
     ]);
     let extensions = canonical_map(vec![(Value::Text("hmac-secret".into()), hmac_extension)]);
@@ -652,13 +670,16 @@ fn get_assertion_produces_hmac_secret_output() {
 fn get_assertion_rejects_mismatched_rp_binding() {
     let mut app = CtapApp::new(TestClient::new(), [0x52; 16]);
     let token = [0xAB; 32];
-    app.pin_state
-        .set_pin_uv_auth_token(token, PIN_PERMISSION_GA, Some("other.com".into()));
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        token,
+        PIN_PERMISSION_GA,
+        Some("other.com"),
+    );
 
     let client_hash = vec![0xCC; 32];
-    let mut mac = HmacSha256::new_from_slice(&token).expect("valid MAC key");
-    mac.update(&client_hash);
-    let pin_uv_auth_param: Vec<u8> = mac.finalize().into_bytes()[..16].to_vec();
+    let pin_uv_auth_param = token_pin_auth(ClassicPinProtocol::V2, &token, &client_hash);
 
     let credential_id = vec![0xAA, 0xBB];
     let alg = CoseAlg::MLDSA44;
@@ -775,11 +796,14 @@ fn cred_protect_enforced_for_user_verification() {
     assert_eq!(credential_id, vec![0xBB]);
 
     let pin_token = [0x66; 32];
-    app.pin_state
-        .set_pin_uv_auth_token(pin_token, PIN_PERMISSION_MC | PIN_PERMISSION_GA, None);
-    let mut mac = HmacSha256::new_from_slice(&pin_token).expect("valid token");
-    mac.update(&client_hash);
-    let pin_uv_auth_param: Vec<u8> = mac.finalize().into_bytes()[..16].to_vec();
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        pin_token,
+        PIN_PERMISSION_MC | PIN_PERMISSION_GA,
+        None,
+    );
+    let pin_uv_auth_param = token_pin_auth(ClassicPinProtocol::V2, &pin_token, &client_hash);
 
     let request_with_uv = canonical_map(vec![
         (

@@ -1,7 +1,7 @@
 //! The authenticatorClientPIN command and its subcommands.
 
 use super::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
-use super::protocol::{PinProtocol, PinProtocolSession};
+use super::protocol::{verify, PinProtocol, PinProtocolSession};
 use super::state::PinState;
 use crate::ctap::cbor::{self, canonical_map, canonical_sort};
 use crate::ctap::CtapApp;
@@ -116,7 +116,7 @@ where
 
         let session = self.take_session(protocol)?;
         let (keys, transcript_hash) = session.derive_session_keys(key_agreement)?;
-        Self::verify_pin_auth(protocol, &keys, &new_pin_enc, &pin_auth_param)?;
+        verify(protocol, &keys.auth_key, &new_pin_enc, &pin_auth_param)?;
         let mut plaintext =
             Self::decrypt_pin_block_checked(protocol, &keys, &transcript_hash, &new_pin_enc)?;
         let mut new_pin = Self::extract_new_pin(&mut plaintext)?;
@@ -157,7 +157,7 @@ where
         let mut auth_data = Vec::with_capacity(new_pin_enc.len() + pin_hash_enc.len());
         auth_data.extend_from_slice(&new_pin_enc);
         auth_data.extend_from_slice(&pin_hash_enc);
-        Self::verify_pin_auth(protocol, &keys, &auth_data, &pin_auth_param)?;
+        verify(protocol, &keys.auth_key, &auth_data, &pin_auth_param)?;
 
         let mut current_plain =
             Self::decrypt_pin_block_checked(protocol, &keys, &transcript_hash, &pin_hash_enc)?;
@@ -196,17 +196,13 @@ where
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let pin_auth_param = match cbor::map_get(map, Value::Integer(Integer::from(4))) {
-            Some(Value::Bytes(bytes)) => Some(bytes.clone()),
-            Some(_) => return Err(CTAP2_ERR_INVALID_CBOR),
-            None => None,
-        };
+        // getPinToken and getPinUvAuthTokenUsingPinWithPermissions take no
+        // pinUvAuthParam (CTAP 2.3 §6.5.5.7.1 and §6.5.5.7.2 list keyAgreement
+        // and pinHashEnc only): proof of the PIN is pinHashEnc itself, so a
+        // pinUvAuthParam sent anyway is ignored rather than verified.
 
         let session = self.take_session(protocol)?;
         let (keys, transcript_hash) = session.derive_session_keys(key_agreement)?;
-        if let Some(pin_auth_param) = pin_auth_param.as_ref() {
-            Self::verify_pin_auth(protocol, &keys, &pin_hash_enc, pin_auth_param)?;
-        }
 
         let mut plain =
             Self::decrypt_pin_block_checked(protocol, &keys, &transcript_hash, &pin_hash_enc)?;

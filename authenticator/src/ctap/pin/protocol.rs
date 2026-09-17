@@ -19,7 +19,9 @@ use p256::{
     ecdh::diffie_hellman, EncodedPoint, PublicKey as P256PublicKey, SecretKey as P256SecretKey,
 };
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
+use zeroize::Zeroizing;
 
 use transport_core::ctap::constants::*;
 
@@ -60,6 +62,62 @@ const PIN_UV_PROTOCOLS_SUPPORTED: [i32; 2] = [
 ];
 
 pub(crate) type PinProtocol = ClassicPinProtocol;
+
+/// Length of a protocol one MAC: `authenticate` returns "the first 16 bytes of
+/// the result of computing HMAC-SHA-256" (CTAP 2.3 §6.5.6).
+const PROTOCOL_ONE_MAC_LEN: usize = 16;
+
+/// `authenticate(key, message)` for the given PIN/UV auth protocol.
+///
+/// * Protocol one (CTAP 2.3 §6.5.6): "Return the first 16 bytes of the result
+///   of computing HMAC-SHA-256 with the given key and message."
+/// * Protocol two (CTAP 2.3 §6.5.7): "Return the result of computing
+///   HMAC-SHA-256 on key and message", i.e. all 32 bytes.
+///
+/// `key` is either the HMAC half of a shared secret or a pinUvAuthToken; both
+/// are exactly 32 bytes, so protocol two's "discard the excess" step is a no-op.
+pub(crate) fn authenticate(
+    protocol: PinProtocol,
+    key: &[u8; 32],
+    message: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, u8> {
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| CTAP2_ERR_PROCESSING)?;
+    mac.update(message);
+    let tag = Zeroizing::new(mac.finalize().into_bytes());
+    let len = match protocol {
+        ClassicPinProtocol::V1 => PROTOCOL_ONE_MAC_LEN,
+        ClassicPinProtocol::V2 => tag.len(),
+    };
+    Ok(Zeroizing::new(tag[..len].to_vec()))
+}
+
+/// `verify(key, message, signature)` for the given PIN/UV auth protocol.
+///
+/// * Protocol one (CTAP 2.3 §6.5.6): "Return success if signature is 16 bytes
+///   and is equal to the first 16 bytes of the result, otherwise return error."
+/// * Protocol two (CTAP 2.3 §6.5.7): "Return success if the signature is equal
+///   to the result, otherwise return an error." (the full 32 bytes).
+///
+/// A signature of the other protocol's length is rejected, so a protocol two
+/// request can never be satisfied by a truncated 16-byte MAC.  The comparison
+/// is constant time; only the (public) length can short-circuit it.
+///
+/// This is the single place every pinUvAuthParam and hmac-secret saltAuth is
+/// checked.  The additional "is the pinUvAuthToken in use" rule of `verify`
+/// belongs to the token state and is applied by the callers that pass a token.
+pub(crate) fn verify(
+    protocol: PinProtocol,
+    key: &[u8; 32],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), u8> {
+    let expected = authenticate(protocol, key, message)?;
+    if bool::from(expected.as_slice().ct_eq(signature)) {
+        Ok(())
+    } else {
+        Err(CTAP2_ERR_PIN_AUTH_INVALID)
+    }
+}
 
 pub(crate) fn pin_protocol_from_identifier(value: i128) -> Result<PinProtocol, u8> {
     if value == i128::from(PIN_UV_AUTH_PROTOCOL_CLASSIC_V1) {
@@ -161,24 +219,24 @@ where
     pub(crate) fn supported_pin_uv_protocols(&self) -> &'static [i32] {
         &PIN_UV_PROTOCOLS_SUPPORTED
     }
-    pub(super) fn verify_pin_auth(
-        _protocol: PinProtocol,
-        keys: &PinUvSessionKeys,
-        data: &[u8],
-        provided: &[u8],
+    /// `verify(pinUvAuthToken, message, pinUvAuthParam)` as used by
+    /// authenticatorMakeCredential (CTAP 2.3 §6.1.2 step 11.1.1),
+    /// authenticatorGetAssertion (§6.2.2 step 6.1.1) and
+    /// authenticatorCredentialManagement (§6.8.2 to §6.8.6): any failure,
+    /// including the absence of a pinUvAuthToken, is
+    /// `CTAP2_ERR_PIN_AUTH_INVALID`.
+    pub(crate) fn verify_pin_uv_auth_param(
+        &self,
+        protocol: PinProtocol,
+        message: &[u8],
+        pin_uv_auth_param: &[u8],
     ) -> Result<(), u8> {
-        let mut mac =
-            HmacSha256::new_from_slice(&keys.auth_key).map_err(|_| CTAP2_ERR_PROCESSING)?;
-        mac.update(data);
-        let result = mac.finalize().into_bytes();
-        if provided.len() != 16 {
-            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-        }
-        if result[..16] == provided[..16] {
-            Ok(())
-        } else {
-            Err(CTAP2_ERR_PIN_AUTH_INVALID)
-        }
+        let token = Zeroizing::new(
+            self.pin_state
+                .pin_uv_auth_token()
+                .ok_or(CTAP2_ERR_PIN_AUTH_INVALID)?,
+        );
+        verify(protocol, &token, message, pin_uv_auth_param)
     }
 
     pub(super) fn decrypt_pin_block_checked(
@@ -189,18 +247,6 @@ where
     ) -> Result<Vec<u8>, u8> {
         decrypt_classic_pin_block(protocol, keys, ciphertext)
             .map_err(|_| CTAP2_ERR_PIN_AUTH_INVALID)
-    }
-
-    pub(crate) fn ensure_supported_pin_uv_protocol(&self, protocol: i128) -> Result<(), u8> {
-        if protocol < i32::MIN as i128 || protocol > i32::MAX as i128 {
-            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-        }
-        let protocol_i32 = protocol as i32;
-        if self.supported_pin_uv_protocols().contains(&protocol_i32) {
-            Ok(())
-        } else {
-            Err(CTAP2_ERR_PIN_AUTH_INVALID)
-        }
     }
 
     pub(super) fn requested_pin_protocol(

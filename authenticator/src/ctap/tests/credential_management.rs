@@ -1,22 +1,23 @@
 //! authenticatorCredentialManagement tests.
 
-use super::support::TestClient;
+use super::support::{install_pin_uv_auth_token, token_pin_auth, TestClient};
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA};
-use crate::ctap::pin::protocol::{HmacSha256, PIN_UV_AUTH_PROTOCOL_CLASSIC};
+use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
 use crate::ctap::storage::StoredCredential;
 use crate::ctap::CtapApp;
-use crate::CoseAlg;
+use crate::{ClassicPinProtocol, CoseAlg};
 
 use ciborium::{
     de::from_reader,
     ser::into_writer,
     value::{Integer, Value},
 };
-use hmac::Mac;
 
 use transport_core::ctap::constants::*;
 
+/// `authenticate(pinUvAuthToken, subCommand || subCommandParams)` over
+/// protocol two, the protocol these tests declare (CTAP 2.3 §6.8).
 fn cm_pin_param(token: &[u8; 32], subcommand: u8, params: Option<Value>) -> Vec<u8> {
     let mut message = vec![subcommand];
     if let Some(value) = params {
@@ -24,17 +25,20 @@ fn cm_pin_param(token: &[u8; 32], subcommand: u8, params: Option<Value>) -> Vec<
         into_writer(&value, &mut encoded).expect("encode params");
         message.extend_from_slice(&encoded);
     }
-    let mut mac = HmacSha256::new_from_slice(token).expect("valid MAC key");
-    mac.update(&message);
-    mac.finalize().into_bytes()[..16].to_vec()
+    token_pin_auth(ClassicPinProtocol::V2, token, &message)
 }
 
 #[test]
 fn credential_management_commands() {
     let mut app = CtapApp::new(TestClient::new(), [0x24; 16]);
     let token = [0x90; 32];
-    app.pin_state
-        .set_pin_uv_auth_token(token, PIN_PERMISSION_CM, None);
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        token,
+        PIN_PERMISSION_CM,
+        None,
+    );
 
     app.stored_credentials.push(StoredCredential {
         rp_id: "example.com".into(),
@@ -305,8 +309,13 @@ fn credential_management_commands() {
 fn credential_management_requires_cm_permission() {
     let mut app = CtapApp::new(TestClient::new(), [0x25; 16]);
     let token = [0x91; 32];
-    app.pin_state
-        .set_pin_uv_auth_token(token, PIN_PERMISSION_GA, None);
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        token,
+        PIN_PERMISSION_GA,
+        None,
+    );
 
     let request = canonical_map(vec![
         (
@@ -333,8 +342,13 @@ fn credential_management_requires_cm_permission() {
 fn credential_management_rejects_bound_token_for_rp_enumeration() {
     let mut app = CtapApp::new(TestClient::new(), [0x26; 16]);
     let token = [0x92; 32];
-    app.pin_state
-        .set_pin_uv_auth_token(token, PIN_PERMISSION_CM, Some("example.com".into()));
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        token,
+        PIN_PERMISSION_CM,
+        Some("example.com"),
+    );
 
     let request = canonical_map(vec![
         (

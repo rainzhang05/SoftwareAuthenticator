@@ -1,19 +1,18 @@
 //! authenticatorMakeCredential tests.
 
-use super::support::TestClient;
+use super::support::{install_pin_uv_auth_token, token_pin_auth, TestClient};
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::make_credential::COSE_ALG_ES256;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
-use crate::ctap::pin::protocol::{HmacSha256, PIN_UV_AUTH_PROTOCOL_CLASSIC};
+use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
 use crate::ctap::CtapApp;
-use crate::{credential_secret_from_bytes, CoseAlg, CredentialSecretKey};
+use crate::{credential_secret_from_bytes, ClassicPinProtocol, CoseAlg, CredentialSecretKey};
 
 use ciborium::{
     de::from_reader,
     ser::into_writer,
     value::{Integer, Value},
 };
-use hmac::Mac;
 use p256::ecdsa::{signature::Signer, Signature as P256EcdsaSignature, SigningKey};
 
 use transport_core::ctap::constants::*;
@@ -23,12 +22,15 @@ fn make_credential_includes_extensions() {
     let mut app = CtapApp::new(TestClient::new(), [0xAA; 16]);
     let client_hash = vec![0xBB; 32];
     let pin_token = [0xCC; 32];
-    app.pin_state
-        .set_pin_uv_auth_token(pin_token, PIN_PERMISSION_MC | PIN_PERMISSION_GA, None);
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        pin_token,
+        PIN_PERMISSION_MC | PIN_PERMISSION_GA,
+        None,
+    );
 
-    let mut mac = HmacSha256::new_from_slice(&pin_token).expect("valid token MAC");
-    mac.update(&client_hash);
-    let pin_uv_auth_param: Vec<u8> = mac.finalize().into_bytes()[..16].to_vec();
+    let pin_uv_auth_param = token_pin_auth(ClassicPinProtocol::V2, &pin_token, &client_hash);
 
     let rp = canonical_map(vec![(
         Value::Text("id".into()),
@@ -519,13 +521,16 @@ fn make_credential_can_suppress_attestation() {
 fn make_credential_requires_mc_permission() {
     let mut app = CtapApp::new(TestClient::new(), [0x51; 16]);
     let token = [0xAA; 32];
-    app.pin_state
-        .set_pin_uv_auth_token(token, PIN_PERMISSION_GA, None);
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        token,
+        PIN_PERMISSION_GA,
+        None,
+    );
 
     let client_hash = vec![0xBB; 32];
-    let mut mac = HmacSha256::new_from_slice(&token).expect("valid MAC key");
-    mac.update(&client_hash);
-    let pin_uv_auth_param: Vec<u8> = mac.finalize().into_bytes()[..16].to_vec();
+    let pin_uv_auth_param = token_pin_auth(ClassicPinProtocol::V2, &token, &client_hash);
 
     let rp = canonical_map(vec![(
         Value::Text("id".into()),

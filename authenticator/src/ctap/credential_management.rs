@@ -1,7 +1,7 @@
 //! The authenticatorCredentialManagement command and its subcommands.
 
 use super::cbor::{self, canonical_map, canonical_sort};
-use super::pin::protocol::HmacSha256;
+use super::pin::protocol::pin_protocol_from_identifier;
 use super::storage::StoredCredential;
 use super::CtapApp;
 
@@ -10,10 +10,8 @@ use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
-use hmac::Mac;
 use sha2::{Digest, Sha256};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
-use zeroize::Zeroize;
 
 use transport_core::ctap::constants::*;
 
@@ -315,21 +313,14 @@ where
             Some(Value::Integer(int)) => int.clone().into(),
             _ => return Err(CTAP2_ERR_PIN_AUTH_INVALID),
         };
-        self.ensure_supported_pin_uv_protocol(protocol_value)?;
+        let protocol = pin_protocol_from_identifier(protocol_value)?;
 
         let pin_auth_param = match cbor::map_get(&map, Value::Integer(Integer::from(4))) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             Some(_) => return Err(CTAP2_ERR_PUAT_REQUIRED),
             None => return Err(CTAP2_ERR_PUAT_REQUIRED),
         };
-        if pin_auth_param.len() != 16 {
-            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-        }
 
-        let mut token = self
-            .pin_state
-            .pin_uv_auth_token()
-            .ok_or(CTAP2_ERR_PUAT_REQUIRED)?;
         let mut message = vec![subcommand];
         if let Some(params) = subcommand_params.as_ref() {
             let map_value = canonical_map(params.clone());
@@ -337,13 +328,7 @@ where
             into_writer(&map_value, &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
             message.extend_from_slice(&encoded);
         }
-        let mut mac = HmacSha256::new_from_slice(&token).map_err(|_| CTAP2_ERR_PROCESSING)?;
-        mac.update(&message);
-        let computed = mac.finalize().into_bytes();
-        token.zeroize();
-        if computed[..16] != pin_auth_param[..] {
-            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-        }
+        self.verify_pin_uv_auth_param(protocol, &message, &pin_auth_param)?;
 
         self.ensure_pin_token_permission_for_cm(
             subcommand,

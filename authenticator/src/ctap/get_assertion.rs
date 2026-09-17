@@ -4,7 +4,7 @@
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::permissions::PIN_PERMISSION_GA;
 use super::pin::protocol::{
-    decrypt_shared_secret, encrypt_shared_secret, pin_protocol_from_identifier, HmacSha256,
+    decrypt_shared_secret, encrypt_shared_secret, pin_protocol_from_identifier, verify, HmacSha256,
     PinProtocol,
 };
 use super::storage::StoredCredential;
@@ -114,13 +114,15 @@ where
         let session = self.take_session(request.protocol)?;
         let (keys, _) = session.derive_session_keys(&request.key_agreement)?;
 
-        let mut mac =
-            HmacSha256::new_from_slice(&keys.auth_key).map_err(|_| CTAP2_ERR_PROCESSING)?;
-        mac.update(&request.salt_enc);
-        let computed = mac.finalize().into_bytes();
-        if computed[..16] != request.salt_auth[..] {
-            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-        }
+        // CTAP 2.3 §12.7: "The authenticator calls verify(shared secret,
+        // saltEnc, saltAuth). If the verification fails, return
+        // CTAP2_ERR_PIN_AUTH_INVALID."
+        verify(
+            request.protocol,
+            &keys.auth_key,
+            &request.salt_enc,
+            &request.salt_auth,
+        )?;
 
         let plaintext = decrypt_shared_secret(&keys.encryption_key, &request.salt_enc)?;
         if plaintext.len() != 32 && plaintext.len() != 64 {
@@ -219,9 +221,6 @@ where
                                 Some(Value::Bytes(bytes)) => bytes.clone(),
                                 _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
                             };
-                        if salt_auth.len() != 16 {
-                            return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-                        }
                         let protocol = match cbor::map_get(params, Value::Integer(Integer::from(4)))
                         {
                             Some(Value::Integer(int)) => {
@@ -267,27 +266,8 @@ where
         let mut user_verified = false;
         match (pin_uv_auth_param.as_ref(), pin_uv_auth_protocol) {
             (Some(param), Some(protocol)) => {
-                self.ensure_supported_pin_uv_protocol(protocol)?;
-                if param.len() != 16 && param.len() != 32 {
-                    return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-                }
-                let mut token = self
-                    .pin_state
-                    .pin_uv_auth_token()
-                    .ok_or(CTAP2_ERR_PIN_AUTH_INVALID)?;
-                let mut mac =
-                    HmacSha256::new_from_slice(&token).map_err(|_| CTAP2_ERR_PROCESSING)?;
-                mac.update(&client_hash);
-                let computed = mac.finalize().into_bytes();
-                let uv_verified = match param.len() {
-                    16 => computed[..16] == param[..],
-                    32 => computed[..32] == param[..],
-                    _ => false,
-                };
-                token.zeroize();
-                if !uv_verified {
-                    return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-                }
+                let protocol = pin_protocol_from_identifier(protocol)?;
+                self.verify_pin_uv_auth_param(protocol, &client_hash, param)?;
                 user_verified = true;
             }
             (None, None) => {

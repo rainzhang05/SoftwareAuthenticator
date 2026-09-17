@@ -2,7 +2,7 @@
 
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::permissions::PIN_PERMISSION_MC;
-use super::pin::protocol::HmacSha256;
+use super::pin::protocol::pin_protocol_from_identifier;
 use super::storage::StoredCredential;
 use super::CtapApp;
 use crate::{create_credential, sign_challenge, CoseAlg};
@@ -12,11 +12,9 @@ use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
-use hmac::Mac;
 use sha2::{Digest, Sha256};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use trussed::syscall;
-use zeroize::Zeroize;
 
 use transport_core::ctap::constants::*;
 
@@ -218,28 +216,9 @@ where
         if let (Some(pin_uv_auth_param), Some(protocol)) =
             (pin_uv_auth_param.as_ref(), pin_uv_auth_protocol)
         {
-            let value: i128 = protocol.into();
-            self.ensure_supported_pin_uv_protocol(value)?;
-            if pin_uv_auth_param.len() != 16 && pin_uv_auth_param.len() != 32 {
-                return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-            }
-
-            let mut token = self
-                .pin_state
-                .pin_uv_auth_token()
-                .ok_or(CTAP2_ERR_PIN_AUTH_INVALID)?;
-            let mut mac = HmacSha256::new_from_slice(&token).map_err(|_| CTAP2_ERR_PROCESSING)?;
-            mac.update(&client_hash);
-            let computed = mac.finalize().into_bytes();
-            uv_verified = match pin_uv_auth_param.len() {
-                16 => computed[..16] == pin_uv_auth_param[..],
-                32 => computed[..32] == pin_uv_auth_param[..],
-                _ => false,
-            };
-            token.zeroize();
-            if !uv_verified {
-                return Err(CTAP2_ERR_PIN_AUTH_INVALID);
-            }
+            let protocol = pin_protocol_from_identifier(protocol.into())?;
+            self.verify_pin_uv_auth_param(protocol, &client_hash, pin_uv_auth_param)?;
+            uv_verified = true;
         }
 
         if uv_verified {
