@@ -237,9 +237,11 @@ class Credential:
     auth_data: AuthData
 
 
-def register(ctap: Ctap2, rp_id: str, alg: int, *, uv: bool = False, **kwargs) -> Credential:
+def register(
+    ctap: Ctap2, rp_id: str, alg: int, *, uv: bool = False, client_data_hash: bytes | None = None, **kwargs
+) -> Credential:
     """makeCredential, with every check that applies to any registration."""
-    client_data_hash = os.urandom(32)
+    client_data_hash = client_data_hash or os.urandom(32)
     user = kwargs.pop("user", None) or user_entity("alice")
     response = make_credential(ctap, rp_id, user, [alg], client_data_hash, **kwargs)
     auth_data = AuthData.parse(response[2])
@@ -252,10 +254,16 @@ def register(ctap: Ctap2, rp_id: str, alg: int, *, uv: bool = False, **kwargs) -
 
 
 def authenticate(
-    ctap: Ctap2, credential: Credential, allow_list: bool = True, *, uv: bool = False, **kwargs
+    ctap: Ctap2,
+    credential: Credential,
+    allow_list: bool = True,
+    *,
+    uv: bool = False,
+    client_data_hash: bytes | None = None,
+    **kwargs,
 ) -> tuple[Mapping[int, Any], AuthData]:
     """getAssertion for one credential, with its signature verified."""
-    client_data_hash = os.urandom(32)
+    client_data_hash = client_data_hash or os.urandom(32)
     allow_ids = [credential.credential_id] if allow_list else None
     response = get_assertion(ctap, credential.rp_id, client_data_hash, allow_ids, **kwargs)
     assert response[1] == {"type": "public-key", "id": credential.credential_id}

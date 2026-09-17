@@ -53,3 +53,12 @@ CREDENTIAL_STORE_CAPACITY = (
     "bug 1: the credential store is capped at 1,024 bytes, so saving the "
     "credential list fails with CTAP2_ERR_PROCESSING"
 )
+
+# Bug 2. clientPIN checks pinUvAuthParam as 16 bytes for both protocols, but
+# protocol 2 sends the full 32-byte HMAC. Only the subcommands that carry a
+# pinUvAuthParam are affected: getPinUvAuthTokenUsingPinWithPermissions has
+# none, and makeCredential/getAssertion accept 32-byte parameters.
+PIN_PROTOCOL_2_AUTH_PARAM = (
+    "bug 2: setPIN and changePIN reject protocol 2's 32-byte pinUvAuthParam "
+    "with CTAP2_ERR_PIN_AUTH_INVALID"
+)
