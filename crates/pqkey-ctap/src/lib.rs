@@ -298,9 +298,9 @@ pub fn decrypt_classic_pin_block(
     }
 }
 
-/// Enumeration of COSE algorithm identifiers for ML-DSA.  These values
-/// follow the draft COSE registration; they are negative because COSE
-/// reserves negative numbers for signature algorithms.
+/// Enumeration of COSE algorithm identifiers for ML-DSA.  These values are
+/// registered by RFC 9964; they are negative because COSE reserves negative
+/// numbers for signature algorithms.
 ///
 /// * -48 -> ML-DSA-44
 /// * -49 -> ML-DSA-65

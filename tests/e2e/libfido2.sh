@@ -7,8 +7,9 @@
 # libfido2 only knows ES256, ES384, RS256 and EdDSA credentials, so ML-DSA is
 # covered by the Python suite instead; `fido2-token -I` prints ML-DSA
 # algorithms as "unknown", and the Python suite checks their exact COSE IDs.
-# Every test registers at most one credential, because the authenticator's
-# credential store currently fits a single ES256 credential.
+# The tests do not reset the authenticator: each registers a non-discoverable
+# credential and asserts with that credential's ID in the allow list, so they do
+# not depend on anything else stored on the key.
 
 set -euo pipefail
 

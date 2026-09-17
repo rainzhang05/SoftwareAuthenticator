@@ -138,9 +138,8 @@ def device(hidraw_path):
 def ctap(device) -> Ctap2:
     """A CTAP2 session on a freshly reset authenticator.
 
-    authenticatorReset wipes all credentials and the PIN. Every test needs it:
-    the credential store is shared by all credentials and currently fits a
-    single ES256 credential.
+    authenticatorReset wipes all credentials and the PIN, so every test starts
+    from the same empty authenticator regardless of what earlier tests stored.
     """
     session = Ctap2(device)
     session.reset()
