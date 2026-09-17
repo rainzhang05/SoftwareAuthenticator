@@ -22,3 +22,9 @@ mldsa44 = []
 mldsa65 = []
 mldsa87 = []
 log = ["dep:log"]
+
+[dev-dependencies]
+# Differential test (tests/differential.rs): RustCrypto's `ml-dsa` is checked
+# byte for byte against the current `fips204` backend before replacing it.
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "rand_core", "zeroize"] }
+getrandom = { version = "0.4", features = ["sys_rng"] }
