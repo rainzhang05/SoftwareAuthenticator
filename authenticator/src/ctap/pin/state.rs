@@ -227,6 +227,12 @@ impl PinState {
         self.clock = clock;
     }
 
+    /// The time on the clock the pinUvAuthToken usage timer runs on, which
+    /// the engine's other timers share.
+    pub(crate) fn now(&self) -> core::time::Duration {
+        self.clock.now()
+    }
+
     pub(crate) fn persistent(&self) -> &PersistentPinState {
         self.pin.persistent()
     }

@@ -4,6 +4,7 @@ mod credential_management;
 mod discoverable;
 mod dispatch;
 mod get_assertion;
+mod get_assertion_rules;
 mod get_info;
 mod make_credential;
 mod make_credential_rules;

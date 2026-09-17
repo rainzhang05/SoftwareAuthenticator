@@ -48,7 +48,9 @@ def _discoverable(ctap: Ctap2, count: int):
     for response in responses:
         credential_id = response[1]["id"]
         credential, user = registered[credential_id]
-        assert response[4]["id"] == user["id"]
+        # CTAP 2.3 6.2.2 step 12: without user verification the user member
+        # carries the user handle but no name or displayName.
+        assert response[4] == {"id": user["id"]}
         auth_data = client.AuthData.parse(response[2])
         auth_data.check(RP_ID, up=True, uv=False, at=False)
         client.verify_signature(credential.public_key, response[2] + client_data_hash, response[3])
