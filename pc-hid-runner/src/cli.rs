@@ -21,6 +21,7 @@ use nix::{
 use crate::{
     permissions,
     pin_input::PinReader,
+    presence::PresenceMode,
     service,
     shutdown::ShutdownSignal,
     state::{self, default_state_dir},
@@ -118,6 +119,39 @@ pub struct StartCommand {
     /// Run in the foreground (useful for systemd integration)
     #[clap(long)]
     pub foreground: bool,
+    #[clap(flatten)]
+    presence: PresenceArgs,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PresenceArgs {
+    /// How the user approves registrations, sign-ins and resets
+    #[clap(long, value_enum, default_value_t = PresenceArg::AutoApprove)]
+    pub presence: PresenceArg,
+    /// Seconds a presence request waits for the user (default 30). For test
+    /// rigs; CTAP 2.3 section 5 asks for at least 10.
+    #[clap(long, hide = true, value_parser = clap::value_parser!(u64).range(1..=600))]
+    pub presence_timeout: Option<u64>,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum PresenceArg {
+    /// Approve every request without asking. Anything running as you can then
+    /// use your passkeys unnoticed; for tests and CI only
+    AutoApprove,
+    /// Never answer, so every request waits until it is cancelled or times
+    /// out (for tests)
+    #[value(hide = true)]
+    Unanswered,
+}
+
+impl PresenceArg {
+    fn into_mode(self) -> PresenceMode {
+        match self {
+            PresenceArg::AutoApprove => PresenceMode::AutoApprove,
+            PresenceArg::Unanswered => PresenceMode::Unanswered,
+        }
+    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -159,9 +193,6 @@ pub struct DeviceArgs {
     /// Authenticator AAGUID
     #[clap(long, default_value = "4645495449414E980616525A30310000")]
     pub aaguid: String,
-    /// Require user gestures instead of automatically satisfying presence checks
-    #[clap(long)]
-    pub manual_user_presence: bool,
     /// Suppress attestation certificate material for makeCredential operations
     #[clap(long)]
     pub suppress_attestation: bool,
@@ -237,7 +268,8 @@ impl StartCommand {
                 product: self.device.product.clone(),
                 serial: self.device.serial.clone(),
             },
-            auto_user_presence: !self.device.manual_user_presence,
+            presence: self.presence.presence.into_mode(),
+            presence_timeout: self.presence.presence_timeout.map(Duration::from_secs),
             suppress_attestation: self.device.suppress_attestation,
             allow_late_reset: self.device.allow_late_reset,
             backend: self.device.backend.into_backend(),
@@ -599,5 +631,42 @@ mod tests {
             assert_eq!(err.kind(), ErrorKind::UnknownArgument, "{args:?}: {err}");
         }
         assert!(parse(&["pin", "change", "--state-dir", "/tmp/x"]).is_ok());
+    }
+
+    fn presence_of(args: &[&str]) -> Result<(PresenceMode, Option<Duration>), clap::Error> {
+        let Command::Attach(start) = parse(args)?.command else {
+            panic!("not attach");
+        };
+        let config = start.to_runner_config().unwrap();
+        Ok((config.presence, config.presence_timeout))
+    }
+
+    #[test]
+    fn presence_mode_is_chosen_with_presence() {
+        assert_eq!(
+            presence_of(&["attach", "--presence", "auto-approve"]).unwrap(),
+            (PresenceMode::AutoApprove, None)
+        );
+        assert_eq!(
+            presence_of(&[
+                "attach",
+                "--presence",
+                "unanswered",
+                "--presence-timeout",
+                "3"
+            ])
+            .unwrap(),
+            (PresenceMode::Unanswered, Some(Duration::from_secs(3)))
+        );
+        let err = presence_of(&["attach", "--presence", "maybe"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidValue, "{err}");
+        let err = presence_of(&["attach", "--presence-timeout", "0"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ValueValidation, "{err}");
+    }
+
+    #[test]
+    fn the_old_manual_user_presence_flag_is_gone() {
+        let err = parse(&["attach", "--manual-user-presence"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
 }

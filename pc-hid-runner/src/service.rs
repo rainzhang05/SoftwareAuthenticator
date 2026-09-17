@@ -1,6 +1,7 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use authenticator::ctap::{
@@ -12,6 +13,7 @@ use authenticator::store::{AttestationRecord, CredentialStore, FileStore};
 use crate::{
     attestation::{generate_attestation_certificate, IdentityConfig},
     create_device, exec,
+    presence::{PresenceMode, Unanswered},
     shutdown::{is_shutdown, ok_if_shutdown, ShutdownSignal},
     state::remove_and_log_legacy_state,
     uhid::UhidDevice,
@@ -35,7 +37,10 @@ pub struct RunnerConfig {
     pub state_dir: PathBuf,
     pub aaguid: [u8; 16],
     pub identity: IdentityStrings,
-    pub auto_user_presence: bool,
+    pub presence: PresenceMode,
+    /// How long presence requests wait for the user, if not the engine's
+    /// default.
+    pub presence_timeout: Option<Duration>,
     pub suppress_attestation: bool,
     pub allow_late_reset: bool,
     pub backend: Backend,
@@ -46,7 +51,11 @@ pub struct AppData {
     /// The credential store in the state directory.
     pub store: FileStore,
     pub aaguid: [u8; 16],
-    pub auto_user_presence: bool,
+    /// How the user is asked for presence.
+    pub presence: PresenceMode,
+    /// How long presence requests wait for the user, if not the engine's
+    /// default.
+    pub presence_timeout: Option<Duration>,
     pub suppress_attestation: bool,
     /// Accept authenticatorReset after the CTAP start-up window (test rigs only).
     pub allow_late_reset: bool,
@@ -95,7 +104,8 @@ pub fn run(
         state_dir,
         aaguid,
         identity,
-        auto_user_presence,
+        presence,
+        presence_timeout,
         suppress_attestation,
         allow_late_reset,
         backend,
@@ -113,7 +123,8 @@ pub fn run(
     let data = AppData {
         store,
         aaguid,
-        auto_user_presence,
+        presence,
+        presence_timeout,
         suppress_attestation,
         allow_late_reset,
     };
@@ -140,13 +151,26 @@ pub fn serve_ctap(
     shutdown: ShutdownSignal,
     on_ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
-    if !data.auto_user_presence {
-        log::warn!("asking the user for presence is not implemented yet; approving every request");
+    match data.presence {
+        PresenceMode::AutoApprove => {
+            log::warn!(
+                "--presence auto-approve: approving every registration, sign-in and reset without asking; \
+                 anything running as this user can use the passkeys unnoticed. Use this for tests only"
+            );
+            serve_ctap_with_presence(device, data, AutoApprove, shutdown, on_ready)
+        }
+        PresenceMode::Unanswered => {
+            log::warn!(
+                "--presence unanswered: no presence request is ever approved; every request waits \
+                 until it is cancelled or times out. Use this for tests only"
+            );
+            serve_ctap_with_presence(device, data, Unanswered, shutdown, on_ready)
+        }
     }
-    serve_ctap_with_presence(device, data, AutoApprove, shutdown, on_ready)
 }
 
-/// [`serve_ctap`] with `presence` asking the user for presence.
+/// [`serve_ctap`] with `presence` asking the user for presence. `data.presence`
+/// names the mode `presence` implements.
 ///
 /// The app runs on a worker thread (see [`exec`]), so `presence` may block
 /// while the user decides: the transport keeps sending keepalives meanwhile,
@@ -164,6 +188,9 @@ pub fn serve_ctap_with_presence(
     let waiting = WaitingForUser::new();
     let mut ctap = CtapApp::with_file_store(data.store, presence, &interrupt, data.aaguid);
     ctap.suppress_attestation(data.suppress_attestation);
+    if let Some(timeout) = data.presence_timeout {
+        ctap.set_presence_timeout(timeout);
+    }
     if data.allow_late_reset {
         log::warn!("accepting authenticatorReset at any time (--allow-late-reset); this does not conform to CTAP");
         ctap.set_reset_window(None);
@@ -352,7 +379,8 @@ mod tests {
         AppData {
             store: FileStore::open(dir.path()).expect("open credential store"),
             aaguid: [0; 16],
-            auto_user_presence: true,
+            presence: PresenceMode::AutoApprove,
+            presence_timeout: None,
             suppress_attestation: false,
             allow_late_reset: false,
         }

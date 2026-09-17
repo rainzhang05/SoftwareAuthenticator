@@ -2,6 +2,7 @@ pub mod attestation;
 pub mod cli;
 pub mod permissions;
 pub mod pin_input;
+pub mod presence;
 pub mod service;
 pub mod shutdown;
 pub mod state;
