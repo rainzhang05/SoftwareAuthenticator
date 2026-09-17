@@ -112,7 +112,7 @@ multiple-versions = "warn"
 wildcards = "warn"
 
 [bans.workspace-dependencies]
-# Members declare sha2 / p256 / getrandom / log / zeroize / heapless-bytes
+# Members declare sha2 / p256 / getrandom / rand_core / log / zeroize / heapless-bytes
 # independently instead of via [workspace.dependencies] + `workspace = true`,
 # which is how the duplicate versions above crept in. cargo-deny denies this by
 # default; downgraded to a warning until the manifests are unified.
