@@ -17,7 +17,6 @@ use nix::{
     sys::signal::{self, Signal},
     unistd::Pid,
 };
-use transport_core::Options;
 
 use crate::{
     permissions,
@@ -123,7 +122,7 @@ pub struct StartCommand {
 
 #[derive(Args, Debug, Clone)]
 pub struct StateArgs {
-    /// Directory where persistent Trussed state and pid files are stored
+    /// Directory where the credential store, lock, pid and log files are kept
     #[clap(long, value_parser, default_value_os_t = default_state_dir())]
     pub state_dir: PathBuf,
 }
@@ -133,13 +132,13 @@ pub struct DeviceArgs {
     /// HID product name
     #[clap(long, default_value = "Feitian FIDO2 Software Authenticator (ML-DSA)")]
     pub name: String,
-    /// USB manufacturer string used by Trussed
+    /// Manufacturer named in a newly provisioned attestation certificate
     #[clap(long, default_value = "Feitian Technologies Co., Ltd.")]
     pub manufacturer: String,
-    /// USB product string used by Trussed
+    /// Product named in a newly provisioned attestation certificate
     #[clap(long, default_value = "Feitian FIDO2 Software Authenticator (ML-DSA)")]
     pub product: String,
-    /// USB serial number string used by Trussed
+    /// Serial number of a newly provisioned attestation certificate
     #[clap(long, default_value = "FEITIAN-PQC-001")]
     pub serial: String,
     /// Vendor ID for the virtual HID device
@@ -151,11 +150,11 @@ pub struct DeviceArgs {
     /// Version reported by the HID descriptor
     #[clap(long, value_parser = maybe_hex::<u32>, default_value_t = 0x0001)]
     pub version: u32,
-    /// USB VID presented by Trussed (for legacy tooling)
-    #[clap(short, long, value_parser = maybe_hex::<u16>, default_value_t = 0x1998)]
+    /// Ignored; accepted so that existing command lines keep working
+    #[clap(short, long, hide = true, value_parser = maybe_hex::<u16>, default_value_t = 0x1998)]
     pub vid: u16,
-    /// USB PID presented by Trussed (for legacy tooling)
-    #[clap(short, long, value_parser = maybe_hex::<u16>, default_value_t = 0x0616)]
+    /// Ignored; accepted so that existing command lines keep working
+    #[clap(short, long, hide = true, value_parser = maybe_hex::<u16>, default_value_t = 0x0616)]
     pub pid: u16,
     /// Authenticator AAGUID
     #[clap(long, default_value = "4645495449414E980616525A30310000")]
@@ -218,14 +217,6 @@ impl StateArgs {
 impl StartCommand {
     fn to_runner_config(&self) -> Result<service::RunnerConfig, String> {
         let aaguid = service::parse_aaguid(&self.device.aaguid)?;
-        let options = Options {
-            manufacturer: Some(self.device.manufacturer.clone()),
-            product: Some(self.device.product.clone()),
-            serial_number: Some(self.device.serial.clone()),
-            vid: self.device.vid,
-            pid: self.device.pid,
-            device_class: None,
-        };
         let descriptor = service::descriptor(
             self.device.name.clone(),
             self.device.vendor_id,
@@ -234,7 +225,6 @@ impl StartCommand {
         );
         Ok(service::RunnerConfig {
             descriptor,
-            options,
             state_dir: self.state.state_dir.clone(),
             aaguid,
             identity: service::IdentityStrings {

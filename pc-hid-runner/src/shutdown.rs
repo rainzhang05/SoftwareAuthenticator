@@ -1,10 +1,10 @@
 //! Turning SIGINT and SIGTERM into an orderly stop of the daemon.
 //!
 //! The signal handler only sets a flag. The uhid transport checks the flag on
-//! every pass through `transport_core::Runner::exec`'s loop and then fails
-//! with [`shutdown_error`]. That unwinds the runner: the apps and the
-//! transport are dropped (which destroys the uhid device) and the error comes
-//! back out, where [`ok_if_shutdown`] turns it into a successful exit.
+//! every pass through the daemon loop ([`crate::serve`]) and then fails with
+//! [`shutdown_error`]. That ends the loop: the app and the transport are
+//! dropped (which destroys the uhid device) and the error comes back out,
+//! where [`ok_if_shutdown`] turns it into a successful exit.
 
 use std::{
     error::Error,

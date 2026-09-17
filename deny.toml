@@ -159,16 +159,9 @@ unused = "warn"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# The trussed patch below pins an exact commit. Require that of any git source:
-# a bare branch dependency is an unpinned wildcard on somebody else's repo.
+# No git sources are allowed today. Should one ever be needed, require it to pin
+# an exact commit: a bare branch dependency is an unpinned wildcard on somebody
+# else's repo.
 required-git-spec = "rev"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = [
-    # Root Cargo.toml has:
-    #   [patch.crates-io]
-    #   trussed = { git = "...", rev = "024e0eca5fb7dbd2457831f7c7bffe4341e08775" }
-    # TODO: remove this entry when the patch is dropped in favour of a released
-    # trussed from crates.io. cargo-deny strips a trailing ".git", so the URL
-    # here is written without it.
-    "https://github.com/trussed-dev/trussed",
-]
+allow-git = []

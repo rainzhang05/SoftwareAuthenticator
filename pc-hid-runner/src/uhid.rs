@@ -365,6 +365,33 @@ fn event_as_bytes(event: &raw::uhid_event) -> &[u8] {
     }
 }
 
+/// The event the kernel sends when a host writes `frame` to the hidraw node.
+#[cfg(test)]
+pub(crate) fn output_event(frame: &[u8; CTAPHID_FRAME_LEN]) -> Vec<u8> {
+    let mut event = raw::uhid_event::default();
+    event.type_ = raw::UHID_EVENT_TYPE_OUTPUT;
+    let output = unsafe { &mut event.u.output };
+    output.data[..CTAPHID_FRAME_LEN].copy_from_slice(frame);
+    output.size = CTAPHID_FRAME_LEN as u16;
+    output.rtype = raw::UHID_REPORT_TYPE_OUTPUT;
+    event_as_bytes(&event).to_vec()
+}
+
+/// The report in an input event written by [`UhidDevice::write_frame`], or
+/// `None` for any other event.
+#[cfg(test)]
+pub(crate) fn input_report(event: &[u8]) -> Option<[u8; CTAPHID_FRAME_LEN]> {
+    let event = raw::event_from_bytes(event.try_into().ok()?);
+    if event.type_ != raw::UHID_EVENT_TYPE_INPUT2 {
+        return None;
+    }
+    let input = unsafe { event.u.input2 };
+    if input.size as usize != CTAPHID_FRAME_LEN {
+        return None;
+    }
+    input.data[..CTAPHID_FRAME_LEN].try_into().ok()
+}
+
 fn to_io_error(err: nix::Error) -> io::Error {
     io::Error::from(err)
 }
