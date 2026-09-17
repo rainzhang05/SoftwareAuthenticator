@@ -32,6 +32,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
+pub use self::pin::state::{PersistentPinState, PinAttempt, PinRetryState, MAX_PIN_RETRIES};
 pub use trussed_core::InterruptFlag;
 
 use self::credential_management::CredentialManagementState;

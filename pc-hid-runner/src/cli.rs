@@ -17,13 +17,14 @@ use nix::{
     sys::signal::{self, Signal},
     unistd::Pid,
 };
-use transport_core::{state::default_state_dir, Options};
+use transport_core::Options;
 
 use crate::{
     permissions,
     pin_input::PinReader,
     service,
     shutdown::ShutdownSignal,
+    state::{self, default_state_dir},
     state_lock::{self, DaemonState, StateLock},
     HidDeviceDescriptor,
 };
@@ -192,7 +193,7 @@ impl StateArgs {
     /// writes the stored state, failing if the daemon or another command has
     /// it.
     fn lock(&self) -> io::Result<StateLock> {
-        service::ensure_state_dir(&self.state_dir)?;
+        state::ensure_state_dir(&self.state_dir)?;
         let lock = StateLock::try_acquire(&self.state_dir)?.ok_or_else(|| self.in_use_error())?;
         // Nothing else can be running, so a pid file is left over from a
         // daemon that did not exit cleanly.
@@ -413,7 +414,7 @@ fn group_by_name(name: &str) -> Option<Gid> {
 }
 
 fn start(cmd: StartCommand) -> io::Result<()> {
-    service::ensure_state_dir(&cmd.state.state_dir)?;
+    state::ensure_state_dir(&cmd.state.state_dir)?;
     let config = cmd
         .to_runner_config()
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
@@ -519,7 +520,7 @@ fn reset(args: ResetArgs) -> io::Result<()> {
         eprintln!("Reset cancelled.");
         return Ok(());
     }
-    service::reset_state(&args.state.state_dir)?;
+    state::reset_state(&args.state.state_dir)?;
     println!("Authenticator state has been reset.");
     Ok(())
 }
@@ -530,7 +531,7 @@ fn pin(cmd: PinCommand) -> io::Result<()> {
         PinAction::Set { state } => {
             let _lock = state.lock()?;
             let pin = PinReader::from_stdin().new_pin()?;
-            service::pin_set(&state.state_dir, &pin)?;
+            state::pin_set(&state.state_dir, &pin)?;
             println!("PIN set.");
             Ok(())
         }
@@ -539,14 +540,14 @@ fn pin(cmd: PinCommand) -> io::Result<()> {
             let reader = PinReader::from_stdin();
             let current = reader.current_pin()?;
             let new = reader.new_pin()?;
-            service::pin_change(&state.state_dir, &current, &new)?;
+            state::pin_change(&state.state_dir, &current, &new)?;
             println!("PIN changed.");
             Ok(())
         }
         PinAction::Remove { state } => {
             let _lock = state.lock()?;
             let current = PinReader::from_stdin().current_pin()?;
-            service::pin_remove(&state.state_dir, &current)?;
+            state::pin_remove(&state.state_dir, &current)?;
             println!("PIN removed.");
             Ok(())
         }
@@ -554,13 +555,15 @@ fn pin(cmd: PinCommand) -> io::Result<()> {
 }
 
 fn pin_status(state: StateArgs) -> io::Result<()> {
-    // Even reading mounts the stored state, which must not happen while the
-    // daemon has it mounted.
-    let _lock = state.lock()?;
-    let info = service::pin_info(&state.state_dir)?;
+    // Reading needs no lock (see `state::pin_info`), so this also works while
+    // the daemon runs.
+    let info = state::pin_info(&state.state_dir)?;
     println!("PIN set:           {}", info.is_set);
     println!("Retries remaining: {}", info.retries);
     println!("Blocked:           {}", info.blocked);
+    if let DaemonState::Running(_) = state_lock::daemon_state(&state.state_dir)? {
+        println!("(After 3 wrong PINs in a row the running daemon also refuses PIN checks until it restarts.)");
+    }
     Ok(())
 }
 

@@ -23,7 +23,7 @@ use nix::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::service;
+use crate::state;
 
 /// A PIN as read from the user. It is wiped from memory when dropped and its
 /// `Debug` output is redacted, so it cannot end up in a log by accident.
@@ -85,7 +85,7 @@ impl PinReader {
 
 fn read_new_pin(confirm: bool, mut read: impl FnMut(&str) -> io::Result<Pin>) -> io::Result<Pin> {
     let pin = read("New PIN: ")?;
-    service::validate_pin(&pin)?;
+    state::validate_pin(&pin)?;
     if confirm {
         let again = read("Confirm new PIN: ")?;
         if *again != *pin {

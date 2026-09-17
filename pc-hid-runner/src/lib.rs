@@ -3,6 +3,7 @@ pub mod permissions;
 pub mod pin_input;
 pub mod service;
 pub mod shutdown;
+pub mod state;
 pub mod state_lock;
 pub mod transport;
 pub mod uhid;
