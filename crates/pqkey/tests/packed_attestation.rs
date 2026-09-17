@@ -137,7 +137,7 @@ fn make_credential(app: &mut CtapApp<'static>, alg: CoseAlg, rk: bool) -> (usize
     let mut encoded = vec![0x01];
     ciborium::ser::into_writer(&request, &mut encoded).unwrap();
     let mut response = Bytes::<MESSAGE_SIZE>::new();
-    App::<MESSAGE_SIZE>::call(app, Command::Cbor, &encoded, &mut response)
+    App::call(app, Command::Cbor, &encoded, &mut response)
         .expect("the response fits a CTAPHID message");
     assert_eq!(response[0], 0x00, "CTAP status {:#04x}", response[0]);
     let decoded = ciborium::de::from_reader(&response[1..]).unwrap();

@@ -21,7 +21,7 @@ zeroize = { workspace = true, features = ["zeroize_derive"] }
 serde = { version = "1", features = ["derive"] }
 ctaphid-app.workspace = true
 # `InterruptFlag`, through which the CTAPHID dispatcher cancels a request.
-trussed-core = "0.1"
+trussed-core = "0.2"
 heapless-bytes.workspace = true
 p256 = { workspace = true, features = ["ecdh"] }
 rand_core.workspace = true

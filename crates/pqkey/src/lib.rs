@@ -144,14 +144,14 @@ fn run_app<'interrupt, A>(
     responses: mpsc::Sender<AppResponse>,
     wake: UnixStream,
 ) where
-    A: App<'interrupt, MESSAGE_SIZE> + ?Sized,
+    A: App<'interrupt> + ?Sized,
 {
     let interrupt = app.interrupt();
     let mut buffer = Box::new(Bytes::<MESSAGE_SIZE>::new());
     for request in requests {
         buffer.clear();
         let response = app
-            .call(request.command, &request.payload, &mut buffer)
+            .call(request.command, &request.payload, buffer.as_mut_view())
             .map(|()| buffer.to_vec());
         if let Some(flag) = interrupt {
             flag.set_idle();
@@ -300,7 +300,7 @@ pub fn exec<'interrupt, A>(
     on_ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()>
 where
-    A: App<'interrupt, MESSAGE_SIZE> + Send + ?Sized,
+    A: App<'interrupt> + Send + ?Sized,
 {
     let interrupt = app.interrupt();
     let app_commands: &'static [Command] = app.commands();
@@ -388,7 +388,7 @@ pub(crate) mod tests {
     /// Answers CTAPHID_CBOR by echoing the request, or panics on 0xFF.
     struct EchoApp;
 
-    impl App<'static, MESSAGE_SIZE> for EchoApp {
+    impl App<'static> for EchoApp {
         fn commands(&self) -> &'static [Command] {
             &[Command::Cbor]
         }
@@ -397,7 +397,7 @@ pub(crate) mod tests {
             &mut self,
             _command: Command,
             request: &[u8],
-            response: &mut Bytes<MESSAGE_SIZE>,
+            response: &mut heapless_bytes::BytesView,
         ) -> Result<(), AppError> {
             assert_ne!(request, [0xFF], "the app fails");
             response.extend_from_slice(request).unwrap();

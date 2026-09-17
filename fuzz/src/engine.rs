@@ -136,8 +136,12 @@ impl Engine {
     /// Send one CTAPHID_CBOR message, `request` being the command byte and
     /// its parameters, check the response and return it.
     pub fn call(&mut self, request: &[u8]) -> Vec<u8> {
-        let result =
-            App::<MESSAGE_SIZE>::call(&mut self.app, Command::Cbor, request, &mut self.response);
+        let result = App::call(
+            &mut self.app,
+            Command::Cbor,
+            request,
+            self.response.as_mut_view(),
+        );
         if request.is_empty() {
             assert_eq!(result, Err(Error::InvalidLength), "an empty CBOR message");
             return Vec::new();

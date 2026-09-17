@@ -20,8 +20,8 @@ arbitrary = { version = "1", features = ["derive"] }
 pqkey-ctap = { path = "../crates/pqkey-ctap" }
 pqkey = { path = "../crates/pqkey" }
 ciborium = { version = "0.2", default-features = false, features = ["std"] }
-ctaphid-app = "0.1"
-heapless-bytes = "0.3"
+ctaphid-app = "0.2"
+heapless-bytes = "0.5"
 hmac = "0.13"
 p256 = { version = "0.14", features = ["ecdh"] }
 rand_core = "0.10"

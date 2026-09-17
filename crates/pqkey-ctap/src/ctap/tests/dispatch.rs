@@ -52,8 +52,7 @@ fn request_log_counts_the_response_with_and_without_its_status_byte() {
 /// Send `request` through `App::call` into a CTAPHID-sized response buffer.
 pub(super) fn call(app: &mut TestApp, request: &[u8]) -> Vec<u8> {
     let mut response = Bytes::<MAX_RESPONSE_SIZE>::new();
-    App::<MAX_RESPONSE_SIZE>::call(app, Command::Cbor, request, &mut response)
-        .expect("CTAPHID_CBOR is answered");
+    App::call(app, Command::Cbor, request, &mut response).expect("CTAPHID_CBOR is answered");
     response.to_vec()
 }
 
@@ -164,8 +163,7 @@ mod get_next_assertion_state {
             // The empty request is answered with a CTAPHID error, the others
             // with a CTAP status.
             let mut response = Bytes::<MAX_RESPONSE_SIZE>::new();
-            let _ =
-                App::<MAX_RESPONSE_SIZE>::call(&mut app, Command::Cbor, &request, &mut response);
+            let _ = App::call(&mut app, Command::Cbor, &request, &mut response);
             assert_eq!(
                 get_next_assertion(&mut app),
                 CTAP2_ERR_NOT_ALLOWED,

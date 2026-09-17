@@ -44,11 +44,11 @@ yanked = "warn"
 
 ignore = [
     # --- unmaintained / unsound -----------------------------------------
-    # atomic-polyfill 1.0.3 <- heapless 0.7, through heapless-bytes 0.3 (used by
-    # pqkey-ctap, pqkey, ctaphid-app, ctaphid-dispatch and
-    # trussed-core) and postcard 0.7 (trussed-core). Goes away with heapless 0.8,
-    # which needs new releases of those crates.
-    { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill via heapless 0.7; needs a coordinated heapless 0.8 upgrade" },
+    # atomic-polyfill 1.0.3 <- heapless 0.7 <- postcard 0.7 <- trussed-core 0.2
+    # (every release up to 0.2.2) <- ctaphid-app 0.2. Only compiled for targets
+    # without atomics, never for the Linux daemon. Goes away with a
+    # trussed-core release on postcard 1.
+    { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill via postcard 0.7 in trussed-core; not built on targets with atomics" },
 ]
 
 # ---------------------------------------------------------------------------
@@ -92,6 +92,11 @@ skip = [
     # rand_core 0.6; everything else is on 0.10. Compiled, but pqkey never
     # calls into it: it only uses trussed-core's `InterruptFlag`.
     { crate = "rand_core@0.6", reason = "trussed-core requires rand_core 0.6" },
+    # trussed-core 0.2 serializes with postcard 0.7, which is still on
+    # heapless 0.7 (and its hash32 0.2), while heapless-bytes 0.5 uses
+    # heapless 0.9. Goes away with a trussed-core release on postcard 1.
+    { crate = "heapless@0.7", reason = "postcard 0.7 via trussed-core" },
+    { crate = "hash32@0.2", reason = "heapless 0.7 via postcard 0.7 and trussed-core" },
     # Build time only: proc macros (zeroize_derive, serde-indexed via
     # trussed-core, zerocopy-derive, enumflags2_derive, x509-parser's asn1-rs
     # derives, ...) that have not moved to syn 3 yet.

@@ -111,7 +111,7 @@ fn call(app: &mut CtapApp<'static>, command: u8, payload: &Value) -> Vec<u8> {
     let mut request = vec![command];
     ciborium::ser::into_writer(payload, &mut request).expect("encode request");
     let mut response = Bytes::<CTAPHID_MAX_MESSAGE>::new();
-    App::<CTAPHID_MAX_MESSAGE>::call(app, Command::Cbor, &request, &mut response)
+    App::call(app, Command::Cbor, &request, &mut response)
         .expect("the response fits a CTAPHID message");
     response.to_vec()
 }

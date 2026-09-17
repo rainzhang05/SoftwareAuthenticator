@@ -259,7 +259,7 @@ impl<'interrupt> CtapApp<'interrupt> {
     }
 }
 
-impl<'a, 'interrupt: 'a, const N: usize> App<'a, N> for CtapApp<'interrupt> {
+impl<'a, 'interrupt: 'a> App<'a> for CtapApp<'interrupt> {
     fn interrupt(&self) -> Option<&'a InterruptFlag> {
         Some(self.interrupt)
     }
@@ -272,7 +272,7 @@ impl<'a, 'interrupt: 'a, const N: usize> App<'a, N> for CtapApp<'interrupt> {
         &mut self,
         command: Command,
         request: &[u8],
-        response: &mut heapless_bytes::Bytes<N>,
+        response: &mut heapless_bytes::BytesView,
     ) -> Result<(), Error> {
         // authenticatorGetNextAssertion is a stateful command: "The
         // authenticator MAY maintain state based on the assumption that each
