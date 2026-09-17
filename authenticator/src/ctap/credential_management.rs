@@ -2,6 +2,7 @@
 
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::protocol::parse_pin_uv_auth_param;
+use super::request::{self, truncate_utf8};
 use super::storage::{is_discoverable, store_status};
 use super::CtapApp;
 use crate::store::CredentialRecord;
@@ -22,6 +23,46 @@ const ENUMERATE_CREDENTIALS_BEGIN: u8 = 0x04;
 const ENUMERATE_CREDENTIALS_GET_NEXT_CREDENTIAL: u8 = 0x05;
 const DELETE_CREDENTIAL: u8 = 0x06;
 const UPDATE_USER_INFORMATION: u8 = 0x07;
+
+/// "#define MAX_STORED_RPID_LENGTH 32  /* MUST be >= 32 */" (CTAP 2.3 §6.8.7)
+const MAX_RETURNED_RP_ID_LENGTH: usize = 32;
+
+/// The PublicKeyCredentialRpEntity returned by enumerateRPsBegin and
+/// enumerateRPsGetNextRP, its id truncated as CTAP 2.3 §6.8.7 describes:
+/// "authenticators MAY truncate them using a procedure that produces the same
+/// results as the code included below", which keeps a protocol prefix up to
+/// the first colon and the end of the identifier, joined by U+2026.  Only the
+/// returned entity is truncated; "authenticators MUST NOT use truncated
+/// relying party identifiers for comparisons at any time".  The truncation
+/// keeps a response with an RP ID of any length within the transport's
+/// message size.
+fn rp_entity(rp_id: &str) -> Value {
+    canonical_map(vec![(
+        Value::Text("id".into()),
+        Value::Text(truncated_rp_id(rp_id)),
+    )])
+}
+
+/// `maybe_truncate_rpid` of CTAP 2.3 §6.8.7.  The byte-oriented procedure can
+/// split a multi-byte character of a non-ASCII identifier; such a split is
+/// replaced by U+FFFD so the result stays a CBOR text string.
+pub(super) fn truncated_rp_id(rp_id: &str) -> String {
+    let rpid = rp_id.as_bytes();
+    if rpid.len() <= MAX_RETURNED_RP_ID_LENGTH {
+        return rp_id.to_string();
+    }
+    let mut stored = Vec::with_capacity(MAX_RETURNED_RP_ID_LENGTH);
+    if let Some(colon) = rpid.iter().position(|byte| *byte == b':') {
+        let protocol_len = colon + 1;
+        stored.extend_from_slice(&rpid[..protocol_len.min(MAX_RETURNED_RP_ID_LENGTH)]);
+    }
+    if MAX_RETURNED_RP_ID_LENGTH - stored.len() >= 3 {
+        stored.extend_from_slice("\u{2026}".as_bytes());
+        let to_copy = MAX_RETURNED_RP_ID_LENGTH - stored.len();
+        stored.extend_from_slice(&rpid[rpid.len() - to_copy..]);
+    }
+    String::from_utf8_lossy(&stored).into_owned()
+}
 
 /// The state of the two stateful subcommands, enumerateRPsGetNextRP and
 /// enumerateCredentialsGetNextCredential (CTAP 2.3 §6).
@@ -124,7 +165,7 @@ impl CtapApp<'_> {
         self.cred_mgmt_state.rp_index = 1;
         self.cred_mgmt_state.rp_token = self.pin_state.pin_uv_auth_token_id();
 
-        let rp_entry = canonical_map(vec![(Value::Text("id".into()), Value::Text(first.clone()))]);
+        let rp_entry = rp_entity(&first);
         let hash = Self::cm_hash_rp_id(&first);
         Ok(vec![
             (Value::Integer(Integer::from(3)), rp_entry),
@@ -152,7 +193,7 @@ impl CtapApp<'_> {
             return Err(CTAP2_ERR_NOT_ALLOWED);
         };
         state.rp_index += 1;
-        let rp_entry = canonical_map(vec![(Value::Text("id".into()), Value::Text(rp_id.clone()))]);
+        let rp_entry = rp_entity(&rp_id);
         let hash = Self::cm_hash_rp_id(&rp_id);
         Ok(vec![
             (Value::Integer(Integer::from(3)), rp_entry),
@@ -168,14 +209,13 @@ impl CtapApp<'_> {
             Value::Text("id".into()),
             Value::Bytes(credential.user_id.clone()),
         )];
+        let bounded =
+            |text: &str| Value::Text(truncate_utf8(text, request::MAX_USER_STRING_LENGTH));
         if let Some(name) = &credential.user_name {
-            user_entries.push((Value::Text("name".into()), Value::Text(name.clone())));
+            user_entries.push((Value::Text("name".into()), bounded(name)));
         }
         if let Some(display) = &credential.user_display_name {
-            user_entries.push((
-                Value::Text("displayName".into()),
-                Value::Text(display.clone()),
-            ));
+            user_entries.push((Value::Text("displayName".into()), bounded(display)));
         }
         let user_map = canonical_map(user_entries);
 
@@ -308,8 +348,11 @@ impl CtapApp<'_> {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
 
+        // Kept to the same bounds as makeCredential stores.
         let non_empty_text = |key: &str| match cbor::map_get(user_map, Value::Text(key.into())) {
-            Some(Value::Text(text)) if !text.is_empty() => Some(text.clone()),
+            Some(Value::Text(text)) if !text.is_empty() => {
+                Some(truncate_utf8(text, request::MAX_USER_STRING_LENGTH))
+            }
             _ => None,
         };
         credential.user_name = non_empty_text("name");

@@ -7,6 +7,7 @@ use super::support::{
     TestStore,
 };
 use crate::ctap::cbor::canonical_map;
+use crate::ctap::credential_management::truncated_rp_id;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA};
 use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
 use crate::ctap::pin::token::{ManualClock, MAX_USAGE_TIME_PERIOD};
@@ -694,4 +695,55 @@ fn pin_uv_auth_param_covers_the_received_sub_command_params_bytes() {
         .handle_credential_management(&payload)
         .expect("enumerateCredentialsBegin with non-canonical params");
     assert_eq!(credential_id_of(&response), [0xA1]);
+}
+
+/// The examples of CTAP 2.3 §6.8.7.
+#[test]
+fn rp_ids_are_truncated_as_the_specification_shows() {
+    for (input, stored) in [
+        ("example.com", "example.com"),
+        (
+            "myfidousingwebsite.hostingprovider.net",
+            "\u{2026}ngwebsite.hostingprovider.net",
+        ),
+        (
+            "mygreatsite.hostingprovider.info",
+            "mygreatsite.hostingprovider.info",
+        ),
+        (
+            "otherprotocol://myfidousingwebsite.hostingprovider.net",
+            "otherprotocol:\u{2026}ingprovider.net",
+        ),
+        (
+            "veryexcessivelylargeprotocolname://example.com",
+            "veryexcessivelylargeprotocolname",
+        ),
+    ] {
+        assert_eq!(truncated_rp_id(input), stored, "{input}");
+    }
+}
+
+/// enumerateRPsBegin returns the truncated RP ID with the hash of the full
+/// one.
+#[test]
+fn enumerate_rps_returns_truncated_rp_ids() {
+    let (mut app, _, token) = app_with_cm_token(0x37);
+    let long_rp_id = format!("{}.example", "a".repeat(5000));
+    insert_owned(&mut app, es256_credential(&long_rp_id, &[0xA1]));
+    let response = credential_management(&mut app, &token, 0x02, None).expect("enumerateRPsBegin");
+    assert_eq!(
+        response_bytes(&response, 4),
+        CtapApp::cm_hash_rp_id(&long_rp_id)
+    );
+    let rp = response_map(&response)
+        .into_iter()
+        .find_map(|(k, v)| (k == Value::Integer(Integer::from(3))).then_some(v))
+        .expect("rp present");
+    assert_eq!(
+        rp,
+        canonical_map(vec![(
+            Value::Text("id".into()),
+            Value::Text("\u{2026}aaaaaaaaaaaaaaaaaaaaa.example".into())
+        )])
+    );
 }
