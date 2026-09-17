@@ -203,15 +203,16 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo build --workspace --locked --release
 
-  # Coverage. Reported, never enforced: parts of pqkey (the uhid device
-  # and the CLI) cannot be exercised by unit tests, so any threshold would either
-  # be meaningless or permanently red. The
-  # point for now is to make the number visible on every run so the trend is
-  # obvious.
+  # Coverage, with a floor on the line coverage of the whole workspace. Parts
+  # of pqkey (opening /dev/uhid, the D-Bus session, daemonizing) cannot run in
+  # unit tests, so the floor sits below the current total (88.4% when it was
+  # set) rather than near 100%: it catches a change that lands a lot of
+  # untested code, not every small dip. Raise it as coverage grows.
   #
   # Deliberately no third-party upload (Codecov/Coveralls): those need a token
-  # this repo does not have. The lcov file is attached as a build artifact and
-  # the summary is printed into the job log instead.
+  # this repo does not have. The lcov file and the HTML report are attached as
+  # a build artifact, and the summary goes into the job log (which, unlike the
+  # step summary, can be fetched with `gh run view --log`) and the step summary.
   coverage:
     name: coverage
     runs-on: ubuntu-latest
@@ -238,20 +239,6 @@ jobs:
           cargo llvm-cov report --lcov --output-path lcov.info
           cargo llvm-cov report --html --output-dir coverage-html
 
-      - name: Publish summary
-        run: |
-          {
-            echo '### Coverage'
-            echo ''
-            echo '```'
-            cargo llvm-cov report --summary-only
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # TODO: once the number stops moving, add a
-      # floor with `--fail-under-lines <N>` on the `report` invocation above and
-      # this job becomes a real gate.
-
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -260,3 +247,23 @@ jobs:
             lcov.info
             coverage-html
           retention-days: 14
+
+      # `--fail-under-lines` compares the TOTAL row, the whole workspace.
+      - name: Summary and coverage floor
+        env:
+          MIN_LINE_COVERAGE: 85
+        run: |
+          status=0
+          cargo llvm-cov report --summary-only --fail-under-lines "$MIN_LINE_COVERAGE" \
+            > coverage-summary.txt 2>&1 || status=$?
+          cat coverage-summary.txt
+          {
+            echo '### Coverage'
+            echo ''
+            echo "Floor: ${MIN_LINE_COVERAGE}% of lines across the workspace."
+            echo ''
+            echo '```'
+            cat coverage-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
