@@ -566,7 +566,7 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fe93489fe96c998488d0843dffea35c02ed9add2585e55228e1d45988727ecc"
 dependencies = [
- "heapless-bytes",
+ "heapless-bytes 0.3.0",
  "trussed-core",
 ]
 
@@ -866,6 +866,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -878,10 +887,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdc6457c0eb62c71aac4bc17216026d8410337c4126773b9c5daba343f17964f"
 dependencies = [
  "atomic-polyfill",
- "hash32",
+ "hash32 0.2.1",
  "rustc_version",
  "serde",
  "spin",
+ "stable_deref_trait",
+]
+
+[[package]]
+name = "heapless"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
+dependencies = [
+ "hash32 0.3.1",
  "stable_deref_trait",
 ]
 
@@ -891,9 +910,19 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7285eba272c6af3e9f15fb9e1c1b6e7d35aa70580ffe0d47af017e97dfb6f48b"
 dependencies = [
- "heapless",
+ "heapless 0.7.17",
  "serde",
  "typenum",
+]
+
+[[package]]
+name = "heapless-bytes"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "774f9dbf3f3a66edc65579e68b9f564ad5ec52e770a755af46b87d40909b8024"
+dependencies = [
+ "heapless 0.9.3",
+ "serde_core",
 ]
 
 [[package]]
@@ -1254,7 +1283,7 @@ version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a25c0b0ae06fcffe600ad392aabfa535696c8973f2253d9ac83171924c58a858"
 dependencies = [
- "heapless",
+ "heapless 0.7.17",
  "postcard-cobs",
  "serde",
 ]
@@ -1282,7 +1311,7 @@ dependencies = [
  "env_logger",
  "futures-lite",
  "getrandom",
- "heapless-bytes",
+ "heapless-bytes 0.5.0",
  "log",
  "nix",
  "p256",
@@ -1306,7 +1335,7 @@ dependencies = [
  "ciborium",
  "ctaphid-app",
  "getrandom",
- "heapless-bytes",
+ "heapless-bytes 0.5.0",
  "hkdf",
  "hmac",
  "log",
@@ -1850,7 +1879,7 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "afddad280ae8a5235e1b06408cca909ce9454cdd89f941b94b024c580732b3ce"
 dependencies = [
- "heapless-bytes",
+ "heapless-bytes 0.3.0",
  "littlefs2-core",
  "postcard",
  "rand_core 0.6.4",

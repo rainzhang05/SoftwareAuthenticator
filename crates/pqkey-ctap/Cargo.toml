@@ -21,7 +21,7 @@ serde = { version = "1", features = ["derive"] }
 ctaphid-app = "0.1"
 # `InterruptFlag`, through which the CTAPHID dispatcher cancels a request.
 trussed-core = "0.1"
-heapless-bytes = "0.3"
+heapless-bytes = "0.5"
 p256 = { version = "0.14", features = ["ecdh"] }
 rand_core = "0.10"
 # `SysRng`, the operating system RNG that key generation uses.
