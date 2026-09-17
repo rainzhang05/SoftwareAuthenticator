@@ -11,7 +11,7 @@ use authenticator::ctap::{
 use authenticator::store::{AttestationRecord, CredentialStore, FileStore};
 
 use crate::{
-    attestation::{generate_attestation_certificate, IdentityConfig},
+    attestation::{certificate_aaguid, generate_attestation_certificate, IdentityConfig},
     create_device, exec,
     presence::{dbus::SessionBus, notification::NotificationPresence, PresenceMode, Unanswered},
     shutdown::{is_shutdown, ok_if_shutdown, ShutdownSignal},
@@ -62,7 +62,15 @@ pub struct AppData {
 }
 
 /// Open the credential store in `state_dir`, and provision the attestation key
-/// and certificate if it has none.
+/// and certificate if it has none, or if its certificate does not carry
+/// `identity.aaguid`.
+///
+/// The latter replaces the certificates made before they met WebAuthn Level 3
+/// §8.2.1, which have no AAGUID extension, and the certificate of an
+/// authenticator whose AAGUID was changed, which would contradict the AAGUID
+/// in authenticatorData. Only the attestation key and certificate are
+/// replaced: credentials have keys of their own and stay usable. A change to
+/// the other identity strings does not replace a certificate.
 ///
 /// A stored attestation record that cannot be read is left alone for
 /// inspection; registrations then use self attestation.
@@ -71,22 +79,140 @@ pub fn open_credential_store(
     identity: IdentityConfig<'_>,
 ) -> io::Result<FileStore> {
     let mut store = FileStore::open(state_dir).map_err(io::Error::other)?;
-    match store.attestation() {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            let (private_key, certificate) = generate_attestation_certificate(&identity)?;
-            let record = AttestationRecord {
-                private_key: *private_key,
-                certificate_chain: vec![certificate],
-            };
-            store.set_attestation(&record).map_err(io::Error::other)?;
-            log::info!("provisioned a new attestation key and certificate");
-        }
+    let replacing = match store.attestation() {
+        Ok(None) => None,
+        Ok(Some(record)) => match record
+            .certificate_chain
+            .first()
+            .and_then(|c| certificate_aaguid(c))
+        {
+            Some(aaguid) if aaguid == identity.aaguid => return Ok(store),
+            Some(_) => Some("its certificate names another AAGUID"),
+            None => Some("its certificate has no AAGUID extension"),
+        },
         Err(err) => {
             log::warn!("the attestation record cannot be read ({err}); using self attestation");
+            return Ok(store);
         }
+    };
+    let (private_key, certificate) = generate_attestation_certificate(&identity)?;
+    let record = AttestationRecord {
+        private_key: *private_key,
+        certificate_chain: vec![certificate],
+    };
+    store.set_attestation(&record).map_err(io::Error::other)?;
+    match replacing {
+        None => log::info!("provisioned a new attestation key and certificate"),
+        Some(reason) => log::info!("replaced the attestation key and certificate: {reason}"),
     }
     Ok(store)
+}
+
+#[cfg(test)]
+mod provisioning_tests {
+    use super::*;
+    use crate::test_support::TempDir;
+
+    const IDENTITY: IdentityConfig<'static> = IdentityConfig {
+        manufacturer: "Example Manufacturer",
+        product: "Example Authenticator",
+        country: "US",
+        aaguid: [0x11; 16],
+    };
+
+    fn stored(dir: &TempDir) -> AttestationRecord {
+        FileStore::open(dir.path())
+            .unwrap()
+            .attestation()
+            .unwrap()
+            .expect("an attestation record")
+    }
+
+    #[test]
+    fn a_new_store_gets_a_certificate_with_the_configured_aaguid_and_keeps_it() {
+        let dir = TempDir::new("provision");
+        drop(open_credential_store(dir.path(), IDENTITY).unwrap());
+        let first = stored(&dir);
+        assert_eq!(first.certificate_chain.len(), 1);
+        assert_eq!(
+            certificate_aaguid(&first.certificate_chain[0]),
+            Some(IDENTITY.aaguid)
+        );
+
+        // Restarting, even with other identity strings, keeps the key and
+        // certificate.
+        let renamed = IdentityConfig {
+            manufacturer: "Another Manufacturer",
+            country: "DE",
+            ..IDENTITY
+        };
+        drop(open_credential_store(dir.path(), renamed).unwrap());
+        let second = stored(&dir);
+        assert_eq!(second.private_key, first.private_key);
+        assert_eq!(second.certificate_chain, first.certificate_chain);
+    }
+
+    /// State directories provisioned before the certificate carried the
+    /// AAGUID get a new attestation key and certificate.
+    #[test]
+    fn a_certificate_without_the_aaguid_is_replaced() {
+        let dir = TempDir::new("provision-legacy");
+        let (private_key, _) = generate_attestation_certificate(&IDENTITY).unwrap();
+        // Any certificate without the extension, such as the old generator's.
+        let legacy = AttestationRecord {
+            private_key: *private_key,
+            certificate_chain: vec![vec![0x30, 0x03, 0x30, 0x01, 0x00]],
+        };
+        FileStore::open(dir.path())
+            .unwrap()
+            .set_attestation(&legacy)
+            .unwrap();
+
+        drop(open_credential_store(dir.path(), IDENTITY).unwrap());
+        let replaced = stored(&dir);
+        assert_ne!(replaced.private_key, legacy.private_key);
+        assert_eq!(
+            certificate_aaguid(&replaced.certificate_chain[0]),
+            Some(IDENTITY.aaguid)
+        );
+    }
+
+    /// The AAGUID in authenticatorData comes from the configuration, so a
+    /// certificate naming another one is replaced rather than contradicting it.
+    #[test]
+    fn a_certificate_with_another_aaguid_is_replaced() {
+        let dir = TempDir::new("provision-aaguid");
+        drop(open_credential_store(dir.path(), IDENTITY).unwrap());
+        let before = stored(&dir);
+
+        let changed = IdentityConfig {
+            aaguid: [0x22; 16],
+            ..IDENTITY
+        };
+        drop(open_credential_store(dir.path(), changed).unwrap());
+        let after = stored(&dir);
+        assert_ne!(after.private_key, before.private_key);
+        assert_eq!(
+            certificate_aaguid(&after.certificate_chain[0]),
+            Some([0x22; 16])
+        );
+    }
+
+    #[test]
+    fn an_invalid_country_fails_provisioning() {
+        let dir = TempDir::new("provision-country");
+        let identity = IdentityConfig {
+            country: "XX",
+            ..IDENTITY
+        };
+        let err = open_credential_store(dir.path(), identity).err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(FileStore::open(dir.path())
+            .unwrap()
+            .attestation()
+            .unwrap()
+            .is_none());
+    }
 }
 
 /// Run the authenticator until the device fails or `shutdown` is requested.

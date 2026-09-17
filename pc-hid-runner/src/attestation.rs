@@ -134,6 +134,101 @@ fn certificate_error(err: rcgen::Error) -> io::Error {
     ))
 }
 
+/// The contents octets of id-fido-gen-ce-aaguid's DER encoding.
+const ID_FIDO_GEN_CE_AAGUID_DER: [u8; 11] = [
+    0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0xe5, 0x1c, 0x01, 0x01, 0x04,
+];
+
+const TAG_BOOLEAN: u8 = 0x01;
+const TAG_OCTET_STRING: u8 = 0x04;
+const TAG_OID: u8 = 0x06;
+const TAG_SEQUENCE: u8 = 0x30;
+/// `[0] EXPLICIT`, the TBSCertificate version.
+const TAG_VERSION: u8 = 0xa0;
+/// `[3] EXPLICIT`, the TBSCertificate extensions.
+const TAG_EXTENSIONS: u8 = 0xa3;
+
+/// Split the first DER element off `input`: its tag and contents. `None` if
+/// `input` does not start with a complete element.
+fn next_element<'a>(input: &mut &'a [u8]) -> Option<(u8, &'a [u8])> {
+    let (&tag, rest) = input.split_first()?;
+    let (&first, mut rest) = rest.split_first()?;
+    let length = if first < 0x80 {
+        usize::from(first)
+    } else {
+        let count = usize::from(first & 0x7f);
+        if count == 0 || count > 4 || rest.len() < count {
+            return None;
+        }
+        let (octets, tail) = rest.split_at(count);
+        rest = tail;
+        octets
+            .iter()
+            .fold(0usize, |length, octet| (length << 8) | usize::from(*octet))
+    };
+    if rest.len() < length {
+        return None;
+    }
+    let (contents, tail) = rest.split_at(length);
+    *input = tail;
+    Some((tag, contents))
+}
+
+/// The contents of the next DER element if it has tag `tag`.
+fn expect_element<'a>(input: &mut &'a [u8], tag: u8) -> Option<&'a [u8]> {
+    match next_element(input)? {
+        (found, contents) if found == tag => Some(contents),
+        _ => None,
+    }
+}
+
+/// The AAGUID in a certificate's id-fido-gen-ce-aaguid extension, if it has
+/// that extension, not critical and encoded as WebAuthn Level 3 §8.2.1
+/// requires. `None` for anything else, including a certificate that cannot
+/// be parsed.
+///
+/// This is not a certificate validator: it walks only as much of the DER as
+/// it takes to find the extension.
+pub fn certificate_aaguid(certificate: &[u8]) -> Option<[u8; 16]> {
+    let mut input = certificate;
+    let mut certificate = expect_element(&mut input, TAG_SEQUENCE)?;
+    let mut tbs = expect_element(&mut certificate, TAG_SEQUENCE)?;
+    if tbs.first() == Some(&TAG_VERSION) {
+        next_element(&mut tbs)?;
+    }
+    // serialNumber, signature, issuer, validity, subject, subjectPublicKeyInfo
+    for _ in 0..6 {
+        next_element(&mut tbs)?;
+    }
+    // issuerUniqueID and subjectUniqueID may come before the extensions.
+    let mut extensions = loop {
+        match next_element(&mut tbs)? {
+            (TAG_EXTENSIONS, mut wrapper) => break expect_element(&mut wrapper, TAG_SEQUENCE)?,
+            _ => continue,
+        }
+    };
+    while !extensions.is_empty() {
+        let mut extension = expect_element(&mut extensions, TAG_SEQUENCE)?;
+        if expect_element(&mut extension, TAG_OID)? != ID_FIDO_GEN_CE_AAGUID_DER {
+            continue;
+        }
+        if extension.first() == Some(&TAG_BOOLEAN) {
+            let critical = expect_element(&mut extension, TAG_BOOLEAN)?;
+            if critical != [0x00] {
+                return None;
+            }
+        }
+        let mut value = expect_element(&mut extension, TAG_OCTET_STRING)?;
+        let aaguid = expect_element(&mut value, TAG_OCTET_STRING)?;
+        return if value.is_empty() && extension.is_empty() {
+            aaguid.try_into().ok()
+        } else {
+            None
+        };
+    }
+    None
+}
+
 /// A random serial number: 20 octets (the most RFC 5280 §4.1.2.2 allows),
 /// with the top bit clear so the INTEGER is positive and the next bit set so
 /// it keeps all 20 octets. 158 random bits make it unique.
@@ -374,6 +469,63 @@ mod tests {
         verifying_key
             .verify(tbs.as_ref(), &signature)
             .expect("the signature verifies with the attestation key");
+    }
+
+    #[test]
+    fn the_aaguid_is_read_back_from_a_generated_certificate() {
+        let (_, der) = generate_attestation_certificate(&IDENTITY).unwrap();
+        assert_eq!(certificate_aaguid(&der), Some(IDENTITY.aaguid));
+        // Any truncation is refused rather than read past.
+        for length in 0..der.len() {
+            assert_eq!(certificate_aaguid(&der[..length]), None, "{length} bytes");
+        }
+    }
+
+    /// A certificate from the generator this one replaced: subject O and CN,
+    /// a DNS name, the serial string as serial number, and no AAGUID.
+    #[test]
+    fn a_certificate_without_the_extension_has_no_aaguid() {
+        let key = P256Key::new(EcdsaSigningKey::generate());
+        let mut params = CertificateParams::new(vec!["example".to_owned()]).unwrap();
+        params.serial_number = Some(SerialNumber::from(b"FEITIAN-PQC-001".to_vec()));
+        params.is_ca = IsCa::ExplicitNoCa;
+        params.key_identifier_method = KeyIdMethod::PreSpecified(vec![1; 20]);
+        let der = params.self_signed(&key).unwrap().der().to_vec();
+        assert!(parse(&der).tbs_certificate.extensions().len() == 3);
+        assert_eq!(certificate_aaguid(&der), None);
+    }
+
+    /// The extension counts only as §8.2.1 has it: not critical, and the
+    /// AAGUID in an OCTET STRING of 16 bytes inside the extension value.
+    #[test]
+    fn a_malformed_or_critical_extension_has_no_aaguid() {
+        let certificate = |critical: bool, content: Vec<u8>| {
+            let key = P256Key::new(EcdsaSigningKey::generate());
+            let mut params = CertificateParams::default();
+            params.serial_number = Some(SerialNumber::from(1));
+            let mut extension = CustomExtension::from_oid_content(ID_FIDO_GEN_CE_AAGUID, content);
+            extension.set_criticality(critical);
+            params.custom_extensions.push(extension);
+            params.self_signed(&key).unwrap().der().to_vec()
+        };
+        let mut wrapped = vec![0x04, 0x10];
+        wrapped.extend_from_slice(&[7; 16]);
+        assert_eq!(
+            certificate_aaguid(&certificate(false, wrapped.clone())),
+            Some([7; 16])
+        );
+        assert_eq!(
+            certificate_aaguid(&certificate(true, wrapped.clone())),
+            None
+        );
+        assert_eq!(certificate_aaguid(&certificate(false, vec![7; 16])), None);
+        assert_eq!(
+            certificate_aaguid(&certificate(false, wrapped[..17].to_vec())),
+            None
+        );
+        let mut trailing = wrapped;
+        trailing.push(0);
+        assert_eq!(certificate_aaguid(&certificate(false, trailing)), None);
     }
 
     #[test]
