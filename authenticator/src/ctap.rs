@@ -34,6 +34,7 @@ mod storage;
 mod tests;
 
 pub use self::pin::state::{PersistentPinState, PinAttempt, PinRetryState, MAX_PIN_RETRIES};
+pub use self::reset::RESET_WINDOW_AFTER_POWER_UP;
 pub use trussed_core::InterruptFlag;
 
 use self::credential_management::CredentialManagementState;
@@ -82,6 +83,8 @@ pub struct CtapApp<'interrupt> {
     cred_mgmt_state: CredentialManagementState,
     pending_assertion: Option<PendingAssertion>,
     presence_timeout: Duration,
+    /// How long after power-up authenticatorReset is accepted, if limited.
+    reset_window: Option<Duration>,
     keepalive: Box<dyn FnMut(bool) + Send>,
 }
 
@@ -122,6 +125,7 @@ impl<'interrupt> CtapApp<'interrupt> {
             cred_mgmt_state: CredentialManagementState::new(),
             pending_assertion: None,
             presence_timeout: DEFAULT_PRESENCE_TIMEOUT,
+            reset_window: Some(RESET_WINDOW_AFTER_POWER_UP),
             keepalive: Box::new(|_| {}),
         }
     }
@@ -148,6 +152,18 @@ impl<'interrupt> CtapApp<'interrupt> {
     /// [`DEFAULT_PRESENCE_TIMEOUT`].
     pub fn set_presence_timeout(&mut self, timeout: Duration) {
         self.presence_timeout = timeout;
+    }
+
+    /// How long after power-up, the construction of this engine,
+    /// authenticatorReset is accepted.  Defaults to
+    /// [`RESET_WINDOW_AFTER_POWER_UP`], the 10 seconds CTAP 2.3 §6.6 requires
+    /// of an authenticator without a display.
+    ///
+    /// `None` accepts a reset at any time, which does not conform to CTAP.  It
+    /// exists for test rigs that reset a long-running authenticator before
+    /// every test; user presence is still required.
+    pub fn set_reset_window(&mut self, window: Option<Duration>) {
+        self.reset_window = window;
     }
 
     pub fn suppress_attestation(&mut self, suppress: bool) {
