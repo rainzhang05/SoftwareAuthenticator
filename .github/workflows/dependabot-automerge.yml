@@ -16,7 +16,7 @@ name: Dependabot auto-merge
 
 on:
   workflow_run:
-    workflows: [CI, Security]
+    workflows: [CI, Security, "E2E"]
     types: [completed]
 
 permissions: {}

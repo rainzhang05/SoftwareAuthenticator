@@ -5,7 +5,7 @@
 # Every condition below must hold, otherwise the script explains why and exits 0:
 #   - the PR is open, authored by Dependabot, on a dependabot/cargo/ branch
 #   - HEAD_SHA is still the PR head (a newer push gets its own evaluation)
-#   - the latest pull_request runs of ci.yml AND security.yml for HEAD_SHA succeeded
+#   - the latest pull_request runs of ci.yml, security.yml and e2e.yml for HEAD_SHA succeeded
 #   - every package version change in Cargo.lock is Cargo-semver compatible
 #     (see cargo_semver_check.py; Dependabot's own update-type calls
 #     0.12 -> 0.13 "minor", but for Cargo a 0.x minor bump is breaking)
@@ -36,7 +36,7 @@ echo "PR #$number by $author at $head"
   || skip "PR #$number is authored by $author, not Dependabot"
 [ "$head" = "$HEAD_SHA" ] || skip "PR #$number moved on to $head; that commit gets its own evaluation"
 
-for workflow in ci.yml security.yml; do
+for workflow in ci.yml security.yml e2e.yml; do
   conclusion=$(gh api "repos/$REPO/actions/workflows/$workflow/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=20" \
     --jq '[.workflow_runs[]] | sort_by(.created_at) | last | if . == null then "missing" elif .status != "completed" then "in_progress" else .conclusion end')
   echo "$workflow: $conclusion"
