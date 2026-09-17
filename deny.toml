@@ -113,7 +113,7 @@ wildcards = "warn"
 
 [bans.workspace-dependencies]
 # Members declare sha2 / p256 / getrandom / rand_core / log / zeroize / heapless-bytes
-# independently instead of via [workspace.dependencies] + `workspace = true`,
+# / ciborium independently instead of via [workspace.dependencies] + `workspace = true`,
 # which is how the duplicate versions above crept in. cargo-deny denies this by
 # default; downgraded to a warning until the manifests are unified.
 # TODO: add [workspace.dependencies] to the root Cargo.toml, then set both of
