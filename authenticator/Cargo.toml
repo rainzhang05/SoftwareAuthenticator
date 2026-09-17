@@ -11,7 +11,7 @@ license = "Apache-2.0 OR MIT"
 ciborium = { version = "0.2", default-features = false, features = ["std"] }
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
-hkdf = "0.12"
+hkdf = "0.13"
 sha2 = "0.10"
 hmac = "0.12"
 zeroize = { version = "1", features = ["zeroize_derive"] }
