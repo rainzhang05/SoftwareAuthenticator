@@ -1,10 +1,11 @@
-//! Packed attestation with the certificate the daemon provisions, through the
-//! CTAP engine: the AAGUID in the certificate must be the one in
+//! Packed attestation with the certificate the daemon provisions for
+//! `--attestation certificate`, through the CTAP engine: the AAGUID in the certificate must be the one in
 //! authenticatorData (WebAuthn Level 3 §8.2, "If attestnCert contains an
 //! extension with OID 1.3.6.1.4.1.45724.1.1.4 (id-fido-gen-ce-aaguid) verify
 //! that the value of this extension matches the aaguid in
 //! authenticatorData"), and the attestation signature must verify with the
-//! certificate's public key.
+//! certificate's public key. Without that option the daemon uses self
+//! attestation, even when an earlier run provisioned a certificate.
 
 use std::{fs, path::PathBuf};
 
@@ -12,20 +13,23 @@ use ciborium::value::{Integer, Value};
 use ctaphid_app::{App, Command};
 use heapless_bytes::Bytes;
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-use pqkey::{attestation::IdentityConfig, service::open_credential_store, MESSAGE_SIZE};
-use pqkey_ctap::ctap::{presence::AutoApprove, CtapApp, InterruptFlag};
+use pqkey::{
+    attestation::IdentityConfig,
+    service::{open_credential_store, AttestationConfig, IdentityStrings},
+    MESSAGE_SIZE,
+};
+use pqkey_ctap::ctap::{presence::AutoApprove, AttestationMode, CtapApp, InterruptFlag};
+use pqkey_ctap::store::{CredentialStore, FileStore};
 use pqkey_ctap::CoseAlg;
 use x509_parser::{certificate::X509Certificate, prelude::FromDer};
 
-/// The daemon's default identity (see `pqkey attach --help`).
+/// An identity as `--manufacturer`, `--product`, `--country` and `--aaguid`
+/// give it.
 const IDENTITY: IdentityConfig<'static> = IdentityConfig {
-    manufacturer: "Feitian Technologies Co., Ltd.",
-    product: "Feitian FIDO2 Software Authenticator (ML-DSA)",
-    country: "CN",
-    aaguid: [
-        0x46, 0x45, 0x49, 0x54, 0x49, 0x41, 0x4e, 0x98, 0x06, 0x16, 0x52, 0x5a, 0x30, 0x31, 0x00,
-        0x00,
-    ],
+    manufacturer: "Example Manufacturer",
+    product: "Example Authenticator",
+    country: "US",
+    aaguid: *b"an example AAGUI",
 };
 
 const ALGORITHMS: [CoseAlg; 4] = [
@@ -58,11 +62,23 @@ impl Drop for TempDir {
     }
 }
 
-/// The engine as the daemon builds it: the store provisioned by
-/// `open_credential_store`, and the same AAGUID.
+/// The engine as the daemon builds it with `--attestation certificate`: the
+/// store provisioned by `open_credential_store`, and the same AAGUID.
 fn open_app(dir: &TempDir, identity: IdentityConfig<'_>) -> CtapApp<'static> {
     let store = open_credential_store(&dir.0, identity).unwrap();
-    CtapApp::with_file_store(store, AutoApprove, &INTERRUPT, identity.aaguid)
+    let mut app = CtapApp::with_file_store(store, AutoApprove, &INTERRUPT, identity.aaguid);
+    app.set_attestation_mode(certificate_mode());
+    app
+}
+
+/// The engine mode of `--attestation certificate`.
+fn certificate_mode() -> AttestationMode {
+    AttestationConfig::Certificate(IdentityStrings {
+        manufacturer: IDENTITY.manufacturer.into(),
+        product: IDENTITY.product.into(),
+        country: IDENTITY.country.into(),
+    })
+    .mode()
 }
 
 fn int(value: i64) -> Value {
@@ -194,6 +210,60 @@ fn packed_attestation_certificate_matches_authenticator_data() {
         }
     }
     println!("largest makeCredential response: {largest} of {MESSAGE_SIZE} bytes");
+}
+
+/// A daemon started without `--attestation certificate` uses self
+/// attestation, signed with the credential key and with the configured AAGUID
+/// in authenticatorData, even though an earlier run provisioned a
+/// certificate. The certificate stays in the store.
+#[test]
+fn a_provisioned_certificate_is_only_used_when_selected() {
+    let dir = TempDir::new();
+    drop(open_app(&dir, IDENTITY));
+    let provisioned = FileStore::open(&dir.0).unwrap().attestation().unwrap();
+    assert!(provisioned.is_some());
+
+    let store = FileStore::open(&dir.0).unwrap();
+    let mut app = CtapApp::with_file_store(store, AutoApprove, &INTERRUPT, IDENTITY.aaguid);
+    assert_eq!(
+        AttestationConfig::SelfAttestation.mode(),
+        AttestationMode::default()
+    );
+    let (_, client_data_hash, response) = make_credential(&mut app, CoseAlg::ES256, true);
+    assert_eq!(get(&response, &int(1)), text("packed"));
+    let auth_data = bytes(get(&response, &int(2)));
+    assert_eq!(
+        auth_data[37..53],
+        IDENTITY.aaguid,
+        "authenticatorData AAGUID"
+    );
+    let att_stmt = get(&response, &int(3));
+    let Value::Map(entries) = &att_stmt else {
+        panic!("attStmt is not a map");
+    };
+    assert!(entries.iter().all(|(key, _)| *key != text("x5c")));
+    assert_eq!(get(&att_stmt, &text("alg")), int(CoseAlg::ES256 as i64));
+
+    // The credential public key from the attested credential data.
+    let length = usize::from(u16::from_be_bytes([auth_data[53], auth_data[54]]));
+    let cose_key: Value = ciborium::de::from_reader(&auth_data[55 + length..]).unwrap();
+    let mut sec1 = vec![0x04];
+    sec1.extend(bytes(get(&cose_key, &int(-2))));
+    sec1.extend(bytes(get(&cose_key, &int(-3))));
+    let public_key = VerifyingKey::from_sec1_bytes(&sec1).unwrap();
+    let mut signed = auth_data;
+    signed.extend_from_slice(&client_data_hash);
+    let signature = Signature::from_der(&bytes(get(&att_stmt, &text("sig")))).unwrap();
+    public_key
+        .verify(&signed, &signature)
+        .expect("self attestation verifies with the credential key");
+
+    drop(app);
+    assert_eq!(
+        FileStore::open(&dir.0).unwrap().attestation().unwrap(),
+        provisioned,
+        "the certificate is kept"
+    );
 }
 
 /// After the AAGUID is changed, the certificate follows it.

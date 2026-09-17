@@ -8,6 +8,7 @@ use super::support::{
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::state::{MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES};
+use crate::ctap::AttestationMode;
 use crate::store::{CredentialStore, PinStateRecord};
 use crate::ClassicPinProtocol;
 use crate::CoseAlg;
@@ -412,6 +413,7 @@ fn unreadable_attestation_falls_back_to_self_attestation() {
     let store = TestStore::new();
     store.faults(|faults| faults.attestation = true);
     let (mut app, _) = app_with_store(store, [0x6D; 16], [], &NEVER_INTERRUPTED);
+    app.set_attestation_mode(AttestationMode::Certificate);
     let response = app
         .handle_make_credential(&make_credential_payload(RP_ID, &[0x01], None))
         .expect("makeCredential succeeds");

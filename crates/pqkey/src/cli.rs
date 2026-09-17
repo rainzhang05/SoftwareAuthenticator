@@ -171,20 +171,29 @@ pub struct DeviceArgs {
     /// HID product name
     #[clap(long, default_value = "Feitian FIDO2 Software Authenticator (ML-DSA)")]
     pub name: String,
-    /// Manufacturer named in a newly provisioned attestation certificate
-    #[clap(long, default_value = "Feitian Technologies Co., Ltd.")]
-    pub manufacturer: String,
+    /// The attestation statement registrations get
+    #[clap(long, value_enum, default_value_t = AttestationArg::SelfAttestation)]
+    pub attestation: AttestationArg,
+    /// Manufacturer named in a newly provisioned attestation certificate.
+    /// Required with --attestation certificate
+    #[clap(long, required_if_eq("attestation", "certificate"))]
+    pub manufacturer: Option<String>,
     /// Product named in a newly provisioned attestation certificate
     #[clap(long, default_value = "Feitian FIDO2 Software Authenticator (ML-DSA)")]
     pub product: String,
     /// Country (ISO 3166-1 alpha-2 code) where the manufacturer is
-    /// incorporated, named in a newly provisioned attestation certificate
-    #[clap(long, value_parser = attestation::parse_country, default_value = "CN")]
-    pub country: String,
+    /// incorporated, named in a newly provisioned attestation certificate.
+    /// Required with --attestation certificate
+    #[clap(
+        long,
+        value_parser = attestation::parse_country,
+        required_if_eq("attestation", "certificate")
+    )]
+    pub country: Option<String>,
     /// Ignored; accepted so that existing command lines keep working. The
     /// attestation certificate's serial number is random.
-    #[clap(long, hide = true, default_value = "FEITIAN-PQC-001")]
-    pub serial: String,
+    #[clap(long, hide = true)]
+    pub serial: Option<String>,
     /// Vendor ID for the virtual HID device
     #[clap(long, value_parser = maybe_hex::<u32>, default_value_t = 0x096e)]
     pub vendor_id: u32,
@@ -203,9 +212,6 @@ pub struct DeviceArgs {
     /// Authenticator AAGUID
     #[clap(long, default_value = "4645495449414E980616525A30310000")]
     pub aaguid: String,
-    /// Suppress attestation certificate material for makeCredential operations
-    #[clap(long)]
-    pub suppress_attestation: bool,
     /// Accept authenticatorReset at any time instead of only within 10 seconds
     /// of start-up. Does not conform to CTAP 2.3 section 6.6; for test rigs that
     /// reset a long-running authenticator. User presence is still required.
@@ -215,6 +221,23 @@ pub struct DeviceArgs {
     /// Backend transport to use
     #[clap(long, value_enum, default_value_t = BackendArg::Uhid)]
     pub backend: BackendArg,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum AttestationArg {
+    /// Self attestation: each registration is signed with the new
+    /// credential's own key. Relying parties learn nothing about the
+    /// authenticator from it and cannot link credentials to each other
+    #[value(name = "self")]
+    SelfAttestation,
+    /// Basic attestation with a certificate generated for this installation
+    /// (needs --manufacturer and --country). The same certificate comes with
+    /// every registration, so relying parties that compare certificates can
+    /// tell that credentials on different sites belong to the same
+    /// authenticator, and so to the same person (WebAuthn Level 3 §14.4.1)
+    Certificate,
+    /// No attestation statement (format "none")
+    None,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
@@ -270,18 +293,29 @@ impl StartCommand {
             self.device.product_id,
             self.device.version,
         );
+        let attestation = match self.device.attestation {
+            AttestationArg::SelfAttestation => service::AttestationConfig::SelfAttestation,
+            AttestationArg::None => service::AttestationConfig::None,
+            AttestationArg::Certificate => {
+                let required = |value: &Option<String>, flag: &str| {
+                    value
+                        .clone()
+                        .ok_or_else(|| format!("--attestation certificate requires {flag}"))
+                };
+                service::AttestationConfig::Certificate(service::IdentityStrings {
+                    manufacturer: required(&self.device.manufacturer, "--manufacturer")?,
+                    product: self.device.product.clone(),
+                    country: required(&self.device.country, "--country")?,
+                })
+            }
+        };
         Ok(service::RunnerConfig {
             descriptor,
             state_dir: self.state.state_dir.clone(),
             aaguid,
-            identity: service::IdentityStrings {
-                manufacturer: self.device.manufacturer.clone(),
-                product: self.device.product.clone(),
-                country: self.device.country.clone(),
-            },
+            attestation,
             presence: self.presence.presence.into_mode(),
             presence_timeout: self.presence.presence_timeout.map(Duration::from_secs),
-            suppress_attestation: self.device.suppress_attestation,
             allow_late_reset: self.device.allow_late_reset,
             backend: self.device.backend.into_backend(),
         })
@@ -700,15 +734,81 @@ mod tests {
     }
 
     #[test]
+    fn self_attestation_is_the_default() {
+        let config = attach_config(&[]).unwrap();
+        assert_eq!(
+            config.attestation,
+            service::AttestationConfig::SelfAttestation
+        );
+        // Identity strings alone do not select certificate attestation.
+        let config = attach_config(&["--manufacturer", "Example", "--country", "US"]).unwrap();
+        assert_eq!(
+            config.attestation,
+            service::AttestationConfig::SelfAttestation
+        );
+        let config = attach_config(&["--attestation", "self"]).unwrap();
+        assert_eq!(
+            config.attestation,
+            service::AttestationConfig::SelfAttestation
+        );
+    }
+
+    #[test]
+    fn attestation_none_is_selected_with_attestation() {
+        let config = attach_config(&["--attestation", "none"]).unwrap();
+        assert_eq!(config.attestation, service::AttestationConfig::None);
+        let err = attach_config(&["--attestation", "basic"]).err().unwrap();
+        assert_eq!(err.kind(), ErrorKind::InvalidValue, "{err}");
+    }
+
+    #[test]
+    fn certificate_attestation_needs_a_manufacturer_and_a_country() {
+        for args in [
+            &["--attestation", "certificate"][..],
+            &["--attestation", "certificate", "--manufacturer", "Example"],
+            &["--attestation", "certificate", "--country", "US"],
+        ] {
+            let err = attach_config(args).err().unwrap();
+            assert_eq!(
+                err.kind(),
+                ErrorKind::MissingRequiredArgument,
+                "{args:?}: {err}"
+            );
+        }
+        let config = attach_config(&[
+            "--attestation",
+            "certificate",
+            "--manufacturer",
+            "Example Manufacturer",
+            "--product",
+            "Example Authenticator",
+            "--country",
+            "us",
+        ])
+        .unwrap();
+        assert_eq!(
+            config.attestation,
+            service::AttestationConfig::Certificate(service::IdentityStrings {
+                manufacturer: "Example Manufacturer".into(),
+                product: "Example Authenticator".into(),
+                country: "US".into(),
+            })
+        );
+    }
+
+    #[test]
     fn the_certificate_country_is_an_iso_3166_code() {
-        assert_eq!(attach_config(&[]).unwrap().identity.country, "CN");
-        let config = attach_config(&["--country", "us"]).unwrap();
-        assert_eq!(config.identity.country, "US");
         for country in ["USA", "EU", "1"] {
             let err = attach_config(&["--country", country]).err().unwrap();
             assert_eq!(err.kind(), ErrorKind::ValueValidation, "{country}: {err}");
         }
         // The serial number is random now; --serial is still accepted.
-        assert!(attach_config(&["--serial", "FEITIAN-PQC-001"]).is_ok());
+        assert!(attach_config(&["--serial", "PQC-001"]).is_ok());
+    }
+
+    #[test]
+    fn the_old_suppress_attestation_flag_is_gone() {
+        let err = parse(&["attach", "--suppress-attestation"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
 }

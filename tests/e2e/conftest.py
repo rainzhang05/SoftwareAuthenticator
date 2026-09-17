@@ -5,10 +5,13 @@ named by the E2E_HIDRAW environment variable (see .github/workflows/e2e.yml):
 
     E2E_HIDRAW=/dev/hidrawN python -m pytest tests/e2e
 
-Most tests use a key started with `--presence auto-approve`. The presence
-tests use further instances, named by E2E_NOTIFY_HIDRAW (`--presence notify`,
-with DBUS_SESSION_BUS_ADDRESS naming a bus the tests' fake notification server
-can own) and E2E_UNANSWERED_HIDRAW (`--presence unanswered`).
+Most tests use a key started with `--presence auto-approve` and the default
+self attestation. Further instances are named by E2E_CERTIFICATE_HIDRAW
+(`--presence auto-approve --attestation certificate`), for the attestation
+certificate tests, and for the presence tests by E2E_NOTIFY_HIDRAW
+(`--presence notify`, with DBUS_SESSION_BUS_ADDRESS naming a bus the tests'
+fake notification server can own) and E2E_UNANSWERED_HIDRAW
+(`--presence unanswered`).
 
 They reset the authenticator (authenticatorReset) before each test, so they
 must never be pointed at a security key whose credentials matter.
@@ -28,6 +31,7 @@ It is a strict expected failure that only counts the exact failure described
 from __future__ import annotations
 
 import os
+from typing import Iterator
 
 import pytest
 from fido2.ctap2 import Ctap2
@@ -96,6 +100,15 @@ def hidraw_path() -> str:
 
 
 @pytest.fixture(scope="session")
+def certificate_hidraw_path() -> str:
+    """The key started with --presence auto-approve --attestation certificate."""
+    return _hidraw_from(
+        "E2E_CERTIFICATE_HIDRAW",
+        "virtual security key started with --presence auto-approve --attestation certificate",
+    )
+
+
+@pytest.fixture(scope="session")
 def notify_hidraw_path() -> str:
     """The key started with --presence notify, on the session bus of the tests."""
     return _hidraw_from("E2E_NOTIFY_HIDRAW", "virtual security key started with --presence notify")
@@ -132,3 +145,15 @@ def ctap(device) -> Ctap2:
     session = Ctap2(device)
     session.reset()
     return session
+
+
+@pytest.fixture
+def certificate_ctap(certificate_hidraw_path) -> Iterator[Ctap2]:
+    """A CTAP2 session on the freshly reset key with certificate attestation."""
+    dev = client.open_device(certificate_hidraw_path)
+    try:
+        session = Ctap2(dev)
+        session.reset()
+        yield session
+    finally:
+        dev.close()

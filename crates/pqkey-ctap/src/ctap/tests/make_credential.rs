@@ -7,6 +7,7 @@ use crate::ctap::cbor::canonical_map;
 use crate::ctap::make_credential::COSE_ALG_ES256;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
+use crate::ctap::AttestationMode;
 use crate::store::{AttestationRecord, PrivateKeyMaterial};
 use crate::{ClassicPinProtocol, CoseAlg, CredentialSecretKey};
 
@@ -243,6 +244,7 @@ fn make_credential_supports_es256() {
 #[test]
 fn make_credential_uses_attestation_certificate_when_available() {
     let mut app = new_app(TestStore::new(), [0xAB; 16]);
+    app.set_attestation_mode(AttestationMode::Certificate);
     let att_key_bytes = vec![0x13; 32];
     let certificate = vec![0x30, 0x82, 0x00, 0x01];
     app.store
@@ -447,9 +449,9 @@ fn make_credential_self_attestation_without_attestation_key() {
 }
 
 #[test]
-fn make_credential_can_suppress_attestation() {
+fn make_credential_can_omit_attestation() {
     let mut app = new_app(TestStore::new(), [0xDD; 16]);
-    app.suppress_attestation(true);
+    app.set_attestation_mode(AttestationMode::None);
 
     let client_hash = vec![0x33; 32];
     let rp = canonical_map(vec![(

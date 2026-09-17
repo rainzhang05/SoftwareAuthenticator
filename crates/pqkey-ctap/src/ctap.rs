@@ -65,6 +65,30 @@ impl fmt::Display for HexOption {
     }
 }
 
+/// The attestation statement makeCredential returns (WebAuthn Level 3 §6.5.3).
+///
+/// Whatever the mode, a request whose attestationFormatsPreference is only
+/// "none" gets "none", and a statement that would make the response longer
+/// than a CTAPHID message gives way to the next one: basic attestation to self
+/// attestation, and self attestation to "none".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AttestationMode {
+    /// "packed" self attestation, signed with the new credential's own key.
+    /// It proves the credential key signed the authenticatorData and names
+    /// nothing a relying party could use to recognise the authenticator.
+    #[default]
+    SelfAttestation,
+    /// "packed" basic attestation with the attestation key and certificate
+    /// chain in the store, or self attestation if the store has none.
+    ///
+    /// The certificate is the same for every credential, so relying parties
+    /// that compare it can tell that two credentials, possibly for different
+    /// sites, live on the same authenticator (WebAuthn Level 3 §14.4.1).
+    Certificate,
+    /// "none": no attestation statement.
+    None,
+}
+
 /// The CTAP2 authenticator: a CTAPHID application answering CTAPHID_CBOR.
 ///
 /// `'interrupt` is the lifetime of the interrupt flag the CTAPHID dispatcher
@@ -79,7 +103,7 @@ pub struct CtapApp<'interrupt> {
     /// False while the stored PIN state is unreadable; see
     /// [`storage::load_pin_state`].
     pin_state_writable: bool,
-    suppress_attestation: bool,
+    attestation_mode: AttestationMode,
     cred_mgmt_state: CredentialManagementState,
     pending_assertion: Option<PendingAssertion>,
     presence_timeout: Duration,
@@ -121,7 +145,7 @@ impl<'interrupt> CtapApp<'interrupt> {
             aaguid,
             pin_state,
             pin_state_writable,
-            suppress_attestation: false,
+            attestation_mode: AttestationMode::default(),
             cred_mgmt_state: CredentialManagementState::new(),
             pending_assertion: None,
             presence_timeout: DEFAULT_PRESENCE_TIMEOUT,
@@ -166,8 +190,11 @@ impl<'interrupt> CtapApp<'interrupt> {
         self.reset_window = window;
     }
 
-    pub fn suppress_attestation(&mut self, suppress: bool) {
-        self.suppress_attestation = suppress;
+    /// Which attestation statement makeCredential returns.  Defaults to
+    /// [`AttestationMode::SelfAttestation`]; the attestation record in the
+    /// store is only used with [`AttestationMode::Certificate`].
+    pub fn set_attestation_mode(&mut self, mode: AttestationMode) {
+        self.attestation_mode = mode;
     }
 
     /// `N` bytes from the injected random number generator.

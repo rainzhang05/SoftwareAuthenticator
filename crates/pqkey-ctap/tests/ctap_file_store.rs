@@ -15,7 +15,7 @@ use ctaphid_app::{App, Command};
 use heapless_bytes::Bytes;
 use p256::ecdsa::{signature::Verifier, Signature, SigningKey, VerifyingKey};
 use pqkey_ctap::ctap::presence::AutoApprove;
-use pqkey_ctap::ctap::{CtapApp, InterruptFlag};
+use pqkey_ctap::ctap::{AttestationMode, CtapApp, InterruptFlag};
 use pqkey_ctap::store::{AttestationRecord, CredentialStore, FileStore, PrivateKeyMaterial};
 use pqkey_ctap::{mldsa_paramset_from_alg, CoseAlg};
 
@@ -58,10 +58,21 @@ impl Drop for TempDir {
     }
 }
 
-/// The engine as the daemon builds it, over the store in `state_dir`.
+/// The AAGUID the tests configure.
+const AAGUID: [u8; 16] = [0x5A; 16];
+
+/// The engine as the daemon builds it by default, over the store in
+/// `state_dir`.
 fn open_app(state_dir: &Path) -> CtapApp<'static> {
     let store = FileStore::open(state_dir).expect("open file store");
-    CtapApp::with_file_store(store, AutoApprove, &INTERRUPT, [0x5A; 16])
+    CtapApp::with_file_store(store, AutoApprove, &INTERRUPT, AAGUID)
+}
+
+/// [`open_app`] with attestation mode `mode`.
+fn open_app_with(state_dir: &Path, mode: AttestationMode) -> CtapApp<'static> {
+    let mut app = open_app(state_dir);
+    app.set_attestation_mode(mode);
+    app
 }
 
 fn int(value: i64) -> Value {
@@ -297,6 +308,70 @@ fn attestation_record(certificate_len: usize) -> (AttestationRecord, VerifyingKe
     )
 }
 
+/// By default the attestation is self attestation even when the store holds
+/// an attestation key and certificate: packed, without x5c, signed with the
+/// credential's own key, and with the configured AAGUID in authenticatorData.
+#[test]
+fn self_attestation_is_the_default_even_with_a_provisioned_certificate() {
+    for alg in ALL_ALGS {
+        let dir = TempDir::new();
+        let (record, _) = attestation_record(512);
+        FileStore::open(dir.state())
+            .unwrap()
+            .set_attestation(&record)
+            .expect("provision attestation");
+
+        let mut app = open_app(&dir.state());
+        let client_data_hash = random_32();
+        let response = call_ok(
+            &mut app,
+            0x01,
+            &make_credential_request(&client_data_hash, &[0x04], alg),
+        );
+        assert_eq!(get(&response, &int(1)), text("packed"), "{alg:?}");
+        let auth_data = bytes(get(&response, &int(2)));
+        assert_eq!(
+            auth_data[37..53],
+            AAGUID,
+            "{alg:?}: authenticatorData AAGUID"
+        );
+        let att_stmt = get(&response, &int(3));
+        let Value::Map(entries) = &att_stmt else {
+            panic!("attStmt is not a map");
+        };
+        let keys: Vec<&Value> = entries.iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, [&text("alg"), &text("sig")], "{alg:?}: no x5c");
+        assert_eq!(get(&att_stmt, &text("alg")), int(alg as i64));
+        let (_, public_key) = attested_credential(&auth_data);
+        let mut message = auth_data;
+        message.extend_from_slice(&client_data_hash);
+        verify(&public_key, &message, &bytes(get(&att_stmt, &text("sig"))));
+    }
+}
+
+/// AttestationMode::None returns "none", with or without a certificate.
+#[test]
+fn attestation_mode_none_returns_the_none_format() {
+    for provisioned in [false, true] {
+        let dir = TempDir::new();
+        if provisioned {
+            FileStore::open(dir.state())
+                .unwrap()
+                .set_attestation(&attestation_record(512).0)
+                .expect("provision attestation");
+        }
+        let mut app = open_app_with(&dir.state(), AttestationMode::None);
+        let response = call_ok(
+            &mut app,
+            0x01,
+            &make_credential_request(&random_32(), &[0x05], CoseAlg::ES256),
+        );
+        assert_eq!(get(&response, &int(1)), text("none"));
+        assert_eq!(get(&response, &int(3)), map(Vec::new()));
+        assert_eq!(bytes(get(&response, &int(2)))[37..53], AAGUID);
+    }
+}
+
 #[test]
 fn packed_attestation_uses_the_provisioned_key_and_certificate_chain() {
     for alg in ALL_ALGS {
@@ -307,7 +382,7 @@ fn packed_attestation_uses_the_provisioned_key_and_certificate_chain() {
             .set_attestation(&record)
             .expect("provision attestation");
 
-        let mut app = open_app(&dir.state());
+        let mut app = open_app_with(&dir.state(), AttestationMode::Certificate);
         let client_data_hash = random_32();
         let response = call_ok(
             &mut app,
@@ -413,7 +488,7 @@ fn ml_dsa_87_make_credential_response_sizes() {
             .unwrap()
             .set_attestation(&record)
             .unwrap();
-        let mut app = open_app(&dir.state());
+        let mut app = open_app_with(&dir.state(), AttestationMode::Certificate);
         call(
             &mut app,
             0x01,

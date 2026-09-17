@@ -8,6 +8,7 @@ use super::support::{
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
+use crate::ctap::AttestationMode;
 use crate::store::AttestationRecord;
 use crate::{ClassicPinProtocol, CoseAlg};
 
@@ -150,6 +151,7 @@ fn attestation_that_would_not_fit_gives_way() {
     // ML-DSA-87 one; ML-DSA-87 self attestation does fit.
     for (alg, has_x5c) in [(CoseAlg::ES256, true), (CoseAlg::MLDSA87, false)] {
         let mut app = test_app([0x83; 16]);
+        app.set_attestation_mode(AttestationMode::Certificate);
         app.store
             .set_attestation(&attestation(5000))
             .expect("store attestation");

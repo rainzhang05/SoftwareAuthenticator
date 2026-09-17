@@ -1,4 +1,5 @@
-"""The packed attestation certificate (WebAuthn Level 3, 8.2 and 8.2.1).
+"""Attestation: self attestation by default, and the packed attestation
+certificate of `--attestation certificate` (WebAuthn Level 3, 8.2 and 8.2.1).
 
 The certificate is read with pyca/cryptography, and the ASN.1 string types and
 the serial number's encoding, which cryptography does not expose, are read from
@@ -140,7 +141,32 @@ def check_attestation_certificate(der: bytes, aaguid: bytes) -> x509.Certificate
         pytest.param(client.ML_DSA_87, id="ML-DSA-87"),
     ],
 )
-def test_packed_attestation_certificate(ctap: Ctap2, alg):
+def test_self_attestation_by_default(ctap: Ctap2, alg):
+    client_data_hash = os.urandom(32)
+    response = client.make_credential(ctap, RP_ID, client.user_entity("alice"), [alg], client_data_hash)
+    auth_data = client.AuthData.parse(response[2])
+    auth_data.check(RP_ID, up=True, uv=False, at=True)
+    assert auth_data.aaguid == client.DEFAULT_AAGUID
+
+    # Packed, without a certificate, signed with the credential's own key.
+    assert response[1] == "packed"
+    att_stmt = response[3]
+    assert set(att_stmt) == {"alg", "sig"}, att_stmt.keys()
+    assert att_stmt["alg"] == alg
+    client.verify_signature(auth_data.public_key, response[2] + client_data_hash, att_stmt["sig"])
+
+
+@pytest.mark.parametrize(
+    "alg",
+    [
+        pytest.param(client.ES256, id="ES256"),
+        pytest.param(client.ML_DSA_44, id="ML-DSA-44"),
+        pytest.param(client.ML_DSA_65, id="ML-DSA-65"),
+        pytest.param(client.ML_DSA_87, id="ML-DSA-87"),
+    ],
+)
+def test_packed_attestation_certificate(certificate_ctap: Ctap2, alg):
+    ctap = certificate_ctap
     client_data_hash = os.urandom(32)
     response = client.make_credential(ctap, RP_ID, client.user_entity("alice"), [alg], client_data_hash)
     auth_data = client.AuthData.parse(response[2])
@@ -156,5 +182,13 @@ def test_packed_attestation_certificate(ctap: Ctap2, alg):
 
     # The signature, with the certificate's key.
     client.verify_attestation(response, auth_data.public_key, client_data_hash)
-    check_attestation_certificate(att_stmt["x5c"][0], auth_data.aaguid)
+    certificate = check_attestation_certificate(att_stmt["x5c"][0], auth_data.aaguid)
     assert auth_data.aaguid == client.DEFAULT_AAGUID
+
+    # The identity strings the key was started with (.github/workflows/e2e.yml).
+    assert [value for _, _, value in subject_attributes(certificate)] == [
+        "US",
+        "pqkey E2E",
+        "Authenticator Attestation",
+        "pqkey E2E key",
+    ]

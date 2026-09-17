@@ -6,7 +6,7 @@ use std::{
 
 use pqkey_ctap::ctap::{
     presence::{AutoApprove, UserPresence},
-    CtapApp, InterruptFlag, RESET_WINDOW_AFTER_POWER_UP,
+    AttestationMode, CtapApp, InterruptFlag, RESET_WINDOW_AFTER_POWER_UP,
 };
 use pqkey_ctap::store::{AttestationRecord, CredentialStore, FileStore};
 
@@ -25,23 +25,46 @@ pub enum Backend {
     Uhid,
 }
 
-#[derive(Clone)]
+/// Who a newly provisioned attestation certificate names.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IdentityStrings {
     pub manufacturer: String,
     pub product: String,
     pub country: String,
 }
 
+/// The attestation the daemon gives registrations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AttestationConfig {
+    /// Self attestation with each credential's own key.
+    SelfAttestation,
+    /// Basic attestation with a certificate made for this installation,
+    /// naming `IdentityStrings`, and provisioned when the daemon starts.
+    Certificate(IdentityStrings),
+    /// No attestation statement.
+    None,
+}
+
+impl AttestationConfig {
+    /// The engine's attestation mode for this configuration.
+    pub fn mode(&self) -> AttestationMode {
+        match self {
+            AttestationConfig::SelfAttestation => AttestationMode::SelfAttestation,
+            AttestationConfig::Certificate(_) => AttestationMode::Certificate,
+            AttestationConfig::None => AttestationMode::None,
+        }
+    }
+}
+
 pub struct RunnerConfig {
     pub descriptor: HidDeviceDescriptor,
     pub state_dir: PathBuf,
     pub aaguid: [u8; 16],
-    pub identity: IdentityStrings,
+    pub attestation: AttestationConfig,
     pub presence: PresenceMode,
     /// How long presence requests wait for the user, if not the engine's
     /// default.
     pub presence_timeout: Option<Duration>,
-    pub suppress_attestation: bool,
     pub allow_late_reset: bool,
     pub backend: Backend,
 }
@@ -56,7 +79,8 @@ pub struct AppData {
     /// How long presence requests wait for the user, if not the engine's
     /// default.
     pub presence_timeout: Option<Duration>,
-    pub suppress_attestation: bool,
+    /// The attestation registrations get.
+    pub attestation: AttestationMode,
     /// Accept authenticatorReset after the CTAP start-up window (test rigs only).
     pub allow_late_reset: bool,
 }
@@ -74,6 +98,10 @@ pub struct AppData {
 ///
 /// A stored attestation record that cannot be read is left alone for
 /// inspection; registrations then use self attestation.
+///
+/// Only the daemon started with `--attestation certificate` calls this. In
+/// the other modes the store is opened as it is, and a certificate provisioned
+/// earlier is kept but not used.
 pub fn open_credential_store(
     state_dir: &Path,
     identity: IdentityConfig<'_>,
@@ -229,30 +257,40 @@ pub fn run(
         descriptor,
         state_dir,
         aaguid,
-        identity,
+        attestation,
         presence,
         presence_timeout,
-        suppress_attestation,
         allow_late_reset,
         backend,
     } = config;
 
     remove_and_log_legacy_state(&state_dir)?;
-    let store = open_credential_store(
-        &state_dir,
-        IdentityConfig {
-            manufacturer: &identity.manufacturer,
-            product: &identity.product,
-            country: &identity.country,
-            aaguid,
-        },
-    )?;
+    let store = match &attestation {
+        AttestationConfig::Certificate(identity) => {
+            log::warn!(
+                "--attestation certificate: every registration carries this installation's \
+                 attestation certificate, so relying parties can link its credentials across sites"
+            );
+            open_credential_store(
+                &state_dir,
+                IdentityConfig {
+                    manufacturer: &identity.manufacturer,
+                    product: &identity.product,
+                    country: &identity.country,
+                    aaguid,
+                },
+            )?
+        }
+        AttestationConfig::SelfAttestation | AttestationConfig::None => {
+            FileStore::open(&state_dir).map_err(io::Error::other)?
+        }
+    };
     let data = AppData {
         store,
         aaguid,
         presence,
         presence_timeout,
-        suppress_attestation,
+        attestation: attestation.mode(),
         allow_late_reset,
     };
 
@@ -319,7 +357,7 @@ pub fn serve_ctap_with_presence(
     let interrupt = InterruptFlag::new();
     let waiting = WaitingForUser::new();
     let mut ctap = CtapApp::with_file_store(data.store, presence, &interrupt, data.aaguid);
-    ctap.suppress_attestation(data.suppress_attestation);
+    ctap.set_attestation_mode(data.attestation);
     if let Some(timeout) = data.presence_timeout {
         ctap.set_presence_timeout(timeout);
     }
@@ -537,7 +575,7 @@ mod tests {
             aaguid: [0; 16],
             presence: PresenceMode::AutoApprove,
             presence_timeout: None,
-            suppress_attestation: false,
+            attestation: AttestationMode::SelfAttestation,
             allow_late_reset: false,
         }
     }

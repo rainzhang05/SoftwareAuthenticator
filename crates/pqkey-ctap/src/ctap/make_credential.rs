@@ -6,7 +6,7 @@ use super::pin::protocol::parse_pin_uv_auth_param;
 use super::presence::{PresenceOperation, PresenceRequest};
 use super::request;
 use super::storage::{is_discoverable, store_status};
-use super::CtapApp;
+use super::{AttestationMode, CtapApp};
 use crate::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial, StoreError};
 use crate::try_sign_challenge;
 
@@ -363,19 +363,27 @@ impl CtapApp<'_> {
         // Steps 18 and 19.  "If attestationFormatsPreference is present and
         // contains only one entry with the value "none", omit attestation from
         // the output."  Otherwise this authenticator, whose only format besides
-        // "none" is "packed", generates a packed attestation statement: basic
-        // attestation with the provisioned attestation key if there is one,
-        // else self attestation.  A response the transport cannot carry is no
-        // response, so an attestation statement that would make it longer
-        // than MAX_RESPONSE_SIZE gives way to the next one in that order and
-        // finally to "none".  (Only an unusually large certificate chain, or
-        // one combined with ML-DSA-87 self attestation, comes near the limit.)
+        // "none" is "packed", generates the statement its attestation mode
+        // asks for: self attestation, or with AttestationMode::Certificate
+        // basic attestation with the provisioned attestation key if there is
+        // one, else self attestation.  A response the transport cannot carry
+        // is no response, so an attestation statement that would make it
+        // longer than MAX_RESPONSE_SIZE gives way to the next one in that
+        // order and finally to "none".  (Only an unusually large certificate
+        // chain, or one combined with ML-DSA-87 self attestation, comes near
+        // the limit.)
         let mut kinds = Vec::with_capacity(3);
-        if !(none_requested || self.suppress_attestation) {
-            if let Some(attestation) = self.attestation_record() {
-                kinds.push(Attestation::Basic(attestation));
+        if !none_requested {
+            match self.attestation_mode {
+                AttestationMode::Certificate => {
+                    if let Some(attestation) = self.attestation_record() {
+                        kinds.push(Attestation::Basic(attestation));
+                    }
+                    kinds.push(Attestation::SelfSigned);
+                }
+                AttestationMode::SelfAttestation => kinds.push(Attestation::SelfSigned),
+                AttestationMode::None => {}
             }
-            kinds.push(Attestation::SelfSigned);
         }
         kinds.push(Attestation::None);
 
