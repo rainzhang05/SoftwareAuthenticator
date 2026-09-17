@@ -11,7 +11,9 @@ use p256::ecdsa::{
 use p256::EncodedPoint;
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
-use trussed_mldsa::{try_keypair, try_sign, MlDsaError, ParamSet, PublicKey, SecretKey};
+use trussed_mldsa::{
+    try_keypair, try_sign, try_sign_from_seed, MlDsaError, ParamSet, PublicKey, SecretKey, SEED_LEN,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub mod ctap;
@@ -374,18 +376,50 @@ pub fn try_cose_es256_public_key(point: &EncodedPoint) -> Result<Vec<u8>, Crypto
 /// Credential secret key variants supported by the authenticator.
 #[derive(Debug)]
 pub enum CredentialSecretKey {
+    /// An expanded FIPS 204 ML-DSA secret key.
     MlDsa(SecretKey),
+    /// An ML-DSA key held as its 32-byte FIPS 204 seed `ξ`, the form stored
+    /// credentials use.  Signing expands the seed directly, so no expanded
+    /// secret key encoding is produced or decoded.
+    MlDsaSeed(MlDsaSeed),
     Es256(P256SigningKey),
+}
+
+/// The 32-byte FIPS 204 key-generation seed `ξ` of an ML-DSA key.
+///
+/// Zeroized on drop; its `Debug` output is redacted.
+pub struct MlDsaSeed(Zeroizing<[u8; SEED_LEN]>);
+
+impl MlDsaSeed {
+    /// Wrap a seed.  The caller remains responsible for zeroizing `seed`'s
+    /// own copy.
+    pub fn new(seed: [u8; SEED_LEN]) -> Self {
+        MlDsaSeed(Zeroizing::new(seed))
+    }
+
+    /// Borrow the seed bytes.
+    pub fn as_bytes(&self) -> &[u8; SEED_LEN] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for MlDsaSeed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MlDsaSeed(<redacted>)")
+    }
 }
 
 impl CredentialSecretKey {
     /// Serialize the secret key into a byte buffer suitable for storage.
     ///
     /// The returned buffer is wrapped in [`Zeroizing`], so the copy is wiped
-    /// when the caller drops it.
+    /// when the caller drops it.  An ML-DSA key held as a seed serializes to
+    /// the 32-byte seed, which [`try_credential_secret_from_bytes`] accepts
+    /// back.
     pub fn secret_bytes(&self) -> Zeroizing<Vec<u8>> {
         match self {
             CredentialSecretKey::MlDsa(sk) => Zeroizing::new(sk.0.clone()),
+            CredentialSecretKey::MlDsaSeed(seed) => Zeroizing::new(seed.as_bytes().to_vec()),
             CredentialSecretKey::Es256(sk) => {
                 let mut scalar = sk.to_bytes();
                 let out = Zeroizing::new(scalar.to_vec());
@@ -424,9 +458,14 @@ pub fn try_credential_secret_from_bytes(
             Ok(CredentialSecretKey::Es256(signing_key))
         }
         CoseAlg::MLDSA44 | CoseAlg::MLDSA65 | CoseAlg::MLDSA87 => {
-            // `SecretKey` zeroizes its buffer on drop.  Length validation
-            // happens in `try_sign`, which rejects a wrong-sized key with
-            // `MlDsaError::InvalidKeyLength`.
+            // A 32-byte value is a seed: no expanded ML-DSA secret key is
+            // shorter than 2,560 bytes, so the two cannot be confused.
+            if let Ok(seed) = <[u8; SEED_LEN]>::try_from(bytes) {
+                return Ok(CredentialSecretKey::MlDsaSeed(MlDsaSeed::new(seed)));
+            }
+            // `SecretKey` zeroizes its buffer on drop.  Length and encoding
+            // validation happens in `try_sign`, which rejects a malformed key
+            // with `MlDsaError::InvalidKeyLength`.
             Ok(CredentialSecretKey::MlDsa(SecretKey(bytes.to_vec())))
         }
     }
@@ -494,6 +533,10 @@ pub fn try_sign_challenge(
             let ps = mldsa_paramset_from_alg(alg).ok_or(CryptoError::UnsupportedAlgorithm)?;
             Ok(try_sign(ps, sk, &msg)?)
         }
+        (_, CredentialSecretKey::MlDsaSeed(seed)) => {
+            let ps = mldsa_paramset_from_alg(alg).ok_or(CryptoError::UnsupportedAlgorithm)?;
+            Ok(try_sign_from_seed(ps, seed.as_bytes(), &msg)?)
+        }
         (_, _) => Err(CryptoError::KeyTypeMismatch),
     }
 }
@@ -536,6 +579,36 @@ mod tests {
             let message: Vec<u8> = auth_data.iter().chain(client_hash).cloned().collect();
             let pk = PublicKey(public_key_from_cose(&public_key_cbor));
             assert!(verify(ps, &pk, &message, &signature));
+        }
+    }
+
+    /// An ML-DSA key held as its seed signs, serializes to the seed, reads back
+    /// from it, and never prints it.
+    #[test]
+    fn mldsa_seed_key_signs_and_round_trips() {
+        for alg in [CoseAlg::MLDSA44, CoseAlg::MLDSA65, CoseAlg::MLDSA87] {
+            let ps = mldsa_paramset_from_alg(alg).expect("ML-DSA param set");
+            let seed = [0x3c; SEED_LEN];
+            let (pk, _) = trussed_mldsa::try_keypair_from_seed(ps, &seed).expect("keygen");
+
+            let key = CredentialSecretKey::MlDsaSeed(MlDsaSeed::new(seed));
+            assert_eq!(key.secret_bytes().as_slice(), &seed[..]);
+            let rendered = format!("{key:?}");
+            assert!(
+                rendered.contains("redacted") && !rendered.contains("60"),
+                "{rendered}"
+            );
+
+            let reloaded = try_credential_secret_from_bytes(alg, &key.secret_bytes()).unwrap();
+            assert!(matches!(reloaded, CredentialSecretKey::MlDsaSeed(_)));
+            for key in [&key, &reloaded] {
+                let signature = try_sign_challenge(alg, key, b"auth", b"hash").expect("sign");
+                assert!(verify(ps, &pk, b"authhash", &signature));
+            }
+            assert!(matches!(
+                try_sign_challenge(CoseAlg::ES256, &key, b"auth", b"hash"),
+                Err(CryptoError::KeyTypeMismatch)
+            ));
         }
     }
 

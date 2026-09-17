@@ -14,12 +14,12 @@ use core::fmt;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use rand_core::{OsRng, RngCore};
 use subtle::ConstantTimeEq;
-use trussed_mldsa::{try_keypair_from_seed, SEED_LEN};
+use trussed_mldsa::{try_public_key_from_seed, SEED_LEN};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
     mldsa_paramset_from_alg, try_cose_es256_public_key, try_cose_public_key,
-    try_credential_secret_from_bytes, CoseAlg, CredentialSecretKey, CryptoError,
+    try_credential_secret_from_bytes, CoseAlg, CredentialSecretKey, CryptoError, MlDsaSeed,
 };
 
 /// The private key of a credential, in its most compact form.
@@ -207,9 +207,9 @@ impl CredentialRecord {
             PrivateKeyMaterial::MlDsa { seed } => {
                 let param_set =
                     mldsa_paramset_from_alg(self.alg).ok_or(CryptoError::KeyTypeMismatch)?;
-                let (public_key, secret_key) = try_keypair_from_seed(param_set, seed)?;
+                let public_key = try_public_key_from_seed(param_set, seed)?;
                 let cose = try_cose_public_key(param_set, &public_key)?;
-                Ok((CredentialSecretKey::MlDsa(secret_key), cose))
+                Ok((CredentialSecretKey::MlDsaSeed(MlDsaSeed::new(*seed)), cose))
             }
         }
     }
@@ -219,7 +219,15 @@ impl CredentialRecord {
     ///
     /// Errors as [`Self::keypair`] does.
     pub fn secret_key(&self) -> Result<CredentialSecretKey, CryptoError> {
-        self.keypair().map(|(secret, _)| secret)
+        match &self.private_key {
+            // Signing expands the seed itself; deriving the unused public key
+            // here would be a second key generation.
+            PrivateKeyMaterial::MlDsa { seed } if self.private_key.matches(self.alg) => {
+                mldsa_paramset_from_alg(self.alg).ok_or(CryptoError::KeyTypeMismatch)?;
+                Ok(CredentialSecretKey::MlDsaSeed(MlDsaSeed::new(*seed)))
+            }
+            _ => self.keypair().map(|(secret, _)| secret),
+        }
     }
 
     /// Derive the CBOR-encoded COSE_Key of the credential's public key from
@@ -420,7 +428,7 @@ mod tests {
     use crate::try_sign_challenge;
     use ciborium::value::{Integer, Value};
     use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-    use trussed_mldsa::{verify, ParamSet, PublicKey};
+    use trussed_mldsa::{try_keypair_from_seed, verify, ParamSet, PublicKey};
 
     const ALL_ALGS: [CoseAlg; 4] = [
         CoseAlg::ES256,
