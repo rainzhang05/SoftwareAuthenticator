@@ -2,9 +2,10 @@
 //! CTAP status, keepalive signalling and cancellation.
 
 use super::support::{
-    scripted_app, scripted_app_with_interrupt, PresenceEvent, PresenceLog, SeenRequest, TestClient,
-    TestRng, NEVER_INTERRUPTED,
+    scripted_app, scripted_app_with_interrupt, PresenceEvent, PresenceLog, SeenRequest, TestRng,
+    TestStore, NEVER_INTERRUPTED,
 };
+use super::support::{stored, TestApp};
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::presence::{
     presence_status, AutoApprove, Cancellation, PresenceOperation, PresenceOutcome,
@@ -107,7 +108,7 @@ fn register_request() -> SeenRequest {
 /// and `outcomes` scripted for the requests that follow.
 fn app_with_credential(
     outcomes: impl IntoIterator<Item = PresenceOutcome>,
-) -> (CtapApp<TestClient>, PresenceLog) {
+) -> (TestApp, PresenceLog) {
     let script: Vec<_> = std::iter::once(PresenceOutcome::Approved)
         .chain(outcomes)
         .collect();
@@ -138,7 +139,7 @@ fn make_credential_refused_or_timed_out_is_operation_denied() {
             Err(CTAP2_ERR_OPERATION_DENIED),
             "{outcome:?}"
         );
-        assert!(app.stored_credentials.is_empty(), "{outcome:?}");
+        assert!(stored(&app).is_empty(), "{outcome:?}");
         assert_eq!(log.take(), asked(register_request()), "{outcome:?}");
     }
 }
@@ -150,7 +151,7 @@ fn make_credential_returns_keepalive_cancel_when_cancelled() {
         app.handle_make_credential(&make_credential_payload()),
         Err(CTAP2_ERR_KEEPALIVE_CANCEL)
     );
-    assert!(app.stored_credentials.is_empty());
+    assert!(stored(&app).is_empty());
     assert_eq!(log.take(), asked(register_request()));
 }
 
@@ -171,7 +172,7 @@ fn make_credential_recovers_after_cancellation() {
         .handle_make_credential(&payload)
         .expect("makeCredential succeeds after cancellation");
     assert_eq!(response[0], CTAP2_OK);
-    assert_eq!(app.stored_credentials.len(), 1);
+    assert_eq!(stored(&app).len(), 1);
     assert_eq!(log.take(), asked(register_request()));
 }
 
@@ -189,7 +190,7 @@ fn cancelled_request_is_not_shown_to_the_user() {
         Err(CTAP2_ERR_KEEPALIVE_CANCEL)
     );
     assert_eq!(log.take(), []);
-    assert!(app.stored_credentials.is_empty());
+    assert!(stored(&app).is_empty());
 }
 
 #[test]
@@ -222,7 +223,7 @@ fn get_assertion_refused_timed_out_or_cancelled_signs_nothing() {
             Err(status),
             "{outcome:?}"
         );
-        assert_eq!(app.stored_credentials[0].sign_count, 0, "{outcome:?}");
+        assert_eq!(stored(&app)[0].sign_count, 0, "{outcome:?}");
         assert!(app.pending_assertion.is_none(), "{outcome:?}");
         assert_eq!(
             log.take(),
@@ -244,7 +245,7 @@ fn reset_asks_the_user_and_erases_nothing_unless_approved() {
     ] {
         let (mut app, log) = app_with_credential([outcome]);
         assert_eq!(app.handle_reset(), Err(status), "{outcome:?}");
-        assert_eq!(app.stored_credentials.len(), 1, "{outcome:?}");
+        assert_eq!(stored(&app).len(), 1, "{outcome:?}");
         assert_eq!(
             log.take(),
             asked(SeenRequest::new(PresenceOperation::Reset, None)),
@@ -254,7 +255,7 @@ fn reset_asks_the_user_and_erases_nothing_unless_approved() {
 
     let (mut app, log) = app_with_credential([PresenceOutcome::Approved]);
     assert_eq!(app.handle_reset(), Ok(vec![CTAP2_OK]));
-    assert!(app.stored_credentials.is_empty());
+    assert!(stored(&app).is_empty());
     assert_eq!(
         log.take(),
         asked(SeenRequest::new(PresenceOperation::Reset, None))
@@ -335,7 +336,7 @@ impl UserPresence for PanickingPresence {
 #[test]
 fn waiting_for_the_user_ends_even_if_the_presence_implementation_panics() {
     let mut app = CtapApp::new(
-        TestClient::new(),
+        TestStore::new(),
         TestRng::new(29),
         PanickingPresence,
         &NEVER_INTERRUPTED,

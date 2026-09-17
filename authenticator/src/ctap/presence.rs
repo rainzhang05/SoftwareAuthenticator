@@ -13,7 +13,6 @@
 
 use std::time::Duration;
 
-use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use trussed_core::InterruptFlag;
 
 use super::CtapApp;
@@ -190,10 +189,7 @@ impl Drop for WaitingForUser<'_> {
     }
 }
 
-impl<C> CtapApp<C>
-where
-    C: TrussedClient + FilesystemClient + CryptoClient,
-{
+impl CtapApp<'_> {
     /// Ask for evidence of user interaction, and return the CTAP status for
     /// anything but approval.  A request the platform has already cancelled
     /// is never shown to the user.

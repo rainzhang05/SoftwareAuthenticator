@@ -7,11 +7,10 @@ use super::pin::protocol::{
     decrypt, parse_pin_uv_auth_param, parse_pin_uv_auth_protocol, verify, HmacSha256, PinProtocol,
 };
 use super::presence::{PresenceOperation, PresenceRequest};
-use super::storage::StoredCredential;
+use super::storage::store_status;
 use super::CtapApp;
-use crate::{
-    credential_secret_from_bytes, sign_challenge, ClassicPinProtocol, CoseAlg, PinUvSessionKeys,
-};
+use crate::store::{sort_newest_first, CredentialRecord};
+use crate::{try_sign_challenge, ClassicPinProtocol, PinUvSessionKeys};
 
 use ciborium::{
     de::from_reader,
@@ -20,7 +19,6 @@ use ciborium::{
 };
 use hmac::Mac;
 use sha2::{Digest, Sha256};
-use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::ctap::constants::*;
@@ -34,19 +32,17 @@ struct PendingHmacSecret {
 }
 
 impl PendingHmacSecret {
-    /// `output1 [|| output2]` with `outputN = HMAC-SHA-256(CredRandom, saltN)`,
-    /// or `None` when the credential has no CredRandom (CTAP 2.3 §12.7).
-    fn outputs_for(&self, cred_random: Option<&Vec<u8>>) -> Result<Option<Zeroizing<Vec<u8>>>, u8> {
-        let Some(random) = cred_random else {
-            return Ok(None);
-        };
+    /// `output1 [|| output2]` with `outputN = HMAC-SHA-256(CredRandom, saltN)`
+    /// (CTAP 2.3 §12.7).
+    fn outputs_for(&self, cred_random: &[u8; 32]) -> Result<Zeroizing<Vec<u8>>, u8> {
         let mut outputs = Zeroizing::new(Vec::with_capacity(self.salt_plaintext.len()));
         for salt in self.salt_plaintext.chunks(32) {
-            let mut hmac = HmacSha256::new_from_slice(random).map_err(|_| CTAP2_ERR_PROCESSING)?;
+            let mut hmac =
+                HmacSha256::new_from_slice(cred_random).map_err(|_| CTAP2_ERR_PROCESSING)?;
             hmac.update(salt);
             outputs.extend_from_slice(&hmac.finalize().into_bytes());
         }
-        Ok(Some(outputs))
+        Ok(outputs)
     }
 }
 
@@ -72,16 +68,13 @@ struct HmacSecretRequest {
     protocol: PinProtocol,
 }
 
-impl<C> CtapApp<C>
-where
-    C: TrussedClient + FilesystemClient + CryptoClient,
-{
+impl CtapApp<'_> {
     fn credential_allows(
-        credential: &StoredCredential,
+        credential: &CredentialRecord,
         user_verified: bool,
         allow_list_provided: bool,
     ) -> bool {
-        match credential.cred_protect.unwrap_or(1) {
+        match credential.cred_protect {
             3 => user_verified,
             2 => user_verified || allow_list_provided,
             _ => true,
@@ -91,10 +84,10 @@ where
     fn process_hmac_secret_for_assertion(
         &mut self,
         request: &HmacSecretRequest,
-        cred_random_with_uv: Option<&Vec<u8>>,
-        cred_random_without_uv: Option<&Vec<u8>>,
+        cred_random_with_uv: &[u8; 32],
+        cred_random_without_uv: &[u8; 32],
         user_verified: bool,
-    ) -> Result<(Option<Vec<u8>>, PendingHmacSecret), u8> {
+    ) -> Result<(Vec<u8>, PendingHmacSecret), u8> {
         // "The authenticator calls decapsulate on the provided platform
         // key-agreement key to obtain a shared secret." (CTAP 2.3 §12.7)
         let keys = self.decapsulate(request.protocol, &request.key_agreement)?;
@@ -136,14 +129,10 @@ where
     fn encrypt_hmac_secret_outputs(
         &mut self,
         pending: &PendingHmacSecret,
-        cred_random: Option<&Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, u8> {
-        match pending.outputs_for(cred_random)? {
-            Some(outputs) => self
-                .encrypt_for_platform(pending.protocol, &pending.keys, &outputs)
-                .map(Some),
-            None => Ok(None),
-        }
+        cred_random: &[u8; 32],
+    ) -> Result<Vec<u8>, u8> {
+        let outputs = pending.outputs_for(cred_random)?;
+        self.encrypt_for_platform(pending.protocol, &pending.keys, &outputs)
     }
 
     fn assertion_auth_data(
@@ -278,9 +267,8 @@ where
             self.ensure_pin_token_permission_for_rp(PIN_PERMISSION_GA, &rp_id)?;
         }
 
-        let mut credentials = self.load_credentials()?;
-
-        let mut matching_indices: Vec<usize> = Vec::new();
+        // CTAP 2.3 §6.2.2 step 7: locate the applicable credentials.
+        let mut applicable: Vec<CredentialRecord> = Vec::new();
         if let Some(list) = allow_list.as_ref() {
             for descriptor in list {
                 let Value::Map(desc_map) = descriptor else {
@@ -290,28 +278,27 @@ where
                 else {
                     continue;
                 };
-                if let Some(pos) = credentials.iter().position(|cred| {
-                    cred.credential_id == *id
-                        && cred.rp_id == rp_id
-                        && Self::credential_allows(cred, user_verified, true)
-                }) {
-                    if !matching_indices.contains(&pos) {
-                        matching_indices.push(pos);
+                if applicable.iter().any(|cred| cred.credential_id == *id) {
+                    continue;
+                }
+                if let Some(cred) = self.stored_credential(id)? {
+                    if cred.rp_id == rp_id && Self::credential_allows(&cred, user_verified, true) {
+                        applicable.push(cred);
                     }
                 }
             }
-            if matching_indices.is_empty() {
-                return Err(CTAP2_ERR_NO_CREDENTIALS);
-            }
+            sort_newest_first(&mut applicable);
         } else {
-            for (index, cred) in credentials.iter().enumerate() {
-                if cred.rp_id == rp_id && Self::credential_allows(cred, user_verified, false) {
-                    matching_indices.push(index);
-                }
-            }
-            if matching_indices.is_empty() {
-                return Err(CTAP2_ERR_NO_CREDENTIALS);
-            }
+            applicable = self
+                .stored_credentials()?
+                .into_iter()
+                .filter(|cred| {
+                    cred.rp_id == rp_id && Self::credential_allows(cred, user_verified, false)
+                })
+                .collect();
+        }
+        if applicable.is_empty() {
+            return Err(CTAP2_ERR_NO_CREDENTIALS);
         }
 
         let timeout = self.presence_timeout;
@@ -323,80 +310,35 @@ where
         self.pin_state
             .consume_pin_uv_auth_token_after_user_presence();
 
-        let chosen_index = matching_indices[0];
-        let remaining_credentials: VecDeque<Vec<u8>> = matching_indices
-            .iter()
-            .skip(1)
-            .map(|idx| credentials[*idx].credential_id.clone())
-            .collect();
+        // Most recently created first (§6.2.2 step 12.2.1).
+        let mut applicable = applicable.into_iter();
+        let credential = applicable.next().ok_or(CTAP2_ERR_NO_CREDENTIALS)?;
+        let remaining_credentials: VecDeque<Vec<u8>> =
+            applicable.map(|cred| cred.credential_id.clone()).collect();
         let remaining_count = remaining_credentials.len();
 
-        let (
-            credential_id,
-            user_id,
-            user_name,
-            user_display_name,
-            secret_key_bytes,
-            sign_count,
-            alg,
-            cred_random_with_uv,
-            cred_random_without_uv,
-        ) = {
-            let credential = &mut credentials[chosen_index];
-            let alg =
-                CoseAlg::try_from(credential.alg).map_err(|_| CTAP2_ERR_UNSUPPORTED_ALGORITHM)?;
-            let secret_key_bytes = credential.secret_key.clone();
-            credential.sign_count = credential.sign_count.saturating_add(1);
-            let sign_count = credential.sign_count;
-            (
-                credential.credential_id.clone(),
-                credential.user_id.clone(),
-                credential.user_name.clone(),
-                credential.user_display_name.clone(),
-                secret_key_bytes,
-                sign_count,
-                alg,
-                credential.cred_random_with_uv.clone(),
-                credential.cred_random_without_uv.clone(),
-            )
-        };
-
-        let signing_key = credential_secret_from_bytes(alg, &secret_key_bytes)
-            .map_err(|_| CTAP2_ERR_PROCESSING)?;
         let mut extension_entries = Vec::new();
         let mut pending_hmac_secret = None;
         if let Some(ref request) = hmac_secret_request {
-            let (maybe_encrypted, pending_state) = self.process_hmac_secret_for_assertion(
+            let (encrypted, pending_state) = self.process_hmac_secret_for_assertion(
                 request,
-                cred_random_with_uv.as_ref(),
-                cred_random_without_uv.as_ref(),
+                &credential.cred_random_with_uv,
+                &credential.cred_random_without_uv,
                 user_verified,
             )?;
-            if let Some(encrypted) = maybe_encrypted {
-                extension_entries
-                    .push((Value::Text("hmac-secret".into()), Value::Bytes(encrypted)));
-            }
+            extension_entries.push((Value::Text("hmac-secret".into()), Value::Bytes(encrypted)));
             pending_hmac_secret = Some(pending_state);
         }
+        let extension_bytes = encode_extensions(extension_entries)?;
 
-        let extension_bytes = if extension_entries.is_empty() {
-            None
-        } else {
-            let map = canonical_map(extension_entries);
-            let mut encoded = Vec::new();
-            into_writer(&map, &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
-            Some(encoded)
-        };
-
-        let auth_data = self.assertion_auth_data(
+        let (credential, auth_data, signature) = self.sign_assertion(
+            credential,
             &rp_id,
-            sign_count,
+            &client_hash,
             user_present,
             user_verified,
             extension_bytes.as_deref(),
-        );
-        let signature = sign_challenge(alg, &signing_key, &auth_data, &client_hash);
-        self.save_credentials(&credentials)?;
+        )?;
 
         if remaining_count != 0 {
             self.pending_assertion = Some(PendingAssertion {
@@ -409,45 +351,8 @@ where
             });
         }
 
-        let credential_map = canonical_map(vec![
-            (Value::Text("type".into()), Value::Text("public-key".into())),
-            (
-                Value::Text("id".into()),
-                Value::Bytes(credential_id.clone()),
-            ),
-        ]);
-
-        let mut user_entries = vec![(Value::Text("id".into()), Value::Bytes(user_id))];
-        if let Some(name) = user_name {
-            user_entries.push((Value::Text("name".into()), Value::Text(name)));
-        }
-        if let Some(display) = user_display_name {
-            user_entries.push((Value::Text("displayName".into()), Value::Text(display)));
-        }
-        let user_map = canonical_map(user_entries);
-
-        let mut response = vec![
-            (Value::Integer(Integer::from(1)), credential_map),
-            (Value::Integer(Integer::from(2)), Value::Bytes(auth_data)),
-            (Value::Integer(Integer::from(3)), Value::Bytes(signature)),
-            (Value::Integer(Integer::from(4)), user_map),
-        ];
-
-        if remaining_count != 0 {
-            let total_count = 1 + remaining_count;
-            response.push((
-                Value::Integer(Integer::from(5)),
-                Value::Integer(Integer::from(total_count as u64)),
-            ));
-        }
-
-        canonical_sort(&mut response);
-        let mut encoded = Vec::new();
-        into_writer(&Value::Map(response), &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
-        let mut out = Vec::with_capacity(1 + encoded.len());
-        out.push(CTAP2_OK);
-        out.extend_from_slice(&encoded);
-        Ok(out)
+        let number_of_credentials = (remaining_count != 0).then_some(1 + remaining_count);
+        assertion_response(&credential, auth_data, signature, number_of_credentials)
     }
 
     pub(super) fn handle_get_next_assertion(&mut self) -> Result<Vec<u8>, u8> {
@@ -457,92 +362,145 @@ where
             .pop_front()
             .ok_or(CTAP2_ERR_NOT_ALLOWED)?;
 
-        let mut credentials = self.load_credentials()?;
-        let credential = credentials
-            .iter_mut()
-            .find(|cred| cred.rp_id == pending.rp_id && cred.credential_id == credential_id)
+        let credential = self
+            .stored_credential(&credential_id)?
+            .filter(|cred| cred.rp_id == pending.rp_id)
             .ok_or(CTAP2_ERR_NO_CREDENTIALS)?;
 
-        let alg = CoseAlg::try_from(credential.alg).map_err(|_| CTAP2_ERR_UNSUPPORTED_ALGORITHM)?;
-        let secret_key_bytes = credential.secret_key.clone();
-        credential.sign_count = credential.sign_count.saturating_add(1);
-        let sign_count = credential.sign_count;
-        let user_id = credential.user_id.clone();
-        let user_name = credential.user_name.clone();
-        let user_display_name = credential.user_display_name.clone();
-        let cred_random_with_uv = credential.cred_random_with_uv.clone();
-        let cred_random_without_uv = credential.cred_random_without_uv.clone();
-
-        let signing_key = credential_secret_from_bytes(alg, &secret_key_bytes)
-            .map_err(|_| CTAP2_ERR_PROCESSING)?;
         let mut extension_entries = Vec::new();
         if let Some(ref hmac_state) = pending.hmac_secret {
             let cred_random = if pending.user_verified {
-                cred_random_with_uv.as_ref()
+                &credential.cred_random_with_uv
             } else {
-                cred_random_without_uv.as_ref()
+                &credential.cred_random_without_uv
             };
-            if let Some(encrypted) = self.encrypt_hmac_secret_outputs(hmac_state, cred_random)? {
-                extension_entries
-                    .push((Value::Text("hmac-secret".into()), Value::Bytes(encrypted)));
-            }
+            let encrypted = self.encrypt_hmac_secret_outputs(hmac_state, cred_random)?;
+            extension_entries.push((Value::Text("hmac-secret".into()), Value::Bytes(encrypted)));
         }
+        let extension_bytes = encode_extensions(extension_entries)?;
 
-        let extension_bytes = if extension_entries.is_empty() {
-            None
-        } else {
-            let map = canonical_map(extension_entries);
-            let mut encoded = Vec::new();
-            into_writer(&map, &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
-            Some(encoded)
-        };
-
-        let auth_data = self.assertion_auth_data(
+        let (credential, auth_data, signature) = self.sign_assertion(
+            credential,
             &pending.rp_id,
-            sign_count,
+            &pending.client_hash,
             pending.user_present,
             pending.user_verified,
             extension_bytes.as_deref(),
-        );
-        let signature = sign_challenge(
-            alg,
-            &signing_key,
-            &auth_data,
-            pending.client_hash.as_slice(),
-        );
-        self.save_credentials(&credentials)?;
+        )?;
 
         if !pending.remaining_credentials.is_empty() {
             self.pending_assertion = Some(pending);
         }
 
-        let credential_map = canonical_map(vec![
-            (Value::Text("type".into()), Value::Text("public-key".into())),
-            (Value::Text("id".into()), Value::Bytes(credential_id)),
-        ]);
-
-        let mut user_entries = vec![(Value::Text("id".into()), Value::Bytes(user_id))];
-        if let Some(name) = user_name {
-            user_entries.push((Value::Text("name".into()), Value::Text(name)));
-        }
-        if let Some(display) = user_display_name {
-            user_entries.push((Value::Text("displayName".into()), Value::Text(display)));
-        }
-        let user_map = canonical_map(user_entries);
-
-        let mut response = vec![
-            (Value::Integer(Integer::from(1)), credential_map),
-            (Value::Integer(Integer::from(2)), Value::Bytes(auth_data)),
-            (Value::Integer(Integer::from(3)), Value::Bytes(signature)),
-            (Value::Integer(Integer::from(4)), user_map),
-        ];
-
-        canonical_sort(&mut response);
-        let mut encoded = Vec::new();
-        into_writer(&Value::Map(response), &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
-        let mut out = Vec::with_capacity(1 + encoded.len());
-        out.push(CTAP2_OK);
-        out.extend_from_slice(&encoded);
-        Ok(out)
+        assertion_response(&credential, auth_data, signature, None)
     }
+
+    /// Increment `credential`'s signature counter, persist it, and sign
+    /// `authData || clientDataHash` with the new count.
+    ///
+    /// The counter is written before the signature is made, and a failed
+    /// write fails the command: a signature is never returned for a counter
+    /// that was not saved, so the counter a relying party sees can never go
+    /// backwards after a restart (WebAuthn Level 3 §6.1.1, "SHOULD ensure
+    /// that the signature counter value does not accidentally decrease").
+    /// The signing key is materialised once, which for ML-DSA is one key
+    /// expansion from the stored seed.
+    fn sign_assertion(
+        &mut self,
+        mut credential: CredentialRecord,
+        rp_id: &str,
+        client_hash: &[u8],
+        user_present: bool,
+        user_verified: bool,
+        extensions: Option<&[u8]>,
+    ) -> Result<(CredentialRecord, Vec<u8>, Vec<u8>), u8> {
+        let secret_key = credential.secret_key().map_err(|err| {
+            log::error!("cannot use a stored credential's key: {err}");
+            CTAP2_ERR_PROCESSING
+        })?;
+        credential.sign_count = credential.sign_count.saturating_add(1);
+        self.store
+            .put(&credential)
+            .map_err(|err| store_status("save the signature counter", err))?;
+
+        let auth_data = self.assertion_auth_data(
+            rp_id,
+            credential.sign_count,
+            user_present,
+            user_verified,
+            extensions,
+        );
+        let signature = try_sign_challenge(credential.alg, &secret_key, &auth_data, client_hash)
+            .map_err(|err| {
+                log::error!(
+                    "assertion signature with {:?} failed: {err}",
+                    credential.alg
+                );
+                CTAP2_ERR_PROCESSING
+            })?;
+        Ok((credential, auth_data, signature))
+    }
+}
+
+/// The CBOR extension outputs for authenticator data, or `None` if empty.
+fn encode_extensions(entries: Vec<(Value, Value)>) -> Result<Option<Vec<u8>>, u8> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let mut encoded = Vec::new();
+    into_writer(&canonical_map(entries), &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
+    Ok(Some(encoded))
+}
+
+/// The authenticatorGetAssertion response, with `numberOfCredentials` only
+/// when given (it is omitted from authenticatorGetNextAssertion responses).
+fn assertion_response(
+    credential: &CredentialRecord,
+    auth_data: Vec<u8>,
+    signature: Vec<u8>,
+    number_of_credentials: Option<usize>,
+) -> Result<Vec<u8>, u8> {
+    let credential_map = canonical_map(vec![
+        (Value::Text("type".into()), Value::Text("public-key".into())),
+        (
+            Value::Text("id".into()),
+            Value::Bytes(credential.credential_id.clone()),
+        ),
+    ]);
+
+    let mut user_entries = vec![(
+        Value::Text("id".into()),
+        Value::Bytes(credential.user_id.clone()),
+    )];
+    if let Some(name) = &credential.user_name {
+        user_entries.push((Value::Text("name".into()), Value::Text(name.clone())));
+    }
+    if let Some(display) = &credential.user_display_name {
+        user_entries.push((
+            Value::Text("displayName".into()),
+            Value::Text(display.clone()),
+        ));
+    }
+    let user_map = canonical_map(user_entries);
+
+    let mut response = vec![
+        (Value::Integer(Integer::from(1)), credential_map),
+        (Value::Integer(Integer::from(2)), Value::Bytes(auth_data)),
+        (Value::Integer(Integer::from(3)), Value::Bytes(signature)),
+        (Value::Integer(Integer::from(4)), user_map),
+    ];
+    if let Some(total) = number_of_credentials {
+        response.push((
+            Value::Integer(Integer::from(5)),
+            Value::Integer(Integer::from(total as u64)),
+        ));
+    }
+
+    canonical_sort(&mut response);
+    let mut encoded = Vec::new();
+    into_writer(&Value::Map(response), &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
+    let mut out = Vec::with_capacity(1 + encoded.len());
+    out.push(CTAP2_OK);
+    out.extend_from_slice(&encoded);
+    Ok(out)
 }

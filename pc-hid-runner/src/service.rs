@@ -1,26 +1,23 @@
 use std::{
     io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
-    thread,
-    time::Duration,
 };
 
 use authenticator::ctap::{presence::AutoApprove, CtapApp, InterruptFlag};
-use rand::rngs::OsRng;
+use authenticator::store::{AttestationRecord, CredentialStore, FileStore};
 use sha2::{Digest, Sha256};
 use transport_core::state::{
-    reset_state_dir, IdentityConfig, PersistentStore, StoredPinState, DEFAULT_PIN_RETRIES,
+    generate_attestation_certificate, reset_state_dir, IdentityConfig, PersistentStore,
+    StoredPinState, DEFAULT_PIN_RETRIES,
 };
-use transport_core::{
-    set_waiting, Apps as TrussedApps, Builder, Client, Options, Platform, Syscall,
-};
+use transport_core::{set_waiting, Apps as TrussedApps, Builder, Options, Platform, Syscall};
 use trussed::{
     backend::{CoreOnly, NoId},
-    pipe::{ServiceEndpoint, TrussedChannel},
+    pipe::ServiceEndpoint,
     service::Service,
-    types::{CoreContext, NoData},
+    types::NoData,
 };
+use zeroize::Zeroize;
 
 use crate::{
     exec,
@@ -51,33 +48,30 @@ pub struct RunnerConfig {
     pub backend: Backend,
 }
 
-#[derive(Clone, Copy)]
 pub struct AppData {
+    /// The credential store in the state directory.
+    pub store: FileStore,
     pub aaguid: [u8; 16],
     pub auto_user_presence: bool,
     pub suppress_attestation: bool,
 }
 
 pub struct Apps {
-    ctap: CtapApp<Client>,
+    ctap: CtapApp<'static>,
 }
 
 impl<'a> TrussedApps<'a, CoreOnly> for Apps {
     type Data = AppData;
 
     fn new(
-        service: &mut Service<Platform, CoreOnly>,
-        endpoints: &mut Vec<ServiceEndpoint<'static, NoId, NoData>>,
-        syscall: Syscall,
+        _service: &mut Service<Platform, CoreOnly>,
+        _endpoints: &mut Vec<ServiceEndpoint<'static, NoId, NoData>>,
+        _syscall: Syscall,
         data: Self::Data,
     ) -> Self {
-        // Only one `Apps` can exist at a time; the channel is released again
-        // when the runner drops it.
-        static CHANNEL: TrussedChannel = TrussedChannel::new();
-        let (requester, responder) = CHANNEL.split().expect("Trussed channel split");
-        let context = CoreContext::new(littlefs2::path!("authenticator").into());
-        endpoints.push(ServiceEndpoint::new(responder, context, &[]));
-        let client = Client::new(requester, syscall, None);
+        // The CTAP engine makes no Trussed requests, so no client is created
+        // and dropping `_syscall` lets the runner's service thread finish.
+        //
         // Cancels the request being processed. There is one `Apps` at a time.
         static INTERRUPT: InterruptFlag = InterruptFlag::new();
         if !data.auto_user_presence {
@@ -85,9 +79,7 @@ impl<'a> TrussedApps<'a, CoreOnly> for Apps {
                 "asking the user for presence is not implemented yet; approving every request"
             );
         }
-        let mut ctap = serving_syscalls(service, endpoints, || {
-            CtapApp::new(client, OsRng, AutoApprove, &INTERRUPT, data.aaguid)
-        });
+        let mut ctap = CtapApp::with_file_store(data.store, AutoApprove, &INTERRUPT, data.aaguid);
         ctap.suppress_attestation(data.suppress_attestation);
         ctap.set_keepalive_callback(set_waiting);
         Self { ctap }
@@ -101,37 +93,35 @@ impl<'a> TrussedApps<'a, CoreOnly> for Apps {
     }
 }
 
-/// Run `construct` while another thread answers Trussed requests.
+/// Open the credential store in `state_dir`, and provision the attestation key
+/// and certificate if it has none.
 ///
-/// `CtapApp::new` reads the persisted PIN state through a Trussed syscall and
-/// busy-waits for the reply, but `transport_core::Runner::exec` only starts
-/// the thread that answers syscalls after `Apps::new` has returned. Without
-/// this, startup never gets past constructing the app.
-fn serving_syscalls<T>(
-    service: &mut Service<Platform, CoreOnly>,
-    endpoints: &mut [ServiceEndpoint<'static, NoId, NoData>],
-    construct: impl FnOnce() -> T,
-) -> T {
-    /// Stops the helper thread even if `construct` panics.
-    struct SetOnDrop<'a>(&'a AtomicBool);
-
-    impl Drop for SetOnDrop<'_> {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
+/// A stored attestation record that cannot be read is left alone for
+/// inspection; registrations then use self attestation.
+pub fn open_credential_store(
+    state_dir: &Path,
+    identity: IdentityConfig<'_>,
+) -> io::Result<FileStore> {
+    let mut store = FileStore::open(state_dir).map_err(io::Error::other)?;
+    match store.attestation() {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let (mut private_key, certificate) = generate_attestation_certificate(&identity)?;
+            let record = AttestationRecord {
+                private_key: private_key.as_slice().try_into().map_err(|_| {
+                    io::Error::other("the generated attestation key is not 32 bytes")
+                })?,
+                certificate_chain: vec![certificate],
+            };
+            private_key.zeroize();
+            store.set_attestation(&record).map_err(io::Error::other)?;
+            log::info!("provisioned a new attestation key and certificate");
+        }
+        Err(err) => {
+            log::warn!("the attestation record cannot be read ({err}); using self attestation");
         }
     }
-
-    let constructed = AtomicBool::new(false);
-    thread::scope(|scope| {
-        scope.spawn(|| {
-            while !constructed.load(Ordering::Acquire) {
-                service.process(endpoints);
-                thread::sleep(Duration::from_millis(1));
-            }
-        });
-        let _stop_helper = SetOnDrop(&constructed);
-        construct()
-    })
+    Ok(store)
 }
 
 /// Run the authenticator until the device fails or `shutdown` is requested.
@@ -153,16 +143,21 @@ pub fn run(
         backend,
     } = config;
 
-    let mut persistent = PersistentStore::new(&state_dir)?;
-    persistent.initialize_identity(IdentityConfig {
-        aaguid,
-        manufacturer: &identity.manufacturer,
-        product: &identity.product,
-        serial: &identity.serial,
-    })?;
-    let store = persistent.store();
-    let platform = Platform::new(store);
+    let credential_store = open_credential_store(
+        &state_dir,
+        IdentityConfig {
+            aaguid,
+            manufacturer: &identity.manufacturer,
+            product: &identity.product,
+            serial: &identity.serial,
+        },
+    )?;
+    // The Trussed runner still needs a platform; the CTAP engine no longer
+    // stores anything in it.
+    let persistent = PersistentStore::new(&state_dir)?;
+    let platform = Platform::new(persistent.store());
     let data = AppData {
+        store: credential_store,
         aaguid,
         auto_user_presence,
         suppress_attestation,
@@ -393,7 +388,7 @@ mod tests {
         DEFAULT_MESSAGE_SIZE,
     };
     use heapless_bytes::Bytes;
-    use std::sync::mpsc;
+    use std::{sync::mpsc, thread, time::Duration};
     use transport_core::Transport;
 
     // Test characters by UTF-8 width, so the boundaries below are explicit.
@@ -582,8 +577,8 @@ mod tests {
     impl<'interrupt, D: trussed::backend::Dispatch> Transport<'interrupt, D> for OneRequestTransport {
         fn poll<A: TrussedApps<'interrupt, D>>(&mut self, apps: &mut A) -> io::Result<bool> {
             self.shutdown.check()?;
-            // authenticatorReset writes to storage, so it only completes if
-            // the runner's Trussed service thread is answering syscalls.
+            // authenticatorReset clears the credential store, so this also
+            // checks the store opened for the runner works.
             const CTAP_RESET: u8 = 0x07;
             let status = apps.with_ctaphid_apps(
                 |apps: &mut [&mut dyn App<'interrupt, DEFAULT_MESSAGE_SIZE>]| {
@@ -632,6 +627,7 @@ mod tests {
                 device_class: None,
             };
             let data = AppData {
+                store: FileStore::open(&state_dir).expect("open credential store"),
                 aaguid: [0; 16],
                 auto_user_presence: true,
                 suppress_attestation: false,

@@ -4,13 +4,13 @@
 use super::support::new_app;
 use super::support::{
     classic_encrypt, classic_pin_auth, corrupt_mac, derive_classic_session,
-    install_pin_uv_auth_token, request_classic_key_agreement, token_pin_auth, TestClient,
+    install_pin_uv_auth_token, request_classic_key_agreement, token_pin_auth, TestStore,
 };
+use super::support::{credential, insert, stored, stored_by_id};
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::{HmacSha256, PIN_UV_AUTH_PROTOCOL_CLASSIC};
-use crate::ctap::storage::StoredCredential;
-use crate::{create_credential, ClassicPinProtocol, CoseAlg, CredentialSecretKey};
+use crate::{ClassicPinProtocol, CoseAlg, CredentialSecretKey};
 
 use ciborium::{
     de::from_reader,
@@ -28,7 +28,7 @@ use crate::ctap::constants::*;
 
 #[test]
 fn get_assertion_response_encoding_is_canonical() {
-    let mut app = new_app(TestClient::new(), [0x11; 16]);
+    let mut app = new_app(TestStore::new(), [0x11; 16]);
     let rp_id = "example.com";
     let client_hash = vec![0x22; 32];
     let pin_token = [0x33; 32];
@@ -47,23 +47,13 @@ fn get_assertion_response_encoding_is_canonical() {
     let user_display = "User".to_string();
     let credential_id = vec![0xAA, 0xBB, 0xCC];
     let alg = CoseAlg::MLDSA44;
-    let (public_key, secret_key) = create_credential(alg);
-    let secret_key_bytes = secret_key.to_bytes();
 
-    app.stored_credentials.push(StoredCredential {
-        rp_id: rp_id.to_string(),
-        user_id: user_id.clone(),
-        user_name: Some(user_name.clone()),
-        user_display_name: Some(user_display.clone()),
-        alg: alg as i32,
-        credential_id: credential_id.clone(),
-        public_key: public_key.clone(),
-        secret_key: secret_key_bytes.clone(),
-        cred_random_with_uv: Some(vec![0x10; 32]),
-        cred_random_without_uv: Some(vec![0x20; 32]),
-        cred_protect: Some(1),
-        sign_count: 0,
-    });
+    let mut record = credential(rp_id, &user_id, &credential_id, alg);
+    record.user_name = Some(user_name.clone());
+    record.user_display_name = Some(user_display.clone());
+    record.cred_random_with_uv = [0x10; 32];
+    record.cred_random_without_uv = [0x20; 32];
+    insert(&mut app, &record);
 
     let request_map = canonical_map(vec![
         (
@@ -91,7 +81,7 @@ fn get_assertion_response_encoding_is_canonical() {
         .expect("getAssertion succeeds");
     assert_eq!(response[0], CTAP2_OK);
 
-    let sign_count = app.stored_credentials[0].sign_count;
+    let sign_count = stored(&app)[0].sign_count;
     assert_eq!(sign_count, 1);
     let Value::Map(entries) = from_reader(&response[1..]).expect("decode getAssertion response")
     else {
@@ -148,43 +138,23 @@ fn get_assertion_response_encoding_is_canonical() {
 
 #[test]
 fn get_next_assertion_preserves_new_credentials() {
-    let mut app = new_app(TestClient::new(), [0x55; 16]);
+    let mut app = new_app(TestStore::new(), [0x55; 16]);
     let rp_id = "example.com";
     let client_hash = vec![0x66; 32];
 
-    let (pk1, sk1) = create_credential(CoseAlg::MLDSA44);
-    let sk1_bytes = sk1.to_bytes();
-    app.stored_credentials.push(StoredCredential {
-        rp_id: rp_id.to_string(),
-        user_id: vec![0x01],
-        user_name: Some("one".into()),
-        user_display_name: Some("One".into()),
-        alg: CoseAlg::MLDSA44 as i32,
-        credential_id: vec![0xA1],
-        public_key: pk1.clone(),
-        secret_key: sk1_bytes.clone(),
-        cred_random_with_uv: Some(vec![0x10; 32]),
-        cred_random_without_uv: Some(vec![0x11; 32]),
-        cred_protect: Some(1),
-        sign_count: 0,
-    });
+    let mut record = credential(rp_id, &[0x01], &[0xA1], CoseAlg::MLDSA44);
+    record.user_name = Some("one".into());
+    record.user_display_name = Some("One".into());
+    record.cred_random_with_uv = [0x10; 32];
+    record.cred_random_without_uv = [0x11; 32];
+    insert(&mut app, &record);
 
-    let (pk2, sk2) = create_credential(CoseAlg::MLDSA44);
-    let sk2_bytes = sk2.to_bytes();
-    app.stored_credentials.push(StoredCredential {
-        rp_id: rp_id.to_string(),
-        user_id: vec![0x02],
-        user_name: Some("two".into()),
-        user_display_name: Some("Two".into()),
-        alg: CoseAlg::MLDSA44 as i32,
-        credential_id: vec![0xA2],
-        public_key: pk2.clone(),
-        secret_key: sk2_bytes.clone(),
-        cred_random_with_uv: Some(vec![0x12; 32]),
-        cred_random_without_uv: Some(vec![0x13; 32]),
-        cred_protect: Some(1),
-        sign_count: 0,
-    });
+    let mut record = credential(rp_id, &[0x02], &[0xA2], CoseAlg::MLDSA44);
+    record.user_name = Some("two".into());
+    record.user_display_name = Some("Two".into());
+    record.cred_random_with_uv = [0x12; 32];
+    record.cred_random_without_uv = [0x13; 32];
+    insert(&mut app, &record);
 
     let request_map = canonical_map(vec![
         (
@@ -204,7 +174,9 @@ fn get_next_assertion_preserves_new_credentials() {
         .expect("getAssertion succeeds");
     assert_eq!(response[0], CTAP2_OK);
     assert!(app.pending_assertion.is_some());
-    assert_eq!(app.stored_credentials[0].sign_count, 1);
+    // The most recently created credential comes first.
+    assert_eq!(stored_by_id(&app, &[0xA2]).sign_count, 1);
+    assert_eq!(stored_by_id(&app, &[0xA1]).sign_count, 0);
 
     let Value::Map(entries) = from_reader(&response[1..]).expect("decode getAssertion response")
     else {
@@ -227,39 +199,21 @@ fn get_next_assertion_preserves_new_credentials() {
     };
     assert_eq!(total_credentials, 2);
 
-    let (pk3, sk3) = create_credential(CoseAlg::MLDSA44);
-    let sk3_bytes = sk3.to_bytes();
-    app.stored_credentials.push(StoredCredential {
-        rp_id: "new.example".into(),
-        user_id: vec![0x03],
-        user_name: Some("three".into()),
-        user_display_name: None,
-        alg: CoseAlg::MLDSA44 as i32,
-        credential_id: vec![0xA3],
-        public_key: pk3.clone(),
-        secret_key: sk3_bytes.clone(),
-        cred_random_with_uv: Some(vec![0x14; 32]),
-        cred_random_without_uv: Some(vec![0x15; 32]),
-        cred_protect: Some(1),
-        sign_count: 0,
-    });
+    let mut record = credential("new.example", &[0x03], &[0xA3], CoseAlg::MLDSA44);
+    record.user_name = Some("three".into());
+    record.cred_random_with_uv = [0x14; 32];
+    record.cred_random_without_uv = [0x15; 32];
+    insert(&mut app, &record);
 
     let next_response = app
         .handle_get_next_assertion()
         .expect("getNextAssertion succeeds");
     assert_eq!(next_response[0], CTAP2_OK);
     assert!(app.pending_assertion.is_none());
-    assert_eq!(app.stored_credentials.len(), 3);
-    assert!(app
-        .stored_credentials
-        .iter()
-        .any(|cred| cred.credential_id == vec![0xA3]));
-    let second = app
-        .stored_credentials
-        .iter()
-        .find(|cred| cred.credential_id == vec![0xA2])
-        .expect("second credential present");
-    assert_eq!(second.sign_count, 1);
+    assert_eq!(stored(&app).len(), 3);
+    assert_eq!(stored_by_id(&app, &[0xA3]).sign_count, 0);
+    assert_eq!(stored_by_id(&app, &[0xA2]).sign_count, 1);
+    assert_eq!(stored_by_id(&app, &[0xA1]).sign_count, 1);
 
     let Value::Map(entries) =
         from_reader(&next_response[1..]).expect("decode getNextAssertion response")
@@ -279,36 +233,25 @@ fn get_next_assertion_preserves_new_credentials() {
 
 #[test]
 fn get_next_assertion_without_pending_fails() {
-    let mut app = new_app(TestClient::new(), [0x77; 16]);
+    let mut app = new_app(TestStore::new(), [0x77; 16]);
     assert_eq!(app.handle_get_next_assertion(), Err(CTAP2_ERR_NOT_ALLOWED));
 }
 
 #[test]
 fn get_assertion_without_pin_uv_uses_presence_only() {
-    let mut app = new_app(TestClient::new(), [0x11; 16]);
+    let mut app = new_app(TestStore::new(), [0x11; 16]);
     let rp_id = "example.com";
     let client_hash = vec![0x22; 32];
 
     let user_id = vec![0x01, 0x02];
     let credential_id = vec![0xAA, 0xBB, 0xCC];
     let alg = CoseAlg::MLDSA44;
-    let (public_key, secret_key) = create_credential(alg);
-    let secret_key_bytes = secret_key.to_bytes();
 
-    app.stored_credentials.push(StoredCredential {
-        rp_id: rp_id.to_string(),
-        user_id: user_id.clone(),
-        user_name: None,
-        user_display_name: None,
-        alg: alg as i32,
-        credential_id: credential_id.clone(),
-        public_key: public_key.clone(),
-        secret_key: secret_key_bytes.clone(),
-        cred_random_with_uv: Some(vec![0x30; 32]),
-        cred_random_without_uv: Some(vec![0x40; 32]),
-        cred_protect: Some(1),
-        sign_count: 7,
-    });
+    let mut record = credential(rp_id, &user_id, &credential_id, alg);
+    record.cred_random_with_uv = [0x30; 32];
+    record.cred_random_without_uv = [0x40; 32];
+    record.sign_count = 7;
+    insert(&mut app, &record);
 
     let request_map = canonical_map(vec![
         (
@@ -345,13 +288,13 @@ fn get_assertion_without_pin_uv_uses_presence_only() {
     assert_eq!(auth_data_bytes[32] & 0x01, 0x01);
     assert_eq!(auth_data_bytes[32] & 0x04, 0x00);
 
-    let sign_count = app.stored_credentials[0].sign_count;
+    let sign_count = stored(&app)[0].sign_count;
     assert_eq!(sign_count, 8);
 }
 
 #[test]
 fn get_assertion_with_invalid_pin_uv_auth_param_fails() {
-    let mut app = new_app(TestClient::new(), [0x11; 16]);
+    let mut app = new_app(TestStore::new(), [0x11; 16]);
     let rp_id = "example.com";
     let client_hash = vec![0x22; 32];
     let pin_token = [0x33; 32];
@@ -366,23 +309,11 @@ fn get_assertion_with_invalid_pin_uv_auth_param_fails() {
     let user_id = vec![0x01, 0x02];
     let credential_id = vec![0xAA, 0xBB, 0xCC];
     let alg = CoseAlg::MLDSA44;
-    let (public_key, secret_key) = create_credential(alg);
-    let secret_key_bytes = secret_key.to_bytes();
 
-    app.stored_credentials.push(StoredCredential {
-        rp_id: rp_id.to_string(),
-        user_id: user_id.clone(),
-        user_name: None,
-        user_display_name: None,
-        alg: alg as i32,
-        credential_id: credential_id.clone(),
-        public_key: public_key.clone(),
-        secret_key: secret_key_bytes.clone(),
-        cred_random_with_uv: Some(vec![0x50; 32]),
-        cred_random_without_uv: Some(vec![0x60; 32]),
-        cred_protect: Some(1),
-        sign_count: 0,
-    });
+    let mut record = credential(rp_id, &user_id, &credential_id, alg);
+    record.cred_random_with_uv = [0x50; 32];
+    record.cred_random_without_uv = [0x60; 32];
+    insert(&mut app, &record);
 
     // Right length for protocol two, wrong value.
     let pin_uv_auth_param = corrupt_mac(token_pin_auth(
@@ -418,31 +349,16 @@ fn get_assertion_with_invalid_pin_uv_auth_param_fails() {
 
 #[test]
 fn get_assertion_es256_signature_verifies() {
-    let mut app = new_app(TestClient::new(), [0x02; 16]);
+    let mut app = new_app(TestStore::new(), [0x02; 16]);
     let rp_id = "example.com";
     let client_hash = vec![0x99; 32];
 
-    let (public_key, secret_key) = create_credential(CoseAlg::ES256);
-    let verifying_key = match &secret_key {
-        CredentialSecretKey::Es256(sk) => sk.verifying_key(),
+    let record = credential(rp_id, &[0x01], &[0xA1, 0xB2], CoseAlg::ES256);
+    insert(&mut app, &record);
+    let verifying_key = match record.secret_key().expect("ES256 key") {
+        CredentialSecretKey::Es256(sk) => *sk.verifying_key(),
         _ => panic!("expected ES256 secret key"),
     };
-    let secret_key_bytes = secret_key.to_bytes();
-
-    app.stored_credentials.push(StoredCredential {
-        rp_id: rp_id.to_string(),
-        user_id: vec![0x01],
-        user_name: None,
-        user_display_name: None,
-        alg: CoseAlg::ES256 as i32,
-        credential_id: vec![0xA1, 0xB2],
-        public_key: public_key.clone(),
-        secret_key: secret_key_bytes.clone(),
-        cred_random_with_uv: None,
-        cred_random_without_uv: None,
-        cred_protect: Some(1),
-        sign_count: 0,
-    });
 
     let request = canonical_map(vec![
         (
@@ -497,7 +413,7 @@ fn get_assertion_es256_signature_verifies() {
 
 #[test]
 fn get_assertion_produces_hmac_secret_output() {
-    let mut app = new_app(TestClient::new(), [0x42; 16]);
+    let mut app = new_app(TestStore::new(), [0x42; 16]);
     let pin = b"1234";
     let mut hasher = Sha256::new();
     hasher.update(pin);
@@ -667,13 +583,10 @@ fn get_assertion_produces_hmac_secret_output() {
             .expect("decrypt hmac-secret output");
     assert_eq!(decrypted.len(), 32);
 
-    let credential = &app.stored_credentials[0];
-    let random = credential
-        .cred_random_with_uv
-        .as_ref()
-        .expect("credRandom with UV present");
-    let mut expected_mac =
-        HmacSha256::new_from_slice(random).expect("valid MAC key for credential");
+    let credentials = stored(&app);
+    let credential = &credentials[0];
+    let mut expected_mac = HmacSha256::new_from_slice(&credential.cred_random_with_uv)
+        .expect("valid MAC key for credential");
     expected_mac.update(&salt);
     let expected = expected_mac.finalize().into_bytes();
     assert_eq!(&decrypted[..], &expected[..]);
@@ -681,7 +594,7 @@ fn get_assertion_produces_hmac_secret_output() {
 
 #[test]
 fn get_assertion_rejects_mismatched_rp_binding() {
-    let mut app = new_app(TestClient::new(), [0x52; 16]);
+    let mut app = new_app(TestStore::new(), [0x52; 16]);
     let token = [0xAB; 32];
     install_pin_uv_auth_token(
         &mut app,
@@ -696,22 +609,8 @@ fn get_assertion_rejects_mismatched_rp_binding() {
 
     let credential_id = vec![0xAA, 0xBB];
     let alg = CoseAlg::MLDSA44;
-    let (public_key, secret_key) = create_credential(alg);
-    let secret_key_bytes = secret_key.to_bytes();
-    app.stored_credentials.push(StoredCredential {
-        rp_id: "example.com".into(),
-        user_id: vec![0x01],
-        user_name: None,
-        user_display_name: None,
-        alg: alg as i32,
-        credential_id: credential_id.clone(),
-        public_key: public_key.clone(),
-        secret_key: secret_key_bytes.clone(),
-        cred_random_with_uv: None,
-        cred_random_without_uv: None,
-        cred_protect: Some(1),
-        sign_count: 0,
-    });
+    let record = credential("example.com", &[0x01], &credential_id, alg);
+    insert(&mut app, &record);
 
     let request = canonical_map(vec![
         (
@@ -740,38 +639,21 @@ fn get_assertion_rejects_mismatched_rp_binding() {
 
 #[test]
 fn cred_protect_enforced_for_user_verification() {
-    let mut app = new_app(TestClient::new(), [0x33; 16]);
+    let mut app = new_app(TestStore::new(), [0x33; 16]);
     let rp_id = "example.com";
     let client_hash = vec![0x55; 32];
 
-    app.stored_credentials.push(StoredCredential {
-        rp_id: rp_id.to_string(),
-        user_id: vec![0x01],
-        user_name: None,
-        user_display_name: None,
-        alg: CoseAlg::MLDSA44 as i32,
-        credential_id: vec![0xAA],
-        public_key: vec![0x01, 0x02, 0x03],
-        secret_key: vec![0x10; 32],
-        cred_random_with_uv: Some(vec![0x11; 32]),
-        cred_random_without_uv: Some(vec![0x12; 32]),
-        cred_protect: Some(3),
-        sign_count: 0,
-    });
-    app.stored_credentials.push(StoredCredential {
-        rp_id: rp_id.to_string(),
-        user_id: vec![0x02],
-        user_name: None,
-        user_display_name: None,
-        alg: CoseAlg::MLDSA44 as i32,
-        credential_id: vec![0xBB],
-        public_key: vec![0x04, 0x05, 0x06],
-        secret_key: vec![0x20; 32],
-        cred_random_with_uv: Some(vec![0x13; 32]),
-        cred_random_without_uv: Some(vec![0x14; 32]),
-        cred_protect: Some(1),
-        sign_count: 0,
-    });
+    let mut record = credential(rp_id, &[0x02], &[0xBB], CoseAlg::MLDSA44);
+    record.cred_random_with_uv = [0x13; 32];
+    record.cred_random_without_uv = [0x14; 32];
+    insert(&mut app, &record);
+    // Created last, so once user verification makes it applicable it is the
+    // most recent credential and comes first.
+    let mut record = credential(rp_id, &[0x01], &[0xAA], CoseAlg::MLDSA44);
+    record.cred_random_with_uv = [0x11; 32];
+    record.cred_random_without_uv = [0x12; 32];
+    record.cred_protect = 3;
+    insert(&mut app, &record);
 
     let request = canonical_map(vec![
         (

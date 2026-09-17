@@ -110,7 +110,6 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "subtle",
- "trussed",
  "trussed-core",
  "trussed-mldsa",
  "zeroize",
@@ -536,15 +535,6 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
-
-[[package]]
-name = "des"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffdd80ce8ce993de27e9f063a444a4d53ce8e8db4c1f00cc03af5ad5a9867a1e"
-dependencies = [
- "cipher",
-]
 
 [[package]]
 name = "digest"
@@ -1172,7 +1162,6 @@ dependencies = [
  "env_logger",
  "heapless-bytes",
  "interchange",
- "littlefs2",
  "log",
  "nix",
  "rand",
@@ -1508,17 +1497,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha-1"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5058ada175748e33390e40e872bd0fe59a19f265d0158daa551c5a88a76009c"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest 0.10.7",
-]
-
-[[package]]
 name = "sha2"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1841,7 +1819,6 @@ dependencies = [
  "chacha20poly1305",
  "cosey",
  "delog",
- "des",
  "flexiber",
  "generic-array",
  "heapless",
@@ -1858,7 +1835,6 @@ dependencies = [
  "rand_core",
  "salty",
  "serde",
- "sha-1",
  "sha2 0.10.9",
  "trussed-core",
  "zeroize",

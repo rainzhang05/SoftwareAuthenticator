@@ -1,3 +1,24 @@
+//! The CTAP2 authenticator engine.
+//!
+//! [`CtapApp`] parses CTAP2 commands and answers them.  Everything outside
+//! the protocol is injected: persistence through a [`CredentialStore`],
+//! randomness through an RNG, and user presence through a [`UserPresence`]
+//! implementation.  [`CtapApp::with_file_store`] builds the combination the
+//! daemon runs.
+//!
+//! # Why trait objects
+//!
+//! The three collaborators are boxed trait objects rather than type
+//! parameters.  Each CTAP command makes a handful of calls into them, every
+//! one of which does file I/O, key generation or waits for a person, so
+//! dynamic dispatch costs nothing measurable.  In exchange the engine is one
+//! concrete type: its many `impl` blocks carry no bounds, the daemon and tests
+//! name it without spelling out a combination, and a failing test store or a
+//! different presence prompt does not produce a new monomorphised copy of the
+//! engine.  All three are required to be `Send`, so the engine can later be
+//! moved to a worker thread and let the transport handle CTAPHID_CANCEL while
+//! a prompt is open.
+
 mod cbor;
 pub mod constants;
 mod credential_management;
@@ -17,16 +38,14 @@ use self::credential_management::CredentialManagementState;
 use self::get_assertion::PendingAssertion;
 use self::pin::state::PinState;
 use self::presence::{UserPresence, DEFAULT_PRESENCE_TIMEOUT};
-#[cfg(test)]
-use self::storage::StoredCredential;
+use crate::store::{CredentialStore, FileStore};
 
 use ciborium::{de::from_reader, value::Value};
 use core::fmt;
 use ctaphid_app::{App, Command, Error};
 use log::info;
-use rand_core::CryptoRngCore;
+use rand_core::{CryptoRngCore, OsRng};
 use std::time::Duration;
-use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 
 use self::constants::*;
 
@@ -43,63 +62,77 @@ impl fmt::Display for HexOption {
     }
 }
 
-pub struct CtapApp<C> {
-    client: C,
+/// The CTAP2 authenticator: a CTAPHID application answering CTAPHID_CBOR.
+///
+/// `'interrupt` is the lifetime of the interrupt flag the CTAPHID dispatcher
+/// uses to cancel a request.
+pub struct CtapApp<'interrupt> {
+    store: Box<dyn CredentialStore + Send>,
+    rng: Box<dyn CryptoRngCore + Send>,
+    presence: Box<dyn UserPresence + Send>,
+    interrupt: &'interrupt InterruptFlag,
     aaguid: [u8; 16],
     pin_state: PinState,
+    /// False while the stored PIN state is unreadable; see
+    /// [`storage::load_pin_state`].
+    pin_state_writable: bool,
     suppress_attestation: bool,
     cred_mgmt_state: CredentialManagementState,
     pending_assertion: Option<PendingAssertion>,
-    attestation_private_key: Option<Vec<u8>>,
-    attestation_certificate_chain: Option<Vec<Vec<u8>>>,
-    attestation_material_initialized: bool,
-    rng: Box<dyn CryptoRngCore + Send>,
-    presence: Box<dyn UserPresence + Send>,
     presence_timeout: Duration,
     keepalive: Box<dyn FnMut(bool) + Send>,
-    interrupt: &'static InterruptFlag,
-    #[cfg(test)]
-    stored_credentials: Vec<StoredCredential>,
 }
 
-impl<C> CtapApp<C>
-where
-    C: TrussedClient + FilesystemClient + CryptoClient,
-{
+impl<'interrupt> CtapApp<'interrupt> {
     /// Create the engine.
     ///
-    /// `rng` provides every random value the engine chooses: credential IDs,
-    /// `CredRandom`, key-agreement keys, pinUvAuthTokens and IVs.  `presence`
-    /// is asked whenever an operation needs evidence of user interaction.  `interrupt` is the flag through which the CTAPHID
-    /// dispatcher cancels the request being processed; it is also what
-    /// [`App::interrupt`] hands to the dispatcher.
+    /// * `store` holds credentials, the PIN state and the attestation key.
+    ///   The persistent PIN state is read from it here; construction performs
+    ///   no other I/O and never blocks on anything else.
+    /// * `rng` provides every random value the engine chooses: credential IDs,
+    ///   `CredRandom`, key-agreement keys, pinUvAuthTokens and IVs.  (Credential
+    ///   private keys come from [`PrivateKeyMaterial::generate`], which uses
+    ///   the operating system's generator.)
+    /// * `presence` is asked whenever an operation needs evidence of user
+    ///   interaction.
+    /// * `interrupt` is the flag through which the CTAPHID dispatcher cancels
+    ///   the request being processed; it is what [`App::interrupt`] returns.
+    ///
+    /// [`PrivateKeyMaterial::generate`]: crate::store::PrivateKeyMaterial::generate
     pub fn new(
-        client: C,
+        store: impl CredentialStore + Send + 'static,
         rng: impl CryptoRngCore + Send + 'static,
         presence: impl UserPresence + Send + 'static,
-        interrupt: &'static InterruptFlag,
+        interrupt: &'interrupt InterruptFlag,
         aaguid: [u8; 16],
     ) -> Self {
-        let mut app = Self {
-            client,
+        let mut rng = rng;
+        let (pin_state, pin_state_writable) = storage::load_pin_state(&store, &mut rng);
+        Self {
+            store: Box::new(store),
+            rng: Box::new(rng),
+            presence: Box::new(presence),
+            interrupt,
             aaguid,
-            pin_state: PinState::new(),
+            pin_state,
+            pin_state_writable,
             suppress_attestation: false,
             cred_mgmt_state: CredentialManagementState::new(),
             pending_assertion: None,
-            attestation_private_key: None,
-            attestation_certificate_chain: None,
-            attestation_material_initialized: false,
-            rng: Box::new(rng),
-            presence: Box::new(presence),
             presence_timeout: DEFAULT_PRESENCE_TIMEOUT,
             keepalive: Box::new(|_| {}),
-            interrupt,
-            #[cfg(test)]
-            stored_credentials: Vec::new(),
-        };
-        app.load_persistent_pin_state();
-        app
+        }
+    }
+
+    /// The engine the daemon runs: `store`, randomness from the operating
+    /// system, and `presence` for user presence.
+    pub fn with_file_store(
+        store: FileStore,
+        presence: impl UserPresence + Send + 'static,
+        interrupt: &'interrupt InterruptFlag,
+        aaguid: [u8; 16],
+    ) -> Self {
+        Self::new(store, OsRng, presence, interrupt, aaguid)
     }
 
     /// Call `callback` with `true` when the engine starts waiting for the
@@ -171,11 +204,8 @@ where
     }
 }
 
-impl<'interrupt, C, const N: usize> App<'interrupt, N> for CtapApp<C>
-where
-    C: TrussedClient + FilesystemClient + CryptoClient,
-{
-    fn interrupt(&self) -> Option<&'interrupt InterruptFlag> {
+impl<'a, 'interrupt: 'a, const N: usize> App<'a, N> for CtapApp<'interrupt> {
+    fn interrupt(&self) -> Option<&'a InterruptFlag> {
         Some(self.interrupt)
     }
 

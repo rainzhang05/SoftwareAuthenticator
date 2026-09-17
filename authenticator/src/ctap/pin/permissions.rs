@@ -4,7 +4,6 @@ use crate::ctap::cbor;
 use crate::ctap::CtapApp;
 
 use ciborium::value::{Integer, Value};
-use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 
 use crate::ctap::constants::*;
 
@@ -35,10 +34,7 @@ pub(crate) fn requested_pin_permissions(permissions: i128) -> Result<u8, u8> {
     Ok(defined)
 }
 
-impl<C> CtapApp<C>
-where
-    C: TrussedClient + FilesystemClient + CryptoClient,
-{
+impl CtapApp<'_> {
     pub(crate) fn ensure_pin_token_permission_for_rp(
         &mut self,
         permission: u8,
@@ -99,9 +95,7 @@ where
                 else {
                     return Err(CTAP2_ERR_MISSING_PARAMETER);
                 };
-                let credentials = self.load_credentials()?;
-                let Some(credential) = credentials.iter().find(|cred| cred.credential_id == *id)
-                else {
+                let Some(credential) = self.stored_credential(id)? else {
                     return Err(CTAP2_ERR_NO_CREDENTIALS);
                 };
                 if credential.rp_id == binding {

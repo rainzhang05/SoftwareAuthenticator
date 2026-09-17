@@ -9,14 +9,10 @@ use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
-use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 
 use crate::ctap::constants::*;
 
-impl<C> CtapApp<C>
-where
-    C: TrussedClient + FilesystemClient + CryptoClient,
-{
+impl CtapApp<'_> {
     pub(super) fn handle_get_info(&mut self) -> Result<Vec<u8>, u8> {
         self.pending_assertion = None;
         let mut map = Vec::new();

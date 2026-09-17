@@ -2,19 +2,18 @@
 //! authenticatorClientPIN drives and persists it.
 
 use super::support::new_app;
+use super::support::TestApp;
 use super::support::{
     client_pin, get_pin_retries, get_pin_token, int, padded_pin, pin_hash, PlatformPinSession,
-    TestClient,
+    TestStore,
 };
 use crate::ctap::pin::state::{
     PersistentPinState, PinRetryState, MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES,
 };
-use crate::ctap::storage::PIN_STATE_STORE_PATH;
-use crate::ctap::CtapApp;
 use crate::ClassicPinProtocol;
 
-use ciborium::{de::from_reader, ser::into_writer, value::Value};
-use serde::{Deserialize, Serialize};
+use crate::store::{CredentialStore, PinStateRecord};
+use ciborium::value::Value;
 
 use crate::ctap::constants::*;
 
@@ -275,26 +274,11 @@ fn power_up_clamps_stored_retries_to_the_maximum() {
 
 // -- clientPIN and persistence ----------------------------------------------------
 
-/// `pin-state.cbor` as pc-hid-runner's copy of the struct reads it.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct PinStateFile {
-    pin_hash: Option<[u8; 16]>,
-    pin_retries: u8,
-    consecutive_failures: u8,
-    pin_auth_blocked: bool,
-}
-
-fn pin_state_writes(app: &CtapApp<TestClient>) -> Vec<PinStateFile> {
-    app.client
-        .writes_to(PIN_STATE_STORE_PATH)
-        .iter()
-        .map(|data| from_reader(data.as_slice()).expect("decode pin-state.cbor"))
-        .collect()
-}
-
 /// An authenticator whose PIN is `PIN`, set through setPIN.
-fn app_with_pin() -> CtapApp<TestClient> {
-    let mut app = new_app(TestClient::new(), [0x70; 16]);
+/// The store is returned too, to inspect what was persisted and to restart on.
+fn app_with_pin() -> (TestApp, TestStore) {
+    let store = TestStore::new();
+    let mut app = new_app(store.clone(), [0x70; 16]);
     let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V2, 0x31);
     let new_pin_enc = session.encrypt(&padded_pin(PIN));
     let pin_uv_auth_param =
@@ -310,32 +294,33 @@ fn app_with_pin() -> CtapApp<TestClient> {
         ],
     );
     assert_eq!(response, Ok(vec![CTAP2_OK]));
-    app
+    (app, store)
 }
 
 /// Stop the daemon and start it again on the same storage.
-fn restart(app: CtapApp<TestClient>) -> CtapApp<TestClient> {
+fn restart(app: TestApp, store: &TestStore) -> TestApp {
     let aaguid = app.aaguid;
-    new_app(app.client, aaguid)
+    drop(app);
+    new_app(store.clone(), aaguid)
 }
 
 #[test]
 fn get_pin_token_persists_the_spent_retry_before_comparing() {
-    let mut app = app_with_pin();
-    let before = pin_state_writes(&app).len();
+    let (mut app, store) = app_with_pin();
+    let before = store.pin_state_writes().len();
 
     get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("correct PIN");
-    let writes = &pin_state_writes(&app)[before..];
+    let writes = &store.pin_state_writes()[before..];
     let retries: Vec<u8> = writes.iter().map(|file| file.pin_retries).collect();
     // The decrement is on disk before the (successful) comparison's reset.
     assert_eq!(retries, [MAX_PIN_RETRIES - 1, MAX_PIN_RETRIES]);
 
-    let before = pin_state_writes(&app).len();
+    let before = store.pin_state_writes().len();
     assert_eq!(
         get_pin_token(&mut app, ClassicPinProtocol::V2, b"9999"),
         Err(CTAP2_ERR_PIN_INVALID)
     );
-    let writes = &pin_state_writes(&app)[before..];
+    let writes = &store.pin_state_writes()[before..];
     assert_eq!(writes[0].pin_retries, MAX_PIN_RETRIES - 1);
     assert_eq!(
         writes.last().map(|file| file.pin_retries),
@@ -345,8 +330,8 @@ fn get_pin_token_persists_the_spent_retry_before_comparing() {
 
 #[test]
 fn change_pin_persists_the_spent_retry_before_comparing() {
-    let mut app = app_with_pin();
-    let before = pin_state_writes(&app).len();
+    let (mut app, store) = app_with_pin();
+    let before = store.pin_state_writes().len();
 
     let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V1, 0x32);
     let new_pin_enc = session.encrypt(&padded_pin(b"5678"));
@@ -368,7 +353,7 @@ fn change_pin_persists_the_spent_retry_before_comparing() {
     );
     assert_eq!(response, Ok(vec![CTAP2_OK]));
 
-    let writes = &pin_state_writes(&app)[before..];
+    let writes = &store.pin_state_writes()[before..];
     assert_eq!(writes[0].pin_retries, MAX_PIN_RETRIES - 1);
     assert_eq!(writes[0].pin_hash, Some(pin_hash(PIN)));
     let last = writes.last().expect("new PIN persisted");
@@ -378,7 +363,7 @@ fn change_pin_persists_the_spent_retry_before_comparing() {
 
 #[test]
 fn restart_clears_the_power_cycle_lockout_but_keeps_retries() {
-    let mut app = app_with_pin();
+    let (mut app, store) = app_with_pin();
     let results: Vec<_> = (0..MAX_CONSECUTIVE_PIN_MISMATCHES)
         .map(|_| get_pin_token(&mut app, ClassicPinProtocol::V2, b"0000").map(|_| ()))
         .collect();
@@ -397,10 +382,10 @@ fn restart_clears_the_power_cycle_lockout_but_keeps_retries() {
     assert_eq!(get_pin_retries(&mut app), (MAX_PIN_RETRIES - 3, Some(true)));
 
     // The lockout is not written to storage.
-    let file = pin_state_writes(&app).pop().expect("PIN state persisted");
+    let file = store.pin_state_writes().pop().expect("PIN state persisted");
     assert_eq!(
         file,
-        PinStateFile {
+        PinStateRecord {
             pin_hash: Some(pin_hash(PIN)),
             pin_retries: MAX_PIN_RETRIES - 3,
             consecutive_failures: 0,
@@ -408,7 +393,7 @@ fn restart_clears_the_power_cycle_lockout_but_keeps_retries() {
         }
     );
 
-    let mut app = restart(app);
+    let mut app = restart(app, &store);
     assert_eq!(get_pin_retries(&mut app), (MAX_PIN_RETRIES - 3, None));
     get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("correct PIN after restart");
     assert_eq!(get_pin_retries(&mut app), (MAX_PIN_RETRIES, None));
@@ -416,21 +401,22 @@ fn restart_clears_the_power_cycle_lockout_but_keeps_retries() {
 
 #[test]
 fn restart_keeps_an_exhausted_pin_blocked() {
-    let mut app = app_with_pin();
+    let (mut app, store) = app_with_pin();
     let mut last = Ok(());
     for _ in 0..MAX_PIN_RETRIES {
         if get_pin_retries(&mut app).1 == Some(true) {
-            app = restart(app);
+            app = restart(app, &store);
         }
         last = get_pin_token(&mut app, ClassicPinProtocol::V1, b"0000").map(|_| ());
     }
     assert_eq!(last, Err(CTAP2_ERR_PIN_BLOCKED));
-    let file = pin_state_writes(&app).pop().expect("PIN state persisted");
+    let file = store.pin_state_writes().pop().expect("PIN state persisted");
     assert_eq!(file.pin_retries, 0);
-    // pc-hid-runner reads this flag as "blocked until reset".
-    assert!(file.pin_auth_blocked);
+    // Only the PIN hash and pinRetries are persistent state.
+    assert!(!file.pin_auth_blocked);
+    assert_eq!(file.consecutive_failures, 0);
 
-    let mut app = restart(app);
+    let mut app = restart(app, &store);
     assert_eq!(get_pin_retries(&mut app), (0, None));
     assert_eq!(
         get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).map(|_| ()),
@@ -442,21 +428,17 @@ fn restart_keeps_an_exhausted_pin_blocked() {
 #[test]
 fn start_up_ignores_a_stored_power_cycle_lockout() {
     // What an earlier daemon wrote after three wrong PINs.
-    let mut stored = Vec::new();
-    into_writer(
-        &PinStateFile {
+    let mut store = TestStore::new();
+    store
+        .set_pin_state(&PinStateRecord {
             pin_hash: Some(pin_hash(PIN)),
             pin_retries: MAX_PIN_RETRIES - 3,
             consecutive_failures: 3,
             pin_auth_blocked: true,
-        },
-        &mut stored,
-    )
-    .expect("encode pin-state.cbor");
-    let mut client = TestClient::new();
-    client.insert_file(PIN_STATE_STORE_PATH, stored);
+        })
+        .expect("store PIN state");
 
-    let mut app = new_app(client, [0x71; 16]);
+    let mut app = new_app(store, [0x71; 16]);
     assert!(app.pin_state.is_set());
     assert_eq!(get_pin_retries(&mut app), (MAX_PIN_RETRIES - 3, None));
     get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("correct PIN");

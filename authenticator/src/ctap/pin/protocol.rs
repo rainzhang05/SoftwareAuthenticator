@@ -16,7 +16,6 @@ use p256::{
 };
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
-use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::ctap::constants::*;
@@ -275,10 +274,7 @@ impl KeyAgreementKeys {
 /// 2^-32, so exhausting these means the RNG is broken.
 const KEY_AGREEMENT_KEY_ATTEMPTS: usize = 8;
 
-impl<C> CtapApp<C>
-where
-    C: TrussedClient + FilesystemClient + CryptoClient,
-{
+impl CtapApp<'_> {
     pub(crate) fn supported_pin_uv_protocols(&self) -> &'static [i32] {
         &PIN_UV_PROTOCOLS_SUPPORTED
     }

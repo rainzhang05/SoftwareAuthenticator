@@ -1,14 +1,14 @@
 //! authenticatorCredentialManagement tests.
 
 use super::support::new_app;
+use super::support::{credential, insert, insert_owned, stored, TestApp};
 use super::support::{
     es256_credential, get_pin_uv_auth_token, install_pin_uv_auth_token, pin_hash, token_pin_auth,
-    TestClient,
+    TestStore,
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA};
 use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
-use crate::ctap::storage::StoredCredential;
 use crate::ctap::CtapApp;
 use crate::{ClassicPinProtocol, CoseAlg};
 
@@ -34,7 +34,7 @@ fn cm_pin_param(token: &[u8; 32], subcommand: u8, params: Option<Value>) -> Vec<
 
 #[test]
 fn credential_management_commands() {
-    let mut app = new_app(TestClient::new(), [0x24; 16]);
+    let mut app = new_app(TestStore::new(), [0x24; 16]);
     let token = [0x90; 32];
     install_pin_uv_auth_token(
         &mut app,
@@ -44,48 +44,23 @@ fn credential_management_commands() {
         None,
     );
 
-    app.stored_credentials.push(StoredCredential {
-        rp_id: "example.com".into(),
-        user_id: vec![0x01],
-        user_name: Some("one".into()),
-        user_display_name: None,
-        alg: CoseAlg::MLDSA44 as i32,
-        credential_id: vec![0xA1],
-        public_key: vec![0x11, 0x22],
-        secret_key: vec![0x33; 32],
-        cred_random_with_uv: Some(vec![0x44; 32]),
-        cred_random_without_uv: Some(vec![0x45; 32]),
-        cred_protect: Some(1),
-        sign_count: 0,
-    });
-    app.stored_credentials.push(StoredCredential {
-        rp_id: "example.com".into(),
-        user_id: vec![0x02],
-        user_name: Some("two".into()),
-        user_display_name: None,
-        alg: CoseAlg::MLDSA44 as i32,
-        credential_id: vec![0xA2],
-        public_key: vec![0x12, 0x23],
-        secret_key: vec![0x34; 32],
-        cred_random_with_uv: Some(vec![0x46; 32]),
-        cred_random_without_uv: Some(vec![0x47; 32]),
-        cred_protect: Some(1),
-        sign_count: 0,
-    });
-    app.stored_credentials.push(StoredCredential {
-        rp_id: "second.example".into(),
-        user_id: vec![0x03],
-        user_name: Some("three".into()),
-        user_display_name: Some("Three".into()),
-        alg: CoseAlg::MLDSA44 as i32,
-        credential_id: vec![0xB1],
-        public_key: vec![0x21, 0x32],
-        secret_key: vec![0x35; 32],
-        cred_random_with_uv: Some(vec![0x48; 32]),
-        cred_random_without_uv: Some(vec![0x49; 32]),
-        cred_protect: Some(2),
-        sign_count: 0,
-    });
+    let mut record = credential("example.com", &vec![0x01], &vec![0xA1], CoseAlg::MLDSA44);
+    record.user_name = Some("one".into());
+    record.cred_random_with_uv = [0x44; 32];
+    record.cred_random_without_uv = [0x45; 32];
+    insert(&mut app, &record);
+    let mut record = credential("example.com", &vec![0x02], &vec![0xA2], CoseAlg::MLDSA44);
+    record.user_name = Some("two".into());
+    record.cred_random_with_uv = [0x46; 32];
+    record.cred_random_without_uv = [0x47; 32];
+    insert(&mut app, &record);
+    let mut record = credential("second.example", &vec![0x03], &vec![0xB1], CoseAlg::MLDSA44);
+    record.user_name = Some("three".into());
+    record.user_display_name = Some("Three".into());
+    record.cred_random_with_uv = [0x48; 32];
+    record.cred_random_without_uv = [0x49; 32];
+    record.cred_protect = 2;
+    insert(&mut app, &record);
 
     let metadata_request = canonical_map(vec![
         (
@@ -120,7 +95,7 @@ fn credential_management_commands() {
         .expect("existing count");
     assert_eq!(existing, 3);
 
-    let rp_hash = CtapApp::<TestClient>::cm_hash_rp_id("example.com");
+    let rp_hash = CtapApp::cm_hash_rp_id("example.com");
     let rp_request = canonical_map(vec![
         (
             Value::Integer(Integer::from(1)),
@@ -171,7 +146,7 @@ fn credential_management_commands() {
     };
     assert!(map.iter().any(|(k, v)| {
         *k == Value::Integer(Integer::from(4))
-            && *v == Value::Bytes(CtapApp::<TestClient>::cm_hash_rp_id("second.example"))
+            && *v == Value::Bytes(CtapApp::cm_hash_rp_id("second.example"))
     }));
 
     let params = canonical_map(vec![(
@@ -266,7 +241,7 @@ fn credential_management_commands() {
         .handle_credential_management(&payload)
         .expect("delete succeeds");
     assert_eq!(response, vec![CTAP2_OK]);
-    assert_eq!(app.stored_credentials.len(), 2);
+    assert_eq!(stored(&app).len(), 2);
 
     let update_descriptor = canonical_map(vec![
         (Value::Text("type".into()), Value::Text("public-key".into())),
@@ -301,9 +276,8 @@ fn credential_management_commands() {
         .handle_credential_management(&payload)
         .expect("update succeeds");
     assert_eq!(response, vec![CTAP2_OK]);
-    let updated = app
-        .stored_credentials
-        .iter()
+    let updated = stored(&app)
+        .into_iter()
         .find(|cred| cred.credential_id == vec![0xA2])
         .expect("credential remains");
     assert_eq!(updated.user_name.as_deref(), Some("updated"));
@@ -311,7 +285,7 @@ fn credential_management_commands() {
 
 #[test]
 fn credential_management_requires_cm_permission() {
-    let mut app = new_app(TestClient::new(), [0x25; 16]);
+    let mut app = new_app(TestStore::new(), [0x25; 16]);
     let token = [0x91; 32];
     install_pin_uv_auth_token(
         &mut app,
@@ -344,7 +318,7 @@ fn credential_management_requires_cm_permission() {
 
 #[test]
 fn credential_management_rejects_bound_token_for_rp_enumeration() {
-    let mut app = new_app(TestClient::new(), [0x26; 16]);
+    let mut app = new_app(TestStore::new(), [0x26; 16]);
     let token = [0x92; 32];
     install_pin_uv_auth_token(
         &mut app,
@@ -376,7 +350,7 @@ fn credential_management_rejects_bound_token_for_rp_enumeration() {
 }
 
 fn credential_management(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     token: &[u8; 32],
     subcommand: u8,
     params: Option<Value>,
@@ -406,7 +380,7 @@ fn credential_management(
 fn rp_id_hash_params(rp_id: &str) -> Value {
     canonical_map(vec![(
         Value::Integer(Integer::from(1)),
-        Value::Bytes(CtapApp::<TestClient>::cm_hash_rp_id(rp_id)),
+        Value::Bytes(CtapApp::cm_hash_rp_id(rp_id)),
     )])
 }
 
@@ -429,12 +403,10 @@ fn credential_id_params(credential_id: &[u8], user: Option<Value>) -> Value {
 
 #[test]
 fn credential_management_limits_an_rp_scoped_token_to_that_rp() {
-    let mut app = new_app(TestClient::new(), [0x27; 16]);
+    let mut app = new_app(TestStore::new(), [0x27; 16]);
     app.pin_state.set_pin(pin_hash(b"1234"));
-    app.stored_credentials
-        .push(es256_credential("example.com", &[0xA1]));
-    app.stored_credentials
-        .push(es256_credential("other.example", &[0xB1]));
+    insert_owned(&mut app, es256_credential("example.com", &[0xA1]));
+    insert_owned(&mut app, es256_credential("other.example", &[0xB1]));
     let token = get_pin_uv_auth_token(
         &mut app,
         ClassicPinProtocol::V2,
@@ -514,10 +486,9 @@ fn credential_management_limits_an_rp_scoped_token_to_that_rp() {
         ),
         Ok(vec![CTAP2_OK])
     );
-    let remaining: Vec<_> = app
-        .stored_credentials
-        .iter()
-        .map(|credential| credential.rp_id.as_str())
+    let remaining: Vec<_> = stored(&app)
+        .into_iter()
+        .map(|credential| credential.rp_id.clone())
         .collect();
     assert_eq!(remaining, ["other.example"]);
 }

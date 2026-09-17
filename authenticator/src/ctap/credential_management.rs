@@ -2,8 +2,9 @@
 
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::protocol::parse_pin_uv_auth_param;
-use super::storage::StoredCredential;
+use super::storage::store_status;
 use super::CtapApp;
+use crate::store::CredentialRecord;
 
 use ciborium::{
     de::from_reader,
@@ -11,14 +12,15 @@ use ciborium::{
     value::{Integer, Value},
 };
 use sha2::{Digest, Sha256};
-use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 
 use crate::ctap::constants::*;
 
 pub(super) struct CredentialManagementState {
     rp_list: Vec<String>,
     rp_index: usize,
-    credential_list: Vec<usize>,
+    /// The IDs of the credentials being enumerated, looked up again for each
+    /// enumerateCredentialsGetNextCredential so no private key is kept.
+    credential_list: Vec<Vec<u8>>,
     credential_index: usize,
     pub(super) current_rp: Option<String>,
 }
@@ -41,10 +43,7 @@ impl CredentialManagementState {
     }
 }
 
-impl<C> CtapApp<C>
-where
-    C: TrussedClient + FilesystemClient + CryptoClient,
-{
+impl CtapApp<'_> {
     pub(super) fn cm_hash_rp_id(rp_id: &str) -> Vec<u8> {
         let mut hasher = Sha256::new();
         hasher.update(rp_id.as_bytes());
@@ -52,23 +51,25 @@ where
     }
 
     fn cm_get_metadata(&mut self) -> Result<Vec<(Value, Value)>, u8> {
-        let credentials = self.load_credentials()?;
-        let existing = credentials.len() as u64;
-        let remaining = 2048u64.saturating_sub(existing);
+        let existing = self
+            .store
+            .count()
+            .map_err(|err| store_status("count credentials", err))?;
+        let remaining = self.store.max_credentials().saturating_sub(existing);
         Ok(vec![
             (
                 Value::Integer(Integer::from(1)),
-                Value::Integer(Integer::from(existing)),
+                Value::Integer(Integer::from(existing as u64)),
             ),
             (
                 Value::Integer(Integer::from(2)),
-                Value::Integer(Integer::from(remaining)),
+                Value::Integer(Integer::from(remaining as u64)),
             ),
         ])
     }
 
     fn cm_enumerate_rps_begin(&mut self) -> Result<Vec<(Value, Value)>, u8> {
-        let credentials = self.load_credentials()?;
+        let credentials = self.stored_credentials()?;
         let mut rp_ids: Vec<String> = credentials.iter().map(|cred| cred.rp_id.clone()).collect();
         rp_ids.sort();
         rp_ids.dedup();
@@ -108,23 +109,8 @@ where
         ])
     }
 
-    fn cm_find_rp_indices(&self, credentials: &[StoredCredential], rp_hash: &[u8]) -> Vec<usize> {
-        credentials
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, cred)| {
-                let hash = Self::cm_hash_rp_id(&cred.rp_id);
-                if hash == rp_hash {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
     fn cm_credential_response(
-        credential: &StoredCredential,
+        credential: &CredentialRecord,
         total: usize,
     ) -> Result<Vec<(Value, Value)>, u8> {
         let mut user_entries = vec![(
@@ -150,8 +136,12 @@ where
             ),
         ]);
 
-        let public_key_value: Value = from_reader::<Value, _>(&credential.public_key[..])
-            .map_err(|_| CTAP2_ERR_PROCESSING)?;
+        let public_key = credential.cose_public_key().map_err(|err| {
+            log::error!("cannot derive a stored credential's public key: {err}");
+            CTAP2_ERR_PROCESSING
+        })?;
+        let public_key_value: Value =
+            from_reader::<Value, _>(&public_key[..]).map_err(|_| CTAP2_ERR_PROCESSING)?;
 
         Ok(vec![
             (Value::Integer(Integer::from(6)), user_map),
@@ -163,7 +153,7 @@ where
             ),
             (
                 Value::Integer(Integer::from(10)),
-                Value::Integer(Integer::from(credential.cred_protect.unwrap_or(1) as u64)),
+                Value::Integer(Integer::from(u64::from(credential.cred_protect))),
             ),
         ])
     }
@@ -177,33 +167,36 @@ where
             _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
 
-        let credentials = self.load_credentials()?;
-        let indices = self.cm_find_rp_indices(&credentials, &rp_hash);
-        if indices.is_empty() {
+        let credentials: Vec<CredentialRecord> = self
+            .stored_credentials()?
+            .into_iter()
+            .filter(|credential| Self::cm_hash_rp_id(&credential.rp_id) == rp_hash)
+            .collect();
+        let Some(first) = credentials.first() else {
             return Err(CTAP2_ERR_NO_CREDENTIALS);
-        }
+        };
 
-        let first_idx = indices[0];
-        let response = Self::cm_credential_response(&credentials[first_idx], indices.len())?;
-
-        self.cred_mgmt_state.current_rp = Some(credentials[first_idx].rp_id.clone());
-        self.cred_mgmt_state.credential_list = indices;
+        let response = Self::cm_credential_response(first, credentials.len())?;
+        self.cred_mgmt_state.current_rp = Some(first.rp_id.clone());
+        self.cred_mgmt_state.credential_list = credentials
+            .iter()
+            .map(|credential| credential.credential_id.clone())
+            .collect();
         self.cred_mgmt_state.credential_index = 1;
 
         Ok(response)
     }
 
     fn cm_enumerate_credentials_next(&mut self) -> Result<Vec<(Value, Value)>, u8> {
-        if self.cred_mgmt_state.credential_index >= self.cred_mgmt_state.credential_list.len() {
+        let index = self.cred_mgmt_state.credential_index;
+        let Some(credential_id) = self.cred_mgmt_state.credential_list.get(index).cloned() else {
             return Err(CTAP2_ERR_NO_CREDENTIALS);
-        }
-        let credentials = self.load_credentials()?;
-        let idx = self.cred_mgmt_state.credential_list[self.cred_mgmt_state.credential_index];
+        };
         self.cred_mgmt_state.credential_index += 1;
-        Self::cm_credential_response(
-            &credentials[idx],
-            self.cred_mgmt_state.credential_list.len(),
-        )
+        let credential = self
+            .stored_credential(&credential_id)?
+            .ok_or(CTAP2_ERR_NO_CREDENTIALS)?;
+        Self::cm_credential_response(&credential, self.cred_mgmt_state.credential_list.len())
     }
 
     fn cm_delete_credential(&mut self, params: &[(Value, Value)]) -> Result<(), u8> {
@@ -214,15 +207,13 @@ where
         let Some(Value::Bytes(id)) = cbor::map_get(descriptor, Value::Text("id".into())) else {
             return Err(CTAP2_ERR_MISSING_PARAMETER);
         };
-        let mut credentials = self.load_credentials()?;
-        let Some(pos) = credentials
-            .iter()
-            .position(|cred| cred.credential_id == *id)
-        else {
+        let deleted = self
+            .store
+            .delete(id)
+            .map_err(|err| store_status("delete a credential", err))?;
+        if !deleted {
             return Err(CTAP2_ERR_NO_CREDENTIALS);
-        };
-        credentials.remove(pos);
-        self.save_credentials(&credentials)?;
+        }
         self.cred_mgmt_state.rp_list.clear();
         self.cred_mgmt_state.rp_index = 0;
         self.cred_mgmt_state.reset_credentials();
@@ -246,42 +237,23 @@ where
             return Err(CTAP2_ERR_MISSING_PARAMETER);
         };
 
-        let mut credentials = self.load_credentials()?;
-        let Some(credential) = credentials
-            .iter_mut()
-            .find(|cred| cred.credential_id == *id)
-        else {
+        let Some(mut credential) = self.stored_credential(id)? else {
             return Err(CTAP2_ERR_NO_CREDENTIALS);
         };
         if credential.user_id != *user_id {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
 
-        credential.user_name = cbor::map_get(user_map, Value::Text("name".into())).and_then(|v| {
-            if let Value::Text(text) = v {
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(text.clone())
-                }
-            } else {
-                None
-            }
-        });
-        credential.user_display_name = cbor::map_get(user_map, Value::Text("displayName".into()))
-            .and_then(|v| {
-                if let Value::Text(text) = v {
-                    if text.is_empty() {
-                        None
-                    } else {
-                        Some(text.clone())
-                    }
-                } else {
-                    None
-                }
-            });
+        let non_empty_text = |key: &str| match cbor::map_get(user_map, Value::Text(key.into())) {
+            Some(Value::Text(text)) if !text.is_empty() => Some(text.clone()),
+            _ => None,
+        };
+        credential.user_name = non_empty_text("name");
+        credential.user_display_name = non_empty_text("displayName");
 
-        self.save_credentials(&credentials)
+        self.store
+            .put(&credential)
+            .map_err(|err| store_status("update a credential", err))
     }
 
     pub(super) fn handle_credential_management(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {

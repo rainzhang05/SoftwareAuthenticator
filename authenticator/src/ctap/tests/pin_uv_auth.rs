@@ -7,8 +7,9 @@ use super::support::{
     client_pin, encode, es256_credential, get_assertion_request, get_assertion_request_with,
     get_pin_uv_auth_token, install_pin_uv_auth_token, int, make_credential_request,
     make_credential_request_with, padded_pin, pin_hash, platform_authenticate, response_auth_data,
-    set_pin_encrypted, set_pin_padded, token_pin_auth, PlatformPinSession, TestClient, FLAG_UV,
+    set_pin_encrypted, set_pin_padded, token_pin_auth, PlatformPinSession, TestStore, FLAG_UV,
 };
+use super::support::{insert_owned, stored};
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::{authenticate, verify, HmacSha256};
@@ -174,7 +175,7 @@ fn protocol_id(protocol: ClassicPinProtocol) -> Value {
 #[test]
 fn set_pin_verifies_pin_uv_auth_param_per_protocol() {
     for (protocol, variant) in CASES {
-        let mut app = new_app(TestClient::new(), [0x60; 16]);
+        let mut app = new_app(TestStore::new(), [0x60; 16]);
         let session = PlatformPinSession::establish(&mut app, protocol, 0x11);
         let new_pin_enc = session.encrypt(&padded_pin(b"1234"));
         let param = mac(protocol, &session.keys.auth_key, &new_pin_enc, variant);
@@ -207,7 +208,7 @@ fn set_pin_verifies_pin_uv_auth_param_per_protocol() {
 #[test]
 fn change_pin_verifies_pin_uv_auth_param_per_protocol() {
     for (protocol, variant) in CASES {
-        let mut app = new_app(TestClient::new(), [0x61; 16]);
+        let mut app = new_app(TestStore::new(), [0x61; 16]);
         app.pin_state.set_pin(pin_hash(b"1234"));
         let session = PlatformPinSession::establish(&mut app, protocol, 0x12);
         let new_pin_enc = session.encrypt(&padded_pin(b"5678"));
@@ -249,7 +250,7 @@ fn make_credential_verifies_pin_uv_auth_param_per_protocol() {
     let token = [0x7A; 32];
     let client_hash = [0x42; 32];
     for (protocol, variant) in CASES {
-        let mut app = new_app(TestClient::new(), [0x62; 16]);
+        let mut app = new_app(TestStore::new(), [0x62; 16]);
         install_pin_uv_auth_token(
             &mut app,
             protocol,
@@ -265,14 +266,14 @@ fn make_credential_verifies_pin_uv_auth_param_per_protocol() {
         if variant == MacCase::Correct {
             let response = result.unwrap_or_else(|err| panic!("{protocol:?}: {err:#04x}"));
             assert_eq!(response_auth_data(&response)[32] & FLAG_UV, FLAG_UV);
-            assert_eq!(app.stored_credentials.len(), 1);
+            assert_eq!(stored(&app).len(), 1);
         } else {
             assert_eq!(
                 result,
                 Err(CTAP2_ERR_PIN_AUTH_INVALID),
                 "{protocol:?} {variant:?}"
             );
-            assert!(app.stored_credentials.is_empty());
+            assert!(stored(&app).is_empty());
         }
     }
 }
@@ -282,9 +283,8 @@ fn get_assertion_verifies_pin_uv_auth_param_per_protocol() {
     let token = [0x7B; 32];
     let client_hash = [0x43; 32];
     for (protocol, variant) in CASES {
-        let mut app = new_app(TestClient::new(), [0x63; 16]);
-        app.stored_credentials
-            .push(es256_credential("example.com", &[0xC1]));
+        let mut app = new_app(TestStore::new(), [0x63; 16]);
+        insert_owned(&mut app, es256_credential("example.com", &[0xC1]));
         install_pin_uv_auth_token(
             &mut app,
             protocol,
@@ -301,14 +301,14 @@ fn get_assertion_verifies_pin_uv_auth_param_per_protocol() {
         if variant == MacCase::Correct {
             let response = result.unwrap_or_else(|err| panic!("{protocol:?}: {err:#04x}"));
             assert_eq!(response_auth_data(&response)[32] & FLAG_UV, FLAG_UV);
-            assert_eq!(app.stored_credentials[0].sign_count, 1);
+            assert_eq!(stored(&app)[0].sign_count, 1);
         } else {
             assert_eq!(
                 result,
                 Err(CTAP2_ERR_PIN_AUTH_INVALID),
                 "{protocol:?} {variant:?}"
             );
-            assert_eq!(app.stored_credentials[0].sign_count, 0);
+            assert_eq!(stored(&app)[0].sign_count, 0);
         }
     }
 }
@@ -318,9 +318,8 @@ fn credential_management_verifies_pin_uv_auth_param_per_protocol() {
     const GET_CREDS_METADATA: u8 = 0x01;
     let token = [0x7C; 32];
     for (protocol, variant) in CASES {
-        let mut app = new_app(TestClient::new(), [0x64; 16]);
-        app.stored_credentials
-            .push(es256_credential("example.com", &[0xC2]));
+        let mut app = new_app(TestStore::new(), [0x64; 16]);
+        insert_owned(&mut app, es256_credential("example.com", &[0xC2]));
         install_pin_uv_auth_token(&mut app, protocol, token, PIN_PERMISSION_CM, None);
         let param = mac(protocol, &token, &[GET_CREDS_METADATA], variant);
         let request = canonical_map(vec![
@@ -373,13 +372,10 @@ fn hmac_secret_verifies_salt_auth_per_protocol() {
     let client_hash = [0x44; 32];
     let salt = [0x99; 32];
     for (protocol, variant) in CASES {
-        let mut app = new_app(TestClient::new(), [0x65; 16]);
+        let mut app = new_app(TestStore::new(), [0x65; 16]);
         let credential = es256_credential("example.com", &[0xC3]);
-        let cred_random_without_uv = credential
-            .cred_random_without_uv
-            .clone()
-            .expect("credRandomWithoutUV");
-        app.stored_credentials.push(credential);
+        let cred_random_without_uv = credential.cred_random_without_uv;
+        insert_owned(&mut app, credential);
         let session = PlatformPinSession::establish(&mut app, protocol, 0x13);
         let salt_enc = session.encrypt(&salt);
         let salt_auth = mac(protocol, &session.keys.auth_key, &salt_enc, variant);
@@ -415,16 +411,14 @@ fn hmac_secret_verifies_salt_auth_per_protocol() {
 
 #[test]
 fn hmac_secret_protocol_two_encrypts_each_output_under_its_own_iv() {
-    let mut app = new_app(TestClient::new(), [0x66; 16]);
+    let mut app = new_app(TestStore::new(), [0x66; 16]);
     let first = es256_credential("example.com", &[0xD1]);
     let mut second = es256_credential("example.com", &[0xD2]);
-    second.cred_random_without_uv = Some(vec![0x30; 32]);
-    let cred_randoms = [
-        first.cred_random_without_uv.clone().expect("credRandom"),
-        second.cred_random_without_uv.clone().expect("credRandom"),
-    ];
-    app.stored_credentials.push(first);
-    app.stored_credentials.push(second);
+    second.cred_random_without_uv = [0x30; 32];
+    let cred_randoms = [first.cred_random_without_uv, second.cred_random_without_uv];
+    // Assertions come most recently created first.
+    insert_owned(&mut app, second);
+    insert_owned(&mut app, first);
 
     let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V2, 0x14);
     let (salt1, salt2) = ([0x51; 32], [0x52; 32]);
@@ -507,7 +501,7 @@ fn make_credential_checks_pin_uv_auth_protocol_only_with_a_pin_uv_auth_param() {
         (None, None, Ok(false)),
     ];
     for (param, protocol, expected) in cases {
-        let mut app = new_app(TestClient::new(), [0x67; 16]);
+        let mut app = new_app(TestStore::new(), [0x67; 16]);
         install_pin_uv_auth_token(
             &mut app,
             ClassicPinProtocol::V2,
@@ -549,9 +543,8 @@ fn get_assertion_checks_pin_uv_auth_protocol_only_with_a_pin_uv_auth_param() {
         (None, Some(int(3)), Ok(false)),
     ];
     for (param, protocol, expected) in cases {
-        let mut app = new_app(TestClient::new(), [0x68; 16]);
-        app.stored_credentials
-            .push(es256_credential("example.com", &[0xE1]));
+        let mut app = new_app(TestStore::new(), [0x68; 16]);
+        insert_owned(&mut app, es256_credential("example.com", &[0xE1]));
         install_pin_uv_auth_token(
             &mut app,
             ClassicPinProtocol::V2,
@@ -591,7 +584,7 @@ fn credential_management_requires_pin_uv_auth_param_then_protocol() {
         (Some(param), Some(int(2)), Ok(CTAP2_OK)),
     ];
     for (param, protocol, expected) in cases {
-        let mut app = new_app(TestClient::new(), [0x69; 16]);
+        let mut app = new_app(TestStore::new(), [0x69; 16]);
         install_pin_uv_auth_token(
             &mut app,
             ClassicPinProtocol::V2,
@@ -618,13 +611,10 @@ fn credential_management_requires_pin_uv_auth_param_then_protocol() {
 fn hmac_secret_defaults_to_pin_uv_auth_protocol_one() {
     let salt = [0x98; 32];
     for protocol in [None, Some(int(3))] {
-        let mut app = new_app(TestClient::new(), [0x6A; 16]);
+        let mut app = new_app(TestStore::new(), [0x6A; 16]);
         let credential = es256_credential("example.com", &[0xE2]);
-        let cred_random = credential
-            .cred_random_without_uv
-            .clone()
-            .expect("credRandomWithoutUV");
-        app.stored_credentials.push(credential);
+        let cred_random = credential.cred_random_without_uv;
+        insert_owned(&mut app, credential);
         // A CTAP2.0 platform: protocol one, and no pinUvAuthProtocol member.
         let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V1, 0x15);
         let salt_enc = session.encrypt(&salt);
@@ -667,7 +657,7 @@ fn hmac_secret_defaults_to_pin_uv_auth_protocol_one() {
 #[test]
 fn reset_discards_the_pin_uv_auth_token_and_the_key_agreement_key() {
     for protocol in PROTOCOLS {
-        let mut app = new_app(TestClient::new(), [0x6B; 16]);
+        let mut app = new_app(TestStore::new(), [0x6B; 16]);
         app.pin_state.set_pin(pin_hash(b"1234"));
         let token = get_pin_uv_auth_token(
             &mut app,
@@ -713,14 +703,11 @@ fn reset_discards_the_pin_uv_auth_token_and_the_key_agreement_key() {
 #[test]
 fn hmac_secret_can_reuse_the_key_agreement_of_a_pin_token_request() {
     for protocol in PROTOCOLS {
-        let mut app = new_app(TestClient::new(), [0x6C; 16]);
+        let mut app = new_app(TestStore::new(), [0x6C; 16]);
         app.pin_state.set_pin(pin_hash(b"1234"));
         let credential = es256_credential("example.com", &[0xE3]);
-        let cred_random_with_uv = credential
-            .cred_random_with_uv
-            .clone()
-            .expect("credRandomWithUV");
-        app.stored_credentials.push(credential);
+        let cred_random_with_uv = credential.cred_random_with_uv;
+        insert_owned(&mut app, credential);
 
         // One getKeyAgreement for both the token and the hmac-secret salts.
         let session = PlatformPinSession::establish(&mut app, protocol, 0x17);

@@ -5,8 +5,11 @@ use crate::ctap::pin::protocol::HmacSha256;
 use crate::ctap::presence::{
     Cancellation, PresenceOperation, PresenceOutcome, PresenceRequest, UserPresence,
 };
-use crate::ctap::storage::StoredCredential;
 use crate::ctap::{CtapApp, InterruptFlag};
+use crate::store::{
+    AttestationRecord, Corruption, CredentialRecord, CredentialStore, MemoryStore, PinStateRecord,
+    PrivateKeyMaterial, StoreError,
+};
 use crate::{ClassicPinProtocol, CoseAlg, PinUvSessionKeys};
 
 use ciborium::{
@@ -14,7 +17,6 @@ use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
-use core::task::Poll;
 use hmac::Mac;
 use p256::{
     ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, EncodedPoint,
@@ -22,16 +24,9 @@ use p256::{
 };
 use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
-use trussed::api::{reply, Reply, Request, RequestVariant};
-use trussed::client::{
-    AttestationClient, CertificateClient, Client as TrussedClient, ClientResult, CounterClient,
-    CryptoClient, FilesystemClient, FutureResult, ManagementClient, PollClient, UiClient,
-};
-use trussed::error::Error as TrussedError;
-use trussed::types::Message;
 
 use crate::ctap::constants::*;
 
@@ -119,14 +114,18 @@ impl UserPresence for ScriptedPresence {
     }
 }
 
-/// An app whose user approves every presence request.
-pub(super) fn test_app(aaguid: [u8; 16]) -> CtapApp<TestClient> {
-    new_app(TestClient::new(), aaguid)
+/// The engine as the unit tests build it.
+pub(super) type TestApp = CtapApp<'static>;
+
+/// An app over an empty [`TestStore`] whose user approves every presence
+/// request.
+pub(super) fn test_app(aaguid: [u8; 16]) -> TestApp {
+    new_app(TestStore::new(), aaguid)
 }
 
-/// An app over `client` whose user approves every presence request.
-pub(super) fn new_app(client: TestClient, aaguid: [u8; 16]) -> CtapApp<TestClient> {
-    app_with_client(client, aaguid, [], &NEVER_INTERRUPTED).0
+/// An app over `store` whose user approves every presence request.
+pub(super) fn new_app(store: TestStore, aaguid: [u8; 16]) -> TestApp {
+    app_with_store(store, aaguid, [], &NEVER_INTERRUPTED).0
 }
 
 /// An app whose presence requests are answered by `outcomes` in order, then
@@ -134,7 +133,7 @@ pub(super) fn new_app(client: TestClient, aaguid: [u8; 16]) -> CtapApp<TestClien
 pub(super) fn scripted_app(
     aaguid: [u8; 16],
     outcomes: impl IntoIterator<Item = PresenceOutcome>,
-) -> (CtapApp<TestClient>, PresenceLog) {
+) -> (TestApp, PresenceLog) {
     scripted_app_with_interrupt(aaguid, outcomes, &NEVER_INTERRUPTED)
 }
 
@@ -143,40 +142,40 @@ pub(super) fn scripted_app_with_interrupt(
     aaguid: [u8; 16],
     outcomes: impl IntoIterator<Item = PresenceOutcome>,
     interrupt: &'static InterruptFlag,
-) -> (CtapApp<TestClient>, PresenceLog) {
-    app_with_client(TestClient::new(), aaguid, outcomes, interrupt)
+) -> (TestApp, PresenceLog) {
+    app_with_store(TestStore::new(), aaguid, outcomes, interrupt)
 }
 
-/// An app over `client` drawing randomness from `rng`, whose user approves
+/// An app over `store` drawing randomness from `rng`, whose user approves
 /// every presence request.
-pub(super) fn app_with_client_and_rng(
-    client: TestClient,
+pub(super) fn app_with_store_and_rng(
+    store: TestStore,
     rng: TestRng,
     aaguid: [u8; 16],
-) -> (CtapApp<TestClient>, PresenceLog) {
+) -> (TestApp, PresenceLog) {
     let log = PresenceLog::default();
     let presence = ScriptedPresence {
         outcomes: VecDeque::new(),
         log: log.clone(),
     };
-    let app = CtapApp::new(client, rng, presence, &NEVER_INTERRUPTED, aaguid);
+    let app = CtapApp::new(store, rng, presence, &NEVER_INTERRUPTED, aaguid);
     (app, log)
 }
 
-/// An app over `client`, with presence answered by `outcomes` then approved.
-pub(super) fn app_with_client(
-    client: TestClient,
+/// An app over `store`, with presence answered by `outcomes` then approved.
+pub(super) fn app_with_store(
+    store: TestStore,
     aaguid: [u8; 16],
     outcomes: impl IntoIterator<Item = PresenceOutcome>,
     interrupt: &'static InterruptFlag,
-) -> (CtapApp<TestClient>, PresenceLog) {
+) -> (TestApp, PresenceLog) {
     let log = PresenceLog::default();
     let presence = ScriptedPresence {
         outcomes: outcomes.into_iter().collect(),
         log: log.clone(),
     };
     let seed = u64::from_le_bytes(aaguid[..8].try_into().expect("8 bytes"));
-    let mut app = CtapApp::new(client, TestRng::new(seed), presence, interrupt, aaguid);
+    let mut app = CtapApp::new(store, TestRng::new(seed), presence, interrupt, aaguid);
     let keepalive_log = log.clone();
     app.set_keepalive_callback(move |waiting| keepalive_log.record_waiting(waiting));
     (app, log)
@@ -236,82 +235,200 @@ impl RngCore for TestRng {
 
 impl CryptoRng for TestRng {}
 
-#[derive(Default)]
-pub(super) struct TestClient {
-    pending: Option<Result<Reply, TrussedError>>,
-    files: HashMap<Vec<u8>, Vec<u8>>,
-    writes: Vec<(Vec<u8>, Vec<u8>)>,
+/// Store operations a [`TestStore`] can be told to fail.
+#[derive(Debug, Default)]
+pub(super) struct Faults {
+    pub(super) get: bool,
+    pub(super) put: bool,
+    pub(super) list: bool,
+    /// `pin_state` reports the record as corrupt.
+    pub(super) pin_state: bool,
+    pub(super) set_pin_state: bool,
+    pub(super) attestation: bool,
+    pub(super) clear: bool,
 }
 
-impl TestClient {
+#[derive(Default)]
+struct TestStoreState {
+    store: MemoryStore,
+    faults: Faults,
+    pin_state_writes: Vec<PinStateRecord>,
+}
+
+/// The unit tests' [`CredentialStore`]: a [`MemoryStore`] that records PIN
+/// state writes and fails operations on demand.
+///
+/// Clones share one store, so a test keeps a handle to inspect or fault the
+/// store an app owns, or to start a new app on the same storage.
+#[derive(Clone, Default)]
+pub(super) struct TestStore(Arc<Mutex<TestStoreState>>);
+
+impl TestStore {
     pub(super) fn new() -> Self {
         Self::default()
     }
 
-    /// Put `data` at `path`, as if an earlier run had written it.
-    pub(super) fn insert_file(&mut self, path: &str, data: Vec<u8>) {
-        self.files.insert(path.as_bytes().to_vec(), data);
+    /// A store holding at most `max` credentials.
+    pub(super) fn with_max_credentials(max: usize) -> Self {
+        let store = Self::new();
+        let mut state = store.lock();
+        state.store = MemoryStore::new().with_max_credentials(max);
+        drop(state);
+        store
     }
 
-    /// Every write to `path`, oldest first.
-    pub(super) fn writes_to(&self, path: &str) -> Vec<Vec<u8>> {
-        self.writes
-            .iter()
-            .filter(|(written, _)| written.as_slice() == path.as_bytes())
-            .map(|(_, data)| data.clone())
-            .collect()
+    fn lock(&self) -> MutexGuard<'_, TestStoreState> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn dispatch(&mut self, request: Request) -> Result<Reply, TrussedError> {
-        match request {
-            Request::WriteFile(req) => {
-                let path_key = req.path.as_str().as_bytes().to_vec();
-                let data = req.data.as_slice().to_vec();
-                self.writes.push((path_key.clone(), data.clone()));
-                self.files.insert(path_key, data);
-                Ok(Reply::from(reply::WriteFile {}))
-            }
-            Request::ReadFile(req) => {
-                let path_key = req.path.as_str().as_bytes().to_vec();
-                if let Some(data) = self.files.get(&path_key) {
-                    let message = Message::from_slice(data).expect("stored file fits message");
-                    Ok(Reply::from(reply::ReadFile { data: message }))
-                } else {
-                    Err(TrussedError::FilesystemReadFailure)
-                }
-            }
-            _ => Err(TrussedError::FunctionNotSupported),
+    /// Change which operations fail.
+    pub(super) fn faults(&self, change: impl FnOnce(&mut Faults)) {
+        change(&mut self.lock().faults);
+    }
+
+    /// Every PIN state written so far, oldest first.
+    pub(super) fn pin_state_writes(&self) -> Vec<PinStateRecord> {
+        self.lock().pin_state_writes.clone()
+    }
+
+    /// Every credential, most recently created first.
+    pub(super) fn credentials(&self) -> Vec<CredentialRecord> {
+        self.lock().store.list().expect("list credentials")
+    }
+
+    /// The credential with `credential_id`.
+    pub(super) fn credential(&self, credential_id: &[u8]) -> CredentialRecord {
+        self.lock()
+            .store
+            .get(credential_id)
+            .expect("read credential")
+            .expect("credential is stored")
+    }
+
+    fn fail_if(&self, failing: impl FnOnce(&Faults) -> bool) -> Result<(), StoreError> {
+        if failing(&self.lock().faults) {
+            Err(StoreError::Io {
+                path: "injected".into(),
+                source: std::io::Error::other("injected failure"),
+            })
+        } else {
+            Ok(())
         }
     }
 }
 
-impl PollClient for TestClient {
-    fn request<Rq: RequestVariant>(&mut self, req: Rq) -> ClientResult<'_, Rq::Reply, Self> {
-        assert!(self.pending.is_none(), "a request is already pending");
-        let request: Request = req.into();
-        self.pending = Some(self.dispatch(request));
-        Ok(FutureResult::new(self))
+impl CredentialStore for TestStore {
+    fn get(&self, credential_id: &[u8]) -> Result<Option<CredentialRecord>, StoreError> {
+        self.fail_if(|faults| faults.get)?;
+        self.lock().store.get(credential_id)
     }
 
-    fn poll(&mut self) -> Poll<Result<Reply, TrussedError>> {
-        match self.pending.take() {
-            Some(result) => Poll::Ready(result),
-            None => Poll::Pending,
+    fn put(&mut self, record: &CredentialRecord) -> Result<(), StoreError> {
+        self.fail_if(|faults| faults.put)?;
+        self.lock().store.put(record)
+    }
+
+    fn delete(&mut self, credential_id: &[u8]) -> Result<bool, StoreError> {
+        self.lock().store.delete(credential_id)
+    }
+
+    fn list(&self) -> Result<Vec<CredentialRecord>, StoreError> {
+        self.fail_if(|faults| faults.list)?;
+        self.lock().store.list()
+    }
+
+    fn count(&self) -> Result<usize, StoreError> {
+        self.fail_if(|faults| faults.list)?;
+        self.lock().store.count()
+    }
+
+    fn max_credentials(&self) -> usize {
+        self.lock().store.max_credentials()
+    }
+
+    fn clear(&mut self) -> Result<(), StoreError> {
+        self.fail_if(|faults| faults.clear)?;
+        self.lock().store.clear()
+    }
+
+    fn pin_state(&self) -> Result<Option<PinStateRecord>, StoreError> {
+        if self.lock().faults.pin_state {
+            return Err(StoreError::Corrupt {
+                object: "pin-state".into(),
+                reason: Corruption::Authentication,
+            });
         }
+        self.lock().store.pin_state()
+    }
+
+    fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<(), StoreError> {
+        self.fail_if(|faults| faults.set_pin_state)?;
+        let mut locked = self.lock();
+        locked.pin_state_writes.push(state.clone());
+        locked.store.set_pin_state(state)
+    }
+
+    fn attestation(&self) -> Result<Option<AttestationRecord>, StoreError> {
+        self.fail_if(|faults| faults.attestation)?;
+        self.lock().store.attestation()
+    }
+
+    fn set_attestation(&mut self, record: &AttestationRecord) -> Result<(), StoreError> {
+        self.lock().store.set_attestation(record)
     }
 }
 
-impl CryptoClient for TestClient {}
-impl FilesystemClient for TestClient {}
-impl AttestationClient for TestClient {}
-impl CertificateClient for TestClient {}
-impl CounterClient for TestClient {}
-impl ManagementClient for TestClient {}
-impl UiClient for TestClient {}
-impl TrussedClient for TestClient {}
+/// Every credential in the app's store, most recently created first.
+pub(super) fn stored(app: &TestApp) -> Vec<CredentialRecord> {
+    app.store.list().expect("list credentials")
+}
+
+/// The credential with `credential_id` in the app's store.
+pub(super) fn stored_by_id(app: &TestApp, credential_id: &[u8]) -> CredentialRecord {
+    app.store
+        .get(credential_id)
+        .expect("read credential")
+        .expect("credential is stored")
+}
+
+/// Put `record` into the app's store, as if the app had created it.
+pub(super) fn insert(app: &mut TestApp, record: &CredentialRecord) {
+    app.store.put(record).expect("store credential");
+}
+
+/// [`insert`], taking the record by value.
+pub(super) fn insert_owned(app: &mut TestApp, record: CredentialRecord) {
+    insert(app, &record);
+}
+
+/// A credential with fresh key material, user ID `user_id` and fixed
+/// `CredRandom` values.
+pub(super) fn credential(
+    rp_id: &str,
+    user_id: &[u8],
+    credential_id: &[u8],
+    alg: CoseAlg,
+) -> CredentialRecord {
+    CredentialRecord {
+        credential_id: credential_id.to_vec(),
+        rp_id: rp_id.into(),
+        user_id: user_id.to_vec(),
+        user_name: None,
+        user_display_name: None,
+        alg,
+        private_key: PrivateKeyMaterial::generate(alg),
+        cred_random_with_uv: [0x10; 32],
+        cred_random_without_uv: [0x20; 32],
+        cred_protect: 1,
+        sign_count: 0,
+        created_at: 0,
+    }
+}
 
 pub(super) fn request_classic_key_agreement(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     protocol: ClassicPinProtocol,
 ) -> Vec<(Value, Value)> {
     let request = canonical_map(vec![
@@ -481,10 +598,7 @@ pub(super) fn encode(value: &Value) -> Vec<u8> {
 }
 
 /// Send an authenticatorClientPIN request built from `entries`.
-pub(super) fn client_pin(
-    app: &mut CtapApp<TestClient>,
-    entries: Vec<(Value, Value)>,
-) -> Result<Vec<u8>, u8> {
+pub(super) fn client_pin(app: &mut TestApp, entries: Vec<(Value, Value)>) -> Result<Vec<u8>, u8> {
     app.handle_client_pin(&encode(&canonical_map(entries)))
 }
 
@@ -513,7 +627,7 @@ pub(super) struct PlatformPinSession {
 
 impl PlatformPinSession {
     pub(super) fn establish(
-        app: &mut CtapApp<TestClient>,
+        app: &mut TestApp,
         protocol: ClassicPinProtocol,
         platform_secret: u8,
     ) -> Self {
@@ -544,7 +658,7 @@ impl PlatformPinSession {
 
 /// setPIN over `protocol`, with `padded_new_pin` as the plaintext of newPinEnc.
 pub(super) fn set_pin_padded(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     protocol: ClassicPinProtocol,
     padded_new_pin: &[u8],
 ) -> Result<Vec<u8>, u8> {
@@ -555,7 +669,7 @@ pub(super) fn set_pin_padded(
 
 /// setPIN with a newPinEnc exactly as given, authenticated correctly.
 pub(super) fn set_pin_encrypted(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     session: &PlatformPinSession,
     new_pin_enc: Vec<u8>,
 ) -> Result<Vec<u8>, u8> {
@@ -573,7 +687,7 @@ pub(super) fn set_pin_encrypted(
 }
 
 /// getPINRetries: `(pinRetries, powerCycleState)`.
-pub(super) fn get_pin_retries(app: &mut CtapApp<TestClient>) -> (u8, Option<bool>) {
+pub(super) fn get_pin_retries(app: &mut TestApp) -> (u8, Option<bool>) {
     let response = client_pin(app, vec![(int(2), int(0x01))]).expect("getPINRetries succeeds");
     assert_eq!(response[0], CTAP2_OK);
     let Value::Map(map) = from_reader(&response[1..]).expect("decode getPINRetries") else {
@@ -597,7 +711,7 @@ pub(super) fn get_pin_retries(app: &mut CtapApp<TestClient>) -> (u8, Option<bool
 
 /// getPinToken (0x05) with `pin` over `protocol`: the decrypted pinUvAuthToken.
 pub(super) fn get_pin_token(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     protocol: ClassicPinProtocol,
     pin: &[u8],
 ) -> Result<[u8; 32], u8> {
@@ -607,7 +721,7 @@ pub(super) fn get_pin_token(
 /// getPinUvAuthTokenUsingPinWithPermissions (0x09) with `pin` over
 /// `protocol`: the decrypted pinUvAuthToken.
 pub(super) fn get_pin_uv_auth_token(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     protocol: ClassicPinProtocol,
     pin: &[u8],
     permissions: i128,
@@ -624,7 +738,7 @@ pub(super) fn get_pin_uv_auth_token(
 }
 
 fn request_pin_uv_auth_token(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     protocol: ClassicPinProtocol,
     pin: &[u8],
     subcommand: i64,
@@ -636,7 +750,7 @@ fn request_pin_uv_auth_token(
 
 /// getPinToken (0x05) with `pin`, over a key agreement the platform already has.
 pub(super) fn get_pin_token_with(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     session: &PlatformPinSession,
     pin: &[u8],
 ) -> Result<[u8; 32], u8> {
@@ -644,7 +758,7 @@ pub(super) fn get_pin_token_with(
 }
 
 fn request_pin_uv_auth_token_with(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     session: &PlatformPinSession,
     pin: &[u8],
     subcommand: i64,
@@ -773,22 +887,8 @@ pub(super) fn get_assertion_request_with(
 }
 
 /// A discoverable ES256 credential bound to `rp_id`.
-pub(super) fn es256_credential(rp_id: &str, credential_id: &[u8]) -> StoredCredential {
-    let (public_key, secret_key) = crate::create_credential(CoseAlg::ES256);
-    StoredCredential {
-        rp_id: rp_id.into(),
-        user_id: vec![0x01],
-        user_name: None,
-        user_display_name: None,
-        alg: CoseAlg::ES256 as i32,
-        credential_id: credential_id.to_vec(),
-        public_key,
-        secret_key: secret_key.to_bytes(),
-        cred_random_with_uv: Some(vec![0x10; 32]),
-        cred_random_without_uv: Some(vec![0x20; 32]),
-        cred_protect: Some(1),
-        sign_count: 0,
-    }
+pub(super) fn es256_credential(rp_id: &str, credential_id: &[u8]) -> CredentialRecord {
+    credential(rp_id, &[0x01], credential_id, CoseAlg::ES256)
 }
 
 /// The authenticator data of a makeCredential or getAssertion response.
@@ -813,7 +913,7 @@ pub(super) const FLAG_UV: u8 = 0x04;
 /// Give `app` an in-use pinUvAuthToken, as a successful
 /// getPinUvAuthTokenUsingPinWithPermissions over `protocol` would.
 pub(super) fn install_pin_uv_auth_token(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     protocol: ClassicPinProtocol,
     token: [u8; 32],
     permissions: u8,

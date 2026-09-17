@@ -5,14 +5,14 @@ use super::support::new_app;
 use super::support::{
     encode, es256_credential, get_assertion_request, get_pin_token, get_pin_uv_auth_token, int,
     make_credential_request, pin_hash, response_auth_data, set_pin_padded, token_pin_auth,
-    TestClient, FLAG_UV,
+    TestStore, FLAG_UV,
 };
+use super::support::{insert_owned, stored, TestApp};
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::token::{
     ManualClock, INITIAL_USAGE_TIME_LIMIT, MAX_USAGE_TIME_PERIOD, USER_PRESENT_TIME_LIMIT,
 };
-use crate::ctap::CtapApp;
 use crate::ClassicPinProtocol;
 
 use ciborium::value::Value;
@@ -25,19 +25,18 @@ const PROTOCOLS: [ClassicPinProtocol; 2] = [ClassicPinProtocol::V1, ClassicPinPr
 const MILLISECOND: Duration = Duration::from_millis(1);
 
 /// An authenticator with `PIN` set, a manual clock and one credential.
-fn app_with_clock() -> (CtapApp<TestClient>, ManualClock) {
-    let mut app = new_app(TestClient::new(), [0x80; 16]);
+fn app_with_clock() -> (TestApp, ManualClock) {
+    let mut app = new_app(TestStore::new(), [0x80; 16]);
     let clock = ManualClock::default();
     app.pin_state.set_clock(Box::new(clock.clone()));
     app.pin_state.set_pin(pin_hash(PIN));
-    app.stored_credentials
-        .push(es256_credential("example.com", &[0xF1]));
+    insert_owned(&mut app, es256_credential("example.com", &[0xF1]));
     (app, clock)
 }
 
 /// getCredsMetadata, which checks the token without consuming it.
 fn creds_metadata(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     protocol: ClassicPinProtocol,
     token: &[u8; 32],
 ) -> Result<(), u8> {
@@ -54,7 +53,7 @@ fn creds_metadata(
 }
 
 fn make_credential(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     protocol: ClassicPinProtocol,
     token: &[u8; 32],
     rp_id: &str,
@@ -69,7 +68,7 @@ fn make_credential(
 }
 
 fn get_assertion(
-    app: &mut CtapApp<TestClient>,
+    app: &mut TestApp,
     protocol: ClassicPinProtocol,
     token: &[u8; 32],
 ) -> Result<Vec<u8>, u8> {
@@ -83,7 +82,7 @@ fn get_assertion(
     ))
 }
 
-fn cm_token(app: &mut CtapApp<TestClient>, protocol: ClassicPinProtocol) -> [u8; 32] {
+fn cm_token(app: &mut TestApp, protocol: ClassicPinProtocol) -> [u8; 32] {
     get_pin_uv_auth_token(app, protocol, PIN, PIN_PERMISSION_CM.into(), None)
         .expect("cm token issued")
 }
@@ -294,7 +293,7 @@ fn a_token_bound_to_an_rp_refuses_other_rps() {
         make_credential(&mut app, ClassicPinProtocol::V2, &token, "example.com"),
         Err(CTAP2_ERR_PIN_AUTH_INVALID)
     );
-    assert!(app.stored_credentials.len() == 1);
+    assert!(stored(&app).len() == 1);
 }
 
 #[test]

@@ -1,12 +1,14 @@
 //! authenticatorMakeCredential tests.
 
 use super::support::new_app;
-use super::support::{install_pin_uv_auth_token, token_pin_auth, TestClient};
+use super::support::stored;
+use super::support::{install_pin_uv_auth_token, token_pin_auth, TestStore};
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::make_credential::COSE_ALG_ES256;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
-use crate::{credential_secret_from_bytes, ClassicPinProtocol, CoseAlg, CredentialSecretKey};
+use crate::store::{AttestationRecord, PrivateKeyMaterial};
+use crate::{ClassicPinProtocol, CoseAlg, CredentialSecretKey};
 
 use ciborium::{
     de::from_reader,
@@ -19,7 +21,7 @@ use crate::ctap::constants::*;
 
 #[test]
 fn make_credential_includes_extensions() {
-    let mut app = new_app(TestClient::new(), [0xAA; 16]);
+    let mut app = new_app(TestStore::new(), [0xAA; 16]);
     let client_hash = vec![0xBB; 32];
     let pin_token = [0xCC; 32];
     install_pin_uv_auth_token(
@@ -81,24 +83,14 @@ fn make_credential_includes_extensions() {
         .expect("makeCredential succeeds");
     assert_eq!(response[0], CTAP2_OK);
 
-    let credential = &app.stored_credentials[0];
-    assert_eq!(credential.cred_protect, Some(3));
-    assert_eq!(
-        credential
-            .cred_random_with_uv
-            .as_ref()
-            .expect("credRandom with UV present")
-            .len(),
-        32
+    let credentials = stored(&app);
+    let credential = &credentials[0];
+    assert_eq!(credential.cred_protect, 3);
+    assert_ne!(
+        credential.cred_random_with_uv, credential.cred_random_without_uv,
+        "the two CredRandom values are independent"
     );
-    assert_eq!(
-        credential
-            .cred_random_without_uv
-            .as_ref()
-            .expect("credRandom without UV present")
-            .len(),
-        32
-    );
+    let public_key = credential.cose_public_key().expect("derive public key");
 
     let Value::Map(entries) = from_reader(&response[1..]).expect("decode response map") else {
         panic!("response must be a map");
@@ -117,7 +109,7 @@ fn make_credential_includes_extensions() {
     offset += 16; // AAGUID
     offset += 2; // credential ID length field
     offset += credential.credential_id.len();
-    offset += credential.public_key.len();
+    offset += public_key.len();
 
     let extension_bytes = &auth_data[offset..];
     let Value::Map(extension_map) = from_reader(extension_bytes).expect("decode extensions") else {
@@ -146,7 +138,7 @@ fn make_credential_includes_extensions() {
 
 #[test]
 fn make_credential_supports_es256() {
-    let mut app = new_app(TestClient::new(), [0x01; 16]);
+    let mut app = new_app(TestStore::new(), [0x01; 16]);
     let client_hash = vec![0x10; 32];
     let rp = canonical_map(vec![(
         Value::Text("id".into()),
@@ -178,13 +170,17 @@ fn make_credential_supports_es256() {
         .expect("makeCredential succeeds");
     assert_eq!(response[0], CTAP2_OK);
 
-    assert_eq!(app.stored_credentials.len(), 1);
-    let credential = &app.stored_credentials[0];
-    assert_eq!(credential.alg, CoseAlg::ES256 as i32);
-    assert_eq!(credential.secret_key.len(), 32);
+    assert_eq!(stored(&app).len(), 1);
+    let credentials = stored(&app);
+    let credential = &credentials[0];
+    assert_eq!(credential.alg, CoseAlg::ES256);
+    assert!(matches!(
+        credential.private_key,
+        PrivateKeyMaterial::Es256 { .. }
+    ));
+    let public_key = credential.cose_public_key().expect("derive public key");
 
-    let Value::Map(entries) =
-        from_reader(credential.public_key.as_slice()).expect("decode ES256 COSE key")
+    let Value::Map(entries) = from_reader(public_key.as_slice()).expect("decode ES256 COSE key")
     else {
         panic!("public key must be a map");
     };
@@ -235,9 +231,9 @@ fn make_credential_supports_es256() {
     assert_eq!(x_len, Some(32));
     assert_eq!(y_len, Some(32));
 
-    let reconstructed =
-        credential_secret_from_bytes(CoseAlg::ES256, credential.secret_key.as_slice())
-            .expect("reconstruct ES256 secret key");
+    let reconstructed = credential
+        .secret_key()
+        .expect("reconstruct ES256 secret key");
     match reconstructed {
         CredentialSecretKey::Es256(_) => {}
         _ => panic!("expected ES256 secret key variant"),
@@ -246,11 +242,15 @@ fn make_credential_supports_es256() {
 
 #[test]
 fn make_credential_uses_attestation_certificate_when_available() {
-    let mut app = new_app(TestClient::new(), [0xAB; 16]);
+    let mut app = new_app(TestStore::new(), [0xAB; 16]);
     let att_key_bytes = vec![0x13; 32];
     let certificate = vec![0x30, 0x82, 0x00, 0x01];
-    app.attestation_private_key = Some(att_key_bytes.clone());
-    app.attestation_certificate_chain = Some(vec![certificate.clone()]);
+    app.store
+        .set_attestation(&AttestationRecord {
+            private_key: att_key_bytes.as_slice().try_into().expect("32 bytes"),
+            certificate_chain: vec![certificate.clone()],
+        })
+        .expect("provision attestation");
 
     let client_hash = vec![0x11; 32];
     let rp = canonical_map(vec![(
@@ -357,7 +357,7 @@ fn make_credential_uses_attestation_certificate_when_available() {
 
 #[test]
 fn make_credential_self_attestation_without_attestation_key() {
-    let mut app = new_app(TestClient::new(), [0xCD; 16]);
+    let mut app = new_app(TestStore::new(), [0xCD; 16]);
     let client_hash = vec![0x22; 32];
     let rp = canonical_map(vec![(
         Value::Text("id".into()),
@@ -448,7 +448,7 @@ fn make_credential_self_attestation_without_attestation_key() {
 
 #[test]
 fn make_credential_can_suppress_attestation() {
-    let mut app = new_app(TestClient::new(), [0xDD; 16]);
+    let mut app = new_app(TestStore::new(), [0xDD; 16]);
     app.suppress_attestation(true);
 
     let client_hash = vec![0x33; 32];
@@ -481,7 +481,7 @@ fn make_credential_can_suppress_attestation() {
         .handle_make_credential(&payload)
         .expect("makeCredential succeeds");
     assert_eq!(response[0], CTAP2_OK);
-    assert_eq!(app.stored_credentials.len(), 1);
+    assert_eq!(stored(&app).len(), 1);
 
     let Value::Map(entries) = from_reader(&response[1..]).expect("decode response map") else {
         panic!("response must be a map");
@@ -519,7 +519,7 @@ fn make_credential_can_suppress_attestation() {
 
 #[test]
 fn make_credential_requires_mc_permission() {
-    let mut app = new_app(TestClient::new(), [0x51; 16]);
+    let mut app = new_app(TestStore::new(), [0x51; 16]);
     let token = [0xAA; 32];
     install_pin_uv_auth_token(
         &mut app,

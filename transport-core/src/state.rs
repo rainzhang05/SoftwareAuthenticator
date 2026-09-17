@@ -381,7 +381,9 @@ fn ensure_metadata(
         .map_err(map_fs_error)
 }
 
-fn generate_attestation_certificate(
+/// Generate a P-256 attestation key and a self-signed certificate for it.
+/// Returns the 32-byte private scalar and the DER certificate.
+pub fn generate_attestation_certificate(
     identity: &IdentityConfig<'_>,
 ) -> io::Result<(Vec<u8>, Vec<u8>)> {
     let mut rng = OsRng;

@@ -13,7 +13,6 @@ use ciborium::{
     value::{Integer, Value},
 };
 use sha2::{Digest, Sha256};
-use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use zeroize::Zeroizing;
 
 use crate::ctap::constants::*;
@@ -121,10 +120,7 @@ fn hash_pin(pin: &[u8]) -> [u8; 16] {
     hash
 }
 
-impl<C> CtapApp<C>
-where
-    C: TrussedClient + FilesystemClient + CryptoClient,
-{
+impl CtapApp<'_> {
     /// Decrypt newPinEnc and turn it into the PIN hash to store:
     /// "calls decrypt(shared secret, newPinEnc) to produce paddedNewPin. If an
     /// error results, it returns CTAP2_ERR_PIN_AUTH_INVALID." (CTAP 2.3
@@ -159,7 +155,7 @@ where
         pin_hash_enc: &[u8],
     ) -> Result<(), u8> {
         let attempt = self.pin_state.begin_pin_attempt()?;
-        self.save_persistent_pin_state();
+        self.save_persistent_pin_state()?;
         let candidate = decrypt(protocol, keys, pin_hash_enc);
         let result = self
             .pin_state
@@ -170,7 +166,7 @@ where
             // regenerate for the selected pinUvAuthProtocol."
             self.pin_state.key_agreement.regenerate(protocol);
         }
-        self.save_persistent_pin_state();
+        self.save_persistent_pin_state()?;
         result
     }
 
@@ -208,7 +204,7 @@ where
         verify(protocol, &keys.auth_key, new_pin_enc, pin_auth_param)?;
         let hash = Self::new_pin_hash(protocol, &keys, new_pin_enc)?;
         self.pin_state.set_pin(hash);
-        self.save_persistent_pin_state();
+        self.save_persistent_pin_state()?;
         Ok(vec![CTAP2_OK])
     }
 
@@ -235,7 +231,7 @@ where
 
         let hash = Self::new_pin_hash(protocol, &keys, new_pin_enc)?;
         self.pin_state.set_pin(hash);
-        self.save_persistent_pin_state();
+        self.save_persistent_pin_state()?;
         Ok(vec![CTAP2_OK])
     }
 

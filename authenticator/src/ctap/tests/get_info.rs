@@ -1,12 +1,12 @@
 //! authenticatorGetInfo tests.
 
-use super::support::{test_app, TestClient};
+use super::support::test_app;
+use super::support::TestApp;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::protocol::{
     PIN_UV_AUTH_PROTOCOL_CLASSIC_V1, PIN_UV_AUTH_PROTOCOL_CLASSIC_V2,
 };
 use crate::ctap::pin::state::PinState;
-use crate::ctap::CtapApp;
 use crate::CoseAlg;
 
 use ciborium::{
@@ -16,7 +16,7 @@ use ciborium::{
 
 use crate::ctap::constants::*;
 
-fn assert_get_info_response(app: &mut CtapApp<TestClient>, aaguid: [u8; 16]) {
+fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16]) {
     let response = app.handle_get_info().expect("getInfo succeeds");
     assert_eq!(response[0], CTAP2_OK);
 
