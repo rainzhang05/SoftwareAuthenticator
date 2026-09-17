@@ -2,7 +2,7 @@
 
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::protocol::parse_pin_uv_auth_param;
-use super::storage::store_status;
+use super::storage::{is_discoverable, store_status};
 use super::CtapApp;
 use crate::store::CredentialRecord;
 
@@ -77,12 +77,26 @@ impl CtapApp<'_> {
         hasher.finalize().to_vec()
     }
 
+    /// Every discoverable credential, most recently created first: the
+    /// credentials this command manages ("This command is used by the
+    /// platform to manage discoverable credentials on the authenticator.",
+    /// CTAP 2.3 §6.8).
+    fn discoverable_credentials(&self) -> Result<Vec<CredentialRecord>, u8> {
+        let mut credentials = self.stored_credentials()?;
+        credentials.retain(|credential| is_discoverable(&credential.credential_id));
+        Ok(credentials)
+    }
+
+    /// existingResidentCredentialsCount counts discoverable credentials.
+    /// maxPossibleRemainingResidentCredentialsCount is the free space of the
+    /// store, which non-discoverable credentials take up too.
     fn cm_get_metadata(&mut self) -> Result<Vec<(Value, Value)>, u8> {
-        let existing = self
+        let existing = self.discoverable_credentials()?.len();
+        let stored = self
             .store
             .count()
             .map_err(|err| store_status("count credentials", err))?;
-        let remaining = self.store.max_credentials().saturating_sub(existing);
+        let remaining = self.store.max_credentials().saturating_sub(stored);
         Ok(vec![
             (
                 Value::Integer(Integer::from(1)),
@@ -96,7 +110,7 @@ impl CtapApp<'_> {
     }
 
     fn cm_enumerate_rps_begin(&mut self) -> Result<Vec<(Value, Value)>, u8> {
-        let credentials = self.stored_credentials()?;
+        let credentials = self.discoverable_credentials()?;
         let mut rp_ids: Vec<String> = credentials.iter().map(|cred| cred.rp_id.clone()).collect();
         rp_ids.sort();
         rp_ids.dedup();
@@ -205,7 +219,7 @@ impl CtapApp<'_> {
         };
 
         let credentials: Vec<CredentialRecord> = self
-            .stored_credentials()?
+            .discoverable_credentials()?
             .into_iter()
             .filter(|credential| Self::cm_hash_rp_id(&credential.rp_id) == rp_hash)
             .collect();

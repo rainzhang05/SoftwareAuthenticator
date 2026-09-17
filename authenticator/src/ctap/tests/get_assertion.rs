@@ -461,6 +461,10 @@ fn get_assertion_produces_hmac_secret_output() {
         (Value::Integer(Integer::from(4)), params),
         (Value::Integer(Integer::from(6)), extensions),
         (
+            Value::Integer(Integer::from(7)),
+            canonical_map(vec![(Value::Text("rk".into()), Value::Bool(true))]),
+        ),
+        (
             Value::Integer(Integer::from(8)),
             Value::Bytes(pin_uv_auth_param.clone()),
         ),

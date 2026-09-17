@@ -7,7 +7,7 @@ use super::pin::protocol::{
     decrypt, parse_pin_uv_auth_param, parse_pin_uv_auth_protocol, verify, HmacSha256, PinProtocol,
 };
 use super::presence::{PresenceOperation, PresenceRequest};
-use super::storage::store_status;
+use super::storage::{is_discoverable, store_status};
 use super::CtapApp;
 use crate::store::{sort_newest_first, CredentialRecord};
 use crate::{try_sign_challenge, ClassicPinProtocol, PinUvSessionKeys};
@@ -289,11 +289,16 @@ impl CtapApp<'_> {
             }
             sort_newest_first(&mut applicable);
         } else {
+            // "If an allowList is not present, locate all discoverable
+            // credentials that are created by this authenticator and bound to
+            // the specified rpId." (CTAP 2.3 §6.2.2 step 7.2)
             applicable = self
                 .stored_credentials()?
                 .into_iter()
                 .filter(|cred| {
-                    cred.rp_id == rp_id && Self::credential_allows(cred, user_verified, false)
+                    cred.rp_id == rp_id
+                        && is_discoverable(&cred.credential_id)
+                        && Self::credential_allows(cred, user_verified, false)
                 })
                 .collect();
         }

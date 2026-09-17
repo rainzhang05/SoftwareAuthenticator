@@ -81,6 +81,19 @@ fn unreadable_pin_state(rng: &mut dyn RngCore) -> PinState {
 }
 
 impl CtapApp<'_> {
+    /// A fresh credential ID that records whether the credential is
+    /// discoverable; see [`is_discoverable`].
+    pub(super) fn new_credential_id(&mut self, discoverable: bool) -> Vec<u8> {
+        let mut credential_id = Vec::with_capacity(CREDENTIAL_ID_LENGTH);
+        credential_id.push(if discoverable {
+            DISCOVERABLE_MARKER
+        } else {
+            NON_DISCOVERABLE_MARKER
+        });
+        credential_id.extend_from_slice(&self.random_array::<32>());
+        credential_id
+    }
+
     /// Persist [`PersistentPinState`].  Called after every change to the PIN
     /// or to pinRetries, including the retry spent before a PIN is compared.
     /// A failed write is an error, so a PIN check fails closed instead of
@@ -144,4 +157,41 @@ impl CtapApp<'_> {
             }
         }
     }
+}
+
+/// The length of the credential IDs this engine creates: a marker byte and
+/// 32 random bytes.
+pub(super) const CREDENTIAL_ID_LENGTH: usize = 33;
+
+/// The first byte of the ID of a credential created with "rk" true.
+const DISCOVERABLE_MARKER: u8 = 0x01;
+
+/// The first byte of the ID of a credential created with "rk" false.
+const NON_DISCOVERABLE_MARKER: u8 = 0x00;
+
+/// Whether a credential is discoverable, which its ID records.
+///
+/// CTAP 2.3 §6.1.2 step 17: "Otherwise, if the "rk" option is false: the
+/// authenticator MUST create a non-discoverable credential", one whose
+/// "credential IDs MUST be supplied by the Relying Party in
+/// authenticatorGetAssertion's allowList parameter in order for the
+/// authenticator to discover and employ them" (§6.1.3).  The same section
+/// allows keeping state for such a credential: "An authenticator may choose
+/// to keep state, such as the private key, whether a credential is
+/// discoverable or not".  So every credential is a stored record, and the
+/// credential ID says which kind it is, which needs no field in the stored
+/// record and so no change to the store's format:
+///
+/// * IDs this engine creates are [`CREDENTIAL_ID_LENGTH`] bytes: a marker byte
+///   ([`DISCOVERABLE_MARKER`] or [`NON_DISCOVERABLE_MARKER`]) and 32 random
+///   bytes.
+/// * Any other ID, including the 32 random bytes of credentials created
+///   before non-discoverable credentials existed, all of which were
+///   discoverable, is discoverable.
+///
+/// The marker cannot be changed from outside: the store authenticates each
+/// record together with its credential ID, and a credential is only ever
+/// found by its exact ID.
+pub(super) fn is_discoverable(credential_id: &[u8]) -> bool {
+    !(credential_id.len() == CREDENTIAL_ID_LENGTH && credential_id[0] == NON_DISCOVERABLE_MARKER)
 }

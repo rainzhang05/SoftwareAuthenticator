@@ -51,6 +51,11 @@ fn make_credential_payload() -> Vec<u8> {
         (Value::Integer(Integer::from(2)), rp),
         (Value::Integer(Integer::from(3)), user),
         (Value::Integer(Integer::from(4)), params),
+        // Discoverable, so getAssertion finds it without an allowList.
+        (
+            Value::Integer(Integer::from(7)),
+            canonical_map(vec![(Value::Text("rk".into()), Value::Bool(true))]),
+        ),
     ]);
     let mut payload = Vec::new();
     into_writer(&request, &mut payload).expect("serialize makeCredential request");

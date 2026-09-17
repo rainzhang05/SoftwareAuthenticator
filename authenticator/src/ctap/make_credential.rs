@@ -4,7 +4,7 @@ use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::permissions::PIN_PERMISSION_MC;
 use super::pin::protocol::parse_pin_uv_auth_param;
 use super::presence::{PresenceOperation, PresenceRequest};
-use super::storage::store_status;
+use super::storage::{is_discoverable, store_status};
 use super::CtapApp;
 use crate::store::{CredentialRecord, PrivateKeyMaterial, StoreError};
 use crate::{try_sign_challenge, CoseAlg};
@@ -232,7 +232,7 @@ impl CtapApp<'_> {
 
         // ML-DSA keys are stored as their 32-byte seed (RFC 9964 §4).
         let record = CredentialRecord {
-            credential_id: self.random_array::<32>().to_vec(),
+            credential_id: self.new_credential_id(rk_requested),
             rp_id,
             user_id,
             user_name,
@@ -359,10 +359,10 @@ impl CtapApp<'_> {
     /// CTAP 2.3 §6.1.2 step 17.2: when a discoverable credential is created
     /// ("rk" true) and "a credential for the same rp.id and account ID already
     /// exists on the authenticator", the authenticator must "Overwrite that
-    /// credential".  The store has no discoverable flag and this engine keeps
-    /// every credential it creates, so the rule matches any stored credential
-    /// with the same rp.id and user.id.  The replaced credentials are deleted,
-    /// which also stops their IDs from working (§6.1.3).
+    /// credential".  Only discoverable credentials are replaced: a
+    /// non-discoverable credential for the same account is the relying
+    /// party's to keep or drop.  The replaced credentials are deleted, which
+    /// also stops their IDs from working (§6.1.3).
     ///
     /// The new credential is written first and the old ones deleted after, so
     /// a failure can leave a duplicate but never loses the account.  Only when
@@ -377,7 +377,9 @@ impl CtapApp<'_> {
             self.stored_credentials()?
                 .iter()
                 .filter(|existing| {
-                    existing.rp_id == record.rp_id && existing.user_id == record.user_id
+                    existing.rp_id == record.rp_id
+                        && existing.user_id == record.user_id
+                        && is_discoverable(&existing.credential_id)
                 })
                 .map(|existing| existing.credential_id.clone())
                 .collect()
