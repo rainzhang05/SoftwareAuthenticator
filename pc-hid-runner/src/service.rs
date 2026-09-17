@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use authenticator::ctap::CtapApp;
+use authenticator::ctap::{presence::AutoApprove, CtapApp, InterruptFlag};
 use sha2::{Digest, Sha256};
 use transport_core::state::{
     reset_state_dir, IdentityConfig, PersistentStore, StoredPinState, DEFAULT_PIN_RETRIES,
@@ -77,8 +77,16 @@ impl<'a> TrussedApps<'a, CoreOnly> for Apps {
         let context = CoreContext::new(littlefs2::path!("authenticator").into());
         endpoints.push(ServiceEndpoint::new(responder, context, &[]));
         let client = Client::new(requester, syscall, None);
-        let mut ctap = serving_syscalls(service, endpoints, || CtapApp::new(client, data.aaguid));
-        ctap.set_auto_user_presence(data.auto_user_presence);
+        // Cancels the request being processed. There is one `Apps` at a time.
+        static INTERRUPT: InterruptFlag = InterruptFlag::new();
+        if !data.auto_user_presence {
+            log::warn!(
+                "asking the user for presence is not implemented yet; approving every request"
+            );
+        }
+        let mut ctap = serving_syscalls(service, endpoints, || {
+            CtapApp::new(client, AutoApprove, &INTERRUPT, data.aaguid)
+        });
         ctap.suppress_attestation(data.suppress_attestation);
         ctap.set_keepalive_callback(set_waiting);
         Self { ctap }

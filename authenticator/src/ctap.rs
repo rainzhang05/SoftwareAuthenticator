@@ -5,16 +5,18 @@ mod get_assertion;
 mod get_info;
 mod make_credential;
 mod pin;
-mod presence;
+pub mod presence;
 mod reset;
 mod storage;
 #[cfg(test)]
 mod tests;
 
+pub use trussed_core::InterruptFlag;
+
 use self::credential_management::CredentialManagementState;
 use self::get_assertion::PendingAssertion;
 use self::pin::state::PinState;
-use self::presence::noop_keepalive;
+use self::presence::{UserPresence, DEFAULT_PRESENCE_TIMEOUT};
 #[cfg(test)]
 use self::storage::StoredCredential;
 
@@ -22,8 +24,8 @@ use ciborium::{de::from_reader, value::Value};
 use core::fmt;
 use ctaphid_app::{App, Command, Error};
 use log::info;
+use std::time::Duration;
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
-use trussed::interrupt::InterruptFlag;
 
 use self::constants::*;
 
@@ -50,9 +52,10 @@ pub struct CtapApp<C> {
     attestation_private_key: Option<Vec<u8>>,
     attestation_certificate_chain: Option<Vec<Vec<u8>>>,
     attestation_material_initialized: bool,
-    keepalive_callback: fn(bool),
-    interrupt_flag: &'static InterruptFlag,
-    auto_user_presence: bool,
+    presence: Box<dyn UserPresence + Send>,
+    presence_timeout: Duration,
+    keepalive: Box<dyn FnMut(bool) + Send>,
+    interrupt: &'static InterruptFlag,
     #[cfg(test)]
     stored_credentials: Vec<StoredCredential>,
 }
@@ -61,7 +64,18 @@ impl<C> CtapApp<C>
 where
     C: TrussedClient + FilesystemClient + CryptoClient,
 {
-    pub fn new(client: C, aaguid: [u8; 16]) -> Self {
+    /// Create the engine.
+    ///
+    /// `presence` is asked whenever an operation needs evidence of user
+    /// interaction.  `interrupt` is the flag through which the CTAPHID
+    /// dispatcher cancels the request being processed; it is also what
+    /// [`App::interrupt`] hands to the dispatcher.
+    pub fn new(
+        client: C,
+        presence: impl UserPresence + Send + 'static,
+        interrupt: &'static InterruptFlag,
+        aaguid: [u8; 16],
+    ) -> Self {
         let mut app = Self {
             client,
             aaguid,
@@ -72,9 +86,10 @@ where
             attestation_private_key: None,
             attestation_certificate_chain: None,
             attestation_material_initialized: false,
-            keepalive_callback: noop_keepalive,
-            interrupt_flag: Box::leak(Box::new(InterruptFlag::new())),
-            auto_user_presence: false,
+            presence: Box::new(presence),
+            presence_timeout: DEFAULT_PRESENCE_TIMEOUT,
+            keepalive: Box::new(|_| {}),
+            interrupt,
             #[cfg(test)]
             stored_credentials: Vec::new(),
         };
@@ -82,12 +97,17 @@ where
         app
     }
 
-    pub fn set_keepalive_callback(&mut self, callback: fn(bool)) {
-        self.keepalive_callback = callback;
+    /// Call `callback` with `true` when the engine starts waiting for the
+    /// user and with `false` when it stops, so the transport can send the
+    /// matching keepalives.
+    pub fn set_keepalive_callback(&mut self, callback: impl FnMut(bool) + Send + 'static) {
+        self.keepalive = Box::new(callback);
     }
 
-    pub fn set_auto_user_presence(&mut self, enabled: bool) {
-        self.auto_user_presence = enabled;
+    /// How long presence requests wait for the user.  Defaults to
+    /// [`DEFAULT_PRESENCE_TIMEOUT`].
+    pub fn set_presence_timeout(&mut self, timeout: Duration) {
+        self.presence_timeout = timeout;
     }
 
     pub fn suppress_attestation(&mut self, suppress: bool) {
@@ -144,7 +164,7 @@ where
     C: TrussedClient + FilesystemClient + CryptoClient,
 {
     fn interrupt(&self) -> Option<&'interrupt InterruptFlag> {
-        Some(self.interrupt_flag)
+        Some(self.interrupt)
     }
 
     fn commands(&self) -> &'static [Command] {

@@ -2,8 +2,11 @@
 
 use crate::ctap::cbor::{canonical_map, canonical_sort};
 use crate::ctap::pin::protocol::HmacSha256;
+use crate::ctap::presence::{
+    Cancellation, PresenceOperation, PresenceOutcome, PresenceRequest, UserPresence,
+};
 use crate::ctap::storage::StoredCredential;
-use crate::ctap::CtapApp;
+use crate::ctap::{CtapApp, InterruptFlag};
 use crate::{ClassicPinProtocol, CoseAlg, PinUvSessionKeys};
 
 use ciborium::{
@@ -19,15 +22,147 @@ use p256::{
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use trussed::api::{reply, Reply, Request, RequestVariant};
 use trussed::client::{
     AttestationClient, CertificateClient, Client as TrussedClient, ClientResult, CounterClient,
     CryptoClient, FilesystemClient, FutureResult, ManagementClient, PollClient, UiClient,
 };
 use trussed::error::Error as TrussedError;
-use trussed::types::{consent, Message};
+use trussed::types::Message;
 
 use crate::ctap::constants::*;
+
+/// The interrupt flag of every test app that is never cancelled.  The engine
+/// only reads the flag, so sharing it between concurrently running tests is
+/// safe as long as no test marks it; cancellation tests use their own.
+pub(super) static NEVER_INTERRUPTED: InterruptFlag = InterruptFlag::new();
+
+/// A presence request as a [`ScriptedPresence`] saw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SeenRequest {
+    pub(super) operation: PresenceOperation,
+    pub(super) rp_id: Option<String>,
+    pub(super) user_name: Option<String>,
+    pub(super) user_display_name: Option<String>,
+    pub(super) timeout: Duration,
+}
+
+impl SeenRequest {
+    /// The request the engine makes for `operation` on `rp_id` with the
+    /// default timeout and no user details.
+    pub(super) fn new(operation: PresenceOperation, rp_id: Option<&str>) -> Self {
+        Self {
+            operation,
+            rp_id: rp_id.map(str::to_owned),
+            user_name: None,
+            user_display_name: None,
+            timeout: crate::ctap::presence::DEFAULT_PRESENCE_TIMEOUT,
+        }
+    }
+}
+
+/// What the presence test doubles observed, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum PresenceEvent {
+    /// The engine told the transport whether it is waiting for the user.
+    Waiting(bool),
+    /// The engine asked for user presence.
+    Asked(SeenRequest),
+}
+
+/// The events of one test app, shared between the app and the test.
+#[derive(Clone, Debug, Default)]
+pub(super) struct PresenceLog(Arc<Mutex<Vec<PresenceEvent>>>);
+
+impl PresenceLog {
+    fn push(&self, event: PresenceEvent) {
+        self.0.lock().expect("presence log lock").push(event);
+    }
+
+    /// Record a call of the keepalive callback.
+    pub(super) fn record_waiting(&self, waiting: bool) {
+        self.push(PresenceEvent::Waiting(waiting));
+    }
+
+    /// Remove and return every event recorded so far.
+    pub(super) fn take(&self) -> Vec<PresenceEvent> {
+        std::mem::take(&mut *self.0.lock().expect("presence log lock"))
+    }
+}
+
+/// Answers presence requests from a script, approving once the script runs
+/// out, and records every request it sees.
+pub(super) struct ScriptedPresence {
+    outcomes: VecDeque<PresenceOutcome>,
+    log: PresenceLog,
+}
+
+impl UserPresence for ScriptedPresence {
+    fn confirm(
+        &mut self,
+        request: &PresenceRequest<'_>,
+        _cancellation: Cancellation<'_>,
+    ) -> PresenceOutcome {
+        self.log.push(PresenceEvent::Asked(SeenRequest {
+            operation: request.operation,
+            rp_id: request.rp_id.map(str::to_owned),
+            user_name: request.user_name.map(str::to_owned),
+            user_display_name: request.user_display_name.map(str::to_owned),
+            timeout: request.timeout,
+        }));
+        self.outcomes
+            .pop_front()
+            .unwrap_or(PresenceOutcome::Approved)
+    }
+}
+
+/// An app whose user approves every presence request.
+pub(super) fn test_app(aaguid: [u8; 16]) -> CtapApp<TestClient> {
+    new_app(TestClient::new(), aaguid)
+}
+
+/// An app over `client` whose user approves every presence request.
+pub(super) fn new_app(client: TestClient, aaguid: [u8; 16]) -> CtapApp<TestClient> {
+    app_with_client(client, aaguid, [], &NEVER_INTERRUPTED).0
+}
+
+/// An app whose presence requests are answered by `outcomes` in order, then
+/// approved, together with the log of presence events.
+pub(super) fn scripted_app(
+    aaguid: [u8; 16],
+    outcomes: impl IntoIterator<Item = PresenceOutcome>,
+) -> (CtapApp<TestClient>, PresenceLog) {
+    scripted_app_with_interrupt(aaguid, outcomes, &NEVER_INTERRUPTED)
+}
+
+/// [`scripted_app`] with the given interrupt flag.
+pub(super) fn scripted_app_with_interrupt(
+    aaguid: [u8; 16],
+    outcomes: impl IntoIterator<Item = PresenceOutcome>,
+    interrupt: &'static InterruptFlag,
+) -> (CtapApp<TestClient>, PresenceLog) {
+    app_with_client(TestClient::new(), aaguid, outcomes, interrupt)
+}
+
+/// An app over `client`, with presence answered by `outcomes` then approved.
+pub(super) fn app_with_client(
+    client: TestClient,
+    aaguid: [u8; 16],
+    outcomes: impl IntoIterator<Item = PresenceOutcome>,
+    interrupt: &'static InterruptFlag,
+) -> (CtapApp<TestClient>, PresenceLog) {
+    let log = PresenceLog::default();
+    let presence = ScriptedPresence {
+        outcomes: outcomes.into_iter().collect(),
+        log: log.clone(),
+    };
+    let mut app = CtapApp::new(client, presence, interrupt, aaguid);
+    let keepalive_log = log.clone();
+    app.set_keepalive_callback(move |waiting| keepalive_log.record_waiting(waiting));
+    (app, log)
+}
 
 #[derive(Default)]
 pub(super) struct TestClient {
@@ -36,7 +171,6 @@ pub(super) struct TestClient {
     random_fill: Option<u8>,
     files: HashMap<Vec<u8>, Vec<u8>>,
     writes: Vec<(Vec<u8>, Vec<u8>)>,
-    presence_responses: VecDeque<consent::Result>,
 }
 
 impl TestClient {
@@ -61,13 +195,6 @@ impl TestClient {
             .filter(|(written, _)| written.as_slice() == path.as_bytes())
             .map(|(_, data)| data.clone())
             .collect()
-    }
-
-    pub(super) fn set_presence_responses<I>(&mut self, responses: I)
-    where
-        I: IntoIterator<Item = consent::Result>,
-    {
-        self.presence_responses = responses.into_iter().collect();
     }
 
     fn dispatch(&mut self, request: Request) -> Result<Reply, TrussedError> {
@@ -96,13 +223,6 @@ impl TestClient {
                 } else {
                     Err(TrussedError::FilesystemReadFailure)
                 }
-            }
-            Request::RequestUserConsent(_req) => {
-                let result = self
-                    .presence_responses
-                    .pop_front()
-                    .unwrap_or(Ok::<(), consent::Error>(()));
-                Ok(Reply::from(reply::RequestUserConsent { result }))
             }
             _ => Err(TrussedError::FunctionNotSupported),
         }

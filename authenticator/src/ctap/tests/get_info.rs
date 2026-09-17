@@ -1,6 +1,6 @@
 //! authenticatorGetInfo tests.
 
-use super::support::TestClient;
+use super::support::{test_app, TestClient};
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::protocol::{
     PIN_UV_AUTH_PROTOCOL_CLASSIC_V1, PIN_UV_AUTH_PROTOCOL_CLASSIC_V2,
@@ -113,7 +113,7 @@ fn assert_get_info_response(app: &mut CtapApp<TestClient>, aaguid: [u8; 16]) {
 #[test]
 fn get_info_response_encoding_is_canonical_with_pin_unset() {
     let aaguid = [0xAB; 16];
-    let mut app = CtapApp::new(TestClient::new(), aaguid);
+    let mut app = test_app(aaguid);
 
     assert_get_info_response(&mut app, aaguid);
 }
@@ -121,7 +121,7 @@ fn get_info_response_encoding_is_canonical_with_pin_unset() {
 #[test]
 fn get_info_response_encoding_is_canonical_with_pin_set() {
     let aaguid = [0xAB; 16];
-    let mut app = CtapApp::new(TestClient::new(), aaguid);
+    let mut app = test_app(aaguid);
     let pin_hash = [0x11; 16];
     app.pin_state.set_pin(pin_hash);
 

@@ -1,6 +1,7 @@
 //! PIN tests: retry state, key agreement, and the authenticatorClientPIN
 //! subcommands over both PIN/UV auth protocols.
 
+use super::support::new_app;
 use super::support::{
     classic_encrypt, classic_pin_auth, client_pin, derive_classic_session, get_pin_retries,
     get_pin_token, get_pin_token_with, get_pin_uv_auth_token, int, padded_pin, pin_hash,
@@ -11,7 +12,6 @@ use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::{KeyAgreementKey, PIN_UV_AUTH_PROTOCOL_CLASSIC};
 use crate::ctap::pin::state::{PinState, MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES};
-use crate::ctap::CtapApp;
 use crate::ClassicPinProtocol;
 
 use ciborium::{
@@ -71,7 +71,7 @@ fn classic_key_agreement_value_is_canonical() {
 
 #[test]
 fn client_pin_get_retries_reports_available_attempts() {
-    let mut app = CtapApp::new(TestClient::new(), [0x30; 16]);
+    let mut app = new_app(TestClient::new(), [0x30; 16]);
     let request = canonical_map(vec![
         (
             Value::Integer(Integer::from(1)),
@@ -113,7 +113,7 @@ fn check_pin(state: &mut PinState, candidate: &[u8; 16]) -> Result<(), u8> {
 
 #[test]
 fn client_pin_get_retries_includes_power_cycle_state_when_blocked() {
-    let mut app = CtapApp::new(TestClient::new(), [0x31; 16]);
+    let mut app = new_app(TestClient::new(), [0x31; 16]);
     let mut pin_hash = [0x11; 16];
     app.pin_state.set_pin(pin_hash);
     let wrong = [0x22; 16];
@@ -206,7 +206,7 @@ fn pin_auth_blocked_persists_until_power_cycle() {
 }
 
 fn run_classic_pin_flow(protocol: ClassicPinProtocol) {
-    let mut app = CtapApp::new(TestClient::new(), [0xA5; 16]);
+    let mut app = new_app(TestClient::new(), [0xA5; 16]);
     let initial_pin = b"123456";
     let changed_pin = b"654321";
 
@@ -380,7 +380,7 @@ fn run_classic_pin_flow(protocol: ClassicPinProtocol) {
 
 #[test]
 fn client_pin_token_with_permissions_sets_metadata() {
-    let mut app = CtapApp::new(TestClient::new(), [0xA7; 16]);
+    let mut app = new_app(TestClient::new(), [0xA7; 16]);
     let pin = b"1234";
     let mut hasher = Sha256::new();
     hasher.update(pin);
@@ -446,7 +446,7 @@ fn client_pin_token_with_permissions_sets_metadata() {
 
 #[test]
 fn client_pin_get_token_legacy_succeeds_without_pin_uv_auth_param() {
-    let mut app = CtapApp::new(TestClient::new(), [0xAA; 16]);
+    let mut app = new_app(TestClient::new(), [0xAA; 16]);
     let pin = b"9876";
     let mut hasher = Sha256::new();
     hasher.update(pin);
@@ -510,7 +510,7 @@ fn client_pin_get_token_legacy_succeeds_without_pin_uv_auth_param() {
 
 #[test]
 fn client_pin_token_with_permissions_accepts_missing_pin_uv_auth_param() {
-    let mut app = CtapApp::new(TestClient::new(), [0xAB; 16]);
+    let mut app = new_app(TestClient::new(), [0xAB; 16]);
     let pin = b"2468";
     let mut hasher = Sha256::new();
     hasher.update(pin);
@@ -592,7 +592,7 @@ fn client_pin_token_with_permissions_accepts_missing_pin_uv_auth_param() {
 
 #[test]
 fn client_pin_token_with_permissions_requires_rp_id() {
-    let mut app = CtapApp::new(TestClient::new(), [0xA8; 16]);
+    let mut app = new_app(TestClient::new(), [0xA8; 16]);
     let pin = b"1234";
     let mut hasher = Sha256::new();
     hasher.update(pin);
@@ -671,7 +671,7 @@ fn client_pin_rejects_subcommands_it_does_not_implement() {
         i128::from(u64::MAX),
     ];
     for subcommand in subcommands {
-        let mut app = CtapApp::new(TestClient::new(), [0x3E; 16]);
+        let mut app = new_app(TestClient::new(), [0x3E; 16]);
         let result = client_pin(
             &mut app,
             vec![
@@ -692,7 +692,7 @@ fn client_pin_rejects_subcommands_it_does_not_implement() {
 
 #[test]
 fn client_pin_requires_an_integer_subcommand() {
-    let mut app = CtapApp::new(TestClient::new(), [0x3F; 16]);
+    let mut app = new_app(TestClient::new(), [0x3F; 16]);
     assert_eq!(
         client_pin(&mut app, vec![(int(1), int(2))]),
         Err(CTAP2_ERR_MISSING_PARAMETER)
@@ -708,7 +708,7 @@ fn client_pin_requires_an_integer_subcommand() {
 
 #[test]
 fn get_key_agreement_requires_a_supported_pin_uv_auth_protocol() {
-    let mut app = CtapApp::new(TestClient::new(), [0x40; 16]);
+    let mut app = new_app(TestClient::new(), [0x40; 16]);
     assert_eq!(
         client_pin(&mut app, vec![(int(2), int(0x02))]),
         Err(CTAP2_ERR_MISSING_PARAMETER)
@@ -760,7 +760,7 @@ fn request_with_all_parameters(subcommand: i64, protocol: Option<Value>) -> Vec<
 fn pin_subcommands_check_parameters_then_the_pin_uv_auth_protocol() {
     // setPIN, changePIN, getPinToken, getPinUvAuthTokenUsingPinWithPermissions
     for subcommand in [0x03, 0x04, 0x05, 0x09] {
-        let mut app = CtapApp::new(TestClient::new(), [0x41; 16]);
+        let mut app = new_app(TestClient::new(), [0x41; 16]);
         if subcommand != 0x03 {
             app.pin_state.set_pin(pin_hash(b"1234"));
         }
@@ -800,7 +800,7 @@ fn pin_subcommands_check_parameters_then_the_pin_uv_auth_protocol() {
 
 #[test]
 fn get_pin_retries_needs_no_pin_uv_auth_protocol() {
-    let mut app = CtapApp::new(TestClient::new(), [0x42; 16]);
+    let mut app = new_app(TestClient::new(), [0x42; 16]);
     assert_eq!(get_pin_retries(&mut app), (MAX_PIN_RETRIES, None));
     let response = client_pin(&mut app, vec![(int(1), int(3)), (int(2), int(0x01))]);
     assert_eq!(response.map(|bytes| bytes[0]), Ok(CTAP2_OK));
@@ -811,7 +811,7 @@ fn set_pin_when_a_pin_is_already_set_is_pin_auth_invalid() {
     // "If a PIN has already been set, authenticator returns
     // CTAP2_ERR_PIN_AUTH_INVALID error." (CTAP 2.3 §6.5.5.5)
     for protocol in [ClassicPinProtocol::V1, ClassicPinProtocol::V2] {
-        let mut app = CtapApp::new(TestClient::new(), [0x43; 16]);
+        let mut app = new_app(TestClient::new(), [0x43; 16]);
         app.pin_state.set_pin(pin_hash(b"1234"));
         let session = PlatformPinSession::establish(&mut app, protocol, 0x44);
         let new_pin_enc = session.encrypt(&padded_pin(b"5678"));
@@ -836,7 +836,7 @@ fn get_pin_uv_auth_token_grants_cm_scoped_to_an_rp_id() {
     // cm: "The rpId parameter is optional, if it is present, the pinUvAuthToken
     // can only be used for Credential Management operations on Credentials
     // associated with that RP ID." (CTAP 2.3 §6.5.5.7)
-    let mut app = CtapApp::new(TestClient::new(), [0x45; 16]);
+    let mut app = new_app(TestClient::new(), [0x45; 16]);
     app.pin_state.set_pin(pin_hash(b"1234"));
     let token = get_pin_uv_auth_token(
         &mut app,
@@ -858,7 +858,7 @@ fn get_pin_uv_auth_token_grants_cm_scoped_to_an_rp_id() {
 fn get_pin_uv_auth_token_refuses_permissions_it_cannot_grant() {
     // be, lbw, acfg and pcmr need features this authenticator does not have.
     for permissions in [0x08, 0x10, 0x20, 0x40, 0x04 | 0x40, 0x01 | 0x02 | 0x08] {
-        let mut app = CtapApp::new(TestClient::new(), [0x46; 16]);
+        let mut app = new_app(TestClient::new(), [0x46; 16]);
         app.pin_state.set_pin(pin_hash(b"1234"));
         let result = get_pin_uv_auth_token(
             &mut app,
@@ -881,7 +881,7 @@ fn get_pin_uv_auth_token_refuses_permissions_it_cannot_grant() {
 #[test]
 fn get_pin_uv_auth_token_rejects_zero_permissions() {
     for permissions in [0, -1] {
-        let mut app = CtapApp::new(TestClient::new(), [0x47; 16]);
+        let mut app = new_app(TestClient::new(), [0x47; 16]);
         app.pin_state.set_pin(pin_hash(b"1234"));
         let result =
             get_pin_uv_auth_token(&mut app, ClassicPinProtocol::V2, b"1234", permissions, None);
@@ -900,7 +900,7 @@ fn get_pin_uv_auth_token_ignores_undefined_permissions() {
         (0x80, 0),
     ];
     for (requested, granted) in cases {
-        let mut app = CtapApp::new(TestClient::new(), [0x48; 16]);
+        let mut app = new_app(TestClient::new(), [0x48; 16]);
         app.pin_state.set_pin(pin_hash(b"1234"));
         let token =
             get_pin_uv_auth_token(&mut app, ClassicPinProtocol::V1, b"1234", requested, None)
@@ -943,7 +943,7 @@ fn set_pin_counts_the_minimum_length_in_code_points() {
     ];
     for protocol in PROTOCOLS {
         for (pin, expected) in cases {
-            let mut app = CtapApp::new(TestClient::new(), [0x49; 16]);
+            let mut app = new_app(TestClient::new(), [0x49; 16]);
             let result = set_pin_padded(&mut app, protocol, &padded_pin(pin)).map(|_| ());
             assert_eq!(result, expected, "{protocol:?} {pin:02x?}");
             let stored = app.pin_state.persistent().pin_hash;
@@ -956,7 +956,7 @@ fn set_pin_counts_the_minimum_length_in_code_points() {
 fn set_pin_allows_63_bytes_and_refuses_64() {
     // "Maximum PIN Length: 63 bytes" (CTAP 2.3 §6.5.1)
     for protocol in PROTOCOLS {
-        let mut app = CtapApp::new(TestClient::new(), [0x4A; 16]);
+        let mut app = new_app(TestClient::new(), [0x4A; 16]);
         assert_eq!(
             set_pin_padded(&mut app, protocol, &padded_pin(&[b'7'; 63])),
             Ok(vec![CTAP2_OK])
@@ -967,7 +967,7 @@ fn set_pin_allows_63_bytes_and_refuses_64() {
         );
 
         // No 0x00 left to strip: newPin would be all 64 bytes.
-        let mut app = CtapApp::new(TestClient::new(), [0x4A; 16]);
+        let mut app = new_app(TestClient::new(), [0x4A; 16]);
         assert_eq!(
             set_pin_padded(&mut app, protocol, &[b'7'; 64]),
             Err(CTAP2_ERR_PIN_POLICY_VIOLATION)
@@ -984,7 +984,7 @@ fn set_pin_requires_a_64_byte_padded_pin() {
         for length in [16, 48, 80, 128] {
             let mut padded = vec![0u8; length];
             padded[..4].copy_from_slice(b"1234");
-            let mut app = CtapApp::new(TestClient::new(), [0x4B; 16]);
+            let mut app = new_app(TestClient::new(), [0x4B; 16]);
             assert_eq!(
                 set_pin_padded(&mut app, protocol, &padded),
                 Err(CTAP1_ERR_INVALID_PARAMETER),
@@ -1003,7 +1003,7 @@ fn set_pin_refuses_a_new_pin_enc_that_does_not_decrypt() {
         (ClassicPinProtocol::V2, vec![0x11; 15]),
         (ClassicPinProtocol::V2, vec![0x11; 16 + 63]),
     ] {
-        let mut app = CtapApp::new(TestClient::new(), [0x4C; 16]);
+        let mut app = new_app(TestClient::new(), [0x4C; 16]);
         let session = PlatformPinSession::establish(&mut app, protocol, 0x52);
         assert_eq!(
             set_pin_encrypted(&mut app, &session, new_pin_enc.clone()),
@@ -1018,7 +1018,7 @@ fn set_pin_refuses_a_new_pin_enc_that_does_not_decrypt() {
 #[test]
 fn change_pin_applies_the_same_pin_policy() {
     for protocol in PROTOCOLS {
-        let mut app = CtapApp::new(TestClient::new(), [0x4D; 16]);
+        let mut app = new_app(TestClient::new(), [0x4D; 16]);
         app.pin_state.set_pin(pin_hash(b"1234"));
         let session = PlatformPinSession::establish(&mut app, protocol, 0x53);
         let new_pin_enc = session.encrypt(&padded_pin("\u{e9}\u{e9}\u{e9}".as_bytes()));
@@ -1050,7 +1050,7 @@ fn get_key_agreement_gives_up_when_the_rng_yields_no_valid_key() {
     for fill in [0x00, 0xFF] {
         let mut client = TestClient::new();
         client.set_random_fill(fill);
-        let mut app = CtapApp::new(client, [0x4E; 16]);
+        let mut app = new_app(client, [0x4E; 16]);
         assert_eq!(
             client_pin(&mut app, vec![(int(1), int(2)), (int(2), int(0x02))]),
             Err(CTAP2_ERR_PROCESSING),
@@ -1061,7 +1061,7 @@ fn get_key_agreement_gives_up_when_the_rng_yields_no_valid_key() {
 
 #[test]
 fn get_key_agreement_returns_each_protocols_own_key_every_time() {
-    let mut app = CtapApp::new(TestClient::new(), [0x4F; 16]);
+    let mut app = new_app(TestClient::new(), [0x4F; 16]);
     let protocol_one = request_classic_key_agreement(&mut app, ClassicPinProtocol::V1);
     let protocol_two = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
     assert_ne!(protocol_one, protocol_two);
@@ -1082,7 +1082,7 @@ fn one_key_agreement_serves_several_commands() {
     // getKeyAgreement returns getPublicKey() (CTAP 2.3 §6.5.5.4); only a PIN
     // mismatch calls regenerate().
     for protocol in PROTOCOLS {
-        let mut app = CtapApp::new(TestClient::new(), [0x50; 16]);
+        let mut app = new_app(TestClient::new(), [0x50; 16]);
         let session = PlatformPinSession::establish(&mut app, protocol, 0x61);
         // The other protocol's key agreement in between does not disturb it.
         let other = match protocol {
@@ -1104,7 +1104,7 @@ fn one_key_agreement_serves_several_commands() {
 
 #[test]
 fn a_pin_mismatch_regenerates_that_protocols_key_agreement_key() {
-    let mut app = CtapApp::new(TestClient::new(), [0x51; 16]);
+    let mut app = new_app(TestClient::new(), [0x51; 16]);
     app.pin_state.set_pin(pin_hash(b"1234"));
     let protocol_one = request_classic_key_agreement(&mut app, ClassicPinProtocol::V1);
     let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V2, 0x62);

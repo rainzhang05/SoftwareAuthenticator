@@ -1,6 +1,7 @@
 //! The authenticatorReset command.
 
 use super::credential_management::CredentialManagementState;
+use super::presence::{PresenceOperation, PresenceRequest};
 use super::CtapApp;
 
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
@@ -17,7 +18,8 @@ where
     /// enforced; a software authenticator on a multi-user desktop already
     /// requires explicit user consent via the presence prompt.
     pub(super) fn handle_reset(&mut self) -> Result<Vec<u8>, u8> {
-        let _present = self.await_user_presence()?;
+        let timeout = self.presence_timeout;
+        self.confirm_user_presence(PresenceRequest::new(PresenceOperation::Reset, timeout))?;
         self.clear_credentials()?;
         // The PIN, pinRetries, the pinUvAuthToken and each protocol's key
         // agreement key go back to their initial values, as at power-up

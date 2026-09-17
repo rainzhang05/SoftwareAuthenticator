@@ -1,8 +1,7 @@
 //! pinUvAuthToken state (CTAP 2.3 §6.5.2.1, §6.5.3.2): the usage timer, the
 //! userPresent and userVerified flags, permissions consumption and binding.
-//!
-//! Tests that collect user presence are `#[serial]` (see `pin_uv_auth`).
 
+use super::support::new_app;
 use super::support::{
     encode, es256_credential, get_assertion_request, get_pin_token, get_pin_uv_auth_token, int,
     make_credential_request, pin_hash, response_auth_data, set_pin_padded, token_pin_auth,
@@ -18,7 +17,6 @@ use crate::ClassicPinProtocol;
 
 use ciborium::value::Value;
 use core::time::Duration;
-use serial_test::serial;
 
 use crate::ctap::constants::*;
 
@@ -28,7 +26,7 @@ const MILLISECOND: Duration = Duration::from_millis(1);
 
 /// An authenticator with `PIN` set, a manual clock and one credential.
 fn app_with_clock() -> (CtapApp<TestClient>, ManualClock) {
-    let mut app = CtapApp::new(TestClient::new(), [0x80; 16]);
+    let mut app = new_app(TestClient::new(), [0x80; 16]);
     let clock = ManualClock::default();
     app.pin_state.set_clock(Box::new(clock.clone()));
     app.pin_state.set_pin(pin_hash(PIN));
@@ -190,7 +188,6 @@ fn the_user_present_flag_lapses_after_the_user_present_time_limit() {
 }
 
 #[test]
-#[serial]
 fn make_credential_consumes_the_token() {
     for protocol in PROTOCOLS {
         let (mut app, _clock) = app_with_clock();
@@ -221,7 +218,6 @@ fn make_credential_consumes_the_token() {
 }
 
 #[test]
-#[serial]
 fn get_assertion_consumes_the_token() {
     for protocol in PROTOCOLS {
         let (mut app, _clock) = app_with_clock();
@@ -238,7 +234,6 @@ fn get_assertion_consumes_the_token() {
 }
 
 #[test]
-#[serial]
 fn collecting_presence_without_a_pin_uv_auth_param_also_consumes_an_in_use_token() {
     // The clear functions are called whenever user presence was collected;
     // "These functions are no-ops if there is not an in-use pinUvAuthToken."
@@ -269,7 +264,6 @@ fn credential_management_does_not_consume_the_token() {
 // -- Binding --------------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn a_get_pin_token_token_is_bound_to_the_first_rp_it_is_used_for() {
     // "If the pinUvAuthToken does not have a permissions RP ID associated:
     // Associate the request's rp.id parameter value with the pinUvAuthToken
@@ -366,7 +360,6 @@ fn setting_a_pin_stops_the_token() {
 }
 
 #[test]
-#[serial]
 fn reset_keeps_the_injected_clock() {
     let (mut app, clock) = app_with_clock();
     assert_eq!(app.handle_reset(), Ok(vec![CTAP2_OK]));

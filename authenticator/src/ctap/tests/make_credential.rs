@@ -1,11 +1,11 @@
 //! authenticatorMakeCredential tests.
 
+use super::support::new_app;
 use super::support::{install_pin_uv_auth_token, token_pin_auth, TestClient};
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::make_credential::COSE_ALG_ES256;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
-use crate::ctap::CtapApp;
 use crate::{credential_secret_from_bytes, ClassicPinProtocol, CoseAlg, CredentialSecretKey};
 
 use ciborium::{
@@ -19,7 +19,7 @@ use crate::ctap::constants::*;
 
 #[test]
 fn make_credential_includes_extensions() {
-    let mut app = CtapApp::new(TestClient::new(), [0xAA; 16]);
+    let mut app = new_app(TestClient::new(), [0xAA; 16]);
     let client_hash = vec![0xBB; 32];
     let pin_token = [0xCC; 32];
     install_pin_uv_auth_token(
@@ -146,7 +146,7 @@ fn make_credential_includes_extensions() {
 
 #[test]
 fn make_credential_supports_es256() {
-    let mut app = CtapApp::new(TestClient::new(), [0x01; 16]);
+    let mut app = new_app(TestClient::new(), [0x01; 16]);
     let client_hash = vec![0x10; 32];
     let rp = canonical_map(vec![(
         Value::Text("id".into()),
@@ -246,7 +246,7 @@ fn make_credential_supports_es256() {
 
 #[test]
 fn make_credential_uses_attestation_certificate_when_available() {
-    let mut app = CtapApp::new(TestClient::new(), [0xAB; 16]);
+    let mut app = new_app(TestClient::new(), [0xAB; 16]);
     let att_key_bytes = vec![0x13; 32];
     let certificate = vec![0x30, 0x82, 0x00, 0x01];
     app.attestation_private_key = Some(att_key_bytes.clone());
@@ -357,7 +357,7 @@ fn make_credential_uses_attestation_certificate_when_available() {
 
 #[test]
 fn make_credential_self_attestation_without_attestation_key() {
-    let mut app = CtapApp::new(TestClient::new(), [0xCD; 16]);
+    let mut app = new_app(TestClient::new(), [0xCD; 16]);
     let client_hash = vec![0x22; 32];
     let rp = canonical_map(vec![(
         Value::Text("id".into()),
@@ -448,7 +448,7 @@ fn make_credential_self_attestation_without_attestation_key() {
 
 #[test]
 fn make_credential_can_suppress_attestation() {
-    let mut app = CtapApp::new(TestClient::new(), [0xDD; 16]);
+    let mut app = new_app(TestClient::new(), [0xDD; 16]);
     app.suppress_attestation(true);
 
     let client_hash = vec![0x33; 32];
@@ -519,7 +519,7 @@ fn make_credential_can_suppress_attestation() {
 
 #[test]
 fn make_credential_requires_mc_permission() {
-    let mut app = CtapApp::new(TestClient::new(), [0x51; 16]);
+    let mut app = new_app(TestClient::new(), [0x51; 16]);
     let token = [0xAA; 32];
     install_pin_uv_auth_token(
         &mut app,

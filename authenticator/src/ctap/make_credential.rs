@@ -3,6 +3,7 @@
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::permissions::PIN_PERMISSION_MC;
 use super::pin::protocol::parse_pin_uv_auth_param;
+use super::presence::{PresenceOperation, PresenceRequest};
 use super::storage::StoredCredential;
 use super::CtapApp;
 use crate::{create_credential, sign_challenge, CoseAlg};
@@ -213,7 +214,14 @@ where
 
         let cred_protect_value = cred_protect_requested.unwrap_or(1);
 
-        let user_present = self.await_user_presence()?;
+        let timeout = self.presence_timeout;
+        self.confirm_user_presence(PresenceRequest {
+            rp_id: Some(&rp_id),
+            user_name: user_name.as_deref(),
+            user_display_name: user_display_name.as_deref(),
+            ..PresenceRequest::new(PresenceOperation::Register, timeout)
+        })?;
+        let user_present = true;
         self.pin_state
             .consume_pin_uv_auth_token_after_user_presence();
 

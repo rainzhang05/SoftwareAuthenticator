@@ -6,6 +6,7 @@ use super::pin::permissions::PIN_PERMISSION_GA;
 use super::pin::protocol::{
     decrypt, parse_pin_uv_auth_param, parse_pin_uv_auth_protocol, verify, HmacSha256, PinProtocol,
 };
+use super::presence::{PresenceOperation, PresenceRequest};
 use super::storage::StoredCredential;
 use super::CtapApp;
 use crate::{
@@ -313,7 +314,12 @@ where
             }
         }
 
-        let user_present = self.await_user_presence()?;
+        let timeout = self.presence_timeout;
+        self.confirm_user_presence(PresenceRequest {
+            rp_id: Some(&rp_id),
+            ..PresenceRequest::new(PresenceOperation::Authenticate, timeout)
+        })?;
+        let user_present = true;
         self.pin_state
             .consume_pin_uv_auth_token_after_user_presence();
 

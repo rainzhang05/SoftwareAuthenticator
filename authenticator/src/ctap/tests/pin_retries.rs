@@ -1,6 +1,7 @@
 //! The PIN retry state machine (CTAP 2.3 §6.5.2.3) on its own, and as
 //! authenticatorClientPIN drives and persists it.
 
+use super::support::new_app;
 use super::support::{
     client_pin, get_pin_retries, get_pin_token, int, padded_pin, pin_hash, PlatformPinSession,
     TestClient,
@@ -293,7 +294,7 @@ fn pin_state_writes(app: &CtapApp<TestClient>) -> Vec<PinStateFile> {
 
 /// An authenticator whose PIN is `PIN`, set through setPIN.
 fn app_with_pin() -> CtapApp<TestClient> {
-    let mut app = CtapApp::new(TestClient::new(), [0x70; 16]);
+    let mut app = new_app(TestClient::new(), [0x70; 16]);
     let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V2, 0x31);
     let new_pin_enc = session.encrypt(&padded_pin(PIN));
     let pin_uv_auth_param =
@@ -315,7 +316,7 @@ fn app_with_pin() -> CtapApp<TestClient> {
 /// Stop the daemon and start it again on the same storage.
 fn restart(app: CtapApp<TestClient>) -> CtapApp<TestClient> {
     let aaguid = app.aaguid;
-    CtapApp::new(app.client, aaguid)
+    new_app(app.client, aaguid)
 }
 
 #[test]
@@ -455,7 +456,7 @@ fn start_up_ignores_a_stored_power_cycle_lockout() {
     let mut client = TestClient::new();
     client.insert_file(PIN_STATE_STORE_PATH, stored);
 
-    let mut app = CtapApp::new(client, [0x71; 16]);
+    let mut app = new_app(client, [0x71; 16]);
     assert!(app.pin_state.is_set());
     assert_eq!(get_pin_retries(&mut app), (MAX_PIN_RETRIES - 3, None));
     get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("correct PIN");

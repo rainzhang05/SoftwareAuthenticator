@@ -1,6 +1,7 @@
 //! authenticatorGetAssertion / authenticatorGetNextAssertion tests, including
 //! hmac-secret and credProtect.
 
+use super::support::new_app;
 use super::support::{
     classic_encrypt, classic_pin_auth, corrupt_mac, derive_classic_session,
     install_pin_uv_auth_token, request_classic_key_agreement, token_pin_auth, TestClient,
@@ -9,7 +10,6 @@ use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::{HmacSha256, PIN_UV_AUTH_PROTOCOL_CLASSIC};
 use crate::ctap::storage::StoredCredential;
-use crate::ctap::CtapApp;
 use crate::{create_credential, ClassicPinProtocol, CoseAlg, CredentialSecretKey};
 
 use ciborium::{
@@ -28,7 +28,7 @@ use crate::ctap::constants::*;
 
 #[test]
 fn get_assertion_response_encoding_is_canonical() {
-    let mut app = CtapApp::new(TestClient::new(), [0x11; 16]);
+    let mut app = new_app(TestClient::new(), [0x11; 16]);
     let rp_id = "example.com";
     let client_hash = vec![0x22; 32];
     let pin_token = [0x33; 32];
@@ -148,7 +148,7 @@ fn get_assertion_response_encoding_is_canonical() {
 
 #[test]
 fn get_next_assertion_preserves_new_credentials() {
-    let mut app = CtapApp::new(TestClient::new(), [0x55; 16]);
+    let mut app = new_app(TestClient::new(), [0x55; 16]);
     let rp_id = "example.com";
     let client_hash = vec![0x66; 32];
 
@@ -279,13 +279,13 @@ fn get_next_assertion_preserves_new_credentials() {
 
 #[test]
 fn get_next_assertion_without_pending_fails() {
-    let mut app = CtapApp::new(TestClient::new(), [0x77; 16]);
+    let mut app = new_app(TestClient::new(), [0x77; 16]);
     assert_eq!(app.handle_get_next_assertion(), Err(CTAP2_ERR_NOT_ALLOWED));
 }
 
 #[test]
 fn get_assertion_without_pin_uv_uses_presence_only() {
-    let mut app = CtapApp::new(TestClient::new(), [0x11; 16]);
+    let mut app = new_app(TestClient::new(), [0x11; 16]);
     let rp_id = "example.com";
     let client_hash = vec![0x22; 32];
 
@@ -351,7 +351,7 @@ fn get_assertion_without_pin_uv_uses_presence_only() {
 
 #[test]
 fn get_assertion_with_invalid_pin_uv_auth_param_fails() {
-    let mut app = CtapApp::new(TestClient::new(), [0x11; 16]);
+    let mut app = new_app(TestClient::new(), [0x11; 16]);
     let rp_id = "example.com";
     let client_hash = vec![0x22; 32];
     let pin_token = [0x33; 32];
@@ -418,7 +418,7 @@ fn get_assertion_with_invalid_pin_uv_auth_param_fails() {
 
 #[test]
 fn get_assertion_es256_signature_verifies() {
-    let mut app = CtapApp::new(TestClient::new(), [0x02; 16]);
+    let mut app = new_app(TestClient::new(), [0x02; 16]);
     let rp_id = "example.com";
     let client_hash = vec![0x99; 32];
 
@@ -497,7 +497,7 @@ fn get_assertion_es256_signature_verifies() {
 
 #[test]
 fn get_assertion_produces_hmac_secret_output() {
-    let mut app = CtapApp::new(TestClient::new(), [0x42; 16]);
+    let mut app = new_app(TestClient::new(), [0x42; 16]);
     let pin = b"1234";
     let mut hasher = Sha256::new();
     hasher.update(pin);
@@ -681,7 +681,7 @@ fn get_assertion_produces_hmac_secret_output() {
 
 #[test]
 fn get_assertion_rejects_mismatched_rp_binding() {
-    let mut app = CtapApp::new(TestClient::new(), [0x52; 16]);
+    let mut app = new_app(TestClient::new(), [0x52; 16]);
     let token = [0xAB; 32];
     install_pin_uv_auth_token(
         &mut app,
@@ -740,7 +740,7 @@ fn get_assertion_rejects_mismatched_rp_binding() {
 
 #[test]
 fn cred_protect_enforced_for_user_verification() {
-    let mut app = CtapApp::new(TestClient::new(), [0x33; 16]);
+    let mut app = new_app(TestClient::new(), [0x33; 16]);
     let rp_id = "example.com";
     let client_hash = vec![0x55; 32];
 

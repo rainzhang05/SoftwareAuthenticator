@@ -1,5 +1,6 @@
 //! authenticatorCredentialManagement tests.
 
+use super::support::new_app;
 use super::support::{
     es256_credential, get_pin_uv_auth_token, install_pin_uv_auth_token, pin_hash, token_pin_auth,
     TestClient,
@@ -33,7 +34,7 @@ fn cm_pin_param(token: &[u8; 32], subcommand: u8, params: Option<Value>) -> Vec<
 
 #[test]
 fn credential_management_commands() {
-    let mut app = CtapApp::new(TestClient::new(), [0x24; 16]);
+    let mut app = new_app(TestClient::new(), [0x24; 16]);
     let token = [0x90; 32];
     install_pin_uv_auth_token(
         &mut app,
@@ -310,7 +311,7 @@ fn credential_management_commands() {
 
 #[test]
 fn credential_management_requires_cm_permission() {
-    let mut app = CtapApp::new(TestClient::new(), [0x25; 16]);
+    let mut app = new_app(TestClient::new(), [0x25; 16]);
     let token = [0x91; 32];
     install_pin_uv_auth_token(
         &mut app,
@@ -343,7 +344,7 @@ fn credential_management_requires_cm_permission() {
 
 #[test]
 fn credential_management_rejects_bound_token_for_rp_enumeration() {
-    let mut app = CtapApp::new(TestClient::new(), [0x26; 16]);
+    let mut app = new_app(TestClient::new(), [0x26; 16]);
     let token = [0x92; 32];
     install_pin_uv_auth_token(
         &mut app,
@@ -428,7 +429,7 @@ fn credential_id_params(credential_id: &[u8], user: Option<Value>) -> Value {
 
 #[test]
 fn credential_management_limits_an_rp_scoped_token_to_that_rp() {
-    let mut app = CtapApp::new(TestClient::new(), [0x27; 16]);
+    let mut app = new_app(TestClient::new(), [0x27; 16]);
     app.pin_state.set_pin(pin_hash(b"1234"));
     app.stored_credentials
         .push(es256_credential("example.com", &[0xA1]));
