@@ -1,3 +1,4 @@
+pub mod attestation;
 pub mod cli;
 pub mod permissions;
 pub mod pin_input;

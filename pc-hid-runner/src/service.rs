@@ -5,10 +5,9 @@ use std::{
 
 use authenticator::ctap::{presence::AutoApprove, CtapApp, InterruptFlag};
 use authenticator::store::{AttestationRecord, CredentialStore, FileStore};
-use transport_core::state::{generate_attestation_certificate, IdentityConfig};
-use zeroize::Zeroize;
 
 use crate::{
+    attestation::{generate_attestation_certificate, IdentityConfig},
     create_device, exec,
     shutdown::{is_shutdown, ok_if_shutdown, ShutdownSignal},
     state::remove_and_log_legacy_state,
@@ -60,14 +59,11 @@ pub fn open_credential_store(
     match store.attestation() {
         Ok(Some(_)) => {}
         Ok(None) => {
-            let (mut private_key, certificate) = generate_attestation_certificate(&identity)?;
+            let (private_key, certificate) = generate_attestation_certificate(&identity)?;
             let record = AttestationRecord {
-                private_key: private_key.as_slice().try_into().map_err(|_| {
-                    io::Error::other("the generated attestation key is not 32 bytes")
-                })?,
+                private_key: *private_key,
                 certificate_chain: vec![certificate],
             };
-            private_key.zeroize();
             store.set_attestation(&record).map_err(io::Error::other)?;
             log::info!("provisioned a new attestation key and certificate");
         }
@@ -102,7 +98,6 @@ pub fn run(
     let store = open_credential_store(
         &state_dir,
         IdentityConfig {
-            aaguid,
             manufacturer: &identity.manufacturer,
             product: &identity.product,
             serial: &identity.serial,

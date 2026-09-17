@@ -55,18 +55,11 @@ jobs:
         with:
           tool: cargo-audit
 
-      # The --ignore entry is the one vulnerability that exists in the tree
-      # today. They are NOT a blanket disable: any other vulnerability, present
-      # or future, still fails this job. Reasons and removal plans live in
-      # deny.toml next to the matching entries - keep the two lists in sync.
-      #
-      #   RUSTSEC-2025-0009  ring 0.16.20 <- rcgen 0.11 <- transport-core
-      #                      AES panic with overflow checks; needs rcgen >= 0.12.
-      #
-      # TODO: delete the flag when the rcgen bump lands; this then becomes a
-      # plain `cargo audit`.
+      # No vulnerability is ignored: any advisory against the locked tree fails
+      # this job. deny.toml lists the non-vulnerability findings that are
+      # tolerated.
       - name: Audit dependencies
-        run: cargo audit --ignore RUSTSEC-2025-0009
+        run: cargo audit
 
   # cargo-deny: advisories, licenses, banned/duplicated crates, and source
   # provenance. This is the strict half of the pair - see deny.toml, which

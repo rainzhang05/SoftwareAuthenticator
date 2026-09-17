@@ -9,8 +9,8 @@
 # pin and this file together.
 #
 # This file is the *source of truth* for which known findings are tolerated.
-# .github/workflows/security.yml mirrors the vulnerability subset into the
-# `cargo audit --ignore` flags; keep the two in sync.
+# Should a vulnerability ever need to be ignored here, mirror it into a
+# `cargo audit --ignore` flag in .github/workflows/security.yml; none is today.
 
 [graph]
 # Check the dependency graph with every feature enabled. transport-core's
@@ -44,17 +44,7 @@ unsound = "all"
 yanked = "warn"
 
 ignore = [
-    # --- vulnerabilities -------------------------------------------------
-    # ring 0.16.20 <- rcgen 0.11.3 <- transport-core.
-    # AES functions can panic when overflow checking is enabled. Fixed in ring
-    # 0.17.12, which requires rcgen >= 0.12.
-    # TODO: bump rcgen in transport-core/Cargo.toml to drop ring 0.16 entirely.
-    { id = "RUSTSEC-2025-0009", reason = "ring 0.16.20 via rcgen 0.11; needs a rcgen >= 0.12 bump" },
-
     # --- unmaintained / unsound -----------------------------------------
-    # Same ring 0.16.20 as above: the 0.16 line is no longer maintained.
-    { id = "RUSTSEC-2025-0010", reason = "ring 0.16.x unmaintained; same rcgen bump as RUSTSEC-2025-0009" },
-
     # atomic-polyfill 1.0.3 <- heapless 0.7. Goes away with heapless 0.8, which
     # is a breaking change across trussed/authenticator/transport-core.
     { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill via heapless 0.7; needs a coordinated heapless 0.8 upgrade" },
@@ -87,21 +77,6 @@ unused-allowed-license = "allow"
 # Note: this only takes effect for crates marked `publish = false`; see the
 # clarifications below for why transport-core / pc-hid-runner still need one.
 private = { ignore = true }
-
-exceptions = [
-    # ring is BoringSSL-derived and carries the OpenSSL license for part of its
-    # code. Allowed for ring specifically, not tree-wide.
-    { crate = "ring", allow = ["OpenSSL"] },
-]
-
-# ring 0.16.20 ships no `license` field, only a hand-written LICENSE file that
-# no license scanner can classify. This is the clarification from cargo-deny's
-# own documentation; the hash pins it to the exact file text, so the
-# clarification stops applying if ring ever changes it.
-[[licenses.clarify]]
-crate = "ring"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 # transport-core and pc-hid-runner declare no `license` at all: the root
 # Cargo.toml sets `license = "Apache-2.0 OR MIT"` under [workspace.package], but
