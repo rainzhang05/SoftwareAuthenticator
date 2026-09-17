@@ -15,7 +15,10 @@ clap-num = "1.0"
 log = { version = "0.4", default-features = false }
 env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
 authenticator = { path = "../authenticator" }
-rand = { version = "0.8", features = ["std"] }
+# CTAPHID channel allocation: the operating system RNG behind rand_core's
+# `CryptoRng`, so tests can inject a deterministic one.
+rand_core = "0.10"
+getrandom = { version = "0.4", features = ["sys_rng"] }
 sha2 = "0.11"
 # Attestation certificate generation. rcgen is built without a crypto backend;
 # the certificate is signed with p256, which the CTAP engine already uses.

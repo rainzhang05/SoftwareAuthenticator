@@ -42,8 +42,12 @@
 use std::{collections::VecDeque, convert::TryInto};
 
 use ctaphid_app::{Command, Error as AppError};
+use getrandom::SysRng;
 use log::debug;
-use rand::{rngs::OsRng, CryptoRng, RngCore};
+use rand_core::{CryptoRng, UnwrapErr};
+
+/// The operating system RNG; panics if it fails, as rand 0.8's `OsRng` did.
+type OsRng = UnwrapErr<SysRng>;
 
 use crate::uhid::{CtapHidFrame, CTAPHID_FRAME_LEN};
 
@@ -209,11 +213,11 @@ pub struct CtaphidHost<R = OsRng> {
 
 impl CtaphidHost<OsRng> {
     pub fn new(app_commands: &'static [Command]) -> Self {
-        Self::with_rng(app_commands, OsRng)
+        Self::with_rng(app_commands, UnwrapErr(SysRng))
     }
 }
 
-impl<R: RngCore + CryptoRng> CtaphidHost<R> {
+impl<R: CryptoRng> CtaphidHost<R> {
     pub fn with_rng(app_commands: &'static [Command], rng: R) -> Self {
         Self {
             state: State::Idle,
@@ -659,6 +663,7 @@ impl<R: RngCore + CryptoRng> CtaphidHost<R> {
 mod tests {
     use super::*;
     use crate::{CAPABILITY_CBOR, CAPABILITY_NMSG};
+    use rand_core::{Infallible, TryCryptoRng, TryRng};
 
     const APP_COMMANDS: &[Command] = &[Command::Cbor];
     const FIRST: u32 = 0x0A0A_0A0A;
@@ -679,27 +684,25 @@ mod tests {
         }
     }
 
-    impl RngCore for TestRng {
-        fn next_u32(&mut self) -> u32 {
+    impl TryRng for TestRng {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Infallible> {
             let value = *self.values.get(self.index).expect("test RNG exhausted");
             self.index += 1;
-            value
+            Ok(value)
         }
 
-        fn next_u64(&mut self) -> u64 {
+        fn try_next_u64(&mut self) -> Result<u64, Infallible> {
             unimplemented!()
         }
 
-        fn fill_bytes(&mut self, _dest: &mut [u8]) {
-            unimplemented!()
-        }
-
-        fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), rand::Error> {
+        fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), Infallible> {
             unimplemented!()
         }
     }
 
-    impl CryptoRng for TestRng {}
+    impl TryCryptoRng for TestRng {}
 
     fn host() -> CtaphidHost<TestRng> {
         host_with_channels(&[])
@@ -731,7 +734,7 @@ mod tests {
         packets
     }
 
-    fn send<R: RngCore + CryptoRng>(
+    fn send<R: CryptoRng>(
         host: &mut CtaphidHost<R>,
         channel: u32,
         command: Command,
@@ -768,7 +771,7 @@ mod tests {
     }
 
     /// Every message queued so far, checking the packets' framing.
-    fn sent<R: RngCore + CryptoRng>(host: &mut CtaphidHost<R>) -> Vec<Message> {
+    fn sent<R: CryptoRng>(host: &mut CtaphidHost<R>) -> Vec<Message> {
         let mut messages = Vec::new();
         while let Some(frame) = host.next_outgoing_frame() {
             let packet = frame.as_bytes();
@@ -796,12 +799,7 @@ mod tests {
     }
 
     /// Complete a CBOR request on `channel` and hand it to the app.
-    fn start_cbor<R: RngCore + CryptoRng>(
-        host: &mut CtaphidHost<R>,
-        channel: u32,
-        payload: &[u8],
-        now: u64,
-    ) {
+    fn start_cbor<R: CryptoRng>(host: &mut CtaphidHost<R>, channel: u32, payload: &[u8], now: u64) {
         send(host, channel, Command::Cbor, payload, now);
         let request = host.take_app_request().expect("a request for the app");
         assert_eq!(request.command, Command::Cbor);
