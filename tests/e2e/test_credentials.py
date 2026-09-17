@@ -6,20 +6,14 @@ import pytest
 from fido2.ctap import CtapError
 from fido2.ctap2 import Ctap2
 
-import bugs
 import ctap as client
-from bugs import known_bug
 
 RP_ID = "e2e.example"
 
 ALGORITHMS = [
     pytest.param(client.ES256, id="ES256"),
     *(
-        pytest.param(
-            alg,
-            id=f"ML-DSA-{name}",
-            marks=known_bug(bugs.CREDENTIAL_STORE_CAPACITY, status=CtapError.ERR.PROCESSING),
-        )
+        pytest.param(alg, id=f"ML-DSA-{name}")
         for alg, name in ((client.ML_DSA_44, 44), (client.ML_DSA_65, 65), (client.ML_DSA_87, 87))
     ),
 ]
@@ -70,7 +64,6 @@ def test_discoverable_credential(ctap: Ctap2):
     _discoverable(ctap, 1)
 
 
-@known_bug(bugs.CREDENTIAL_STORE_CAPACITY, status=CtapError.ERR.PROCESSING)
 def test_several_discoverable_credentials(ctap: Ctap2):
     _discoverable(ctap, 3)
 

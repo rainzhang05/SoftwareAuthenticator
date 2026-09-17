@@ -46,14 +46,6 @@ def is_expected(marker, exc: BaseException) -> bool:
     return True
 
 
-# Bug 1. The credential store is a single file written through Trussed, whose
-# messages are capped at 1,024 bytes, so saving the credential list fails once
-# it outgrows that. One ML-DSA-44 credential alone needs about 7.6 KB.
-CREDENTIAL_STORE_CAPACITY = (
-    "bug 1: the credential store is capped at 1,024 bytes, so saving the "
-    "credential list fails with CTAP2_ERR_PROCESSING"
-)
-
 # Bug 3. The CTAPHID layer answers CANCEL on an idle channel with an ERROR
 # packet, and writes error responses for one channel into the buffer that
 # holds another channel's partially received request.
