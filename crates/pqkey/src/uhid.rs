@@ -1,10 +1,10 @@
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
-use nix::poll::{PollFd, PollFlags, poll};
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::unistd::{read, write};
 use std::fs::OpenOptions;
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::thread;
 use std::time::Duration;
 
@@ -135,7 +135,7 @@ impl UhidDevice {
             .read(true)
             .write(true)
             .open(DEVICE_PATH)?;
-        let fd = file.as_raw_fd();
+        let fd = file.as_fd();
 
         let create2 = descriptor_to_create2(&descriptor)?;
         let mut create_event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_CREATE2);
@@ -259,7 +259,7 @@ struct UhidInner {
 
 impl UhidInner {
     fn try_read_event(&self) -> io::Result<Option<raw::uhid_event>> {
-        match read_event_nonblocking(self.fd.as_raw_fd()) {
+        match read_event_nonblocking(self.fd.as_fd()) {
             Ok(event) => Ok(Some(event)),
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
             Err(err) => Err(err),
@@ -267,14 +267,16 @@ impl UhidInner {
     }
 
     fn wait(&self, timeout: Option<Duration>, other: Option<BorrowedFd<'_>>) -> io::Result<bool> {
-        let mut fds = vec![PollFd::new(&self.fd, PollFlags::POLLIN)];
-        if let Some(other) = &other {
+        let mut fds = vec![PollFd::new(self.fd.as_fd(), PollFlags::POLLIN)];
+        if let Some(other) = other {
             fds.push(PollFd::new(other, PollFlags::POLLIN));
         }
-        let timeout_ms = timeout
-            .map(|d| d.as_millis().min(i32::MAX as u128) as i32)
-            .unwrap_or(-1);
-        match poll(&mut fds, timeout_ms) {
+        // `PollTimeout::NONE` blocks indefinitely; a wait longer than
+        // `PollTimeout::MAX` can say is capped rather than rejected.
+        let timeout = timeout.map_or(PollTimeout::NONE, |d| {
+            PollTimeout::try_from(d).unwrap_or(PollTimeout::MAX)
+        });
+        match poll(&mut fds, timeout) {
             Ok(ready) => Ok(ready > 0),
             // Interrupted by a signal: return, so the caller can look at why.
             Err(Errno::EINTR) => Ok(false),
@@ -289,7 +291,7 @@ impl UhidInner {
         let input = unsafe { &mut event.u.input2 };
         input.size = CTAPHID_FRAME_LEN as u16;
         input.data[..CTAPHID_FRAME_LEN].copy_from_slice(data);
-        write_event_blocking(self.fd.as_raw_fd(), &mut event)
+        write_event_blocking(self.fd.as_fd(), &mut event)
     }
 
     fn send_get_report_reply(&self, id: u32, err: u16, data: &[u8]) -> io::Result<()> {
@@ -306,7 +308,7 @@ impl UhidInner {
         reply.err = err;
         reply.size = data.len() as u16;
         reply.data[..data.len()].copy_from_slice(data);
-        write_event_blocking(self.fd.as_raw_fd(), &mut event)
+        write_event_blocking(self.fd.as_fd(), &mut event)
     }
 
     fn send_set_report_reply(&self, id: u32, err: u16) -> io::Result<()> {
@@ -315,7 +317,7 @@ impl UhidInner {
         let reply = unsafe { &mut event.u.set_report_reply };
         reply.id = id;
         reply.err = err;
-        write_event_blocking(self.fd.as_raw_fd(), &mut event)
+        write_event_blocking(self.fd.as_fd(), &mut event)
     }
 }
 
@@ -324,7 +326,7 @@ impl Drop for UhidInner {
         // Closing the descriptor would destroy the device as well; saying so
         // explicitly removes it before anything else is torn down.
         let mut event = raw::uhid_event::new(UHID_EVENT_TYPE_DESTROY);
-        let _ = write_event_blocking(self.fd.as_raw_fd(), &mut event);
+        let _ = write_event_blocking(self.fd.as_fd(), &mut event);
     }
 }
 
@@ -363,7 +365,7 @@ fn copy_str_to_array(value: &str, dest: &mut [u8]) {
     dest[bytes.len()] = 0;
 }
 
-fn write_event_blocking(fd: RawFd, event: &mut raw::uhid_event) -> io::Result<()> {
+fn write_event_blocking(fd: BorrowedFd<'_>, event: &mut raw::uhid_event) -> io::Result<()> {
     loop {
         match write(fd, event_as_bytes(event)) {
             Ok(n) if n == UHID_EVENT_SIZE => return Ok(()),
@@ -378,7 +380,7 @@ fn write_event_blocking(fd: RawFd, event: &mut raw::uhid_event) -> io::Result<()
     }
 }
 
-fn read_event_nonblocking(fd: RawFd) -> io::Result<raw::uhid_event> {
+fn read_event_nonblocking(fd: BorrowedFd<'_>) -> io::Result<raw::uhid_event> {
     let mut buffer = [0u8; UHID_EVENT_SIZE];
     let mut offset = 0;
     while offset < buffer.len() {
@@ -701,7 +703,7 @@ mod tests {
 
     #[test]
     fn write_event_sends_raw_descriptor_bytes() {
-        use nix::unistd::{close, pipe, read};
+        use nix::unistd::{pipe, read};
 
         let descriptor = HidDeviceDescriptor::default();
         let create2 = descriptor_to_create2(&descriptor).expect("descriptor conversion");
@@ -709,19 +711,20 @@ mod tests {
         event.u.create2 = create2;
 
         let (read_fd, write_fd) = pipe().expect("pipe");
-        write_event_blocking(write_fd, &mut event).expect("write_event");
-        close(write_fd).ok();
+        write_event_blocking(write_fd.as_fd(), &mut event).expect("write_event");
+        // Closed so the read below sees end of file instead of blocking.
+        drop(write_fd);
 
         let mut buffer = [0u8; UHID_EVENT_SIZE];
         let mut offset = 0;
         while offset < buffer.len() {
-            let read_bytes = read(read_fd, &mut buffer[offset..]).expect("read");
+            let read_bytes = read(&read_fd, &mut buffer[offset..]).expect("read");
             if read_bytes == 0 {
                 break;
             }
             offset += read_bytes;
         }
-        close(read_fd).ok();
+        drop(read_fd);
         assert_eq!(offset, UHID_EVENT_SIZE);
 
         // SAFETY: both pointers are into `event`.

@@ -15,7 +15,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    os::unix::fs::OpenOptionsExt,
     path::Path,
     process, thread,
     time::{Duration, Instant},
@@ -23,7 +23,7 @@ use std::{
 
 use nix::{
     errno::Errno,
-    fcntl::{FlockArg, flock},
+    fcntl::{Flock, FlockArg},
     unistd::Pid,
 };
 
@@ -37,7 +37,8 @@ const ACQUIRE_PATIENCE: Duration = Duration::from_millis(250);
 /// Exclusive hold on a state directory, released when dropped.
 #[derive(Debug)]
 pub struct StateLock {
-    _file: File,
+    /// Holds the lock; dropping it unlocks and closes the file.
+    _flock: Flock<File>,
 }
 
 impl StateLock {
@@ -51,15 +52,19 @@ impl StateLock {
             .mode(0o600)
             .open(state_dir.join(LOCK_FILE))?;
         let deadline = Instant::now() + ACQUIRE_PATIENCE;
+        // `Flock::lock` takes the file by value and hands it back with the
+        // error, so each retry locks the file it just got back.
+        let mut file = file;
         loop {
-            match flock(file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
-                Ok(()) => return Ok(Some(Self { _file: file })),
-                Err(Errno::EWOULDBLOCK) if Instant::now() < deadline => {
+            match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+                Ok(flock) => return Ok(Some(Self { _flock: flock })),
+                Err((returned, Errno::EWOULDBLOCK)) if Instant::now() < deadline => {
+                    file = returned;
                     thread::sleep(Duration::from_millis(10));
                 }
-                Err(Errno::EWOULDBLOCK) => return Ok(None),
-                Err(Errno::EINTR) => {}
-                Err(err) => return Err(err.into()),
+                Err((_, Errno::EWOULDBLOCK)) => return Ok(None),
+                Err((returned, Errno::EINTR)) => file = returned,
+                Err((_, err)) => return Err(err.into()),
             }
         }
     }
@@ -72,14 +77,15 @@ pub fn is_locked(state_dir: &Path) -> io::Result<bool> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(err) => return Err(err),
     };
+    let mut file = file;
     loop {
         // A shared lock conflicts only with an exclusive holder. It is
-        // released again when `file` is closed on return.
-        match flock(file.as_raw_fd(), FlockArg::LockSharedNonblock) {
-            Ok(()) => return Ok(false),
-            Err(Errno::EWOULDBLOCK) => return Ok(true),
-            Err(Errno::EINTR) => {}
-            Err(err) => return Err(err.into()),
+        // released again when the `Flock` is dropped on return.
+        match Flock::lock(file, FlockArg::LockSharedNonblock) {
+            Ok(_flock) => return Ok(false),
+            Err((_, Errno::EWOULDBLOCK)) => return Ok(true),
+            Err((returned, Errno::EINTR)) => file = returned,
+            Err((_, err)) => return Err(err.into()),
         }
     }
 }
@@ -172,7 +178,7 @@ mod tests {
         let dir = TempDir::new("lock-probe-race");
         File::create(dir.path().join(LOCK_FILE)).unwrap();
         let probe = File::open(dir.path().join(LOCK_FILE)).unwrap();
-        flock(probe.as_raw_fd(), FlockArg::LockSharedNonblock).unwrap();
+        let probe = Flock::lock(probe, FlockArg::LockSharedNonblock).unwrap();
         let release = thread::spawn(move || {
             thread::sleep(Duration::from_millis(50));
             drop(probe);

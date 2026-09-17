@@ -9,7 +9,7 @@ use std::{
     fmt,
     io::{self, BufRead, IsTerminal, Read, Write},
     ops::Deref,
-    os::fd::{AsFd, AsRawFd, BorrowedFd},
+    os::fd::{AsFd, BorrowedFd},
     sync::atomic::{AtomicI32, Ordering},
 };
 
@@ -152,7 +152,7 @@ fn read_tty_line(tty: BorrowedFd<'_>) -> io::Result<Pin> {
         }
         // The terminal is in canonical mode, so a read returns at most one
         // line and the kernel handles backspace and friends.
-        match nix::unistd::read(tty.as_raw_fd(), &mut chunk[..]) {
+        match nix::unistd::read(tty, &mut chunk[..]) {
             Ok(0) if line.is_empty() => {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -416,7 +416,7 @@ mod tests {
         // terminal emulator would: restoring the settings waits for the output
         // queue to drain.
         nix::fcntl::fcntl(
-            terminal.as_raw_fd(),
+            &terminal,
             nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
         )
         .unwrap();
