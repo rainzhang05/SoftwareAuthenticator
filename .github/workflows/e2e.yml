@@ -133,6 +133,9 @@ jobs:
           udevadm info --query=all --name="$node" | tee "$RUNNER_TEMP/e2e-diagnostics/udevadm-hidraw.txt"
           echo "E2E_HIDRAW=$node" >> "$GITHUB_ENV"
 
+      - name: libfido2 tests
+        run: tests/e2e/libfido2.sh "$E2E_HIDRAW"
+
       - name: Detach the virtual security key
         if: always() && env.E2E_STATE_DIR != ''
         run: |
