@@ -455,6 +455,26 @@ fn request_pin_uv_auth_token(
     parameters: Vec<(Value, Value)>,
 ) -> Result<[u8; 32], u8> {
     let session = PlatformPinSession::establish(app, protocol, 0x21);
+    request_pin_uv_auth_token_with(app, &session, pin, subcommand, parameters)
+}
+
+/// getPinToken (0x05) with `pin`, over a key agreement the platform already has.
+pub(super) fn get_pin_token_with(
+    app: &mut CtapApp<TestClient>,
+    session: &PlatformPinSession,
+    pin: &[u8],
+) -> Result<[u8; 32], u8> {
+    request_pin_uv_auth_token_with(app, session, pin, 0x05, Vec::new())
+}
+
+fn request_pin_uv_auth_token_with(
+    app: &mut CtapApp<TestClient>,
+    session: &PlatformPinSession,
+    pin: &[u8],
+    subcommand: i64,
+    parameters: Vec<(Value, Value)>,
+) -> Result<[u8; 32], u8> {
+    let protocol = session.protocol;
     let pin_hash_enc = session.encrypt(&pin_hash(pin));
     let mut entries = vec![
         (int(1), int(protocol.identifier().into())),

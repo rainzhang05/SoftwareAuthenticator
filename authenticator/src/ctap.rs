@@ -12,7 +12,6 @@ mod tests;
 
 use self::credential_management::CredentialManagementState;
 use self::get_assertion::PendingAssertion;
-use self::pin::protocol::PinProtocolSession;
 use self::pin::state::PinState;
 use self::presence::noop_keepalive;
 #[cfg(test)]
@@ -30,7 +29,6 @@ pub struct CtapApp<C> {
     client: C,
     aaguid: [u8; 16],
     pin_state: PinState,
-    pin_protocol_session: Option<PinProtocolSession>,
     suppress_attestation: bool,
     cred_mgmt_state: CredentialManagementState,
     pending_assertion: Option<PendingAssertion>,
@@ -53,7 +51,6 @@ where
             client,
             aaguid,
             pin_state: PinState::new(),
-            pin_protocol_session: None,
             suppress_attestation: false,
             cred_mgmt_state: CredentialManagementState::new(),
             pending_assertion: None,

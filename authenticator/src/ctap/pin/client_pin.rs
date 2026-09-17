@@ -1,11 +1,9 @@
 //! The authenticatorClientPIN command and its subcommands.
 
 use super::permissions::{requested_pin_permissions, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
-use super::protocol::{
-    decrypt, parse_required_pin_uv_auth_protocol, verify, PinProtocol, PinProtocolSession,
-};
+use super::protocol::{decrypt, parse_required_pin_uv_auth_protocol, verify, PinProtocol};
 use super::state::PinState;
-use crate::ctap::cbor::{self, canonical_map, canonical_sort};
+use crate::ctap::cbor::{self, canonical_map};
 use crate::ctap::CtapApp;
 use crate::PinUvSessionKeys;
 
@@ -14,7 +12,6 @@ use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
-use p256::{elliptic_curve::sec1::ToEncodedPoint, SecretKey as P256SecretKey};
 use sha2::{Digest, Sha256};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 use trussed::syscall;
@@ -80,11 +77,6 @@ const PADDED_PIN_LENGTH: usize = 64;
 
 /// "Maximum PIN Length: 63 bytes" (CTAP 2.3 §6.5.1).
 const MAX_PIN_BYTES: usize = 63;
-
-/// Attempts at drawing a P-256 private key from the RNG before giving up.  A
-/// uniformly random 32-byte string is out of range with probability below
-/// 2^-32, so exhausting these means the RNG is broken.
-const KEY_AGREEMENT_KEY_ATTEMPTS: usize = 8;
 
 /// Recover newPin from the decrypted newPinEnc, as setPIN (CTAP 2.3 §6.5.5.5)
 /// and changePIN (§6.5.5.6) specify:
@@ -173,32 +165,21 @@ where
         let result = self
             .pin_state
             .finish_pin_attempt(attempt, candidate.as_ref().map(|hash| hash.as_slice()));
+        if result.is_err() {
+            // "If an error results, or a mismatch is detected, the
+            // authenticator performs the following operations: Calls
+            // regenerate for the selected pinUvAuthProtocol."
+            self.pin_state.key_agreement.regenerate(protocol);
+        }
         self.save_persistent_pin_state();
         result
     }
 
+    /// getKeyAgreement (CTAP 2.3 §6.5.5.4): "keyAgreement: the result of
+    /// calling getPublicKey for the selected pinUvAuthProtocol."  The key is
+    /// not regenerated.
     fn client_pin_get_key_agreement(&mut self, protocol: PinProtocol) -> Result<Vec<u8>, u8> {
-        let secret_key = (0..KEY_AGREEMENT_KEY_ATTEMPTS)
-            .find_map(|_| {
-                let bytes = syscall!(self.client.random_bytes(32)).bytes;
-                if bytes.len() != 32 {
-                    return None;
-                }
-                P256SecretKey::from_slice(bytes.as_slice()).ok()
-            })
-            .ok_or(CTAP2_ERR_PROCESSING)?;
-        let public_key = secret_key.public_key().to_encoded_point(false);
-        let session = PinProtocolSession {
-            protocol,
-            public_key,
-            secret_key,
-        };
-        let mut key_map = session.key_agreement_value();
-        if let Value::Map(mut entries) = key_map {
-            canonical_sort(&mut entries);
-            key_map = Value::Map(entries);
-        }
-        self.pin_protocol_session = Some(session);
+        let key_map = self.key_agreement_key(protocol)?.cose_key();
         let response = canonical_map(vec![(Value::Integer(Integer::from(1)), key_map)]);
         let mut encoded = Vec::new();
         into_writer(&response, &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
@@ -224,8 +205,7 @@ where
             return Err(CTAP2_ERR_PIN_AUTH_INVALID);
         }
 
-        let session = self.take_session(protocol)?;
-        let keys = session.derive_session_keys(key_agreement)?;
+        let keys = self.decapsulate(protocol, key_agreement)?;
         verify(protocol, &keys.auth_key, new_pin_enc, pin_auth_param)?;
         let hash = Self::new_pin_hash(protocol, &keys, new_pin_enc)?;
         self.pin_state.set_pin(hash);
@@ -247,8 +227,7 @@ where
         let protocol = parse_required_pin_uv_auth_protocol(protocol)?;
         self.pin_state.check_pin_attempt_allowed()?;
 
-        let session = self.take_session(protocol)?;
-        let keys = session.derive_session_keys(key_agreement)?;
+        let keys = self.decapsulate(protocol, key_agreement)?;
         let mut auth_data = Vec::with_capacity(new_pin_enc.len() + pin_hash_enc.len());
         auth_data.extend_from_slice(new_pin_enc);
         auth_data.extend_from_slice(pin_hash_enc);
@@ -276,8 +255,7 @@ where
     ) -> Result<Vec<u8>, u8> {
         // "If the pinRetries counter is 0, return CTAP2_ERR_PIN_BLOCKED error."
         self.pin_state.check_pin_attempt_allowed()?;
-        let session = self.take_session(protocol)?;
-        let keys = session.derive_session_keys(key_agreement)?;
+        let keys = self.decapsulate(protocol, key_agreement)?;
         self.verify_pin_hash_enc(protocol, &keys, pin_hash_enc)?;
 
         let random = syscall!(self.client.random_bytes(32)).bytes;

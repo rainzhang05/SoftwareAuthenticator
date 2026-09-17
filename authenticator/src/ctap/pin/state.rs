@@ -2,6 +2,8 @@
 
 use core::fmt;
 
+use super::protocol::KeyAgreementKeys;
+
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -184,8 +186,11 @@ impl PinRetryState {
     }
 }
 
+/// Everything the authenticator tracks for PIN/UV auth: the PIN retry state,
+/// each protocol's key agreement key and the pinUvAuthToken.
 pub(crate) struct PinState {
     pin: PinRetryState,
+    pub(crate) key_agreement: KeyAgreementKeys,
     pub(crate) pin_uv_auth_token: Option<[u8; 32]>,
     pub(crate) pin_uv_auth_permissions: u8,
     pub(crate) pin_uv_auth_rp_id: Option<String>,
@@ -203,6 +208,7 @@ impl PinState {
     pub(crate) fn from_persistent(persistent: PersistentPinState) -> Self {
         Self {
             pin: PinRetryState::power_up(persistent),
+            key_agreement: KeyAgreementKeys::default(),
             pin_uv_auth_token: None,
             pin_uv_auth_permissions: 0,
             pin_uv_auth_rp_id: None,

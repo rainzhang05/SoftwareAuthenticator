@@ -3,12 +3,13 @@
 
 use super::support::{
     classic_encrypt, classic_pin_auth, client_pin, derive_classic_session, get_pin_retries,
-    get_pin_uv_auth_token, int, padded_pin, pin_hash, request_classic_key_agreement,
-    set_pin_encrypted, set_pin_padded, PlatformPinSession, TestClient,
+    get_pin_token, get_pin_token_with, get_pin_uv_auth_token, int, padded_pin, pin_hash,
+    request_classic_key_agreement, set_pin_encrypted, set_pin_padded, PlatformPinSession,
+    TestClient,
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
-use crate::ctap::pin::protocol::{PinProtocolSession, PIN_UV_AUTH_PROTOCOL_CLASSIC};
+use crate::ctap::pin::protocol::{KeyAgreementKey, PIN_UV_AUTH_PROTOCOL_CLASSIC};
 use crate::ctap::pin::state::{PinState, MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES};
 use crate::ctap::CtapApp;
 use crate::ClassicPinProtocol;
@@ -28,13 +29,9 @@ use transport_core::ctap::constants::*;
 fn classic_key_agreement_value_is_canonical() {
     let secret_key = P256SecretKey::from_slice(&[0x13; 32]).expect("valid secret key");
     let public_key = secret_key.public_key().to_encoded_point(false);
-    let session = PinProtocolSession {
-        protocol: ClassicPinProtocol::V2,
-        public_key: public_key.clone(),
-        secret_key,
-    };
+    let key = KeyAgreementKey::new(secret_key);
 
-    let value = session.key_agreement_value();
+    let value = key.cose_key();
     let x = public_key
         .x()
         .expect("x coordinate present")
@@ -1050,4 +1047,77 @@ fn get_key_agreement_gives_up_when_the_rng_yields_no_valid_key() {
             "random bytes {fill:#04x}"
         );
     }
+}
+
+#[test]
+fn get_key_agreement_returns_each_protocols_own_key_every_time() {
+    let mut app = CtapApp::new(TestClient::new(), [0x4F; 16]);
+    let protocol_one = request_classic_key_agreement(&mut app, ClassicPinProtocol::V1);
+    let protocol_two = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
+    assert_ne!(protocol_one, protocol_two);
+    for _ in 0..3 {
+        assert_eq!(
+            request_classic_key_agreement(&mut app, ClassicPinProtocol::V1),
+            protocol_one
+        );
+        assert_eq!(
+            request_classic_key_agreement(&mut app, ClassicPinProtocol::V2),
+            protocol_two
+        );
+    }
+}
+
+#[test]
+fn one_key_agreement_serves_several_commands() {
+    // getKeyAgreement returns getPublicKey() (CTAP 2.3 §6.5.5.4); only a PIN
+    // mismatch calls regenerate().
+    for protocol in PROTOCOLS {
+        let mut app = CtapApp::new(TestClient::new(), [0x50; 16]);
+        let session = PlatformPinSession::establish(&mut app, protocol, 0x61);
+        // The other protocol's key agreement in between does not disturb it.
+        let other = match protocol {
+            ClassicPinProtocol::V1 => ClassicPinProtocol::V2,
+            ClassicPinProtocol::V2 => ClassicPinProtocol::V1,
+        };
+        request_classic_key_agreement(&mut app, other);
+
+        let new_pin_enc = session.encrypt(&padded_pin(b"1234"));
+        assert_eq!(
+            set_pin_encrypted(&mut app, &session, new_pin_enc),
+            Ok(vec![CTAP2_OK])
+        );
+        let first = get_pin_token_with(&mut app, &session, b"1234").expect("first token");
+        let second = get_pin_token_with(&mut app, &session, b"1234").expect("second token");
+        assert_ne!(first, second, "each getPinToken issues a fresh token");
+    }
+}
+
+#[test]
+fn a_pin_mismatch_regenerates_that_protocols_key_agreement_key() {
+    let mut app = CtapApp::new(TestClient::new(), [0x51; 16]);
+    app.pin_state.set_pin(pin_hash(b"1234"));
+    let protocol_one = request_classic_key_agreement(&mut app, ClassicPinProtocol::V1);
+    let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V2, 0x62);
+    let protocol_two = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
+
+    assert_eq!(
+        get_pin_token_with(&mut app, &session, b"0000"),
+        Err(CTAP2_ERR_PIN_INVALID)
+    );
+    // "Calls regenerate for the selected pinUvAuthProtocol."
+    assert_ne!(
+        request_classic_key_agreement(&mut app, ClassicPinProtocol::V2),
+        protocol_two
+    );
+    assert_eq!(
+        request_classic_key_agreement(&mut app, ClassicPinProtocol::V1),
+        protocol_one
+    );
+
+    // The platform's old shared secret is useless now, even with the right PIN.
+    assert_eq!(
+        get_pin_token_with(&mut app, &session, b"1234"),
+        Err(CTAP2_ERR_PIN_INVALID)
+    );
+    get_pin_token(&mut app, ClassicPinProtocol::V2, b"1234").expect("fresh key agreement");
 }

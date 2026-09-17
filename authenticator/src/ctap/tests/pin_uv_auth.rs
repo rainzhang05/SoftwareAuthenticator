@@ -721,3 +721,52 @@ fn reset_discards_the_pin_uv_auth_token_and_the_key_agreement_key() {
         );
     }
 }
+
+#[test]
+#[serial]
+fn hmac_secret_can_reuse_the_key_agreement_of_a_pin_token_request() {
+    for protocol in PROTOCOLS {
+        let mut app = CtapApp::new(TestClient::new(), [0x6C; 16]);
+        app.pin_state.set_pin(pin_hash(b"1234"));
+        let credential = es256_credential("example.com", &[0xE3]);
+        let cred_random_with_uv = credential
+            .cred_random_with_uv
+            .clone()
+            .expect("credRandomWithUV");
+        app.stored_credentials.push(credential);
+
+        // One getKeyAgreement for both the token and the hmac-secret salts.
+        let session = PlatformPinSession::establish(&mut app, protocol, 0x17);
+        let token = super::support::get_pin_token_with(&mut app, &session, b"1234")
+            .expect("pinUvAuthToken issued");
+
+        let salt = [0x97; 32];
+        let salt_enc = session.encrypt(&salt);
+        let salt_auth = platform_authenticate(protocol, &session.keys.auth_key, &salt_enc);
+        let extensions = canonical_map(vec![(
+            Value::Text("hmac-secret".into()),
+            canonical_map(vec![
+                (int(1), session.key_agreement.clone()),
+                (int(2), Value::Bytes(salt_enc)),
+                (int(3), Value::Bytes(salt_auth)),
+                (int(4), protocol_id(protocol)),
+            ]),
+        )]);
+        let client_hash = [0x4A; 32];
+        let param = token_pin_auth(protocol, &token, &client_hash);
+        let request = get_assertion_request(
+            &client_hash,
+            "example.com",
+            Some((protocol, param)),
+            Some(extensions),
+        );
+
+        let response = app
+            .handle_get_assertion(&request)
+            .unwrap_or_else(|err| panic!("{protocol:?}: {err:#04x}"));
+        assert_eq!(
+            session.decrypt(&encrypted_hmac_secret_output(&response)),
+            hmac_secret_output(&cred_random_with_uv, &salt)
+        );
+    }
+}

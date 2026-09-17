@@ -94,8 +94,9 @@ where
         cred_random_without_uv: Option<&Vec<u8>>,
         user_verified: bool,
     ) -> Result<(Option<Vec<u8>>, PendingHmacSecret), u8> {
-        let session = self.take_session(request.protocol)?;
-        let keys = session.derive_session_keys(&request.key_agreement)?;
+        // "The authenticator calls decapsulate on the provided platform
+        // key-agreement key to obtain a shared secret." (CTAP 2.3 §12.7)
+        let keys = self.decapsulate(request.protocol, &request.key_agreement)?;
 
         // CTAP 2.3 §12.7: "The authenticator calls verify(shared secret,
         // saltEnc, saltAuth). If the verification fails, return

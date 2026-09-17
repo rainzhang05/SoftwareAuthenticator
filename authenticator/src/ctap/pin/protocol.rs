@@ -11,7 +11,8 @@ use crate::{
 use ciborium::value::{Integer, Value};
 use hmac::{Hmac, Mac};
 use p256::{
-    ecdh::diffie_hellman, EncodedPoint, PublicKey as P256PublicKey, SecretKey as P256SecretKey,
+    ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, EncodedPoint,
+    PublicKey as P256PublicKey, SecretKey as P256SecretKey,
 };
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -149,18 +150,26 @@ pub(crate) fn parse_pin_uv_auth_param(
     Ok(Some((protocol, param)))
 }
 
-pub(crate) struct PinProtocolSession {
-    pub(crate) protocol: ClassicPinProtocol,
-    pub(crate) public_key: EncodedPoint,
-    pub(crate) secret_key: P256SecretKey,
+/// A PIN/UV auth protocol's key agreement key: "a P-256 private key, x, and
+/// the associated public point xB" (CTAP 2.3 §6.5.6; protocol two inherits
+/// it, §6.5.7).
+pub(crate) struct KeyAgreementKey {
+    secret_key: P256SecretKey,
+    public_key: EncodedPoint,
 }
 
-impl PinProtocolSession {
-    fn protocol(&self) -> PinProtocol {
-        self.protocol
+impl KeyAgreementKey {
+    pub(crate) fn new(secret_key: P256SecretKey) -> Self {
+        let public_key = secret_key.public_key().to_encoded_point(false);
+        Self {
+            secret_key,
+            public_key,
+        }
     }
 
-    pub(crate) fn key_agreement_value(&self) -> Value {
+    /// `getPublicKey()`: a COSE_Key with "1 (kty) = 2 (EC2)", "3 (alg) = -25",
+    /// "-1 (crv) = 1 (P-256)" and the x and y coordinates (CTAP 2.3 §6.5.6).
+    pub(crate) fn cose_key(&self) -> Value {
         let (x, y) = match (self.public_key.x(), self.public_key.y()) {
             (Some(x_bytes), Some(y_bytes)) => (x_bytes.to_vec(), y_bytes.to_vec()),
             _ => (Vec::new(), Vec::new()),
@@ -184,10 +193,11 @@ impl PinProtocolSession {
     }
 
     /// `decapsulate(peerCoseKey)`: ECDH with the platform key-agreement key,
-    /// then the protocol's `kdf(Z)` (CTAP 2.3 §6.5.6, §6.5.7).  Parse errors
+    /// then `kdf(Z)` of `protocol` (CTAP 2.3 §6.5.6, §6.5.7).  Parse errors
     /// and points not on the curve are CTAP1_ERR_INVALID_PARAMETER.
-    pub(crate) fn derive_session_keys(
-        self,
+    pub(crate) fn decapsulate(
+        &self,
+        protocol: PinProtocol,
         platform_key: &[(Value, Value)],
     ) -> Result<PinUvSessionKeys, u8> {
         let Some(peer_x) = platform_key
@@ -225,11 +235,46 @@ impl PinProtocolSession {
 
         let shared_bytes = shared.raw_secret_bytes();
         Ok(derive_classic_pin_uv_session_keys(
-            self.protocol,
+            protocol,
             shared_bytes.as_ref(),
         ))
     }
 }
+
+/// The key agreement key of each supported PIN/UV auth protocol: "Each PIN/UV
+/// auth protocol [...] maintains its own" state (CTAP 2.3 §6.5).
+///
+/// A key lives from power-up, when "the authenticator calls initialize for
+/// each pinUvAuthProtocol that it supports" (§6.5.5.1), until that protocol's
+/// `regenerate()` after a PIN mismatch.  getKeyAgreement only returns it, so a
+/// platform can use one key for several commands.  Here a key is drawn from
+/// the RNG when first needed, which a platform cannot tell apart from drawing
+/// it at power-up: nothing reveals or uses it before then.
+#[derive(Default)]
+pub(crate) struct KeyAgreementKeys {
+    protocol_one: Option<KeyAgreementKey>,
+    protocol_two: Option<KeyAgreementKey>,
+}
+
+impl KeyAgreementKeys {
+    fn slot(&mut self, protocol: PinProtocol) -> &mut Option<KeyAgreementKey> {
+        match protocol {
+            ClassicPinProtocol::V1 => &mut self.protocol_one,
+            ClassicPinProtocol::V2 => &mut self.protocol_two,
+        }
+    }
+
+    /// `regenerate()`: "Generates a fresh public key."  The new key is drawn
+    /// when it is next needed.
+    pub(crate) fn regenerate(&mut self, protocol: PinProtocol) {
+        *self.slot(protocol) = None;
+    }
+}
+
+/// Attempts at drawing a P-256 private key from the RNG before giving up.  A
+/// uniformly random 32-byte string is out of range with probability below
+/// 2^-32, so exhausting these means the RNG is broken.
+const KEY_AGREEMENT_KEY_ATTEMPTS: usize = 8;
 
 impl<C> CtapApp<C>
 where
@@ -283,14 +328,38 @@ where
         verify(protocol, &token, message, pin_uv_auth_param)
     }
 
-    pub(crate) fn take_session(&mut self, protocol: PinProtocol) -> Result<PinProtocolSession, u8> {
-        match self.pin_protocol_session.take() {
-            Some(session) if session.protocol() == protocol => Ok(session),
-            Some(session) => {
-                self.pin_protocol_session = Some(session);
-                Err(CTAP2_ERR_PIN_AUTH_INVALID)
-            }
-            None => Err(CTAP2_ERR_PIN_AUTH_INVALID),
+    /// The key agreement key of `protocol`, drawn from the RNG if it has not
+    /// been yet (see [`KeyAgreementKeys`]).
+    pub(crate) fn key_agreement_key(
+        &mut self,
+        protocol: PinProtocol,
+    ) -> Result<&KeyAgreementKey, u8> {
+        if self.pin_state.key_agreement.slot(protocol).is_none() {
+            let secret_key = (0..KEY_AGREEMENT_KEY_ATTEMPTS)
+                .find_map(|_| {
+                    let bytes = syscall!(self.client.random_bytes(32)).bytes;
+                    if bytes.len() != 32 {
+                        return None;
+                    }
+                    P256SecretKey::from_slice(bytes.as_slice()).ok()
+                })
+                .ok_or(CTAP2_ERR_PROCESSING)?;
+            *self.pin_state.key_agreement.slot(protocol) = Some(KeyAgreementKey::new(secret_key));
         }
+        self.pin_state
+            .key_agreement
+            .slot(protocol)
+            .as_ref()
+            .ok_or(CTAP2_ERR_PROCESSING)
+    }
+
+    /// `decapsulate(peerCoseKey)` with `protocol`'s key agreement key.
+    pub(crate) fn decapsulate(
+        &mut self,
+        protocol: PinProtocol,
+        platform_key: &[(Value, Value)],
+    ) -> Result<PinUvSessionKeys, u8> {
+        self.key_agreement_key(protocol)?
+            .decapsulate(protocol, platform_key)
     }
 }
