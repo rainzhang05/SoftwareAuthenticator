@@ -135,7 +135,7 @@ fn overwrite_succeeds_in_a_full_store_and_new_accounts_do_not() {
     );
     register(&mut app, RP_ID, &[0x01], Some(true));
     let new = register(&mut app, RP_ID, &[0x01], Some(true));
-    assert_eq!(ids(&app), [new.clone()]);
+    assert_eq!(ids(&app), std::slice::from_ref(&new));
 
     assert_eq!(
         app.handle_make_credential(&make_credential_payload(RP_ID, &[0x02], Some(true))),

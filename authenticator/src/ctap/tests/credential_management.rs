@@ -44,17 +44,17 @@ fn credential_management_commands() {
         None,
     );
 
-    let mut record = credential("example.com", &vec![0x01], &vec![0xA1], CoseAlg::MLDSA44);
+    let mut record = credential("example.com", &[0x01], &[0xA1], CoseAlg::MLDSA44);
     record.user_name = Some("one".into());
     record.cred_random_with_uv = [0x44; 32];
     record.cred_random_without_uv = [0x45; 32];
     insert(&mut app, &record);
-    let mut record = credential("example.com", &vec![0x02], &vec![0xA2], CoseAlg::MLDSA44);
+    let mut record = credential("example.com", &[0x02], &[0xA2], CoseAlg::MLDSA44);
     record.user_name = Some("two".into());
     record.cred_random_with_uv = [0x46; 32];
     record.cred_random_without_uv = [0x47; 32];
     insert(&mut app, &record);
-    let mut record = credential("second.example", &vec![0x03], &vec![0xB1], CoseAlg::MLDSA44);
+    let mut record = credential("second.example", &[0x03], &[0xB1], CoseAlg::MLDSA44);
     record.user_name = Some("three".into());
     record.user_display_name = Some("Three".into());
     record.cred_random_with_uv = [0x48; 32];
