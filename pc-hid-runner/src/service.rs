@@ -13,7 +13,7 @@ use authenticator::store::{AttestationRecord, CredentialStore, FileStore};
 use crate::{
     attestation::{generate_attestation_certificate, IdentityConfig},
     create_device, exec,
-    presence::{PresenceMode, Unanswered},
+    presence::{dbus::SessionBus, notification::NotificationPresence, PresenceMode, Unanswered},
     shutdown::{is_shutdown, ok_if_shutdown, ShutdownSignal},
     state::remove_and_log_legacy_state,
     uhid::UhidDevice,
@@ -152,6 +152,11 @@ pub fn serve_ctap(
     on_ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
     match data.presence {
+        PresenceMode::Notify => {
+            log::info!("asking for user presence with desktop notifications");
+            let presence = NotificationPresence::new(SessionBus::new());
+            serve_ctap_with_presence(device, data, presence, shutdown, on_ready)
+        }
         PresenceMode::AutoApprove => {
             log::warn!(
                 "--presence auto-approve: approving every registration, sign-in and reset without asking; \

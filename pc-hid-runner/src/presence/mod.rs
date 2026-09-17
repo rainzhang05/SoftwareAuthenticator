@@ -11,12 +11,18 @@ use std::{
 
 use authenticator::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest, UserPresence};
 
+pub mod dbus;
+pub mod notification;
+
 /// How often waiting implementations look at their [`Cancellation`].
 pub(crate) const CANCELLATION_POLL: Duration = Duration::from_millis(20);
 
 /// The `--presence` modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PresenceMode {
+    /// Ask with a desktop notification
+    /// ([`NotificationPresence`](notification::NotificationPresence)).
+    Notify,
     /// Approve every request without asking anyone. For tests and CI only.
     AutoApprove,
     /// Never answer: wait until the request is cancelled or times out. For

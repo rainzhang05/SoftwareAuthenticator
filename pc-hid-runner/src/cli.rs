@@ -126,7 +126,7 @@ pub struct StartCommand {
 #[derive(Args, Debug, Clone)]
 pub struct PresenceArgs {
     /// How the user approves registrations, sign-ins and resets
-    #[clap(long, value_enum, default_value_t = PresenceArg::AutoApprove)]
+    #[clap(long, value_enum, default_value_t = PresenceArg::Notify)]
     pub presence: PresenceArg,
     /// Seconds a presence request waits for the user (default 30). For test
     /// rigs; CTAP 2.3 section 5 asks for at least 10.
@@ -136,6 +136,10 @@ pub struct PresenceArgs {
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub enum PresenceArg {
+    /// Ask with a desktop notification that has Approve and Deny buttons.
+    /// Without a session bus and a notification server that can show
+    /// buttons, every request is denied
+    Notify,
     /// Approve every request without asking. Anything running as you can then
     /// use your passkeys unnoticed; for tests and CI only
     AutoApprove,
@@ -148,6 +152,7 @@ pub enum PresenceArg {
 impl PresenceArg {
     fn into_mode(self) -> PresenceMode {
         match self {
+            PresenceArg::Notify => PresenceMode::Notify,
             PresenceArg::AutoApprove => PresenceMode::AutoApprove,
             PresenceArg::Unanswered => PresenceMode::Unanswered,
         }
@@ -643,6 +648,14 @@ mod tests {
 
     #[test]
     fn presence_mode_is_chosen_with_presence() {
+        assert_eq!(
+            presence_of(&["attach"]).unwrap(),
+            (PresenceMode::Notify, None)
+        );
+        assert_eq!(
+            presence_of(&["attach", "--presence", "notify"]).unwrap(),
+            (PresenceMode::Notify, None)
+        );
         assert_eq!(
             presence_of(&["attach", "--presence", "auto-approve"]).unwrap(),
             (PresenceMode::AutoApprove, None)

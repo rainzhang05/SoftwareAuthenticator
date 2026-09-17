@@ -97,7 +97,7 @@ jobs:
           (
             status=0
             RUST_LOG=info,pc_hid_runner=debug target/release/pc-hid-runner \
-              attach --foreground --allow-late-reset --state-dir "$state_dir" || status=$?
+              attach --foreground --presence auto-approve --allow-late-reset --state-dir "$state_dir" || status=$?
             echo "$status" > "$status_file"
           ) </dev/null >"$log" 2>&1 &
 
