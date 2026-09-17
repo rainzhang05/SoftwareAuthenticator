@@ -66,15 +66,15 @@ fn matches_descriptor(uevent: &str, vendor_id: u32, product_id: u32) -> bool {
             let _bus = parts.next();
             let vendor = parts.next();
             let product = parts.next();
-            if let (Some(vendor), Some(product)) = (vendor, product) {
-                if let (Ok(vendor), Ok(product)) = (
+            if let (Some(vendor), Some(product)) = (vendor, product)
+                && let (Ok(vendor), Ok(product)) = (
                     u32::from_str_radix(vendor, 16),
                     u32::from_str_radix(product, 16),
-                ) {
-                    if vendor == vendor_id && product == product_id {
-                        return true;
-                    }
-                }
+                )
+                && vendor == vendor_id
+                && product == product_id
+            {
+                return true;
             }
         }
     }

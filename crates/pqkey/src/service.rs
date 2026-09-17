@@ -603,11 +603,11 @@ mod tests {
                 Ok(())
             });
             let result = serve(device, on_ready);
-            if let Err(err) = &result {
-                if !is_shutdown(err) {
-                    // A test waiting for a packet would only see it missing.
-                    eprintln!("the loop failed: {err}");
-                }
+            if let Err(err) = &result
+                && !is_shutdown(err)
+            {
+                // A test waiting for a packet would only see it missing.
+                eprintln!("the loop failed: {err}");
             }
             let _ = result_sender.send(result);
         });

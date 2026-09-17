@@ -272,12 +272,11 @@ impl<R: CryptoRng> CtaphidHost<R> {
             last_packet_at,
             ..
         } = self.state
+            && now >= last_packet_at + CONTINUATION_TIMEOUT_MS
         {
-            if now >= last_packet_at + CONTINUATION_TIMEOUT_MS {
-                debug!("message timeout cid={channel:08x}");
-                self.state = State::Idle;
-                self.enqueue_error(channel, ErrorCode::Timeout);
-            }
+            debug!("message timeout cid={channel:08x}");
+            self.state = State::Idle;
+            self.enqueue_error(channel, ErrorCode::Timeout);
         }
     }
 
@@ -454,10 +453,10 @@ impl<R: CryptoRng> CtaphidHost<R> {
         // transaction that has the same channel id as the active transaction,
         // the transaction is aborted (if possible) and all buffered data
         // flushed (if any)."
-        if let State::Processing(processing) = &self.state {
-            if processing.request.is_none() {
-                self.interrupt_app = true;
-            }
+        if let State::Processing(processing) = &self.state
+            && processing.request.is_none()
+        {
+            self.interrupt_app = true;
         }
         let aborted = !matches!(self.state, State::Idle);
         if aborted {

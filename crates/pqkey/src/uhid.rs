@@ -132,8 +132,7 @@ impl UhidDevice {
         let fd = file.as_raw_fd();
 
         let create2 = descriptor_to_create2(&descriptor)?;
-        let mut create_event = raw::uhid_event::default();
-        create_event.type_ = raw::UHID_EVENT_TYPE_CREATE2;
+        let mut create_event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_CREATE2);
         create_event.u.create2 = create2;
         write_event_blocking(fd, &mut create_event)?;
 
@@ -260,13 +259,12 @@ impl UhidInner {
             Ok(ready) => Ok(ready > 0),
             // Interrupted by a signal: return, so the caller can look at why.
             Err(Errno::EINTR) => Ok(false),
-            Err(err) => Err(to_io_error(err.into())),
+            Err(err) => Err(to_io_error(err)),
         }
     }
 
     fn send_input_report(&self, data: &[u8; CTAPHID_FRAME_LEN]) -> io::Result<()> {
-        let mut event = raw::uhid_event::default();
-        event.type_ = raw::UHID_EVENT_TYPE_INPUT2;
+        let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_INPUT2);
         let input = unsafe { &mut event.u.input2 };
         input.size = CTAPHID_FRAME_LEN as u16;
         input.data[..CTAPHID_FRAME_LEN].copy_from_slice(data);
@@ -280,8 +278,7 @@ impl UhidInner {
                 "feature report too large",
             ));
         }
-        let mut event = raw::uhid_event::default();
-        event.type_ = raw::UHID_EVENT_TYPE_GET_REPORT_REPLY;
+        let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_GET_REPORT_REPLY);
         let reply = unsafe { &mut event.u.get_report_reply };
         reply.id = id;
         reply.err = err;
@@ -291,8 +288,7 @@ impl UhidInner {
     }
 
     fn send_set_report_reply(&self, id: u32, err: u16) -> io::Result<()> {
-        let mut event = raw::uhid_event::default();
-        event.type_ = raw::UHID_EVENT_TYPE_SET_REPORT_REPLY;
+        let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_SET_REPORT_REPLY);
         let reply = unsafe { &mut event.u.set_report_reply };
         reply.id = id;
         reply.err = err;
@@ -304,8 +300,7 @@ impl Drop for UhidInner {
     fn drop(&mut self) {
         // Closing the descriptor would destroy the device as well; saying so
         // explicitly removes it before anything else is torn down.
-        let mut event = raw::uhid_event::default();
-        event.type_ = raw::UHID_EVENT_TYPE_DESTROY;
+        let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_DESTROY);
         let _ = write_event_blocking(self.fd.as_raw_fd(), &mut event);
     }
 }
@@ -350,13 +345,13 @@ fn write_event_blocking(fd: RawFd, event: &mut raw::uhid_event) -> io::Result<()
     loop {
         match write(fd, event_as_bytes(event)) {
             Ok(n) if n == raw::UHID_EVENT_SIZE => return Ok(()),
-            Ok(_) => return Err(io::Error::new(io::ErrorKind::Other, "short write")),
+            Ok(_) => return Err(io::Error::other("short write")),
             Err(Errno::EINTR) => continue,
             Err(Errno::EAGAIN) => {
                 thread::sleep(Duration::from_millis(1));
                 continue;
             }
-            Err(err) => return Err(to_io_error(err.into())),
+            Err(err) => return Err(to_io_error(err)),
         }
     }
 }
@@ -370,7 +365,7 @@ fn read_event_nonblocking(fd: RawFd) -> io::Result<raw::uhid_event> {
             Ok(n) => offset += n,
             Err(Errno::EINTR) => continue,
             Err(Errno::EAGAIN) => return Err(io::ErrorKind::WouldBlock.into()),
-            Err(err) => return Err(to_io_error(err.into())),
+            Err(err) => return Err(to_io_error(err)),
         }
     }
     Ok(raw::event_from_bytes(&buffer))
@@ -388,8 +383,7 @@ fn event_as_bytes(event: &raw::uhid_event) -> &[u8] {
 /// The event the kernel sends when a host writes `frame` to the hidraw node.
 #[cfg(test)]
 pub(crate) fn output_event(frame: &[u8; CTAPHID_FRAME_LEN]) -> Vec<u8> {
-    let mut event = raw::uhid_event::default();
-    event.type_ = raw::UHID_EVENT_TYPE_OUTPUT;
+    let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_OUTPUT);
     let output = unsafe { &mut event.u.output };
     output.data[..CTAPHID_FRAME_LEN].copy_from_slice(frame);
     output.size = CTAPHID_FRAME_LEN as u16;
@@ -583,10 +577,13 @@ mod raw {
         pub u: uhid_event_union,
     }
 
-    impl Default for uhid_event {
-        fn default() -> Self {
+    impl uhid_event {
+        /// An all-zero event of type `type_`, whose union fields the caller
+        /// fills in. Zeroing the whole union, not only the field in use, keeps
+        /// uninitialized bytes out of what is written to the kernel.
+        pub fn new(type_: u32) -> Self {
             Self {
-                type_: 0,
+                type_,
                 u: uhid_event_union::default(),
             }
         }
@@ -667,8 +664,7 @@ mod tests {
             &CTAPHID_REPORT_DESCRIPTOR
         );
 
-        let mut event = raw::uhid_event::default();
-        event.type_ = raw::UHID_EVENT_TYPE_CREATE2;
+        let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_CREATE2);
         event.u.create2 = req;
 
         let bytes = event_as_bytes(&event);
@@ -687,8 +683,7 @@ mod tests {
 
         let descriptor = HidDeviceDescriptor::default();
         let create2 = descriptor_to_create2(&descriptor).expect("descriptor conversion");
-        let mut event = raw::uhid_event::default();
-        event.type_ = raw::UHID_EVENT_TYPE_CREATE2;
+        let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_CREATE2);
         event.u.create2 = create2;
 
         let (read_fd, write_fd) = pipe().expect("pipe");
