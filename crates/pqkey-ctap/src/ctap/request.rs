@@ -11,7 +11,7 @@ use ciborium::value::Value;
 use crate::ctap::constants::*;
 
 /// The only credential type there is, PublicKeyCredentialType "public-key"
-/// ([WebAuthn] §5.8.2).
+/// (WebAuthn Level 3 §5.8.2).
 const PUBLIC_KEY: &str = "public-key";
 
 /// A required member of a PublicKeyCredentialParameters or
@@ -134,13 +134,13 @@ pub(super) fn is_zero_length(pin_uv_auth_param: Option<&Value>) -> bool {
 }
 
 /// The longest user handle: "A user handle is an opaque byte sequence with a
-/// maximum size of 64 bytes" ([WebAuthn] §5.4.3).
+/// maximum size of 64 bytes" (WebAuthn Level 3 §5.4.3).
 pub(super) const MAX_USER_ID_LENGTH: usize = 64;
 
 /// How many bytes of user.name and user.displayName are kept: "When storing a
 /// name member's value, the value MAY be truncated as described in § 6.4.1
 /// String Truncation using a size limit greater than or equal to 64 bytes."
-/// ([WebAuthn] §5.4.1, and likewise for displayName in §5.4.3)  Bounding them
+/// (WebAuthn Level 3 §5.4.1, and likewise for displayName in §5.4.3)  Bounding them
 /// bounds every response that returns them.
 pub(super) const MAX_USER_STRING_LENGTH: usize = 64;
 
