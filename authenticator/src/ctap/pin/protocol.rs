@@ -17,8 +17,7 @@ use p256::{
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
-use trussed::syscall;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::ctap::constants::*;
 
@@ -296,14 +295,7 @@ where
     ) -> Result<Vec<u8>, u8> {
         let iv = match protocol {
             ClassicPinProtocol::V1 => None,
-            ClassicPinProtocol::V2 => {
-                let random = syscall!(self.client.random_bytes(16)).bytes;
-                let iv: [u8; 16] = random
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| CTAP2_ERR_PROCESSING)?;
-                Some(iv)
-            }
+            ClassicPinProtocol::V2 => Some(self.random_array::<16>()),
         };
         encrypt_classic_pin_block(protocol, keys, iv.as_ref(), plaintext)
             .map_err(|_| CTAP2_ERR_PROCESSING)
@@ -333,11 +325,10 @@ where
         if self.pin_state.key_agreement.slot(protocol).is_none() {
             let secret_key = (0..KEY_AGREEMENT_KEY_ATTEMPTS)
                 .find_map(|_| {
-                    let bytes = syscall!(self.client.random_bytes(32)).bytes;
-                    if bytes.len() != 32 {
-                        return None;
-                    }
-                    P256SecretKey::from_slice(bytes.as_slice()).ok()
+                    let mut bytes = self.random_array::<32>();
+                    let secret_key = P256SecretKey::from_slice(&bytes).ok();
+                    bytes.zeroize();
+                    secret_key
                 })
                 .ok_or(CTAP2_ERR_PROCESSING)?;
             *self.pin_state.key_agreement.slot(protocol) = Some(KeyAgreementKey::new(secret_key));

@@ -20,6 +20,7 @@ use p256::{
     ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, EncodedPoint,
     PublicKey as P256PublicKey, SecretKey as P256SecretKey,
 };
+use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -146,6 +147,22 @@ pub(super) fn scripted_app_with_interrupt(
     app_with_client(TestClient::new(), aaguid, outcomes, interrupt)
 }
 
+/// An app over `client` drawing randomness from `rng`, whose user approves
+/// every presence request.
+pub(super) fn app_with_client_and_rng(
+    client: TestClient,
+    rng: TestRng,
+    aaguid: [u8; 16],
+) -> (CtapApp<TestClient>, PresenceLog) {
+    let log = PresenceLog::default();
+    let presence = ScriptedPresence {
+        outcomes: VecDeque::new(),
+        log: log.clone(),
+    };
+    let app = CtapApp::new(client, rng, presence, &NEVER_INTERRUPTED, aaguid);
+    (app, log)
+}
+
 /// An app over `client`, with presence answered by `outcomes` then approved.
 pub(super) fn app_with_client(
     client: TestClient,
@@ -158,17 +175,70 @@ pub(super) fn app_with_client(
         outcomes: outcomes.into_iter().collect(),
         log: log.clone(),
     };
-    let mut app = CtapApp::new(client, presence, interrupt, aaguid);
+    let seed = u64::from_le_bytes(aaguid[..8].try_into().expect("8 bytes"));
+    let mut app = CtapApp::new(client, TestRng::new(seed), presence, interrupt, aaguid);
     let keepalive_log = log.clone();
     app.set_keepalive_callback(move |waiting| keepalive_log.record_waiting(waiting));
     (app, log)
 }
 
+/// A deterministic random number generator, so test runs are reproducible:
+/// SplitMix64, or one byte repeated.
+///
+/// It is not cryptographically secure; the `CryptoRng` marker only lets the
+/// engine accept it, and it must never be used outside tests.
+pub(super) enum TestRng {
+    SplitMix(u64),
+    Constant(u8),
+}
+
+impl TestRng {
+    pub(super) fn new(seed: u64) -> Self {
+        TestRng::SplitMix(seed)
+    }
+
+    /// Every random byte is `fill`.
+    pub(super) fn constant(fill: u8) -> Self {
+        TestRng::Constant(fill)
+    }
+}
+
+impl RngCore for TestRng {
+    fn next_u32(&mut self) -> u32 {
+        self.next_u64() as u32
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        match self {
+            TestRng::SplitMix(state) => {
+                *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let mut z = *state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^ (z >> 31)
+            }
+            TestRng::Constant(fill) => u64::from_le_bytes([*fill; 8]),
+        }
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for chunk in dest.chunks_mut(8) {
+            let bytes = self.next_u64().to_le_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl CryptoRng for TestRng {}
+
 #[derive(Default)]
 pub(super) struct TestClient {
     pending: Option<Result<Reply, TrussedError>>,
-    random_counter: u8,
-    random_fill: Option<u8>,
     files: HashMap<Vec<u8>, Vec<u8>>,
     writes: Vec<(Vec<u8>, Vec<u8>)>,
 }
@@ -176,11 +246,6 @@ pub(super) struct TestClient {
 impl TestClient {
     pub(super) fn new() -> Self {
         Self::default()
-    }
-
-    /// Make every random byte `fill` instead of a counter.
-    pub(super) fn set_random_fill(&mut self, fill: u8) {
-        self.random_fill = Some(fill);
     }
 
     /// Put `data` at `path`, as if an earlier run had written it.
@@ -199,15 +264,6 @@ impl TestClient {
 
     fn dispatch(&mut self, request: Request) -> Result<Reply, TrussedError> {
         match request {
-            Request::RandomBytes(req) => {
-                let mut bytes = Vec::with_capacity(req.count);
-                for _ in 0..req.count {
-                    bytes.push(self.random_fill.unwrap_or(self.random_counter));
-                    self.random_counter = self.random_counter.wrapping_add(1);
-                }
-                let message = Message::from_slice(&bytes).expect("random bytes fit message");
-                Ok(Reply::from(reply::RandomBytes { bytes: message }))
-            }
             Request::WriteFile(req) => {
                 let path_key = req.path.as_str().as_bytes().to_vec();
                 let data = req.data.as_slice().to_vec();

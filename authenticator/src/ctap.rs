@@ -24,6 +24,7 @@ use ciborium::{de::from_reader, value::Value};
 use core::fmt;
 use ctaphid_app::{App, Command, Error};
 use log::info;
+use rand_core::CryptoRngCore;
 use std::time::Duration;
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
 
@@ -52,6 +53,7 @@ pub struct CtapApp<C> {
     attestation_private_key: Option<Vec<u8>>,
     attestation_certificate_chain: Option<Vec<Vec<u8>>>,
     attestation_material_initialized: bool,
+    rng: Box<dyn CryptoRngCore + Send>,
     presence: Box<dyn UserPresence + Send>,
     presence_timeout: Duration,
     keepalive: Box<dyn FnMut(bool) + Send>,
@@ -66,12 +68,14 @@ where
 {
     /// Create the engine.
     ///
-    /// `presence` is asked whenever an operation needs evidence of user
-    /// interaction.  `interrupt` is the flag through which the CTAPHID
+    /// `rng` provides every random value the engine chooses: credential IDs,
+    /// `CredRandom`, key-agreement keys, pinUvAuthTokens and IVs.  `presence`
+    /// is asked whenever an operation needs evidence of user interaction.  `interrupt` is the flag through which the CTAPHID
     /// dispatcher cancels the request being processed; it is also what
     /// [`App::interrupt`] hands to the dispatcher.
     pub fn new(
         client: C,
+        rng: impl CryptoRngCore + Send + 'static,
         presence: impl UserPresence + Send + 'static,
         interrupt: &'static InterruptFlag,
         aaguid: [u8; 16],
@@ -86,6 +90,7 @@ where
             attestation_private_key: None,
             attestation_certificate_chain: None,
             attestation_material_initialized: false,
+            rng: Box::new(rng),
             presence: Box::new(presence),
             presence_timeout: DEFAULT_PRESENCE_TIMEOUT,
             keepalive: Box::new(|_| {}),
@@ -112,6 +117,13 @@ where
 
     pub fn suppress_attestation(&mut self, suppress: bool) {
         self.suppress_attestation = suppress;
+    }
+
+    /// `N` bytes from the injected random number generator.
+    fn random_array<const N: usize>(&mut self) -> [u8; N] {
+        let mut bytes = [0u8; N];
+        self.rng.fill_bytes(&mut bytes);
+        bytes
     }
 
     fn handle_bio_enrollment(&mut self, _payload: &[u8]) -> Result<Vec<u8>, u8> {

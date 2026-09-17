@@ -3,7 +3,7 @@
 
 use super::support::{
     scripted_app, scripted_app_with_interrupt, PresenceEvent, PresenceLog, SeenRequest, TestClient,
-    NEVER_INTERRUPTED,
+    TestRng, NEVER_INTERRUPTED,
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::presence::{
@@ -336,6 +336,7 @@ impl UserPresence for PanickingPresence {
 fn waiting_for_the_user_ends_even_if_the_presence_implementation_panics() {
     let mut app = CtapApp::new(
         TestClient::new(),
+        TestRng::new(29),
         PanickingPresence,
         &NEVER_INTERRUPTED,
         [0x29; 16],

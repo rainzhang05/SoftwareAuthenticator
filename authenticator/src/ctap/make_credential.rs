@@ -15,7 +15,6 @@ use ciborium::{
 };
 use sha2::{Digest, Sha256};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
-use trussed::syscall;
 
 use crate::ctap::constants::*;
 
@@ -227,20 +226,9 @@ where
 
         let (cose_key, secret_key) = create_credential(alg);
         let secret_key_bytes = secret_key.to_bytes();
-        let credential_id_bytes = syscall!(self.client.random_bytes(32)).bytes;
-        let credential_id = credential_id_bytes.to_vec();
-
-        let cred_random_with_uv_bytes = syscall!(self.client.random_bytes(32)).bytes;
-        if cred_random_with_uv_bytes.len() != 32 {
-            return Err(CTAP2_ERR_PROCESSING);
-        }
-        let cred_random_without_uv_bytes = syscall!(self.client.random_bytes(32)).bytes;
-        if cred_random_without_uv_bytes.len() != 32 {
-            return Err(CTAP2_ERR_PROCESSING);
-        }
-
-        let cred_random_with_uv = cred_random_with_uv_bytes.to_vec();
-        let cred_random_without_uv = cred_random_without_uv_bytes.to_vec();
+        let credential_id = self.random_array::<32>().to_vec();
+        let cred_random_with_uv = self.random_array::<32>().to_vec();
+        let cred_random_without_uv = self.random_array::<32>().to_vec();
 
         let mut credentials = self.load_credentials()?;
         let initial_sign_count = 0;

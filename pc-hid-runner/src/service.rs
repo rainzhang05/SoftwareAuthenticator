@@ -7,6 +7,7 @@ use std::{
 };
 
 use authenticator::ctap::{presence::AutoApprove, CtapApp, InterruptFlag};
+use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use transport_core::state::{
     reset_state_dir, IdentityConfig, PersistentStore, StoredPinState, DEFAULT_PIN_RETRIES,
@@ -85,7 +86,7 @@ impl<'a> TrussedApps<'a, CoreOnly> for Apps {
             );
         }
         let mut ctap = serving_syscalls(service, endpoints, || {
-            CtapApp::new(client, AutoApprove, &INTERRUPT, data.aaguid)
+            CtapApp::new(client, OsRng, AutoApprove, &INTERRUPT, data.aaguid)
         });
         ctap.suppress_attestation(data.suppress_attestation);
         ctap.set_keepalive_callback(set_waiting);

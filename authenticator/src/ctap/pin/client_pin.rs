@@ -14,7 +14,6 @@ use ciborium::{
 };
 use sha2::{Digest, Sha256};
 use trussed::client::{Client as TrussedClient, CryptoClient, FilesystemClient};
-use trussed::syscall;
 use zeroize::Zeroizing;
 
 use crate::ctap::constants::*;
@@ -258,12 +257,7 @@ where
         let keys = self.decapsulate(protocol, key_agreement)?;
         self.verify_pin_hash_enc(protocol, &keys, pin_hash_enc)?;
 
-        let random = syscall!(self.client.random_bytes(32)).bytes;
-        if random.len() != 32 {
-            return Err(CTAP2_ERR_PROCESSING);
-        }
-        let mut token = [0u8; 32];
-        token.copy_from_slice(random.as_slice());
+        let token = self.random_array::<32>();
         let encrypted = self.encrypt_for_platform(protocol, &keys, &token)?;
         self.pin_state
             .issue_pin_uv_auth_token(protocol, token, permissions, rp_id);

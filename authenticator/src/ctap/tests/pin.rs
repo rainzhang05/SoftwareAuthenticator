@@ -1,7 +1,7 @@
 //! PIN tests: retry state, key agreement, and the authenticatorClientPIN
 //! subcommands over both PIN/UV auth protocols.
 
-use super::support::new_app;
+use super::support::{app_with_client_and_rng, new_app, TestRng};
 use super::support::{
     classic_encrypt, classic_pin_auth, client_pin, derive_classic_session, get_pin_retries,
     get_pin_token, get_pin_token_with, get_pin_uv_auth_token, int, padded_pin, pin_hash,
@@ -1048,9 +1048,8 @@ fn change_pin_applies_the_same_pin_policy() {
 fn get_key_agreement_gives_up_when_the_rng_yields_no_valid_key() {
     // All-zero and all-0xFF scalars are both outside [1, n).
     for fill in [0x00, 0xFF] {
-        let mut client = TestClient::new();
-        client.set_random_fill(fill);
-        let mut app = new_app(client, [0x4E; 16]);
+        let (mut app, _) =
+            app_with_client_and_rng(TestClient::new(), TestRng::constant(fill), [0x4E; 16]);
         assert_eq!(
             client_pin(&mut app, vec![(int(1), int(2)), (int(2), int(0x02))]),
             Err(CTAP2_ERR_PROCESSING),
