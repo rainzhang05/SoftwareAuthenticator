@@ -34,6 +34,7 @@ pub struct RunnerConfig {
     pub identity: IdentityStrings,
     pub auto_user_presence: bool,
     pub suppress_attestation: bool,
+    pub allow_late_reset: bool,
     pub backend: Backend,
 }
 
@@ -44,6 +45,8 @@ pub struct AppData {
     pub aaguid: [u8; 16],
     pub auto_user_presence: bool,
     pub suppress_attestation: bool,
+    /// Accept authenticatorReset after the CTAP start-up window (test rigs only).
+    pub allow_late_reset: bool,
 }
 
 /// Open the credential store in `state_dir`, and provision the attestation key
@@ -91,6 +94,7 @@ pub fn run(
         identity,
         auto_user_presence,
         suppress_attestation,
+        allow_late_reset,
         backend,
     } = config;
 
@@ -108,6 +112,7 @@ pub fn run(
         aaguid,
         auto_user_presence,
         suppress_attestation,
+        allow_late_reset,
     };
 
     match backend {
@@ -143,6 +148,10 @@ pub fn serve_ctap(
     }
     let mut ctap = CtapApp::with_file_store(data.store, AutoApprove, &interrupt, data.aaguid);
     ctap.suppress_attestation(data.suppress_attestation);
+    if data.allow_late_reset {
+        log::warn!("accepting authenticatorReset at any time (--allow-late-reset); this does not conform to CTAP");
+        ctap.set_reset_window(None);
+    }
     let app_waiting = waiting.clone();
     ctap.set_keepalive_callback(move |waiting| app_waiting.set(waiting));
     exec(device, &mut [&mut ctap], &waiting, shutdown, on_ready)
@@ -248,6 +257,7 @@ mod tests {
             aaguid: [0; 16],
             auto_user_presence: true,
             suppress_attestation: false,
+            allow_late_reset: false,
         };
 
         let shutdown = ShutdownSignal::new();

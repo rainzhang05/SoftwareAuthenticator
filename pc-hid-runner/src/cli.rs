@@ -165,6 +165,11 @@ pub struct DeviceArgs {
     /// Suppress attestation certificate material for makeCredential operations
     #[clap(long)]
     pub suppress_attestation: bool,
+    /// Accept authenticatorReset at any time instead of only within 10 seconds
+    /// of start-up. Does not conform to CTAP 2.3 section 6.6; for test rigs that
+    /// reset a long-running authenticator. User presence is still required.
+    #[clap(long, hide = true)]
+    pub allow_late_reset: bool,
     /// Backend transport to use
     #[clap(long, value_enum, default_value_t = BackendArg::Uhid)]
     pub backend: BackendArg,
@@ -234,6 +239,7 @@ impl StartCommand {
             },
             auto_user_presence: !self.device.manual_user_presence,
             suppress_attestation: self.device.suppress_attestation,
+            allow_late_reset: self.device.allow_late_reset,
             backend: self.device.backend.into_backend(),
         })
     }
