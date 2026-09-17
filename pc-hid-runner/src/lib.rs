@@ -11,7 +11,7 @@ pub mod uhid;
 mod test_support;
 
 use std::{
-    io,
+    io, thread,
     time::{Duration, Instant},
 };
 
@@ -25,6 +25,17 @@ use uhid::{HidDeviceDescriptor, UhidDevice, CTAPHID_FRAME_LEN};
 // CTAPHID capability flags (CTAP spec section 11.2.9.1.3)
 pub const CAPABILITY_CBOR: u8 = 0x04; // Implements CTAPHID_CBOR
 pub const CAPABILITY_NMSG: u8 = 0x08; // Does NOT implement CTAPHID_MSG
+
+/// Pause between input reports of a multi-packet message.
+///
+/// A USB full-speed HID interrupt endpoint delivers at most one report per
+/// millisecond, and FIDO clients read at that pace. uhid has no such flow
+/// control: each input report goes straight into every hidraw reader's buffer,
+/// which holds only 64 reports (`HIDRAW_BUFFER_SIZE`), so a longer burst drops
+/// packets. An ML-DSA-87 assertion is 82 packets. Pacing like real hardware
+/// keeps even the largest CTAPHID message (129 packets) intact, at a cost of
+/// at most about 130 ms.
+const INPUT_REPORT_INTERVAL: Duration = Duration::from_millis(1);
 
 pub struct UhidTransport<'pipe, 'interrupt> {
     device: UhidDevice,
@@ -53,6 +64,9 @@ impl<'pipe, 'interrupt> UhidTransport<'pipe, 'interrupt> {
     fn flush_pending(&mut self) -> io::Result<bool> {
         let mut wrote = false;
         while let Some(frame) = self.host.next_outgoing_frame() {
+            if wrote {
+                thread::sleep(INPUT_REPORT_INTERVAL);
+            }
             self.device.write_frame(&frame)?;
             wrote = true;
         }
