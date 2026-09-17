@@ -136,7 +136,6 @@ fn a_discoverable_registration_replaces_only_discoverable_credentials() {
 #[test]
 fn credential_management_lists_only_discoverable_credentials() {
     let mut app = test_app([0x65; 16]);
-    app.pin_state.set_pin([0x44; 16]);
     register(&mut app, &[0x01], rk(false));
     register(&mut app, &[0x02], rk(true));
     let token = [0x65; 32];

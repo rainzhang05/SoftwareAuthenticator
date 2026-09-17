@@ -911,7 +911,11 @@ pub(super) fn response_auth_data(response: &[u8]) -> Vec<u8> {
 pub(super) const FLAG_UV: u8 = 0x04;
 
 /// Give `app` an in-use pinUvAuthToken, as a successful
-/// getPinUvAuthTokenUsingPinWithPermissions over `protocol` would.
+/// getPinUvAuthTokenUsingPinWithPermissions over `protocol` would.  Only a PIN
+/// issues tokens, so a PIN is set first if there is none: without one the
+/// authenticator is not "protected by some form of user verification" and
+/// makeCredential and getAssertion ignore a pinUvAuthParam (CTAP 2.3 §6.1.2
+/// step 11, §6.2.2 step 6).
 pub(super) fn install_pin_uv_auth_token(
     app: &mut TestApp,
     protocol: ClassicPinProtocol,
@@ -919,6 +923,9 @@ pub(super) fn install_pin_uv_auth_token(
     permissions: u8,
     rp_id: Option<&str>,
 ) {
+    if !app.pin_state.is_set() {
+        app.pin_state.set_pin(pin_hash(b"1234"));
+    }
     app.pin_state
         .issue_pin_uv_auth_token(protocol, token, permissions, rp_id.map(str::to_string));
 }

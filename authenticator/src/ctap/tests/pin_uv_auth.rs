@@ -673,13 +673,19 @@ fn reset_discards_the_pin_uv_auth_token_and_the_key_agreement_key() {
         assert_eq!(app.handle_reset(), Ok(vec![CTAP2_OK]), "{protocol:?}");
         assert!(!app.pin_state.is_set());
 
-        // The token authenticates nothing any more.
+        // The token authenticates nothing any more.  With no PIN the
+        // authenticator is not protected by some form of user verification,
+        // so makeCredential skips verifying a pinUvAuthParam and leaves the
+        // "uv" bit false (CTAP 2.3 §6.1.2 step 11).
         let client_hash = [0x49; 32];
         let param = token_pin_auth(protocol, &token, &client_hash);
         let request = make_credential_request(&client_hash, "example.com", Some((protocol, param)));
+        let response = app
+            .handle_make_credential(&request)
+            .expect("makeCredential without user verification");
         assert_eq!(
-            app.handle_make_credential(&request),
-            Err(CTAP2_ERR_PIN_AUTH_INVALID),
+            response_auth_data(&response)[32] & FLAG_UV,
+            0,
             "{protocol:?}"
         );
 

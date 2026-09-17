@@ -356,7 +356,7 @@ impl PinState {
         self.token.permissions(now)
     }
 
-    #[cfg(test)]
+    /// `getUserPresentFlagValue()`.
     pub(crate) fn user_present_flag(&mut self) -> bool {
         let now = self.clock.now();
         self.token.user_present_flag(now)

@@ -36,6 +36,7 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         (text("credMgmt"), Value::Bool(true)),
         (text("pinUvAuthToken"), Value::Bool(true)),
         (text("clientPin"), Value::Bool(pin_set)),
+        (text("makeCredUvNotRqd"), Value::Bool(true)),
     ]);
 
     let extensions = Value::Array(vec![text("credProtect"), text("hmac-secret")]);

@@ -130,3 +130,18 @@ def test_wrong_pin_decrements_retries(ctap: Ctap2, protocol):
 
     assert _token(ctap, protocol, PIN, ClientPin.PERMISSION.GET_ASSERTION)
     assert _retries(ctap) == MAX_RETRIES
+
+
+def test_pin_is_required_for_discoverable_credentials_only(ctap: Ctap2):
+    """With a PIN set, a discoverable credential needs a pinUvAuthParam
+    (CTAP 2.3 6.1.2 step 7), while makeCredUvNotRqd lets a non-discoverable one
+    be created without (step 10)."""
+    _client_pin(ctap, PinProtocolV1).set_pin(PIN)
+
+    with pytest.raises(CtapError) as excinfo:
+        client.make_credential(
+            ctap, RP_ID, client.user_entity("bob"), [client.ES256], os.urandom(32), options={"rk": True}
+        )
+    assert excinfo.value.code == CtapError.ERR.PUAT_REQUIRED
+
+    client.authenticate(ctap, client.register(ctap, RP_ID, client.ES256))

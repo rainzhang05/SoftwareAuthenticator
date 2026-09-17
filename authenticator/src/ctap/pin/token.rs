@@ -204,7 +204,6 @@ impl PinUvAuthTokenState {
     /// `getUserPresentFlagValue()`: the userPresent flag if the token is in
     /// use, otherwise false.  No issuance path of this authenticator collects
     /// user presence, so it is only ever set by tests.
-    #[cfg(test)]
     pub(crate) fn user_present_flag(&mut self, now: Duration) -> bool {
         self.observe(now);
         self.in_use.as_ref().is_some_and(|token| token.user_present)

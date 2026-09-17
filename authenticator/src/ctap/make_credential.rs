@@ -62,6 +62,13 @@ impl CtapApp<'_> {
         auth_data
     }
 
+    /// authenticatorMakeCredential, following the steps of CTAP 2.3 §6.1.2.
+    ///
+    /// This authenticator supports clientPin and pinUvAuthToken but no
+    /// built-in user verification, alwaysUv, noMcGaPermissionsWithClientPin or
+    /// enterprise attestation, and advertises makeCredUvNotRqd.  It "is
+    /// protected by some form of user verification" exactly when a PIN is
+    /// set.
     pub(super) fn handle_make_credential(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
         self.pending_assertion = None;
         let request: Value = from_reader(payload).map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
@@ -69,64 +76,109 @@ impl CtapApp<'_> {
             Value::Map(map) => map,
             _ => return Err(CTAP2_ERR_INVALID_CBOR),
         };
+        let parameter = |key: i64| cbor::map_get(&map, Value::Integer(Integer::from(key)));
 
-        let client_hash = match cbor::map_get(&map, Value::Integer(Integer::from(1))) {
+        // Step 1: a zero length pinUvAuthParam asks the user to select this
+        // authenticator.
+        if request::is_zero_length(parameter(8)) {
+            return Err(self.select_for_pin_uv_auth(PresenceOperation::Register));
+        }
+
+        // Step 2.
+        let pin_uv_auth = parse_pin_uv_auth_param(parameter(8), parameter(9))?;
+
+        let client_hash = match parameter(1) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => return Err(CTAP2_ERR_INVALID_CBOR),
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
 
-        let rp = match cbor::map_get(&map, Value::Integer(Integer::from(2))) {
+        let rp = match parameter(2) {
             Some(Value::Map(rp)) => rp,
-            _ => return Err(CTAP2_ERR_INVALID_CBOR),
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
         let rp_id = match cbor::map_get(rp, Value::Text("id".into())) {
             Some(Value::Text(text)) => text.clone(),
-            _ => return Err(CTAP2_ERR_INVALID_CBOR),
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
 
-        let user = match cbor::map_get(&map, Value::Integer(Integer::from(3))) {
+        let user = match parameter(3) {
             Some(Value::Map(user)) => user,
-            _ => return Err(CTAP2_ERR_INVALID_CBOR),
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
         let user_id = match cbor::map_get(user, Value::Text("id".into())) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => return Err(CTAP2_ERR_INVALID_CBOR),
+            Some(Value::Bytes(bytes)) if bytes.len() <= request::MAX_USER_ID_LENGTH => {
+                bytes.clone()
+            }
+            Some(Value::Bytes(_)) => return Err(CTAP1_ERR_INVALID_LENGTH),
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let user_name = cbor::map_get(user, Value::Text("name".into())).and_then(|v| match v {
-            Value::Text(text) => Some(text.clone()),
-            _ => None,
-        });
-        let user_display_name =
-            cbor::map_get(user, Value::Text("displayName".into())).and_then(|v| match v {
-                Value::Text(text) => Some(text.clone()),
-                _ => None,
-            });
+        let user_string = |name: &str| match cbor::map_get(user, Value::Text(name.into())) {
+            None => Ok(None),
+            Some(Value::Text(text)) => Ok(Some(request::truncate_utf8(
+                text,
+                request::MAX_USER_STRING_LENGTH,
+            ))),
+            Some(_) => Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+        };
+        let user_name = user_string("name")?;
+        let user_display_name = user_string("displayName")?;
 
-        let alg = match cbor::map_get(&map, Value::Integer(Integer::from(4))) {
+        // Step 3.
+        let alg = match parameter(4) {
             Some(Value::Array(params)) => request::chosen_algorithm(params)?,
             Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
             None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
 
-        let exclude_list = cbor::map_get(&map, Value::Integer(Integer::from(5)))
+        let exclude_list = parameter(5)
             .map(request::credential_ids)
             .transpose()?
             .unwrap_or_default();
-        for id in &exclude_list {
-            // CTAP 2.3 §6.1.2 step 12: a credential "bound to the specified
-            // rp.id".
-            if self
-                .stored_credential(id)?
-                .is_some_and(|credential| credential.rp_id == rp_id)
-            {
-                return Err(CTAP2_ERR_CREDENTIAL_EXCLUDED);
-            }
+
+        // Step 5.  "If the pinUvAuthParam is present, let the "uv" option be
+        // treated as being present with the value false." (pinUvAuthParam
+        // takes precedence.)  "If the "uv" option is true then: If the
+        // authenticator does not support a built-in user verification method
+        // end the operation by returning CTAP2_ERR_INVALID_OPTION."
+        let options = request::options(parameter(7))?;
+        let uv = pin_uv_auth.is_none() && options.uv.unwrap_or(false);
+        if uv {
+            return Err(CTAP2_ERR_INVALID_OPTION);
+        }
+        // The rk option ID is in authenticatorGetInfo, so "rk" is supported.
+        let rk = options.rk.unwrap_or(false);
+        if options.up == Some(false) {
+            return Err(CTAP2_ERR_INVALID_OPTION);
+        }
+
+        // Step 7, with makeCredUvNotRqd true: "If the following statements are
+        // all true: The authenticator is protected by some form of user
+        // verification. The "uv" option is set to false. The pinUvAuthParam
+        // parameter is not present. The "rk" option is present and set to
+        // true. Then: If ClientPin option ID is true and the
+        // noMcGaPermissionsWithClientPin option ID is absent or false, end the
+        // operation by returning CTAP2_ERR_PUAT_REQUIRED."  A non-discoverable
+        // credential needs no user verification (step 10).
+        let protected = self.pin_state.is_set();
+        if protected && pin_uv_auth.is_none() && rk {
+            return Err(CTAP2_ERR_PUAT_REQUIRED);
+        }
+
+        // Step 8: "If the authenticator is not enterprise attestation capable
+        // [...] end the operation by returning CTAP1_ERR_INVALID_PARAMETER."
+        if parameter(0x0A).is_some() {
+            return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
 
         let mut hmac_secret_requested = false;
         let mut cred_protect_requested: Option<u8> = None;
 
-        if let Some(value) = cbor::map_get(&map, Value::Integer(Integer::from(6))) {
+        if let Some(value) = parameter(6) {
             let Value::Map(extension_map) = value else {
                 return Err(CTAP2_ERR_INVALID_CBOR);
             };
@@ -140,17 +192,12 @@ impl CtapApp<'_> {
                     },
                     Value::Text(text) if text == "credProtect" => {
                         let policy_value = match value {
-                            Value::Integer(int) => {
-                                let int_value: i128 = int.clone().into();
-                                if int_value < 0 || int_value > u8::MAX as i128 {
-                                    return Err(CTAP2_ERR_INVALID_OPTION);
-                                }
-                                int_value as u8
-                            }
+                            Value::Integer(int) => u8::try_from(i128::from(*int))
+                                .map_err(|_| CTAP2_ERR_INVALID_OPTION)?,
                             _ => return Err(CTAP2_ERR_INVALID_CBOR),
                         };
                         match policy_value {
-                            1 | 2 | 3 => cred_protect_requested = Some(policy_value),
+                            1..=3 => cred_protect_requested = Some(policy_value),
                             _ => return Err(CTAP2_ERR_INVALID_OPTION),
                         }
                     }
@@ -159,58 +206,76 @@ impl CtapApp<'_> {
             }
         }
 
-        let mut uv_requested = false;
-        let mut rk_requested = false;
-        if let Some(Value::Map(options)) = cbor::map_get(&map, Value::Integer(Integer::from(7))) {
-            if let Some(Value::Bool(rk)) = cbor::map_get(options, Value::Text("rk".into())) {
-                rk_requested = *rk;
+        // Steps 10 and 11.  Without a PIN the authenticator is not protected,
+        // step 11 is skipped and a pinUvAuthParam is not verified: the "uv"
+        // bit stays false.  (No pinUvAuthToken can be in use then, since only
+        // a PIN issues one.)
+        let mut uv_bit = false;
+        if protected {
+            if let Some((protocol, pin_uv_auth_param)) = pin_uv_auth.as_ref() {
+                self.verify_pin_uv_auth_param(*protocol, &client_hash, pin_uv_auth_param)?;
+                self.ensure_pin_token_permission_for_rp(PIN_PERMISSION_MC, &rp_id)?;
+                uv_bit = true;
             }
-            if let Some(Value::Bool(false)) = cbor::map_get(options, Value::Text("up".into())) {
-                return Err(CTAP2_ERR_INVALID_OPTION);
-            }
-            if let Some(Value::Bool(uv)) = cbor::map_get(options, Value::Text("uv".into())) {
-                if *uv {
-                    uv_requested = true;
-                }
-            }
-        }
-
-        let pin_uv_auth = parse_pin_uv_auth_param(
-            cbor::map_get(&map, Value::Integer(Integer::from(8))),
-            cbor::map_get(&map, Value::Integer(Integer::from(9))),
-        )?;
-
-        if uv_requested && pin_uv_auth.is_some() {
-            return Err(CTAP2_ERR_INVALID_OPTION);
-        }
-
-        let mut uv_verified = false;
-
-        if let Some((protocol, pin_uv_auth_param)) = pin_uv_auth.as_ref() {
-            self.verify_pin_uv_auth_param(*protocol, &client_hash, pin_uv_auth_param)?;
-            uv_verified = true;
-        }
-
-        if uv_verified {
-            self.ensure_pin_token_permission_for_rp(PIN_PERMISSION_MC, &rp_id)?;
         }
 
         let cred_protect_value = cred_protect_requested.unwrap_or(1);
-
         let timeout = self.presence_timeout;
-        self.confirm_user_presence(PresenceRequest {
+        let register_request = |timeout| PresenceRequest {
             rp_id: Some(&rp_id),
             user_name: user_name.as_deref(),
             user_display_name: user_display_name.as_deref(),
             ..PresenceRequest::new(PresenceOperation::Register, timeout)
-        })?;
-        let user_present = true;
+        };
+
+        // Step 12.
+        for id in &exclude_list {
+            let Some(excluded) = self.stored_credential(id)? else {
+                continue;
+            };
+            if excluded.rp_id != rp_id {
+                continue;
+            }
+            // "Else (implying the credential's credProtect value is
+            // userVerificationRequired): [...] Else (implying user
+            // verification was not collected in Step 11), remove the
+            // credential from the excludeList and continue parsing the rest
+            // of the list."
+            if excluded.cred_protect == 3 && !uv_bit {
+                continue;
+            }
+            // "If the pinUvAuthParam parameter is present then let
+            // userPresentFlagValue be the result of calling
+            // getUserPresentFlagValue(). [...] If userPresentFlagValue is
+            // false, then: Wait for user presence. Regardless of whether user
+            // presence is obtained or the authenticator times out, terminate
+            // this procedure and return CTAP2_ERR_CREDENTIAL_EXCLUDED."  A
+            // request the platform cancels ends as cancelled.
+            let user_present = pin_uv_auth.is_some() && self.pin_state.user_present_flag();
+            if !user_present {
+                let outcome = self.confirm_user_presence(register_request(timeout));
+                if outcome == Err(CTAP2_ERR_KEEPALIVE_CANCEL) {
+                    return Err(CTAP2_ERR_KEEPALIVE_CANCEL);
+                }
+            }
+            return Err(CTAP2_ERR_CREDENTIAL_EXCLUDED);
+        }
+
+        // Step 14: collect user presence unless a pinUvAuthParam brought a
+        // pinUvAuthToken whose userPresent flag is set, then "Call
+        // clearUserPresentFlag(), clearUserVerifiedFlag(), and
+        // clearPinUvAuthTokenPermissionsExceptLbw()."
+        let user_present = pin_uv_auth.is_some() && self.pin_state.user_present_flag();
+        if !user_present {
+            self.confirm_user_presence(register_request(timeout))?;
+        }
+        let up_bit = true;
         self.pin_state
             .consume_pin_uv_auth_token_after_user_presence();
 
         // ML-DSA keys are stored as their 32-byte seed (RFC 9964 §4).
         let record = CredentialRecord {
-            credential_id: self.new_credential_id(rk_requested),
+            credential_id: self.new_credential_id(rk),
             rp_id,
             user_id,
             user_name,
@@ -252,8 +317,8 @@ impl CtapApp<'_> {
             &record.rp_id,
             &record.credential_id,
             &cose_key,
-            user_present,
-            uv_verified,
+            up_bit,
+            uv_bit,
             record.sign_count,
             extension_bytes.as_deref(),
         );
@@ -328,7 +393,7 @@ impl CtapApp<'_> {
 
         // Stored only once the response is complete, so a request that fails
         // leaves no credential behind that the platform never learned about.
-        self.store_new_credential(&record, rk_requested)?;
+        self.store_new_credential(&record, rk)?;
         Ok(out)
     }
 

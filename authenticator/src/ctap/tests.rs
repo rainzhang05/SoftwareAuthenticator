@@ -6,6 +6,7 @@ mod dispatch;
 mod get_assertion;
 mod get_info;
 mod make_credential;
+mod make_credential_rules;
 mod pin;
 mod pin_retries;
 mod pin_uv_auth;

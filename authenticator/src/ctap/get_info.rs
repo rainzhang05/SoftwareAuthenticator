@@ -57,6 +57,8 @@ impl CtapApp<'_> {
             (text("credMgmt"), Value::Bool(true)),
             (text("pinUvAuthToken"), Value::Bool(true)),
             (text("clientPin"), Value::Bool(self.pin_state.is_set())),
+            // "Authenticators SHOULD include this option with the value true."
+            (text("makeCredUvNotRqd"), Value::Bool(true)),
         ]);
         map.push((uint(4), options));
 
