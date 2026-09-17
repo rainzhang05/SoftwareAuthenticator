@@ -1,13 +1,13 @@
 name: E2E
 
-# End-to-end test of the daemon as a security key: pc-hid-runner creates a real
+# End-to-end test of the daemon as a security key: pqkey creates a real
 # virtual USB-HID device through the kernel's uhid driver, and real FIDO
 # clients (libfido2's command-line tools and python-fido2) talk CTAPHID and
 # CTAP2 to it through the hidraw node the kernel creates for it.
 #
 # This needs a Linux kernel with uhid, so it only runs on GitHub's Ubuntu
 # runners. To reproduce it on a Linux machine, follow the steps below: build
-# pc-hid-runner, attach it in the foreground, point E2E_HIDRAW at its hidraw
+# pqkey, attach it in the foreground, point E2E_HIDRAW at its hidraw
 # node, then run tests/e2e/libfido2.sh and pytest tests/e2e.
 
 on:
@@ -52,8 +52,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # Release mode, as the daemon ships.
-      - name: Build pc-hid-runner
-        run: cargo build -p pc-hid-runner --locked --release
+      - name: Build pqkey
+        run: cargo build -p pqkey --locked --release
 
       # The daemon and the clients run as the unprivileged job user, the way
       # the authenticator is meant to be used, rather than as root: a root
@@ -84,7 +84,7 @@ jobs:
             exit 1
           fi
 
-      # Each virtual key is a pc-hid-runner instance of its own, told apart by
+      # Each virtual key is a pqkey instance of its own, told apart by
       # its product ID; tests/e2e/daemon.sh starts and stops them.
       - name: Attach the virtual security key
         run: |

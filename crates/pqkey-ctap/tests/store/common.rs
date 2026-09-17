@@ -4,11 +4,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use authenticator::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial};
-use authenticator::{mldsa_paramset_from_alg, try_sign_challenge, CoseAlg};
 use ciborium::value::Value;
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-use trussed_mldsa::PublicKey;
+use pqkey_ctap::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial};
+use pqkey_ctap::{mldsa_paramset_from_alg, try_sign_challenge, CoseAlg};
+use pqkey_mldsa::PublicKey;
 
 pub const ALL_ALGS: [CoseAlg; 4] = [
     CoseAlg::ES256,
@@ -153,7 +153,7 @@ pub fn assert_signature_verifies(record: &CredentialRecord) {
         alg => {
             let param_set = mldsa_paramset_from_alg(alg).expect("ML-DSA parameter set");
             assert!(
-                trussed_mldsa::verify(param_set, &PublicKey::new(bytes(-1)), &message, &signature),
+                pqkey_mldsa::verify(param_set, &PublicKey::new(bytes(-1)), &message, &signature),
                 "{alg:?} signature verifies under the derived public key"
             );
         }

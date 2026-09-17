@@ -13,9 +13,9 @@ use core::fmt;
 
 use p256::ecdsa::SigningKey as P256SigningKey;
 use p256::elliptic_curve::Generate;
+use pqkey_mldsa::{try_public_key_from_seed, SEED_LEN};
 use rand_core::Rng;
 use subtle::ConstantTimeEq;
-use trussed_mldsa::{try_public_key_from_seed, SEED_LEN};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
@@ -27,7 +27,7 @@ use crate::{
 ///
 /// ML-DSA keys are kept as the 32-byte FIPS 204 key-generation seed `ξ`, not as
 /// the 2,560–4,896-byte expanded secret key.  The seed determines the whole key
-/// pair ([`trussed_mldsa::try_keypair_from_seed`] is `ML-DSA.KeyGen_internal`),
+/// pair ([`pqkey_mldsa::try_keypair_from_seed`] is `ML-DSA.KeyGen_internal`),
 /// so nothing is lost, and every record stays a few hundred bytes regardless of
 /// the parameter set.  The price is one key expansion each time the key is
 /// used, which is far cheaper than the signature it enables.  The seed is as
@@ -429,7 +429,7 @@ mod tests {
     use crate::try_sign_challenge;
     use ciborium::value::{Integer, Value};
     use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-    use trussed_mldsa::{try_keypair_from_seed, verify, ParamSet, PublicKey};
+    use pqkey_mldsa::{try_keypair_from_seed, verify, ParamSet, PublicKey};
 
     const ALL_ALGS: [CoseAlg; 4] = [
         CoseAlg::ES256,

@@ -1,7 +1,7 @@
 """A fake desktop notification server on the D-Bus session bus.
 
 It implements the parts of org.freedesktop.Notifications (Desktop
-Notifications Specification 1.2) that `pc-hid-runner attach --presence notify`
+Notifications Specification 1.2) that `pqkey attach --presence notify`
 uses, records what it was asked to show and close, and plays the user: after
 a notification appears it invokes Approve or Deny, dismisses it, or leaves it
 unanswered, as the test chooses.

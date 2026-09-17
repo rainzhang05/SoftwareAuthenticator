@@ -269,30 +269,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "authenticator"
-version = "0.1.0"
-dependencies = [
- "aes",
- "cbc",
- "chacha20poly1305",
- "ciborium",
- "ctaphid-app",
- "getrandom",
- "heapless-bytes",
- "hkdf",
- "hmac",
- "log",
- "p256",
- "rand_core 0.10.1",
- "serde",
- "sha2",
- "subtle",
- "trussed-core",
- "trussed-mldsa",
- "zeroize",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1213,31 +1189,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
 
 [[package]]
-name = "pc-hid-runner"
-version = "0.1.0"
-dependencies = [
- "authenticator",
- "ciborium",
- "clap",
- "clap-num",
- "ctaphid-app",
- "env_logger",
- "futures-lite",
- "getrandom",
- "heapless-bytes",
- "log",
- "nix",
- "p256",
- "rand_core 0.10.1",
- "rcgen",
- "sha2",
- "signal-hook",
- "x509-parser",
- "zbus",
- "zeroize",
-]
-
-[[package]]
 name = "pem-rfc7468"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1319,6 +1270,65 @@ name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
+
+[[package]]
+name = "pqkey"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "clap",
+ "clap-num",
+ "ctaphid-app",
+ "env_logger",
+ "futures-lite",
+ "getrandom",
+ "heapless-bytes",
+ "log",
+ "nix",
+ "p256",
+ "pqkey-ctap",
+ "rand_core 0.10.1",
+ "rcgen",
+ "sha2",
+ "signal-hook",
+ "x509-parser",
+ "zbus",
+ "zeroize",
+]
+
+[[package]]
+name = "pqkey-ctap"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "cbc",
+ "chacha20poly1305",
+ "ciborium",
+ "ctaphid-app",
+ "getrandom",
+ "heapless-bytes",
+ "hkdf",
+ "hmac",
+ "log",
+ "p256",
+ "pqkey-mldsa",
+ "rand_core 0.10.1",
+ "serde",
+ "sha2",
+ "subtle",
+ "trussed-core",
+ "zeroize",
+]
+
+[[package]]
+name = "pqkey-mldsa"
+version = "0.1.0"
+dependencies = [
+ "getrandom",
+ "log",
+ "ml-dsa",
+ "zeroize",
+]
 
 [[package]]
 name = "primefield"
@@ -1846,16 +1856,6 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde-indexed",
-]
-
-[[package]]
-name = "trussed-mldsa"
-version = "0.1.0"
-dependencies = [
- "getrandom",
- "log",
- "ml-dsa",
- "zeroize",
 ]
 
 [[package]]

@@ -20,13 +20,13 @@ use std::fs;
 use std::path::Path;
 
 use arbitrary::{Arbitrary, Unstructured};
-use authenticator_fuzz::cbor::{bytes, int, text};
-use authenticator_fuzz::ctaphid::{Action, Channel, Mangle, CONT_DATA, INIT_DATA};
-use authenticator_fuzz::requests::command;
-use authenticator_fuzz::rng::SplitMix;
-use authenticator_fuzz::{sequence, structured};
 use ciborium::value::Value;
 use p256::elliptic_curve::sec1::ToSec1Point;
+use pqkey_fuzz::cbor::{bytes, int, text};
+use pqkey_fuzz::ctaphid::{Action, Channel, Mangle, CONT_DATA, INIT_DATA};
+use pqkey_fuzz::requests::command;
+use pqkey_fuzz::rng::SplitMix;
+use pqkey_fuzz::{sequence, structured};
 use rand_core::Rng;
 use sha2::{Digest, Sha256};
 
@@ -437,7 +437,7 @@ fn exchange(vendor: bool, actions: &[Action]) -> Vec<u8> {
         );
     }
     assert!(u.is_empty());
-    authenticator_fuzz::ctaphid::run(&encoded);
+    pqkey_fuzz::ctaphid::run(&encoded);
     encoded
 }
 

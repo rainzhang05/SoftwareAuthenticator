@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use authenticator::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest, UserPresence};
+use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest, UserPresence};
 
 pub mod dbus;
 pub mod notification;
@@ -62,7 +62,7 @@ impl UserPresence for Unanswered {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use authenticator::ctap::{presence::PresenceOperation, InterruptFlag};
+    use pqkey_ctap::ctap::{presence::PresenceOperation, InterruptFlag};
 
     #[test]
     fn unanswered_times_out() {

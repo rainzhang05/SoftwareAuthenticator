@@ -10,14 +10,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use authenticator::ctap::presence::AutoApprove;
-use authenticator::ctap::{CtapApp, InterruptFlag};
-use authenticator::store::{AttestationRecord, CredentialStore, FileStore, PrivateKeyMaterial};
-use authenticator::{mldsa_paramset_from_alg, CoseAlg};
 use ciborium::value::{Integer, Value};
 use ctaphid_app::{App, Command};
 use heapless_bytes::Bytes;
 use p256::ecdsa::{signature::Verifier, Signature, SigningKey, VerifyingKey};
+use pqkey_ctap::ctap::presence::AutoApprove;
+use pqkey_ctap::ctap::{CtapApp, InterruptFlag};
+use pqkey_ctap::store::{AttestationRecord, CredentialStore, FileStore, PrivateKeyMaterial};
+use pqkey_ctap::{mldsa_paramset_from_alg, CoseAlg};
 
 /// CTAPHID's largest message: 64 - 7 + 128 * (64 - 5) bytes (CTAP 2.3
 /// §11.2.4).
@@ -209,9 +209,9 @@ fn verify(public_key: &Value, message: &[u8], signature: &[u8]) {
         }
         alg => {
             let param_set = mldsa_paramset_from_alg(alg).expect("ML-DSA");
-            let key = trussed_mldsa::PublicKey(bytes(get(public_key, &int(-1))));
+            let key = pqkey_mldsa::PublicKey(bytes(get(public_key, &int(-1))));
             assert!(
-                trussed_mldsa::verify(param_set, &key, message, signature),
+                pqkey_mldsa::verify(param_set, &key, message, signature),
                 "{alg:?} signature verifies"
             );
         }

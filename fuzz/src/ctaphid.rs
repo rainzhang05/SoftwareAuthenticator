@@ -23,11 +23,11 @@ use std::collections::HashSet;
 use crate::rng::NarrowRng;
 use arbitrary::{Arbitrary, Unstructured};
 use ctaphid_app::{Command, Error as AppError};
-use pc_hid_runner::transport::ctaphid_host::{
+use pqkey::transport::ctaphid_host::{
     CtaphidHost, CONTINUATION_TIMEOUT_MS, CTAP2_ERR_KEEPALIVE_CANCEL, KEEPALIVE_INTERVAL_MS,
     MAX_MESSAGE_SIZE,
 };
-use pc_hid_runner::uhid::{CtapHidFrame, CTAPHID_FRAME_LEN};
+use pqkey::uhid::{CtapHidFrame, CTAPHID_FRAME_LEN};
 
 pub const INIT_DATA: usize = CTAPHID_FRAME_LEN - 7;
 pub const CONT_DATA: usize = CTAPHID_FRAME_LEN - 5;

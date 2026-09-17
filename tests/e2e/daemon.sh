@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Start and stop a pc-hid-runner instance for the end-to-end tests.
+# Start and stop a pqkey instance for the end-to-end tests.
 #
 #   tests/e2e/daemon.sh start NAME PRODUCT_ID [ATTACH_ARGUMENTS...]
 #   tests/e2e/daemon.sh stop NAME PRODUCT_ID
 #
 # NAME keeps the state directory, log and exit status of instances apart;
 # PRODUCT_ID (four hex digits, e.g. 0858) tells their virtual keys apart. Each
-# instance must use a different one. `start` runs `pc-hid-runner attach
+# instance must use a different one. `start` runs `pqkey attach
 # --foreground` in the background and prints the key's hidraw node once it is
 # accessible. `stop` detaches the instance and checks that it exited with
 # status 0 and that its device is gone.
 #
 # Everything goes under $E2E_WORK: NAME-state/, NAME.status and
-# e2e-diagnostics/NAME.log. The binary is $PC_HID_RUNNER, by default
-# target/release/pc-hid-runner.
+# e2e-diagnostics/NAME.log. The binary is $PQKEY, by default
+# target/release/pqkey.
 
 set -euo pipefail
 
@@ -30,7 +30,7 @@ shift 3
 [[ $product_id =~ ^[0-9A-F]{4}$ ]] || usage
 
 work=${E2E_WORK:?E2E_WORK must name a work directory}
-binary=${PC_HID_RUNNER:-target/release/pc-hid-runner}
+binary=${PQKEY:-target/release/pqkey}
 state_dir="$work/$name-state"
 status_file="$work/$name.status"
 diagnostics="$work/e2e-diagnostics"
@@ -46,7 +46,7 @@ start() {
   # process to close them.
   (
     status=0
-    RUST_LOG=info,pc_hid_runner=debug "$binary" attach --foreground \
+    RUST_LOG=info,pqkey=debug "$binary" attach --foreground \
       --product-id "0x$product_id" --state-dir "$state_dir" "$@" || status=$?
     echo "$status" > "$status_file"
   ) </dev/null >"$log" 2>&1 &
@@ -56,7 +56,7 @@ start() {
   local deadline=$((SECONDS + 60)) node= sys
   while :; do
     if [ -e "$status_file" ]; then
-      echo "::error::pc-hid-runner ($name) exited with status $(cat "$status_file") before the device was ready" >&2
+      echo "::error::pqkey ($name) exited with status $(cat "$status_file") before the device was ready" >&2
       cat "$log" >&2
       return 1
     fi
@@ -92,16 +92,16 @@ stop() {
   local deadline=$((started + 5))
   until [ -e "$status_file" ]; do
     if [ "$SECONDS" -ge "$deadline" ]; then
-      echo "::error::pc-hid-runner ($name) did not exit within 5s of detach"
+      echo "::error::pqkey ($name) did not exit within 5s of detach"
       return 1
     fi
     sleep 0.1
   done
   local status
   status=$(cat "$status_file")
-  echo "pc-hid-runner ($name) exited with status $status after $((SECONDS - started))s"
+  echo "pqkey ($name) exited with status $status after $((SECONDS - started))s"
   if [ "$status" != 0 ]; then
-    echo "::error::pc-hid-runner ($name) exited with status $status"
+    echo "::error::pqkey ($name) exited with status $status"
     return 1
   fi
 

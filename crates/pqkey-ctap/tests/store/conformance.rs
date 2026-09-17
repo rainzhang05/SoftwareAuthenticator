@@ -7,11 +7,11 @@
 //! added to the list runs against every store; there is no way to add it to
 //! only one.
 
-use authenticator::store::{
+use pqkey_ctap::store::{
     AttestationRecord, CredentialRecord, CredentialStore, FileStore, MemoryStore, PinStateRecord,
     PrivateKeyMaterial, StoreError, DEFAULT_MAX_CREDENTIALS,
 };
-use authenticator::CoseAlg;
+use pqkey_ctap::CoseAlg;
 
 use crate::common::{
     assert_signature_verifies, attestation_record, ids, new_record, random_bytes, with_created_at,

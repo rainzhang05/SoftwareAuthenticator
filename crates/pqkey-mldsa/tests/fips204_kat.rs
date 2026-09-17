@@ -22,7 +22,7 @@
 // compiled in.  A reduced-feature build simply has no KATs to run.
 #![cfg(all(feature = "mldsa44", feature = "mldsa65", feature = "mldsa87"))]
 
-use trussed_mldsa::{
+use pqkey_mldsa::{
     lengths, try_keypair_from_seed, try_public_key, try_sign, try_sign_deterministic,
     try_sign_with_context, verify, verify_with_context, MlDsaError, ParamSet, PublicKey, SecretKey,
     SEED_LEN,
@@ -357,7 +357,7 @@ fn signature_does_not_verify_under_another_param_set() {
     let keys: Vec<(ParamSet, PublicKey, Vec<u8>)> = ParamSet::ALL
         .into_iter()
         .map(|ps| {
-            let (pk, sk) = trussed_mldsa::keypair(ps);
+            let (pk, sk) = pqkey_mldsa::keypair(ps);
             let sig = try_sign(ps, &sk, message).expect("sign");
             (ps, pk, sig)
         })
@@ -383,7 +383,7 @@ fn signature_does_not_verify_under_another_param_set() {
 fn public_key_from_another_param_set_is_rejected() {
     let message = b"cross-parameter-set confusion";
     for ps in ParamSet::ALL {
-        let (pk, sk) = trussed_mldsa::keypair(ps);
+        let (pk, sk) = pqkey_mldsa::keypair(ps);
         let sig = try_sign(ps, &sk, message).expect("sign");
         assert!(verify(ps, &pk, message, &sig), "{ps} sanity check");
 
@@ -417,7 +417,7 @@ fn public_key_from_another_param_set_is_rejected() {
 #[test]
 fn secret_key_from_another_param_set_is_rejected() {
     for ps in ParamSet::ALL {
-        let (_pk, sk) = trussed_mldsa::keypair(ps);
+        let (_pk, sk) = pqkey_mldsa::keypair(ps);
         for other in other_param_sets(ps) {
             assert_eq!(
                 try_sign(other, &sk, b"msg"),
@@ -425,7 +425,7 @@ fn secret_key_from_another_param_set_is_rejected() {
                 "{ps} secret key accepted by {other}"
             );
             assert!(
-                trussed_mldsa::sign(other, &sk, b"msg").is_empty(),
+                pqkey_mldsa::sign(other, &sk, b"msg").is_empty(),
                 "{ps} secret key produced a signature under {other}"
             );
         }
@@ -460,11 +460,11 @@ fn nist_signatures_do_not_cross_param_sets() {
 fn sign_reports_failure_as_an_empty_vec() {
     let ps = ParamSet::MLDSA44;
     let junk = SecretKey::new(vec![0u8; 7]);
-    let sig = trussed_mldsa::sign(ps, &junk, b"msg");
+    let sig = pqkey_mldsa::sign(ps, &junk, b"msg");
     assert!(sig.is_empty(), "sign() must return an empty Vec on failure");
     assert_ne!(sig.len(), lengths(ps).2);
 
     // ... and a caller that only checks emptiness is not fooled by a real one.
-    let (_pk, sk) = trussed_mldsa::keypair(ps);
-    assert_eq!(trussed_mldsa::sign(ps, &sk, b"msg").len(), lengths(ps).2);
+    let (_pk, sk) = pqkey_mldsa::keypair(ps);
+    assert_eq!(pqkey_mldsa::sign(ps, &sk, b"msg").len(), lengths(ps).2);
 }

@@ -43,7 +43,7 @@ COSE_KTY_EC2 = 2
 COSE_KTY_AKP = 7
 COSE_CRV_P256 = 1
 
-# The AAGUID pc-hid-runner uses unless --aaguid is given.
+# The AAGUID pqkey uses unless --aaguid is given.
 DEFAULT_AAGUID = bytes.fromhex("4645495449414E980616525A30310000")
 
 FLAG_UP = 0x01

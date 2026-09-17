@@ -26,10 +26,8 @@ impl TempDir {
     pub fn new(label: &str) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let unique = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "pc-hid-runner-{label}-{}-{unique}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("pqkey-{label}-{}-{unique}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("create temporary directory");
         Self { path }

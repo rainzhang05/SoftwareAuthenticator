@@ -8,7 +8,7 @@
 
 use crate::{engine::Engine, requests};
 use arbitrary::Unstructured;
-use authenticator::store::MemoryStore;
+use pqkey_ctap::store::MemoryStore;
 
 /// Run one fuzz input.
 pub fn run(data: &[u8]) {

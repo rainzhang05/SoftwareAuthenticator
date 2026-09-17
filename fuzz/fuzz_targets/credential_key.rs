@@ -12,8 +12,8 @@
 
 #![no_main]
 
-use authenticator::{try_credential_secret_from_bytes, try_sign_challenge, CoseAlg};
 use libfuzzer_sys::fuzz_target;
+use pqkey_ctap::{try_credential_secret_from_bytes, try_sign_challenge, CoseAlg};
 
 const ALGORITHMS: [CoseAlg; 4] = [
     CoseAlg::ES256,

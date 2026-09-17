@@ -22,10 +22,10 @@ use crate::engine::Engine;
 use crate::platform::{authenticate, pin_hash, protocol_value, Session};
 use crate::requests::{self, command, Overrides};
 use arbitrary::{Arbitrary, Result, Unstructured};
-use authenticator::ctap::constants::*;
-use authenticator::store::MemoryStore;
-use authenticator::ClassicPinProtocol;
 use ciborium::value::Value;
+use pqkey_ctap::ctap::constants::*;
+use pqkey_ctap::store::MemoryStore;
+use pqkey_ctap::ClassicPinProtocol;
 use sha2::{Digest, Sha256};
 
 const MAX_STEPS: usize = 24;

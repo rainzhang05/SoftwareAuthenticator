@@ -4,11 +4,11 @@ use std::{
     time::Duration,
 };
 
-use authenticator::ctap::{
+use pqkey_ctap::ctap::{
     presence::{AutoApprove, UserPresence},
     CtapApp, InterruptFlag, RESET_WINDOW_AFTER_POWER_UP,
 };
-use authenticator::store::{AttestationRecord, CredentialStore, FileStore};
+use pqkey_ctap::store::{AttestationRecord, CredentialStore, FileStore};
 
 use crate::{
     attestation::{certificate_aaguid, generate_attestation_certificate, IdentityConfig},
@@ -307,7 +307,7 @@ pub fn serve_ctap(
 /// The app runs on a worker thread (see [`exec`]), so `presence` may block
 /// while the user decides: the transport keeps sending keepalives meanwhile,
 /// and CTAPHID_CANCEL, resynchronisation of the channel and shutdown reach
-/// `presence` through its [`Cancellation`](authenticator::ctap::presence::Cancellation).
+/// `presence` through its [`Cancellation`](pqkey_ctap::ctap::presence::Cancellation).
 pub fn serve_ctap_with_presence(
     device: UhidDevice,
     data: AppData,
@@ -391,7 +391,7 @@ pub fn parse_aaguid(input: &str) -> Result<[u8; 16], String> {
 mod tests {
     use super::*;
     use crate::{test_support::TempDir, tests::socket_device, uhid};
-    use authenticator::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest};
+    use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest};
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,

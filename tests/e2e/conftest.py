@@ -1,6 +1,6 @@
 """Fixtures for the end-to-end tests of the virtual security key.
 
-The tests talk to a running `pc-hid-runner attach` through its hidraw node,
+The tests talk to a running `pqkey attach` through its hidraw node,
 named by the E2E_HIDRAW environment variable (see .github/workflows/e2e.yml):
 
     E2E_HIDRAW=/dev/hidrawN python -m pytest tests/e2e

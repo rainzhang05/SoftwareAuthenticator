@@ -8,16 +8,16 @@
 
 use std::{fs, path::PathBuf};
 
-use authenticator::ctap::{presence::AutoApprove, CtapApp, InterruptFlag};
-use authenticator::CoseAlg;
 use ciborium::value::{Integer, Value};
 use ctaphid_app::{App, Command};
 use heapless_bytes::Bytes;
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-use pc_hid_runner::{attestation::IdentityConfig, service::open_credential_store, MESSAGE_SIZE};
+use pqkey::{attestation::IdentityConfig, service::open_credential_store, MESSAGE_SIZE};
+use pqkey_ctap::ctap::{presence::AutoApprove, CtapApp, InterruptFlag};
+use pqkey_ctap::CoseAlg;
 use x509_parser::{certificate::X509Certificate, prelude::FromDer};
 
-/// The daemon's default identity (see `pc-hid-runner attach --help`).
+/// The daemon's default identity (see `pqkey attach --help`).
 const IDENTITY: IdentityConfig<'static> = IdentityConfig {
     manufacturer: "Feitian Technologies Co., Ltd.",
     product: "Feitian FIDO2 Software Authenticator (ML-DSA)",
@@ -46,7 +46,7 @@ impl TempDir {
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).unwrap();
         let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-        let path = std::env::temp_dir().join(format!("pc-hid-runner-attestation-{name}"));
+        let path = std::env::temp_dir().join(format!("pqkey-attestation-{name}"));
         fs::create_dir(&path).unwrap();
         Self(path)
     }

@@ -11,11 +11,11 @@ use p256::ecdsa::{
 };
 use p256::elliptic_curve::Generate;
 use p256::Sec1Point;
-use rand_core::UnwrapErr;
-use sha2::{Digest, Sha256};
-use trussed_mldsa::{
+use pqkey_mldsa::{
     try_keypair, try_sign, try_sign_from_seed, MlDsaError, ParamSet, PublicKey, SecretKey, SEED_LEN,
 };
+use rand_core::UnwrapErr;
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub mod ctap;
@@ -554,7 +554,7 @@ mod tests {
     use super::*;
     use ciborium::{de::from_reader, value::Integer};
     use p256::ecdsa::signature::hazmat::PrehashVerifier;
-    use trussed_mldsa::verify;
+    use pqkey_mldsa::verify;
 
     #[test]
     fn cose_public_key_canonical_encoding_matches_fixture() {
@@ -597,7 +597,7 @@ mod tests {
         for alg in [CoseAlg::MLDSA44, CoseAlg::MLDSA65, CoseAlg::MLDSA87] {
             let ps = mldsa_paramset_from_alg(alg).expect("ML-DSA param set");
             let seed = [0x3c; SEED_LEN];
-            let (pk, _) = trussed_mldsa::try_keypair_from_seed(ps, &seed).expect("keygen");
+            let (pk, _) = pqkey_mldsa::try_keypair_from_seed(ps, &seed).expect("keygen");
 
             let key = CredentialSecretKey::MlDsaSeed(MlDsaSeed::new(seed));
             assert_eq!(key.secret_bytes().as_slice(), &seed[..]);

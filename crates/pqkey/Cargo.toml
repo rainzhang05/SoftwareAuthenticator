@@ -1,5 +1,5 @@
 [package]
-name = "pc-hid-runner"
+name = "pqkey"
 version = "0.1.0"
 edition = "2021"
 
@@ -14,7 +14,7 @@ clap = { version = "4", features = ["derive"] }
 clap-num = "1.0"
 log = { version = "0.4", default-features = false }
 env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
-authenticator = { path = "../pqkey-ctap" }
+pqkey-ctap = { path = "../pqkey-ctap" }
 # CTAPHID channel allocation: the operating system RNG behind rand_core's
 # `CryptoRng`, so tests can inject a deterministic one.
 rand_core = "0.10"

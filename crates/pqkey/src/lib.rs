@@ -24,9 +24,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use authenticator::ctap::InterruptFlag;
 use ctaphid_app::{App, Command, Error as AppError};
 use heapless_bytes::Bytes;
+use pqkey_ctap::ctap::InterruptFlag;
 use shutdown::ShutdownSignal;
 use transport::ctaphid_host::{AppRequest, CtaphidHost, Version, MAX_MESSAGE_SIZE};
 use uhid::{HidDeviceDescriptor, UhidDevice, CTAPHID_FRAME_LEN};

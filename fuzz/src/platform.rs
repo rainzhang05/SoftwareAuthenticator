@@ -1,13 +1,13 @@
 //! The platform's side of PIN/UV auth protocols one and two (CTAP 2.3 §6.5),
 //! so the stateful target can send requests that authenticate.
 
-use authenticator::{
-    decrypt_classic_pin_block, derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
-    ClassicPinProtocol, PinUvSessionKeys,
-};
 use ciborium::value::Value;
 use hmac::{Hmac, KeyInit, Mac};
 use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey, SecretKey};
+use pqkey_ctap::{
+    decrypt_classic_pin_block, derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
+    ClassicPinProtocol, PinUvSessionKeys,
+};
 use sha2::{Digest, Sha256};
 
 use crate::cbor::{bytes, get_int, int};

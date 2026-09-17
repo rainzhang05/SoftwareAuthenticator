@@ -6,13 +6,13 @@ use std::sync::{
     Arc,
 };
 
-use authenticator::ctap::constants::*;
-use authenticator::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest, UserPresence};
-use authenticator::ctap::{CtapApp, InterruptFlag};
-use authenticator::store::MemoryStore;
 use ciborium::value::Value;
 use ctaphid_app::{App, Command, Error};
 use heapless_bytes::Bytes;
+use pqkey_ctap::ctap::constants::*;
+use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest, UserPresence};
+use pqkey_ctap::ctap::{CtapApp, InterruptFlag};
+use pqkey_ctap::store::MemoryStore;
 
 use crate::rng::SplitMix;
 
@@ -20,8 +20,8 @@ use crate::rng::SplitMix;
 /// dispatcher, which would, is not part of these targets.
 static NEVER_INTERRUPTED: InterruptFlag = InterruptFlag::new();
 
-/// The message size the daemon builds the app for (`pc_hid_runner::MESSAGE_SIZE`).
-pub const MESSAGE_SIZE: usize = pc_hid_runner::MESSAGE_SIZE;
+/// The message size the daemon builds the app for (`pqkey::MESSAGE_SIZE`).
+pub const MESSAGE_SIZE: usize = pqkey::MESSAGE_SIZE;
 
 /// Every status code CTAP defines (CTAP 2.3 §8.2) that the engine may answer.
 pub const STATUS_CODES: &[u8] = &[

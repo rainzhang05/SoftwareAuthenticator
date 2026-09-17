@@ -3,8 +3,8 @@
 //! fuzzer spends its time past the decoding step.
 
 use arbitrary::{Result, Unstructured};
-use authenticator::ctap::constants::*;
 use ciborium::value::Value;
+use pqkey_ctap::ctap::constants::*;
 
 use crate::cbor::{arbitrary_bytes, arbitrary_value, bytes, encode, int, text, MAX_DEPTH};
 

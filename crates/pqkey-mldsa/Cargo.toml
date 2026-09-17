@@ -1,5 +1,5 @@
 [package]
-name = "trussed-mldsa"
+name = "pqkey-mldsa"
 version = "0.1.0"
 edition = "2021"
 

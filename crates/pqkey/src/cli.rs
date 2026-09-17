@@ -249,11 +249,11 @@ impl StateArgs {
 
     fn in_use_error(&self) -> io::Error {
         let message = match state_lock::read_pid(&self.state_dir) {
-            Ok(Some(pid)) => format!(
-                "the authenticator daemon is running (pid {pid}); run 'pc-hid-runner detach' first"
-            ),
+            Ok(Some(pid)) => {
+                format!("the authenticator daemon is running (pid {pid}); run 'pqkey detach' first")
+            }
             _ => format!(
-                "{} is in use by another pc-hid-runner process",
+                "{} is in use by another pqkey process",
                 self.state_dir.display()
             ),
         };
@@ -618,7 +618,7 @@ mod tests {
     use clap::{error::ErrorKind, CommandFactory};
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(std::iter::once("pc-hid-runner").chain(args.iter().copied()))
+        Cli::try_parse_from(std::iter::once("pqkey").chain(args.iter().copied()))
     }
 
     #[test]

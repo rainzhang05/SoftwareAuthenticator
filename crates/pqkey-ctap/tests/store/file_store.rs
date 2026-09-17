@@ -8,12 +8,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 
-use authenticator::store::{
+use ciborium::value::Value;
+use pqkey_ctap::store::{
     Corruption, CredentialRecord, CredentialStore, FileKeySource, FileStore, KeyDomain, KeySource,
     PinStateRecord, PrivateKeyMaterial, StoreError,
 };
-use authenticator::CoseAlg;
-use ciborium::value::Value;
+use pqkey_ctap::CoseAlg;
 
 use crate::common::{
     assert_signature_verifies, attestation_record, hex, ids, logs, new_record, random_bytes,

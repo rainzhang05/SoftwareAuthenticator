@@ -1,6 +1,6 @@
 //! The state directory, and the CLI's operations on the stored state.
 //!
-//! The daemon keeps everything in an [`authenticator::store::FileStore`] in
+//! The daemon keeps everything in an [`pqkey_ctap::store::FileStore`] in
 //! the state directory. The `pin` and `reset` commands work on that same
 //! store, and check PINs with the CTAP engine's own retry state machine
 //! ([`PinRetryState`]), so a PIN set here is the PIN the authenticator asks
@@ -16,11 +16,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use authenticator::ctap::constants::{
+use pqkey_ctap::ctap::constants::{
     CTAP2_ERR_PIN_AUTH_BLOCKED, CTAP2_ERR_PIN_BLOCKED, CTAP2_ERR_PIN_NOT_SET,
 };
-use authenticator::ctap::{PersistentPinState, PinRetryState};
-use authenticator::store::{CredentialStore, FileStore, PinStateRecord};
+use pqkey_ctap::ctap::{PersistentPinState, PinRetryState};
+use pqkey_ctap::store::{CredentialStore, FileStore, PinStateRecord};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -131,7 +131,7 @@ fn hash_pin(pin: &str) -> Zeroizing<[u8; 16]> {
     hash
 }
 
-fn store_error(err: authenticator::store::StoreError) -> io::Error {
+fn store_error(err: pqkey_ctap::store::StoreError) -> io::Error {
     io::Error::other(err)
 }
 
@@ -293,8 +293,8 @@ fn pin_status_error(status: u8) -> io::Error {
 mod tests {
     use super::*;
     use crate::test_support::TempDir;
-    use authenticator::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial};
-    use authenticator::CoseAlg;
+    use pqkey_ctap::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial};
+    use pqkey_ctap::CoseAlg;
 
     // Test characters by UTF-8 width, so the boundaries below are explicit.
     const TWO_BYTES: &str = "\u{e9}"; // e with acute accent

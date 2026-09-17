@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use authenticator::ctap::presence::{
+use pqkey_ctap::ctap::presence::{
     Cancellation, PresenceOperation, PresenceOutcome, PresenceRequest, UserPresence,
 };
 
@@ -393,7 +393,7 @@ impl fmt::Display for ConnectError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use authenticator::ctap::InterruptFlag;
+    use pqkey_ctap::ctap::InterruptFlag;
     use std::{
         collections::VecDeque,
         sync::{Arc, Mutex},
