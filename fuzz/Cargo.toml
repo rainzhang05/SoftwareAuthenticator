@@ -17,8 +17,8 @@ members = ["."]
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-authenticator = { path = "../authenticator" }
-pc-hid-runner = { path = "../pc-hid-runner" }
+authenticator = { path = "../crates/pqkey-ctap" }
+pc-hid-runner = { path = "../crates/pqkey" }
 ciborium = { version = "0.2", default-features = false, features = ["std"] }
 ctaphid-app = "0.1"
 heapless-bytes = "0.3"

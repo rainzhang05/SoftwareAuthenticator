@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "trussed-mldsa",
-    "authenticator",
-    "pc-hid-runner",
+    "crates/pqkey-mldsa",
+    "crates/pqkey-ctap",
+    "crates/pqkey",
 ]
 
 resolver = "2"

@@ -35,9 +35,9 @@ on:
   push:
     branches: [main]
     paths:
-      - authenticator/**
-      - pc-hid-runner/src/**
-      - trussed-mldsa/**
+      - crates/pqkey-ctap/**
+      - crates/pqkey/src/**
+      - crates/pqkey-mldsa/**
       - Cargo.lock
       - fuzz/**
       - .github/workflows/fuzz.yml

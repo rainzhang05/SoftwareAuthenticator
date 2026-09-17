@@ -98,7 +98,7 @@ pub const DEFAULT_MAX_CREDENTIALS: usize = 1000;
 /// attestation key.
 ///
 /// Every implementation must behave identically; the conformance tests in
-/// `authenticator/tests/store` run the same cases against each of them.
+/// `crates/pqkey-ctap/tests/store` run the same cases against each of them.
 pub trait CredentialStore {
     /// Load the credential with this ID.
     ///
