@@ -48,23 +48,35 @@ cargo build --release
 The cryptography is pure Rust — there is no `liboqs` build step and nothing
 to add to `LD_LIBRARY_PATH`.
 
-### 2. Setup Virtual HID Permissions
-To allow the authenticator to create a virtual USB device, you need to load the `uhid` kernel module and grant your user the correct permissions.
+### 2. Set Up the Virtual HID Permissions
+The authenticator creates its virtual security key through `/dev/uhid`, which
+only root can open by default. The repository ships udev rules,
+[`contrib/udev/70-pqkey.rules`](contrib/udev/70-pqkey.rules), that give the
+`plugdev` group access to `/dev/uhid` and give the user of the active local
+session, and no one else, access to the virtual key's hidraw node. Install
+them and have the `uhid` module loaded at every boot:
 
 ```bash
-# Load the uhid module
-sudo modprobe uhid
-
-# Create a udev rule to grant access to the 'plugdev' group
-echo 'KERNEL=="uhid", MODE="0660", GROUP="plugdev"' | sudo tee /etc/udev/rules.d/70-uhid.rules
+# Install the udev rules
+sudo install -m 644 contrib/udev/70-pqkey.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
+
+# Load the uhid module at every boot, and now
+echo uhid | sudo tee /etc/modules-load.d/uhid.conf
+sudo modprobe uhid
 sudo udevadm trigger
 
-# Apply permissions immediately
-sudo chown root:plugdev /dev/uhid
-sudo chmod 660 /dev/uhid
-newgrp plugdev
+# Let your user open /dev/uhid, then log out and back in
+# (or run `newgrp plugdev` in the shell you start pqkey from)
+sudo usermod -aG plugdev "$USER"
 ```
+
+Anyone who can open `/dev/uhid` can create any kind of HID device, keyboards
+included, so only add users you would trust with that to the group. The group
+is `plugdev` as on Debian and Ubuntu; elsewhere create it or change the group in
+the rules. If you start the authenticator with `--vendor-id` or
+`--product-id`, change the hidraw rule's device pattern to match; the comments
+in the rules file explain both.
 
 ### 3. Run the Authenticator
 Launch the virtual authenticator in the foreground. It handles WebAuthn
