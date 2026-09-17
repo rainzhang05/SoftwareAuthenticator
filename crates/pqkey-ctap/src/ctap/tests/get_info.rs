@@ -6,6 +6,7 @@ use crate::ctap::pin::protocol::{
     PIN_UV_AUTH_PROTOCOL_CLASSIC_V1, PIN_UV_AUTH_PROTOCOL_CLASSIC_V2,
 };
 use crate::ctap::pin::state::PinState;
+use crate::ctap::AttestationMode;
 use crate::CoseAlg;
 
 use ciborium::{
@@ -136,6 +137,35 @@ fn client_pin_option_reports_whether_a_pin_is_set() {
 fn uv_option_is_absent_without_built_in_user_verification() {
     let mut app = test_app([0xAD; 16]);
     assert!(options(&mut app).iter().all(|(key, _)| *key != text("uv")));
+}
+
+/// attestationFormats: "List of supported attestation formats. [...] The list
+/// MUST NOT include duplicate values nor be empty if present. [...] Support
+/// for "none" attestation is implied and MUST be omitted." (CTAP 2.3 §6.4)
+#[test]
+fn attestation_formats_follow_the_attestation_mode() {
+    for (mode, formats) in [
+        (
+            AttestationMode::SelfAttestation,
+            Some(Value::Array(vec![text("packed")])),
+        ),
+        (
+            AttestationMode::Certificate,
+            Some(Value::Array(vec![text("packed")])),
+        ),
+        (AttestationMode::None, None),
+    ] {
+        let mut app = test_app([0xAF; 16]);
+        app.set_attestation_mode(mode);
+        let response = app.handle_get_info().expect("getInfo succeeds");
+        let Value::Map(map) = from_reader(&response[1..]).expect("decode getInfo") else {
+            panic!("getInfo must be a map");
+        };
+        let listed = map
+            .into_iter()
+            .find_map(|(key, value)| (key == uint(0x16)).then_some(value));
+        assert_eq!(listed, formats, "{mode:?}");
+    }
 }
 
 /// A store that cannot be counted leaves remainingDiscoverableCredentials out

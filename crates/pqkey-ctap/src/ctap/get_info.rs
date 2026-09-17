@@ -2,7 +2,7 @@
 
 use super::cbor::{canonical_map, canonical_sort};
 use super::pin::state::PinState;
-use super::CtapApp;
+use super::{AttestationMode, CtapApp};
 use crate::CoseAlg;
 
 use ciborium::{
@@ -109,9 +109,18 @@ impl CtapApp<'_> {
             map.push((uint(0x14), uint(remaining as u64)));
         }
 
-        // attestationFormats: "Support for "none" attestation is implied and
-        // MUST be omitted."
-        map.push((uint(0x16), Value::Array(vec![text("packed")])));
+        // attestationFormats: "List of supported attestation formats. [...]
+        // The list MUST NOT include duplicate values nor be empty if present.
+        // [...] Support for "none" attestation is implied and MUST be
+        // omitted."  Self and basic attestation are both "packed"; with
+        // AttestationMode::None makeCredential only ever returns "none", so
+        // the list would be empty and is left out.
+        match self.attestation_mode {
+            AttestationMode::SelfAttestation | AttestationMode::Certificate => {
+                map.push((uint(0x16), Value::Array(vec![text("packed")])));
+            }
+            AttestationMode::None => {}
+        }
 
         canonical_sort(&mut map);
         let mut encoded = Vec::new();
