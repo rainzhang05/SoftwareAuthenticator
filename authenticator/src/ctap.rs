@@ -164,44 +164,57 @@ impl<'interrupt> CtapApp<'interrupt> {
         Err(CTAP1_ERR_INVALID_COMMAND)
     }
 
-    fn extract_subcommand_and_pin_protocol_for_logging(payload: &[u8]) -> (Option<u8>, Option<u8>) {
-        use std::io::Cursor;
+    /// The log line for one CTAPHID_CBOR exchange: `request` is the command
+    /// byte and its parameters, `response` the status byte and its CBOR.
+    /// resp_bcnt counts the whole response, resp_payload_len only the CBOR
+    /// after the status byte.
+    fn request_log_line(request: &[u8], response: &[u8]) -> String {
+        let ctap_cmd = request.first().copied().unwrap_or_default();
+        let payload = request.get(1..).unwrap_or_default();
+        let status = response.first().copied().unwrap_or(CTAP2_OK);
+        let (sub_command, pin_protocol) =
+            Self::subcommand_and_pin_protocol_for_logging(ctap_cmd, payload);
+        format!(
+            "CTAP2 cmd=0x{ctap_cmd:02x} status=0x{status:02x} sub={} pinProtocol={} req_bcnt={} resp_bcnt={} resp_payload_len={}",
+            HexOption(sub_command),
+            HexOption(pin_protocol),
+            request.len(),
+            response.len(),
+            response.len().saturating_sub(1),
+        )
+    }
 
-        let mut sub_command = None;
-        let mut pin_protocol = None;
-
-        if payload.is_empty() {
-            return (sub_command, pin_protocol);
-        }
-
-        if let Ok(Value::Map(entries)) = from_reader(Cursor::new(payload)) {
-            for (key, value) in entries {
-                if let Value::Integer(key_int) = key {
-                    let key_val: i128 = key_int.into();
-                    match key_val {
-                        1 => {
-                            if let Value::Integer(sub_int) = value {
-                                let value: i128 = sub_int.into();
-                                if (0..=u8::MAX as i128).contains(&value) {
-                                    sub_command = Some(value as u8);
-                                }
-                            }
-                        }
-                        2 => {
-                            if let Value::Integer(pin_int) = value {
-                                let value: i128 = pin_int.into();
-                                if (0..=u8::MAX as i128).contains(&value) {
-                                    pin_protocol = Some(value as u8);
-                                }
-                            }
-                        }
-                        _ => {}
+    /// The subcommand and pinUvAuthProtocol of a request, for the request
+    /// log.  The two parameters sit under different keys per command:
+    /// authenticatorClientPIN has pinUvAuthProtocol (0x01) and subCommand
+    /// (0x02) (CTAP 2.3 §6.5.5), authenticatorCredentialManagement has
+    /// subCommand (0x01) and pinUvAuthProtocol (0x03) (§6.8).  Other commands
+    /// log neither.
+    fn subcommand_and_pin_protocol_for_logging(
+        ctap_cmd: u8,
+        payload: &[u8],
+    ) -> (Option<u8>, Option<u8>) {
+        let (sub_command_key, pin_protocol_key) = match ctap_cmd {
+            CTAP_CMD_CLIENT_PIN => (2, 1),
+            CTAP_CMD_CREDENTIAL_MANAGEMENT => (1, 3),
+            _ => return (None, None),
+        };
+        let Ok(Value::Map(entries)) = from_reader::<Value, _>(payload) else {
+            return (None, None);
+        };
+        let byte_at = |key: i128| {
+            entries
+                .iter()
+                .find_map(|(entry_key, value)| match (entry_key, value) {
+                    (Value::Integer(entry_key), Value::Integer(value))
+                        if i128::from(*entry_key) == key =>
+                    {
+                        u8::try_from(i128::from(*value)).ok()
                     }
-                }
-            }
-        }
-
-        (sub_command, pin_protocol)
+                    _ => None,
+                })
+        };
+        (byte_at(sub_command_key), byte_at(pin_protocol_key))
     }
 }
 
@@ -239,30 +252,9 @@ impl<'a, 'interrupt: 'a, const N: usize> App<'a, N> for CtapApp<'interrupt> {
                     _ => Err(CTAP1_ERR_INVALID_COMMAND),
                 };
 
-                let (message, status) = match result {
-                    Ok(bytes) => {
-                        let status = bytes.first().copied().unwrap_or(CTAP2_OK);
-                        (bytes, status)
-                    }
-                    Err(status) => (vec![status], status),
-                };
+                let message = result.unwrap_or_else(|status| vec![status]);
 
-                let (sub_command, pin_protocol) = match ctap_cmd {
-                    CTAP_CMD_CLIENT_PIN | CTAP_CMD_BIO_ENROLLMENT => {
-                        Self::extract_subcommand_and_pin_protocol_for_logging(payload)
-                    }
-                    _ => (None, None),
-                };
-
-                info!(
-                    "CTAP2 cmd=0x{ctap_cmd:02x} status=0x{:02x} sub={} pinProtocol={} req_bcnt={} resp_bcnt={} resp_payload_len={}",
-                    status,
-                    HexOption(sub_command),
-                    HexOption(pin_protocol),
-                    request.len(),
-                    message.len(),
-                    message.len(),
-                );
+                info!("{}", Self::request_log_line(request, &message));
 
                 response.clear();
                 response

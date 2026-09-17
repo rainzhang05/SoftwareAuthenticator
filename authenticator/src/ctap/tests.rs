@@ -1,6 +1,7 @@
 //! Unit tests for `ctap`, one module per area of the handler code.
 
 mod credential_management;
+mod dispatch;
 mod get_assertion;
 mod get_info;
 mod make_credential;
