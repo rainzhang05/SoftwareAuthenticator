@@ -613,6 +613,15 @@ impl<R: CryptoRng> CtaphidHost<R> {
         });
     }
 
+    /// Queue the packets of a message.
+    ///
+    /// A message holds at most [`MAX_MESSAGE_SIZE`] bytes: its length must
+    /// fit the two-byte BCNT of the initialization packet, and its
+    /// continuation packets the sequence numbers 0 to 0x7f, "the sequence
+    /// number of each continuation packet [...] incremented for each
+    /// continuation packet" with the high bit reserved for initialization
+    /// packets (CTAP 2.3 §11.2.4).  A longer payload, which only the app can
+    /// produce, is not sent: the channel gets ERR_OTHER instead.
     fn enqueue_message(&mut self, channel: u32, command: Command, payload: &[u8]) {
         debug!(
             "TX cid={channel:08x} cmd=0x{:02x} len={} preview={:02x?}",
@@ -620,18 +629,29 @@ impl<R: CryptoRng> CtaphidHost<R> {
             payload.len(),
             &payload[..payload.len().min(LOG_PREVIEW)]
         );
+        let Some(length) = u16::try_from(payload.len())
+            .ok()
+            .filter(|_| payload.len() <= MAX_MESSAGE_SIZE)
+        else {
+            log::error!(
+                "a {}-byte response to cid={channel:08x} exceeds the {MAX_MESSAGE_SIZE} bytes a message can hold",
+                payload.len()
+            );
+            self.enqueue_error(channel, ErrorCode::Other);
+            return;
+        };
         let mut frame = [0u8; PACKET_SIZE];
         frame[..4].copy_from_slice(&channel.to_be_bytes());
         frame[4] = command.into_u8() | 0x80;
-        frame[5..7].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        frame[5..7].copy_from_slice(&length.to_be_bytes());
         let (head, rest) = payload.split_at(payload.len().min(INIT_DATA));
         frame[7..7 + head.len()].copy_from_slice(head);
         self.pending.push_back(CtapHidFrame::new(frame));
 
-        for (sequence, chunk) in rest.chunks(CONT_DATA).enumerate() {
+        for (sequence, chunk) in (0..=0x7f_u8).zip(rest.chunks(CONT_DATA)) {
             let mut frame = [0u8; PACKET_SIZE];
             frame[..4].copy_from_slice(&channel.to_be_bytes());
-            frame[4] = sequence as u8;
+            frame[4] = sequence;
             frame[5..5 + chunk.len()].copy_from_slice(chunk);
             self.pending.push_back(CtapHidFrame::new(frame));
         }
@@ -947,6 +967,32 @@ mod tests {
             host.app_response(Err(error_from_app));
             assert_eq!(sent(&mut host), [error(FIRST, code)]);
         }
+    }
+
+    /// The largest response goes out in 129 packets; a longer one would need
+    /// a BCNT or sequence numbers CTAPHID does not have (CTAP 2.3 §11.2.4),
+    /// and fails with ERR_OTHER instead of being sent malformed.
+    #[test]
+    fn responses_longer_than_a_message_are_errors() {
+        let mut host = host();
+        let largest: Vec<u8> = (0..=255).cycle().take(MAX_MESSAGE_SIZE).collect();
+        start_cbor(&mut host, FIRST, &[0x04], 0);
+        host.app_response(Ok(largest.clone()));
+        assert_eq!(host.pending.len(), 129);
+        assert_eq!(sent(&mut host), [message(FIRST, Command::Cbor, &largest)]);
+
+        for length in [MAX_MESSAGE_SIZE + 1, usize::from(u16::MAX) + 1] {
+            start_cbor(&mut host, FIRST, &[0x04], 0);
+            host.app_response(Ok(vec![0; length]));
+            assert_eq!(
+                sent(&mut host),
+                [error(FIRST, ErrorCode::Other)],
+                "{length} bytes"
+            );
+        }
+        // The channel is free again.
+        send(&mut host, FIRST, Command::Ping, &[1], 0);
+        assert_eq!(sent(&mut host), [message(FIRST, Command::Ping, &[1])]);
     }
 
     #[test]
