@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Make sure fuzz/Cargo.lock resolves the fuzz crate before anything reads it.
 # Invoked by .github/workflows/fuzz.yml, with NIGHTLY naming the toolchain, and
-# by ci.yml, with TOOLCHAIN naming it (TOOLCHAIN wins when both are set).
+# by ci.yml and security.yml, with TOOLCHAIN naming it (TOOLCHAIN wins when both
+# are set).
 #
 # The fuzz crate is a workspace of its own whose path dependencies are the
 # crates of the main workspace, so a change to one of their manifests (a new

@@ -10,6 +10,16 @@ name: Security
 # targets are not shipped, but they build and run on CI runners and developer
 # machines, so a compromised or vulnerable crate there matters too.
 #
+# fuzz/Cargo.lock is handled as in fuzz.yml and ci.yml, by
+# .github/scripts/sync-fuzz-lockfile.sh: on pull requests it must be up to date
+# as committed, and cargo deny's --locked fails the check otherwise. Elsewhere
+# (pushes to main, the weekly scan) a lockfile left behind by a change to a
+# workspace manifest is brought up to date first, with a warning, and the
+# result is what gets checked: it is the graph fuzz.yml builds and fuzzes on
+# those events, and a stale lockfile is a chore to commit, not a supply-chain
+# finding that should turn Security red or stop the weekly advisory scan of
+# the fuzz crate from running at all.
+#
 # Neither job compiles anything - cargo-audit reads Cargo.lock directly and
 # cargo-deny only needs `cargo metadata` - so they need no system packages, no
 # build cache, and finish in well under a minute.
@@ -66,6 +76,12 @@ jobs:
       - name: Audit dependencies
         run: cargo audit
 
+      - name: Check fuzz/Cargo.lock
+        if: ${{ !cancelled() }}
+        env:
+          TOOLCHAIN: stable
+        run: .github/scripts/sync-fuzz-lockfile.sh
+
       - name: Audit the fuzz crate's dependencies
         if: ${{ !cancelled() }}
         run: cargo audit --file fuzz/Cargo.lock
@@ -100,8 +116,16 @@ jobs:
       - name: Check advisories, licenses, bans and sources
         run: cargo deny --locked check advisories bans licenses sources
 
+      - name: Check fuzz/Cargo.lock
+        if: ${{ !cancelled() }}
+        env:
+          TOOLCHAIN: stable
+        run: .github/scripts/sync-fuzz-lockfile.sh
+
       # The fuzz crate has no deny.toml of its own; cargo-deny finds the root
-      # one, so both graphs are held to the same policy.
+      # one, so both graphs are held to the same policy. --locked holds it to
+      # the lockfile as committed (on pull requests) or as the step above left
+      # it (elsewhere).
       - name: Check the fuzz crate
         if: ${{ !cancelled() }}
         run: cargo deny --manifest-path fuzz/Cargo.toml --locked check advisories bans licenses sources
