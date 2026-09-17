@@ -5,6 +5,11 @@ named by the E2E_HIDRAW environment variable (see .github/workflows/e2e.yml):
 
     E2E_HIDRAW=/dev/hidrawN python -m pytest tests/e2e
 
+Most tests use a key started with `--presence auto-approve`. The presence
+tests use further instances, named by E2E_NOTIFY_HIDRAW (`--presence notify`,
+with DBUS_SESSION_BUS_ADDRESS naming a bus the tests' fake notification server
+can own) and E2E_UNANSWERED_HIDRAW (`--presence unanswered`).
+
 They reset the authenticator (authenticatorReset) before each test, so they
 must never be pointed at a security key whose credentials matter.
 
@@ -77,12 +82,23 @@ def pytest_terminal_summary(terminalreporter):
         terminalreporter.write_line(f"{nodeid}\n    {observed}")
 
 
+def _hidraw_from(variable: str, key: str) -> str:
+    path = os.environ.get(variable)
+    if not path:
+        pytest.fail(f"{variable} must name the hidraw node of the {key}")
+    return path
+
+
 @pytest.fixture(scope="session")
 def hidraw_path() -> str:
-    path = os.environ.get("E2E_HIDRAW")
-    if not path:
-        pytest.fail("E2E_HIDRAW must name the virtual security key's hidraw node")
-    return path
+    """The key started with --presence auto-approve, used by most tests."""
+    return _hidraw_from("E2E_HIDRAW", "virtual security key started with --presence auto-approve")
+
+
+@pytest.fixture(scope="session")
+def notify_hidraw_path() -> str:
+    """The key started with --presence notify, on the session bus of the tests."""
+    return _hidraw_from("E2E_NOTIFY_HIDRAW", "virtual security key started with --presence notify")
 
 
 @pytest.fixture

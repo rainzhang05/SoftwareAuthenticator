@@ -45,9 +45,10 @@ jobs:
           toolchain: stable
       - name: Install system dependencies
         # fido2-tools: libfido2's fido2-token/fido2-cred/fido2-assert clients.
+        # dbus-daemon: the session bus the presence notification tests use.
         run: |
           sudo apt-get update
-          sudo apt-get install -y fido2-tools
+          sudo apt-get install -y fido2-tools dbus-daemon
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # Release mode, as the daemon ships.
@@ -66,7 +67,7 @@ jobs:
           user=$(id -un)
           sudo tee /etc/udev/rules.d/99-e2e-virtual-key.rules >/dev/null <<EOF
           KERNEL=="uhid", SUBSYSTEM=="misc", OWNER="$user", MODE="0600"
-          SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/0003:096E:0858.*", OWNER="$user", MODE="0600"
+          SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/0003:096E:085[89A].*", OWNER="$user", MODE="0600"
           EOF
           sudo udevadm control --reload-rules
           if ! sudo modprobe uhid; then
@@ -92,6 +93,23 @@ jobs:
           node=$(tests/e2e/daemon.sh start auto-approve 0858 --presence auto-approve --allow-late-reset)
           echo "E2E_HIDRAW=$node" >> "$GITHUB_ENV"
 
+      # A session bus of the tests' own, with no notification server on it
+      # until a test starts its fake one (tests/e2e/notifications.py).
+      - name: Start a D-Bus session bus
+        run: |
+          address="unix:path=$E2E_WORK/session-bus"
+          dbus-daemon --config-file=tests/e2e/session-bus.conf --address="$address" \
+            --fork --print-pid > "$E2E_WORK/session-bus.pid"
+          echo "DBUS_SESSION_BUS_ADDRESS=$address" >> "$GITHUB_ENV"
+
+      # Asks for presence with desktop notifications on that bus. A short
+      # presence timeout keeps the test of an unanswered prompt quick. No
+      # --allow-late-reset: with notifications a reset is accepted at any time.
+      - name: Attach the notify key
+        run: |
+          node=$(tests/e2e/daemon.sh start notify 0859 --presence notify --presence-timeout 3)
+          echo "E2E_NOTIFY_HIDRAW=$node" >> "$GITHUB_ENV"
+
       - name: libfido2 tests
         run: tests/e2e/libfido2.sh "$E2E_HIDRAW"
 
@@ -115,9 +133,18 @@ jobs:
           "$RUNNER_TEMP/e2e-venv/bin/python" -m pytest tests/e2e -v \
             --junitxml="$RUNNER_TEMP/e2e-diagnostics/pytest-junit.xml"
 
-      - name: Detach the virtual security key
+      - name: Detach the virtual security keys
         if: always() && env.E2E_WORK != ''
-        run: tests/e2e/daemon.sh stop auto-approve 0858
+        run: |
+          failed=0
+          tests/e2e/daemon.sh stop auto-approve 0858 || failed=1
+          if [ -n "${E2E_NOTIFY_HIDRAW:-}" ]; then
+            tests/e2e/daemon.sh stop notify 0859 || failed=1
+          fi
+          if [ -e "$E2E_WORK/session-bus.pid" ]; then
+            kill "$(cat "$E2E_WORK/session-bus.pid")" || true
+          fi
+          exit "$failed"
 
       - name: Collect diagnostics
         if: failure()

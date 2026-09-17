@@ -11,3 +11,6 @@ fido2==2.2.1
 # needs 48.0.0 or later, whose wheels are built with OpenSSL's implementation.
 cryptography==50.0.1
 pytest==9.1.1
+# jeepney: a pure-Python D-Bus implementation, for the fake desktop
+# notification server the presence tests answer prompts with.
+jeepney==0.9.0

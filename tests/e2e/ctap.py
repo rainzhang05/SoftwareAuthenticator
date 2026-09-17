@@ -181,6 +181,15 @@ def verify_attestation(response: Mapping[int, Any], cose_key: Mapping[int, Any],
         raise AssertionError(f"unexpected attestation format {fmt!r}")
 
 
+def make_credential_request(rp_id: str, user: Mapping[str, Any], alg: int = ES256) -> bytes:
+    """An encoded authenticatorMakeCredential request, for raw CTAPHID tests."""
+    from fido2 import cbor
+
+    return bytes([Ctap2.CMD.MAKE_CREDENTIAL]) + cbor.encode(
+        {1: os.urandom(32), 2: {"id": rp_id}, 3: dict(user), 4: [{"type": "public-key", "alg": alg}]}
+    )
+
+
 def make_credential(
     ctap: Ctap2,
     rp_id: str,
