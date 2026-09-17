@@ -38,8 +38,11 @@ SUBSYSTEM=="misc", KERNEL=="uhid", GROUP="plugdev", MODE="0660"
 # report descriptor, this one included (60-fido-id.rules, 70-uaccess.rules),
 # and give the user of the active local session access to it. This rule does
 # the same where that is missing, and keeps the node closed to everyone else:
-# the authenticator approves user presence by itself, so whoever can open the
-# node can use the credentials behind it.
+# whoever can open the node can send the authenticator any request. By default
+# (--presence notify) each request that needs user presence shows a desktop
+# notification the user has to approve, but with --presence auto-approve every
+# such request is approved by itself, so whoever can open the node can use the
+# credentials behind it without the user noticing.
 SUBSYSTEM=="hidraw", KERNEL=="hidraw*", DEVPATH=="/devices/virtual/misc/uhid/0003:1209:0001.*", \
   MODE="0600", TAG+="uaccess"
 
