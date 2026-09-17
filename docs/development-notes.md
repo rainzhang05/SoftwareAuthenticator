@@ -7,7 +7,8 @@ README covers installing and running it.
 
 Set up `/dev/uhid` access once, with the shipped udev rules (the comments in
 [`contrib/udev/70-pqkey.rules`](../contrib/udev/70-pqkey.rules) explain them),
-exactly as in step 2 of the README:
+exactly as in step 2 of the README's
+[Installation](../README.md#installation) section:
 
 ```bash
 sudo install -m 644 contrib/udev/70-pqkey.rules /etc/udev/rules.d/
@@ -33,19 +34,8 @@ asking and is only for tests.
 
 ## Checks CI runs
 
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --document-private-items
-cargo hack check --workspace --locked --all-targets --feature-powerset
-cargo deny --locked check
-cargo deny --manifest-path fuzz/Cargo.toml --locked check
-cargo audit && cargo audit --file fuzz/Cargo.lock
-```
-
-The fuzz targets need nightly: `cargo +nightly fuzz run <target>` from the
-repository root (see `.github/workflows/fuzz.yml`).
+The full list of checks, and how to run the end-to-end tests and the fuzz
+targets, is in [CONTRIBUTING.md](../CONTRIBUTING.md#checks).
 
 ## Confirm the virtual HID device is visible to userspace
 
