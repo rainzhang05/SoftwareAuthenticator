@@ -28,3 +28,11 @@ p256 = "0.14"
 rand_core = "0.10"
 sha2 = "0.11"
 zeroize = "1"
+
+# Lints every member inherits with `[lints] workspace = true`. Crate-specific
+# ones (`forbid(unsafe_code)`, `missing_docs`, safety comments on `unsafe`)
+# are attributes at the top of each crate root.
+[workspace.lints.rust]
+# `std::fmt::Result` where `fmt::Result` is already in scope: noise in review
+# and a sign of imports that drifted.
+unused_qualifications = "warn"

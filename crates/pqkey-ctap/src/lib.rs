@@ -565,8 +565,7 @@ mod tests {
             0xA3, 0x01, 0x07, 0x03, 0x38, 0x2F, 0x20, 0x44, 0xDE, 0xAD, 0xBE, 0xEF,
         ];
         assert_eq!(cose, expected);
-        let decoded: ciborium::value::Value =
-            from_reader(cose.as_slice()).expect("valid COSE public key");
+        let decoded: Value = from_reader(cose.as_slice()).expect("valid COSE public key");
         assert_eq!(
             decoded,
             cose_akp_key_map(CoseAlg::MLDSA44 as i32, &pk_bytes)
@@ -626,9 +625,8 @@ mod tests {
             try_create_credential(CoseAlg::ES256).expect("create ES256 credential");
         assert_eq!(secret_key.secret_bytes().len(), 32);
 
-        let value: ciborium::value::Value =
-            from_reader(cose_key.as_slice()).expect("decode ES256 COSE key");
-        let ciborium::value::Value::Map(entries) = value else {
+        let value: Value = from_reader(cose_key.as_slice()).expect("decode ES256 COSE key");
+        let Value::Map(entries) = value else {
             panic!("COSE key must be a map");
         };
 
@@ -639,19 +637,19 @@ mod tests {
         let mut y_bytes = None;
 
         for (key, val) in entries {
-            if let ciborium::value::Value::Integer(label) = key {
+            if let Value::Integer(label) = key {
                 let label_value: i128 = label.into();
                 match label_value {
                     1 => kty = Some(val),
                     3 => alg = Some(val),
                     -1 => crv = Some(val),
                     -2 => {
-                        if let ciborium::value::Value::Bytes(bytes) = val {
+                        if let Value::Bytes(bytes) = val {
                             x_bytes = Some(bytes);
                         }
                     }
                     -3 => {
-                        if let ciborium::value::Value::Bytes(bytes) = val {
+                        if let Value::Bytes(bytes) = val {
                             y_bytes = Some(bytes);
                         }
                     }
@@ -660,23 +658,13 @@ mod tests {
             }
         }
 
-        assert_eq!(
-            kty,
-            Some(ciborium::value::Value::Integer(Integer::from(2))),
-            "kty present"
-        );
+        assert_eq!(kty, Some(Value::Integer(Integer::from(2))), "kty present");
         assert_eq!(
             alg,
-            Some(ciborium::value::Value::Integer(Integer::from(
-                CoseAlg::ES256 as i32
-            ))),
+            Some(Value::Integer(Integer::from(CoseAlg::ES256 as i32))),
             "alg present"
         );
-        assert_eq!(
-            crv,
-            Some(ciborium::value::Value::Integer(Integer::from(1))),
-            "crv present"
-        );
+        assert_eq!(crv, Some(Value::Integer(Integer::from(1))), "crv present");
 
         let x_bytes = x_bytes.expect("x coordinate present");
         assert_eq!(x_bytes.len(), 32);
@@ -693,11 +681,11 @@ mod tests {
     }
 
     fn public_key_from_cose(cbor: &[u8]) -> Vec<u8> {
-        let value: ciborium::value::Value = ciborium::de::from_reader(cbor).expect("valid CBOR");
-        if let ciborium::value::Value::Map(map) = value {
+        let value: Value = from_reader(cbor).expect("valid CBOR");
+        if let Value::Map(map) = value {
             for (k, v) in map {
-                if k == ciborium::value::Value::Integer(Integer::from(COSE_KEY_PARAM_AKP_KEY))
-                    && let ciborium::value::Value::Bytes(bytes) = v
+                if k == Value::Integer(Integer::from(COSE_KEY_PARAM_AKP_KEY))
+                    && let Value::Bytes(bytes) = v
                 {
                     return bytes;
                 }

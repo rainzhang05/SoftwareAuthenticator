@@ -9,6 +9,9 @@ authors.workspace = true
 repository.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 ciborium.workspace = true
 # `zeroize` wipes key schedules and HMAC/SHA-256 state on drop.

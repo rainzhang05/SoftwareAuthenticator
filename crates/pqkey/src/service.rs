@@ -527,7 +527,7 @@ mod tests {
 
         /// Send a single-packet CTAPHID request.
         fn send(&mut self, cid: u32, command: u8, payload: &[u8]) {
-            let mut frame = [0u8; uhid::CTAPHID_FRAME_LEN];
+            let mut frame = [0u8; CTAPHID_FRAME_LEN];
             frame[..4].copy_from_slice(&cid.to_be_bytes());
             frame[4] = command;
             frame[5..7].copy_from_slice(&(payload.len() as u16).to_be_bytes());

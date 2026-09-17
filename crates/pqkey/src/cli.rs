@@ -606,8 +606,8 @@ fn confirm(prompt: &str) -> io::Result<bool> {
     use std::io::{BufRead, BufReader};
     eprint!("{prompt} [y/N] ");
     use std::io::Write;
-    std::io::stderr().flush().ok();
-    let stdin = std::io::stdin();
+    io::stderr().flush().ok();
+    let stdin = io::stdin();
     let mut line = String::new();
     BufReader::new(stdin.lock()).read_line(&mut line)?;
     Ok(matches!(line.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))

@@ -9,6 +9,9 @@ authors.workspace = true
 repository.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 # The CTAPHID app interface the CTAP engine implements. The transport frames
 # CTAPHID itself and runs the app on a worker thread.

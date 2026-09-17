@@ -10,7 +10,6 @@ use std::time::Duration;
 
 const DEVICE_PATH: &str = "/dev/uhid";
 
-#[cfg(test)]
 pub(crate) use raw::{UHID_EVENT_SIZE, UHID_EVENT_TYPE_DESTROY};
 
 pub const CTAPHID_FRAME_LEN: usize = 64;
@@ -300,7 +299,7 @@ impl Drop for UhidInner {
     fn drop(&mut self) {
         // Closing the descriptor would destroy the device as well; saying so
         // explicitly removes it before anything else is torn down.
-        let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_DESTROY);
+        let mut event = raw::uhid_event::new(UHID_EVENT_TYPE_DESTROY);
         let _ = write_event_blocking(self.fd.as_raw_fd(), &mut event);
     }
 }
@@ -344,7 +343,7 @@ fn copy_str_to_array(value: &str, dest: &mut [u8]) {
 fn write_event_blocking(fd: RawFd, event: &mut raw::uhid_event) -> io::Result<()> {
     loop {
         match write(fd, event_as_bytes(event)) {
-            Ok(n) if n == raw::UHID_EVENT_SIZE => return Ok(()),
+            Ok(n) if n == UHID_EVENT_SIZE => return Ok(()),
             Ok(_) => return Err(io::Error::other("short write")),
             Err(Errno::EINTR) => continue,
             Err(Errno::EAGAIN) => {
@@ -357,7 +356,7 @@ fn write_event_blocking(fd: RawFd, event: &mut raw::uhid_event) -> io::Result<()
 }
 
 fn read_event_nonblocking(fd: RawFd) -> io::Result<raw::uhid_event> {
-    let mut buffer = [0u8; raw::UHID_EVENT_SIZE];
+    let mut buffer = [0u8; UHID_EVENT_SIZE];
     let mut offset = 0;
     while offset < buffer.len() {
         match read(fd, &mut buffer[offset..]) {
@@ -375,7 +374,7 @@ fn event_as_bytes(event: &raw::uhid_event) -> &[u8] {
     unsafe {
         std::slice::from_raw_parts(
             (event as *const raw::uhid_event) as *const u8,
-            raw::UHID_EVENT_SIZE,
+            UHID_EVENT_SIZE,
         )
     }
 }
@@ -431,7 +430,7 @@ mod raw {
     pub const UHID_REPORT_TYPE_OUTPUT: u8 = 1;
     pub const UHID_REPORT_TYPE_INPUT: u8 = 2;
 
-    pub const UHID_EVENT_SIZE: usize = core::mem::size_of::<uhid_event>();
+    pub const UHID_EVENT_SIZE: usize = size_of::<uhid_event>();
 
     #[repr(C, packed)]
     #[derive(Clone, Copy)]
@@ -690,7 +689,7 @@ mod tests {
         write_event_blocking(write_fd, &mut event).expect("write_event");
         close(write_fd).ok();
 
-        let mut buffer = [0u8; raw::UHID_EVENT_SIZE];
+        let mut buffer = [0u8; UHID_EVENT_SIZE];
         let mut offset = 0;
         while offset < buffer.len() {
             let read_bytes = read(read_fd, &mut buffer[offset..]).expect("read");
@@ -700,7 +699,7 @@ mod tests {
             offset += read_bytes;
         }
         close(read_fd).ok();
-        assert_eq!(offset, raw::UHID_EVENT_SIZE);
+        assert_eq!(offset, UHID_EVENT_SIZE);
 
         let data_offset = unsafe {
             let base = (&event as *const raw::uhid_event).cast::<u8>();

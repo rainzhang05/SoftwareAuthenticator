@@ -9,6 +9,9 @@ authors.workspace = true
 repository.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 # RustCrypto's ML-DSA.  0.1.0 and later include the fixes for RUSTSEC-2025-0144
 # (timing side-channel in Decompose) and GHSA-5x2r-hc65-25f9 (repeated hint

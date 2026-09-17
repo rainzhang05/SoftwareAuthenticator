@@ -374,7 +374,7 @@ pub(crate) mod tests {
                         nix::libc::SOL_SOCKET,
                         option,
                         (&size as *const nix::libc::c_int).cast(),
-                        std::mem::size_of::<nix::libc::c_int>() as nix::libc::socklen_t,
+                        size_of::<nix::libc::c_int>() as nix::libc::socklen_t,
                     )
                 };
                 assert_eq!(status, 0, "{}", io::Error::last_os_error());

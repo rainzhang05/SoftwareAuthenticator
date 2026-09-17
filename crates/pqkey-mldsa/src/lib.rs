@@ -62,7 +62,7 @@
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-#![warn(missing_debug_implementations, unused_qualifications)]
+#![warn(missing_debug_implementations)]
 // With no parameter set compiled in, every entry point reduces to its
 // `InvalidParameterSet` arm and the backend helpers are unused.
 #![cfg_attr(
