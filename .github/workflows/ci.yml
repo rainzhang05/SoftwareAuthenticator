@@ -60,7 +60,7 @@ jobs:
     env:
       # ------------------------------------------------------------------
       # THE CLIPPY GATE. The workspace still carries ~70 clippy findings
-      # (mostly authenticator and pc-hid-runner), so warnings are surfaced in
+      # (mostly pqkey-ctap and pqkey), so warnings are surfaced in
       # the log but do not fail the build yet.
       #
       # To make clippy a hard gate once those are cleaned up, change this one
@@ -79,8 +79,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo clippy --workspace --all-targets --locked -- ${{ env.CLIPPY_FLAGS }}
 
-  # The main correctness gate: the full workspace, including pc-hid-runner,
-  # which compiles nowhere else.
+  # The main correctness gate: the full workspace on Linux, the platform where
+  # the pqkey daemon actually runs.
   test:
     name: test
     runs-on: ubuntu-latest
@@ -101,7 +101,7 @@ jobs:
       - name: Doctests
         run: cargo test --workspace --locked --doc
 
-      # Every feature combination of every crate, not just "all on". trussed-mldsa
+      # Every feature combination of every crate, not just "all on". pqkey-mldsa
       # dispatches per parameter set behind cfg(feature), so a build with one set
       # compiled out is exactly where a silent break would otherwise hide until a
       # downstream user tried it.
@@ -178,7 +178,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo doc --workspace --locked --no-deps --all-features
 
-  # pc-hid-runner ships as a release-mode daemon. Debug and release differ in
+  # pqkey ships as a release-mode daemon. Debug and release differ in
   # ways that matter here (overflow checks, debug_assert!, LTO/codegen), and
   # nothing else in this pipeline ever links a release binary.
   build-release:
@@ -195,7 +195,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo build --workspace --locked --release
 
-  # Coverage. Reported, never enforced: parts of pc-hid-runner (the uhid device
+  # Coverage. Reported, never enforced: parts of pqkey (the uhid device
   # and the CLI) cannot be exercised by unit tests, so any threshold would either
   # be meaningless or permanently red. The
   # point for now is to make the number visible on every run so the trend is
