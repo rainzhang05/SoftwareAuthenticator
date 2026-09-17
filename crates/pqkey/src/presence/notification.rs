@@ -11,6 +11,10 @@
 //!
 //! It fails closed: if no notification can be shown with buttons to answer
 //! it, the request is denied, never approved.
+//!
+//! Logs at info level and above name only the kind of request. The relying
+//! party and the user names come from whichever process wrote to the key, and
+//! nothing has verified the user yet, so they are logged at debug level only.
 
 use std::{
     fmt,
@@ -129,6 +133,7 @@ impl<S: NotificationServer> NotificationPresence<S> {
         }
         let markup = capabilities.iter().any(|c| c == "body-markup");
         let notification = notification_for(request, markup);
+        log::debug!("notification prompt: {}", prompt_text(request));
         if cancellation.is_cancelled() {
             return PresenceOutcome::Cancelled;
         }
@@ -141,7 +146,7 @@ impl<S: NotificationServer> NotificationPresence<S> {
         };
         log::info!(
             "asking the user with a desktop notification: {}",
-            prompt_text(request)
+            notification.summary
         );
 
         let outcome = loop {
@@ -215,10 +220,8 @@ enum Unavailable {
 impl Unavailable {
     fn message(&self, request: &PresenceRequest<'_>) -> String {
         const OPT_OUT: &str = "or, for tests only, start the daemon with --presence auto-approve, which approves everything without asking";
-        let denied = format!(
-            "denied without asking ({}): ",
-            prompt_text(request).trim_end_matches('?')
-        );
+        // The summary, unlike the prompt, holds nothing from the request.
+        let denied = format!("denied without asking ({}): ", summary(request.operation));
         match self {
             Unavailable::Connect(ConnectError::NoSessionBus(err)) => format!(
                 "{denied}cannot ask for user presence because there is no D-Bus session bus ({err}). \
@@ -250,19 +253,24 @@ impl Unavailable {
 /// The notification for `request`; `markup` if the server interprets markup
 /// in the body.
 pub fn notification_for(request: &PresenceRequest<'_>, markup: bool) -> Notification {
-    let summary = match request.operation {
+    let text = prompt_text(request);
+    Notification {
+        summary: summary(request.operation),
+        body: if markup { escape_markup(&text) } else { text },
+        timeout: request.timeout,
+    }
+}
+
+/// The notification title for `operation`: fixed text, nothing from the
+/// request.
+fn summary(operation: PresenceOperation) -> &'static str {
+    match operation {
         PresenceOperation::Register => "Create a passkey",
         PresenceOperation::Authenticate => "Sign in with a passkey",
         PresenceOperation::Reset => "Reset the security key",
         PresenceOperation::CredentialManagement => "Manage passkeys",
         PresenceOperation::Select => "Select a security key",
         _ => "Security key request",
-    };
-    let text = prompt_text(request);
-    Notification {
-        summary,
-        body: if markup { escape_markup(&text) } else { text },
-        timeout: request.timeout,
     }
 }
 
@@ -522,6 +530,39 @@ mod tests {
                 _ => None,
             })
             .expect("nothing was shown")
+    }
+
+    /// The relying party and user names come from an unverified request;
+    /// only debug logs may carry them.
+    #[test]
+    fn only_debug_logs_name_the_relying_party_or_the_user() {
+        use crate::test_support::logs;
+        use log::Level;
+
+        logs::install();
+        let request = PresenceRequest {
+            rp_id: Some("logged-rp.example"),
+            user_name: Some("logged-user"),
+            user_display_name: Some("Logged Display Name"),
+            ..register()
+        };
+        let answered = FakeServer::working().event(NotificationEvent::ActionInvoked {
+            id: 7,
+            key: DENY_ACTION.into(),
+        });
+        assert_eq!(confirm(&answered, &request), PresenceOutcome::Denied);
+        let unreachable = FakeServer::default();
+        unreachable.script().connect = Some(Err(ConnectError::Failed("broken".into())));
+        assert_eq!(confirm(&unreachable, &request), PresenceOutcome::Denied);
+
+        for needle in ["logged-rp.example", "logged-user", "Logged Display Name"] {
+            let logged = logs::containing(needle);
+            assert!(!logged.is_empty(), "the prompt is logged at debug level");
+            assert!(
+                logged.iter().all(|(level, _)| *level >= Level::Debug),
+                "{needle} logged above debug level: {logged:?}"
+            );
+        }
     }
 
     #[test]

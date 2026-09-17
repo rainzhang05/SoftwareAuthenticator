@@ -43,3 +43,51 @@ impl Drop for TempDir {
         let _ = fs::remove_dir_all(&self.path);
     }
 }
+
+/// Captures everything logged anywhere in the unit test binary.
+///
+/// The logger is process-wide and tests run in parallel, so callers look for
+/// messages naming something unique to their own test.
+pub mod logs {
+    use std::sync::{Mutex, Once};
+
+    use log::{Level, LevelFilter, Log, Metadata, Record};
+
+    static MESSAGES: Mutex<Vec<(Level, String)>> = Mutex::new(Vec::new());
+    static INSTALL: Once = Once::new();
+
+    struct Capture;
+
+    impl Log for Capture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &Record<'_>) {
+            MESSAGES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((record.level(), record.args().to_string()));
+        }
+
+        fn flush(&self) {}
+    }
+
+    pub fn install() {
+        INSTALL.call_once(|| {
+            log::set_logger(&Capture).expect("no other logger is installed");
+            log::set_max_level(LevelFilter::Trace);
+        });
+    }
+
+    /// The messages logged so far that contain `needle`, with their level.
+    pub fn containing(needle: &str) -> Vec<(Level, String)> {
+        MESSAGES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|(_, message)| message.contains(needle))
+            .cloned()
+            .collect()
+    }
+}
