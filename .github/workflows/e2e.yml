@@ -12,7 +12,7 @@ name: E2E
 
 on:
   push:
-    branches: [main, ci/e2e-bringup]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
