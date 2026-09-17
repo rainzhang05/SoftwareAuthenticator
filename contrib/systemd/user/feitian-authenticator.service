@@ -20,6 +20,28 @@
 #        systemctl --user daemon-reload
 #        systemctl --user enable --now feitian-authenticator.service
 #
+# User presence: every registration, sign-in and reset shows a desktop
+# notification with Approve and Deny buttons, sent to the notification server
+# of your desktop over the D-Bus session bus. The service needs nothing extra
+# for that:
+#   - It finds the session bus through DBUS_SESSION_BUS_ADDRESS, which the user
+#     service manager passes to its services where the session bus is the
+#     per-user bus at $XDG_RUNTIME_DIR/bus (dbus-user-session or dbus-broker,
+#     the default on current distributions), and without it at
+#     $XDG_RUNTIME_DIR/bus itself. Where the desktop instead starts a bus of
+#     its own per login (dbus-launch), import its address into the user
+#     manager from the desktop session, before a request comes in:
+#        systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS
+#   - It connects anew for each request, so it may start before the desktop
+#     does and keeps working across logging out and in again.
+#   - The notification server must support action buttons, as GNOME Shell,
+#     KDE Plasma and dunst do.
+# Without a session bus or a suitable notification server every request is
+# denied, never approved, and the log says why:
+#   journalctl --user -u feitian-authenticator
+# Do not add --presence auto-approve here: it approves everything without
+# asking, so any program running as you could use your passkeys unnoticed.
+#
 # While the service runs, "pc-hid-runner status" reports it, and "pc-hid-runner
 # pin ..." and "pc-hid-runner reset" refuse to touch its state. Stop it first
 # with "systemctl --user stop feitian-authenticator".
@@ -40,7 +62,8 @@ RestartSec=5s
 # Sandboxing. A user service manager has no privileges, so this uses only
 # settings enforced with prctl() and seccomp, which need none:
 NoNewPrivileges=yes
-# No sockets other than AF_UNIX, which NSS may use to look up group names.
+# No sockets other than AF_UNIX, which the D-Bus session bus uses and NSS may
+# use to look up group names.
 RestrictAddressFamilies=AF_UNIX
 RestrictNamespaces=yes
 RestrictRealtime=yes
