@@ -271,8 +271,7 @@ pub fn notification_for(request: &PresenceRequest<'_>, markup: bool) -> Notifica
 pub fn prompt_text(request: &PresenceRequest<'_>) -> String {
     let rp = request
         .rp_id
-        .and_then(|rp| sanitise(rp, MAX_RP_ID_CHARS, Keep::End))
-        .unwrap_or_else(|| "an unnamed website".to_owned());
+        .and_then(|rp| sanitise(rp, MAX_RP_ID_CHARS, Keep::End));
     let name = request
         .user_name
         .and_then(|name| sanitise(name, MAX_USER_CHARS, Keep::Start));
@@ -285,11 +284,18 @@ pub fn prompt_text(request: &PresenceRequest<'_>) -> String {
         (None, display) => display,
     };
     let as_user = user.map(|user| format!(" as {user}")).unwrap_or_default();
-    match request.operation {
-        PresenceOperation::Register => format!("Create a passkey for {rp}{as_user}?"),
-        PresenceOperation::Authenticate => format!("Sign in to {rp}{as_user}?"),
-        PresenceOperation::Reset => "Reset the security key? This deletes all passkeys.".to_owned(),
-        PresenceOperation::CredentialManagement => {
+    match (request.operation, rp) {
+        (PresenceOperation::Register, Some(rp)) => format!("Create a passkey for {rp}{as_user}?"),
+        (PresenceOperation::Authenticate, Some(rp)) => format!("Sign in to {rp}{as_user}?"),
+        // The engine names no relying party when the platform only asks the
+        // user to pick this authenticator among several.
+        (PresenceOperation::Register | PresenceOperation::Authenticate, None) => {
+            "Use this security key?".to_owned()
+        }
+        (PresenceOperation::Reset, _) => {
+            "Reset the security key? This deletes all passkeys.".to_owned()
+        }
+        (PresenceOperation::CredentialManagement, _) => {
             "Allow access to the passkeys stored on the security key?".to_owned()
         }
         _ => "Allow a request to the security key?".to_owned(),
@@ -715,10 +721,7 @@ mod tests {
             text(CredentialManagement, None, None),
             "Allow access to the passkeys stored on the security key?"
         );
-        assert_eq!(
-            text(Authenticate, None, None),
-            "Sign in to an unnamed website?"
-        );
+        assert_eq!(text(Authenticate, None, None), "Use this security key?");
         assert_eq!(
             prompt_text(&PresenceRequest {
                 rp_id: Some("example.com"),
@@ -760,7 +763,7 @@ mod tests {
                 Some("\u{2066}\u{FEFF}\t"),
                 Some("\u{1b}")
             ),
-            "Create a passkey for an unnamed website?"
+            "Use this security key?"
         );
     }
 
