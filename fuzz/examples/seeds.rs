@@ -617,7 +617,7 @@ fn searched(
             seeds.push((new, input));
         }
     }
-    seeds.sort_by(|a, b| b.0.cmp(&a.0));
+    seeds.sort_by_key(|seed| std::cmp::Reverse(seed.0));
     seeds.truncate(max);
     let seeds: Vec<Vec<u8>> = seeds.into_iter().map(|(_, input)| input).collect();
     println!("{}: {} command/status pairs", dir.display(), seen.len());

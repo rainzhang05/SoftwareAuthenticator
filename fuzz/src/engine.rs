@@ -98,7 +98,7 @@ pub struct Engine {
     presence: FuzzPresence,
     response: Box<Bytes<MESSAGE_SIZE>>,
     /// The command byte and response status of every request so far.
-    trace: Vec<(u8, u8)>,
+    pub(crate) trace: Vec<(u8, u8)>,
 }
 
 impl Engine {

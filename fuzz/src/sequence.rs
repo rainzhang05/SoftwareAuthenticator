@@ -74,11 +74,18 @@ enum Op {
     MakeCredential {
         auth: Auth,
         rp: u8,
+        /// Ask for a discoverable credential rather than generating options.
+        rk: bool,
+        /// One supported algorithm, by index, rather than generated
+        /// pubKeyCredParams.
+        alg: Option<u8>,
     },
     GetAssertion {
         auth: Auth,
         rp: u8,
         hmac_secret: Option<(bool, bool)>,
+        /// Leave the allowList out, so every discoverable credential counts.
+        discoverable: bool,
     },
     GetNextAssertion,
     CredentialManagement {
@@ -114,6 +121,26 @@ fn protocol(v2: bool) -> ClassicPinProtocol {
         ClassicPinProtocol::V2
     } else {
         ClassicPinProtocol::V1
+    }
+}
+
+/// Mostly the first two RP IDs, so credentials and assertions meet.
+fn rp_id(choice: u8) -> &'static str {
+    let ids = requests::RP_IDS;
+    if choice < 0xC0 {
+        ids[usize::from(choice) % 2]
+    } else {
+        ids[usize::from(choice) % ids.len()]
+    }
+}
+
+/// Mostly the permission sets a platform asks for, sometimes any.
+fn permission_set(choice: u8) -> u8 {
+    const SETS: [u8; 6] = [0x04, 0x01, 0x02, 0x03, 0x05, 0x07];
+    if choice < 0xC0 {
+        SETS[usize::from(choice) % SETS.len()]
+    } else {
+        choice & 0x7f
     }
 }
 
@@ -444,10 +471,9 @@ impl Platform {
                     ),
                 ];
                 if !legacy {
-                    entries.push((int(9), int(i64::from(permissions & 0x7f))));
+                    entries.push((int(9), int(i64::from(permission_set(permissions)))));
                     if let Some(rp) = rp {
-                        let rp_id = requests::RP_IDS[usize::from(rp) % requests::RP_IDS.len()];
-                        entries.push((int(10), text(rp_id)));
+                        entries.push((int(10), text(rp_id(rp))));
                     }
                 }
                 let response = self.call(&command(CTAP_CMD_CLIENT_PIN, &Value::Map(entries)));
@@ -470,8 +496,8 @@ impl Platform {
                     self.token = Some((protocol, token));
                 }
             }
-            Op::MakeCredential { auth, rp } => {
-                let rp_id = requests::RP_IDS[usize::from(rp) % requests::RP_IDS.len()];
+            Op::MakeCredential { auth, rp, rk, alg } => {
+                let rp_id = rp_id(rp);
                 let hash: [u8; 32] = u.arbitrary()?;
                 let (param, protocol) = self.pin_uv_auth(auth, &hash);
                 let request = requests::make_credential(
@@ -483,6 +509,15 @@ impl Platform {
                         pin_uv_auth_protocol: protocol,
                         known_credentials: self.known_ids(),
                         hmac_secret: None,
+                        options: rk.then(|| Value::Map(vec![(text("rk"), Value::Bool(true))])),
+                        no_allow_list: false,
+                        credential_parameters: alg.map(|alg| {
+                            let alg = [-7, -48, -49, -50][usize::from(alg) % 4];
+                            Value::Array(vec![Value::Map(vec![
+                                (text("alg"), int(alg)),
+                                (text("type"), text("public-key")),
+                            ])])
+                        }),
                     },
                 )?;
                 self.call(&request);
@@ -491,6 +526,7 @@ impl Platform {
                 auth,
                 rp,
                 hmac_secret,
+                discoverable,
             } => {
                 let mut salts = None;
                 let hmac_secret = match hmac_secret {
@@ -513,7 +549,7 @@ impl Platform {
                     }
                     None => None,
                 };
-                let rp_id = requests::RP_IDS[usize::from(rp) % requests::RP_IDS.len()];
+                let rp_id = rp_id(rp);
                 let hash: [u8; 32] = u.arbitrary()?;
                 let (param, protocol) = self.pin_uv_auth(auth, &hash);
                 let request = requests::get_assertion(
@@ -525,6 +561,9 @@ impl Platform {
                         pin_uv_auth_protocol: protocol,
                         known_credentials: self.known_ids(),
                         hmac_secret,
+                        options: None,
+                        no_allow_list: discoverable,
+                        credential_parameters: None,
                     },
                 )?;
                 let response = self.call(&request);
@@ -632,4 +671,53 @@ pub fn run_traced(data: &[u8]) -> Vec<(u8, u8)> {
         }
     }
     platform.engine.into_trace()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The platform side of the harness is right: it sets a PIN, gets a
+    /// token with the credential management permission and authenticates
+    /// a credential management request with it.
+    #[test]
+    fn authenticates_credential_management() {
+        let mut p = Platform {
+            engine: Engine::new(7),
+            pin: None,
+            token: None,
+            credentials: Vec::new(),
+            assertion_rp: None,
+        };
+        let filler = [0x0Fu8; 1 << 12];
+        let mut u = Unstructured::new(&filler);
+        let ops = [
+            Op::SetPin {
+                v2: true,
+                pin: 0,
+                bad_auth: false,
+                pad_to: 2,
+            },
+            Op::GetToken {
+                v2: false,
+                right_pin: true,
+                legacy: false,
+                permissions: 0,
+                rp: None,
+            },
+            Op::CredentialManagement {
+                auth: Auth::Token,
+                subcommand: 1,
+            },
+        ];
+        for op in ops {
+            p.step(op, &mut u).unwrap();
+        }
+        let trace = p.engine.into_trace();
+        assert_eq!(
+            trace.last(),
+            Some(&(CTAP_CMD_CREDENTIAL_MANAGEMENT, CTAP2_OK)),
+            "{trace:02x?}"
+        );
+    }
 }

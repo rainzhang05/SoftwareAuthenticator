@@ -183,6 +183,12 @@ pub struct Overrides {
     pub pin_uv_auth_protocol: Option<Option<Value>>,
     pub known_credentials: Vec<Vec<u8>>,
     pub hmac_secret: Option<Value>,
+    /// The options map, instead of a generated one.
+    pub options: Option<Value>,
+    /// Leave the allowList out.
+    pub no_allow_list: bool,
+    /// pubKeyCredParams, instead of generated ones.
+    pub credential_parameters: Option<Value>,
 }
 
 /// authenticatorMakeCredential (CTAP 2.3 §6.1), command byte included.
@@ -228,7 +234,10 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
             ],
         )
     })?;
-    let params = field(u, credential_parameters)?;
+    let params = match overrides.credential_parameters {
+        Some(params) => Some(params),
+        None => field(u, credential_parameters)?,
+    };
     let known = overrides.known_credentials;
     let exclude_list = optional(u, |u| descriptor_list(u, &known))?;
     let extensions = optional(u, |u| {
@@ -242,7 +251,10 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
             ],
         )
     })?;
-    let options = optional(u, options)?;
+    let options = match overrides.options {
+        Some(options) => Some(options),
+        None => optional(u, options)?,
+    };
     let (param, protocol) = pin_uv_auth(
         u,
         overrides.pin_uv_auth_param,
@@ -286,7 +298,11 @@ pub fn get_assertion(u: &mut Unstructured<'_>, overrides: Overrides) -> Result<V
         None => field(u, client_data_hash)?,
     };
     let known = overrides.known_credentials;
-    let allow_list = optional(u, |u| descriptor_list(u, &known))?;
+    let allow_list = if overrides.no_allow_list {
+        None
+    } else {
+        optional(u, |u| descriptor_list(u, &known))?
+    };
     let extensions = match overrides.hmac_secret {
         Some(hmac_secret) => Some(Value::Map(vec![(text("hmac-secret"), hmac_secret)])),
         None => optional(u, |u| {
@@ -308,7 +324,10 @@ pub fn get_assertion(u: &mut Unstructured<'_>, overrides: Overrides) -> Result<V
             map(u, vec![(text("hmac-secret"), hmac_secret)])
         })?,
     };
-    let options = optional(u, options)?;
+    let options = match overrides.options {
+        Some(options) => Some(options),
+        None => optional(u, options)?,
+    };
     let (param, protocol) = pin_uv_auth(
         u,
         overrides.pin_uv_auth_param,
