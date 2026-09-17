@@ -1,7 +1,7 @@
-# udev rules for the Feitian ML-DSA software authenticator (pc-hid-runner).
+# udev rules for the Feitian ML-DSA software authenticator (pqkey).
 #
 # Install with:
-#   sudo install -m 644 70-feitian-authenticator.rules /etc/udev/rules.d/
+#   sudo install -m 644 70-pqkey.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger
 # and load the uhid module at every boot, so the first rule applies before
@@ -11,9 +11,9 @@
 # The file name must sort before 73-seat-late.rules, which is where systemd
 # acts on the "uaccess" tag set below.
 
-ACTION=="remove", GOTO="feitian_authenticator_end"
+ACTION=="remove", GOTO="pqkey_end"
 
-# /dev/uhid, which pc-hid-runner opens to create the virtual security key.
+# /dev/uhid, which pqkey opens to create the virtual security key.
 # Only root can open it by default. Anyone who can open it can create any
 # kind of HID device, keyboards included, and so type into whichever session
 # is active: only add users you would trust with that to the group. The group
@@ -29,7 +29,7 @@ SUBSYSTEM=="misc", KERNEL=="uhid", GROUP="plugdev", MODE="0660"
 # misc device its parent instead, which gives the node a path like
 #   /devices/virtual/misc/uhid/0003:096E:0858.0004/hidraw/hidraw3
 # where the numbers are the bus (0003, USB), the vendor and product IDs in
-# upper-case hex, and an instance counter. 096E:0858 are pc-hid-runner's
+# upper-case hex, and an instance counter. 096E:0858 are pqkey's
 # defaults; change the pattern if you pass --vendor-id or --product-id. Real
 # USB security keys never match, even with the same IDs.
 #
@@ -42,4 +42,4 @@ SUBSYSTEM=="misc", KERNEL=="uhid", GROUP="plugdev", MODE="0660"
 SUBSYSTEM=="hidraw", KERNEL=="hidraw*", DEVPATH=="/devices/virtual/misc/uhid/0003:096E:0858.*", \
   MODE="0600", TAG+="uaccess"
 
-LABEL="feitian_authenticator_end"
+LABEL="pqkey_end"

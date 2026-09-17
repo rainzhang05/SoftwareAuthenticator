@@ -407,7 +407,7 @@ fn warn_device_permissions(descriptor: &HidDeviceDescriptor) {
             let mode = node.mode & 0o777;
             if mode & 0o007 != 0 {
                 eprintln!(
-                    "warning: {} is world-accessible (mode {:o}). Install contrib/udev/70-feitian-authenticator.rules or tighten permissions.",
+                    "warning: {} is world-accessible (mode {:o}). Install contrib/udev/70-pqkey.rules or tighten permissions.",
                     node.path.display(),
                     mode
                 );
@@ -431,18 +431,18 @@ fn warn_group_membership() {
     if let Some(gid) = plugdev_gid {
         if !groups.contains(&gid) && egid != gid {
             eprintln!(
-                "warning: insufficient permissions to access /dev/uhid. Add your user to the '{}' group or adjust contrib/udev/70-feitian-authenticator.rules.",
+                "warning: insufficient permissions to access /dev/uhid. Add your user to the '{}' group or adjust contrib/udev/70-pqkey.rules.",
                 GROUP_NAME
             );
         } else {
             eprintln!(
-                "warning: unable to access /dev/uhid even though '{}' group is present. Verify the udev rule contrib/udev/70-feitian-authenticator.rules is installed.",
+                "warning: unable to access /dev/uhid even though '{}' group is present. Verify the udev rule contrib/udev/70-pqkey.rules is installed.",
                 GROUP_NAME
             );
         }
     } else {
         eprintln!(
-            "warning: insufficient permissions to access /dev/uhid and '{}' group was not found. Install contrib/udev/70-feitian-authenticator.rules and adjust the GROUP value for your system.",
+            "warning: insufficient permissions to access /dev/uhid and '{}' group was not found. Install contrib/udev/70-pqkey.rules and adjust the GROUP value for your system.",
             GROUP_NAME
         );
     }

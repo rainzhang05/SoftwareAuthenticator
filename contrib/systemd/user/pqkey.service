@@ -3,22 +3,21 @@
 # The authenticator is a security key for your own desktop session: your
 # browser uses it, and its credentials live in your home directory, so it runs
 # under your user service manager rather than as a system service. It uses the
-# same state directory as the pc-hid-runner CLI does by default,
+# same state directory as the pqkey CLI does by default,
 # $XDG_DATA_HOME/feitian-mldsa-authenticator, or
 # ~/.local/share/feitian-mldsa-authenticator when XDG_DATA_HOME is unset. If
 # you set XDG_DATA_HOME in your shell, set it for the user manager as well
 # (see environment.d(5)), or the two will use different directories.
 #
 # Setup:
-#   1. Install contrib/udev/70-feitian-authenticator.rules as described in
-#      that file, add yourself to its group, and log in again.
+#   1. Install contrib/udev/70-pqkey.rules as described in that file, add
+#      yourself to its group, and log in again.
 #   2. Install the binary where this unit expects it:
-#        install -D -m 755 target/release/pc-hid-runner ~/.local/bin/pc-hid-runner
+#        install -D -m 755 target/release/pqkey ~/.local/bin/pqkey
 #   3. Install and start the unit:
-#        install -D -m 644 feitian-authenticator.service \
-#          ~/.config/systemd/user/feitian-authenticator.service
+#        install -D -m 644 pqkey.service ~/.config/systemd/user/pqkey.service
 #        systemctl --user daemon-reload
-#        systemctl --user enable --now feitian-authenticator.service
+#        systemctl --user enable --now pqkey.service
 #
 # User presence: every registration, sign-in and reset shows a desktop
 # notification with Approve and Deny buttons, sent to the notification server
@@ -38,13 +37,13 @@
 #     KDE Plasma and dunst do.
 # Without a session bus or a suitable notification server every request is
 # denied, never approved, and the log says why:
-#   journalctl --user -u feitian-authenticator
+#   journalctl --user -u pqkey
 # Do not add --presence auto-approve here: it approves everything without
 # asking, so any program running as you could use your passkeys unnoticed.
 #
-# While the service runs, "pc-hid-runner status" reports it, and "pc-hid-runner
-# pin ..." and "pc-hid-runner reset" refuse to touch its state. Stop it first
-# with "systemctl --user stop feitian-authenticator".
+# While the service runs, "pqkey status" reports it, and "pqkey pin ..." and
+# "pqkey reset" refuse to touch its state. Stop it first with
+# "systemctl --user stop pqkey".
 
 [Unit]
 Description=Feitian ML-DSA software authenticator (virtual FIDO security key)
@@ -52,7 +51,7 @@ Documentation=https://github.com/FeitianTech/FidoSoftwareAuthenticator
 
 [Service]
 Type=exec
-ExecStart=%h/.local/bin/pc-hid-runner attach --foreground
+ExecStart=%h/.local/bin/pqkey attach --foreground
 Environment=RUST_LOG=info
 # On SIGTERM the daemon removes the virtual device and exits with status 0, so
 # stopping the service is not a failure and does not trigger a restart.
