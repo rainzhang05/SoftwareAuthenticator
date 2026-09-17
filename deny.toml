@@ -74,6 +74,14 @@ allow = [
 # The list above is the usual permissive set rather than the exact set the tree
 # happens to use today, so don't nag about entries nothing currently needs.
 unused-allowed-license = "allow"
+# The fuzz crate (fuzz/, a workspace of its own that security.yml checks
+# against this same file) links LLVM's libFuzzer, part of which is under the
+# permissive NCSA license. The fuzz targets are never distributed.
+exceptions = [
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
+# The main workspace does not contain libfuzzer-sys.
+unused-license-exception = "allow"
 # Every workspace member sets `publish = false`, and is licensed through
 # `license.workspace = true` anyway.
 private = { ignore = true }

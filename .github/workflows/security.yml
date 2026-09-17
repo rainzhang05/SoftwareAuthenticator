@@ -5,6 +5,11 @@ name: Security
 # they have to run on a timer as well as on commits. A new advisory against
 # any dependency must turn something red even in a week with no pushes.
 #
+# Both jobs check two dependency graphs: the main workspace (Cargo.lock) and
+# the fuzz crate, a workspace of its own with its own fuzz/Cargo.lock. The fuzz
+# targets are not shipped, but they build and run on CI runners and developer
+# machines, so a compromised or vulnerable crate there matters too.
+#
 # Neither job compiles anything - cargo-audit reads Cargo.lock directly and
 # cargo-deny only needs `cargo metadata` - so they need no system packages, no
 # build cache, and finish in well under a minute.
@@ -61,6 +66,10 @@ jobs:
       - name: Audit dependencies
         run: cargo audit
 
+      - name: Audit the fuzz crate's dependencies
+        if: ${{ !cancelled() }}
+        run: cargo audit --file fuzz/Cargo.lock
+
   # cargo-deny: advisories, licenses, banned/duplicated crates, and source
   # provenance. This is the strict half of the pair - see deny.toml, which
   # documents every tolerated finding with a TODO for removing it.
@@ -90,3 +99,9 @@ jobs:
       # check names are the whole command.
       - name: Check advisories, licenses, bans and sources
         run: cargo deny --locked check advisories bans licenses sources
+
+      # The fuzz crate has no deny.toml of its own; cargo-deny finds the root
+      # one, so both graphs are held to the same policy.
+      - name: Check the fuzz crate
+        if: ${{ !cancelled() }}
+        run: cargo deny --manifest-path fuzz/Cargo.toml --locked check advisories bans licenses sources
