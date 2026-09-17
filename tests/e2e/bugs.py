@@ -61,5 +61,6 @@ CTAPHID_CANCEL_WHILE_IDLE = "bug 3: CTAPHID answers CANCEL on an idle channel wi
 CTAPHID_INTERLEAVED_REQUESTS = (
     "bug 3: an error sent to another channel overwrites the first byte of a "
     "request still being received, turning makeCredential (0x01) into clientPIN "
-    "(0x06), which fails with CTAP2_ERR_MISSING_PARAMETER"
+    "(0x06), which then rejects the makeCredential parameters. The exact status "
+    "depends on clientPIN's parameter validation, so any CTAP error counts"
 )

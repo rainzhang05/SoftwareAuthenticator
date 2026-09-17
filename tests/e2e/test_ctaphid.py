@@ -67,7 +67,7 @@ def test_cancel_while_idle_gets_no_response(hid):
         raise ctaphid.UnexpectedPacket(f"CANCEL on an idle channel was answered with {message}")
 
 
-@known_bug(bugs.CTAPHID_INTERLEAVED_REQUESTS, status=CtapError.ERR.MISSING_PARAMETER)
+@known_bug(bugs.CTAPHID_INTERLEAVED_REQUESTS)
 def test_request_from_another_channel_does_not_corrupt_a_request_in_progress(hid):
     first, second = hid.allocate_channel(), hid.allocate_channel()
     rp_id = "interleaved.e2e.example"
