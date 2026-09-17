@@ -88,6 +88,13 @@ enum Op {
         discoverable: bool,
     },
     GetNextAssertion,
+    /// What a platform does before credential management: set a PIN if
+    /// there is none, then get a token with the right PIN.
+    Enroll {
+        v2: bool,
+        permissions: u8,
+        rp: Option<u8>,
+    },
     CredentialManagement {
         auth: Auth,
         subcommand: u8,
@@ -580,6 +587,29 @@ impl Platform {
                     let output = session.decrypt(output).expect("the output decrypts");
                     assert_eq!(output.len(), salt_len, "one output per salt");
                 }
+            }
+            Op::Enroll {
+                v2,
+                permissions,
+                rp,
+            } => {
+                if self.pin.is_none() {
+                    let set_pin = Op::SetPin {
+                        v2,
+                        pin: 0,
+                        bad_auth: false,
+                        pad_to: 2,
+                    };
+                    self.step(set_pin, u)?;
+                }
+                let get_token = Op::GetToken {
+                    v2,
+                    right_pin: true,
+                    legacy: false,
+                    permissions,
+                    rp,
+                };
+                self.step(get_token, u)?;
             }
             Op::GetNextAssertion => {
                 self.call(&[CTAP_CMD_GET_NEXT_ASSERTION]);
