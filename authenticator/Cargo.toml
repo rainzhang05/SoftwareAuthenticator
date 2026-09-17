@@ -9,7 +9,7 @@ license = "Apache-2.0 OR MIT"
 
 [dependencies]
 ciborium = { version = "0.2", default-features = false, features = ["std"] }
-aes = "0.8"
+aes = "0.9"
 cbc = { version = "0.1", features = ["alloc"] }
 hkdf = "0.12"
 sha2 = "0.10"
