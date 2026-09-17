@@ -37,9 +37,9 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let sign_alg = ALGORITHMS[usize::from(*sign_with) % 4];
-    if let Ok(signature) = try_sign_challenge(sign_alg, &key, auth_data, client_data_hash) {
-        if sign_alg == CoseAlg::ES256 {
-            p256::ecdsa::Signature::from_der(&signature).expect("a DER ECDSA signature");
-        }
+    if let Ok(signature) = try_sign_challenge(sign_alg, &key, auth_data, client_data_hash)
+        && sign_alg == CoseAlg::ES256
+    {
+        p256::ecdsa::Signature::from_der(&signature).expect("a DER ECDSA signature");
     }
 });
