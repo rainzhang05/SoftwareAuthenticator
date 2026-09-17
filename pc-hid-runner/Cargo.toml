@@ -31,5 +31,7 @@ zbus = { version = "5.19", default-features = false, features = ["async-io", "bl
 futures-lite = { version = "2", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+# CBOR requests and responses in the CTAP-level tests.
+ciborium = { version = "0.2", default-features = false, features = ["std"] }
 # Reads the attestation certificate back independently of rcgen, which wrote it.
 x509-parser = "0.18"
