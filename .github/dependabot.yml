@@ -37,6 +37,28 @@ updates:
           - minor
           - patch
 
+  # The fuzz crate (fuzz/) is a workspace of its own with its own lockfile,
+  # which the entry above never touches. Same schedule and grouping. Its PRs
+  # are auto-merged under the same rules once the Fuzz workflow, the only one
+  # that builds this lockfile, has built and run every target with it.
+  - package-ecosystem: cargo
+    directory: "/fuzz"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "deps(fuzz)"
+    groups:
+      fuzz-cargo-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
   # ----------------------------------------------------------------------
   # GitHub Actions
   # ----------------------------------------------------------------------

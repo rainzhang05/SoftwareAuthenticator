@@ -7,7 +7,8 @@ name: Dependabot auto-merge
 #   DRY_RUN=1 REPO=owner/repo HEAD_SHA=<sha> HEAD_BRANCH=<branch> \
 #     .github/scripts/dependabot-automerge.sh
 #
-# workflow_run is used because it fires after CI and Security finish, always runs
+# workflow_run is used because it fires after CI, Security, E2E and Fuzz (which
+# runs on pull requests only for fuzz/Cargo.lock updates) finish, always runs
 # this file and the script from main (never code from the PR), and may be granted
 # write permissions, which a Dependabot-triggered pull_request run may not.
 #
@@ -16,7 +17,7 @@ name: Dependabot auto-merge
 
 on:
   workflow_run:
-    workflows: [CI, Security, "E2E"]
+    workflows: [CI, Security, "E2E", Fuzz]
     types: [completed]
 
 permissions: {}

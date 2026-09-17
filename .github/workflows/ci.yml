@@ -51,6 +51,18 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # The Python tests of the Dependabot auto-merge decision
+  # (.github/scripts/test_dependabot_automerge.py). The runner image has
+  # python3, bash and jq.
+  automerge-scripts:
+    name: auto-merge scripts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+
   # Lints. Currently reports without failing.
   clippy:
     name: clippy
