@@ -101,6 +101,12 @@ def notify_hidraw_path() -> str:
     return _hidraw_from("E2E_NOTIFY_HIDRAW", "virtual security key started with --presence notify")
 
 
+@pytest.fixture(scope="session")
+def unanswered_hidraw_path() -> str:
+    """The key started with --presence unanswered, whose prompts wait until cancelled."""
+    return _hidraw_from("E2E_UNANSWERED_HIDRAW", "virtual security key started with --presence unanswered")
+
+
 @pytest.fixture
 def device(hidraw_path):
     """A CTAPHID channel on the key, closed after the test.

@@ -110,6 +110,13 @@ jobs:
           node=$(tests/e2e/daemon.sh start notify 0859 --presence notify --presence-timeout 3)
           echo "E2E_NOTIFY_HIDRAW=$node" >> "$GITHUB_ENV"
 
+      # Asks for presence and never gets an answer, so tests can watch the
+      # transport while a prompt is showing.
+      - name: Attach the unanswered key
+        run: |
+          node=$(tests/e2e/daemon.sh start unanswered 085A --presence unanswered)
+          echo "E2E_UNANSWERED_HIDRAW=$node" >> "$GITHUB_ENV"
+
       - name: libfido2 tests
         run: tests/e2e/libfido2.sh "$E2E_HIDRAW"
 
@@ -140,6 +147,9 @@ jobs:
           tests/e2e/daemon.sh stop auto-approve 0858 || failed=1
           if [ -n "${E2E_NOTIFY_HIDRAW:-}" ]; then
             tests/e2e/daemon.sh stop notify 0859 || failed=1
+          fi
+          if [ -n "${E2E_UNANSWERED_HIDRAW:-}" ]; then
+            tests/e2e/daemon.sh stop unanswered 085A || failed=1
           fi
           if [ -e "$E2E_WORK/session-bus.pid" ]; then
             kill "$(cat "$E2E_WORK/session-bus.pid")" || true
