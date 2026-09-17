@@ -33,6 +33,11 @@ pub const CTAP_CMD_CREDENTIAL_MANAGEMENT: u8 = 0x0A;
 /// backwards compatibility).  Not implemented either.
 pub const CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE: u8 = 0x40;
 
+/// The longest response the engine produces, status byte included: the
+/// largest CTAPHID message, 64 - 7 + 128 * (64 - 5) = 7609 bytes (CTAP 2.3
+/// § 11.2.4), the transport the engine is served over.
+pub const MAX_RESPONSE_SIZE: usize = 7609;
+
 // -- Status codes (CTAP 2.1 § 8.2) -------------------------------------------
 //
 // Ordered by value so the table can be diffed against the spec by eye.

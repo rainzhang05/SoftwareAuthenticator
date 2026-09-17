@@ -7,7 +7,7 @@ use super::presence::{PresenceOperation, PresenceRequest};
 use super::request;
 use super::storage::{is_discoverable, store_status};
 use super::CtapApp;
-use crate::store::{CredentialRecord, PrivateKeyMaterial, StoreError};
+use crate::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial, StoreError};
 use crate::try_sign_challenge;
 
 use ciborium::{
@@ -21,6 +21,27 @@ use sha2::{Digest, Sha256};
 use crate::ctap::constants::*;
 
 pub(super) const COSE_ALG_ES256: i32 = -7;
+
+/// The attestation statements makeCredential can return, in order of
+/// preference.
+enum Attestation {
+    /// "packed" basic attestation with the provisioned attestation key.
+    Basic(AttestationRecord),
+    /// "packed" self attestation with the credential key.
+    SelfSigned,
+    /// "none".
+    None,
+}
+
+impl Attestation {
+    fn name(&self) -> &'static str {
+        match self {
+            Attestation::Basic(_) => "basic",
+            Attestation::SelfSigned => "self",
+            Attestation::None => "no",
+        }
+    }
+}
 
 impl CtapApp<'_> {
     fn attested_auth_data(
@@ -175,6 +196,23 @@ impl CtapApp<'_> {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
 
+        // attestationFormatsPreference (0x0B): "Clients may request omission
+        // of attestation by including a single element with the string value
+        // "none"." (CTAP 2.3 §6.1)
+        let none_requested = match parameter(0x0B) {
+            None => false,
+            Some(Value::Array(formats)) => {
+                if formats
+                    .iter()
+                    .any(|format| !matches!(format, Value::Text(_)))
+                {
+                    return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+                }
+                matches!(formats.as_slice(), [Value::Text(format)] if format == "none")
+            }
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+        };
+
         let mut hmac_secret_requested = false;
         let mut cred_protect_requested: Option<u8> = None;
 
@@ -322,13 +360,30 @@ impl CtapApp<'_> {
             record.sign_count,
             extension_bytes.as_deref(),
         );
-        let (attestation_format, att_stmt) = if self.suppress_attestation {
-            (Value::Text("none".into()), Value::Map(Vec::new()))
-        } else {
-            let att_stmt = match self.attestation_record() {
+        // Steps 18 and 19.  "If attestationFormatsPreference is present and
+        // contains only one entry with the value "none", omit attestation from
+        // the output."  Otherwise this authenticator, whose only format besides
+        // "none" is "packed", generates a packed attestation statement: basic
+        // attestation with the provisioned attestation key if there is one,
+        // else self attestation.  A response the transport cannot carry is no
+        // response, so an attestation statement that would make it longer
+        // than MAX_RESPONSE_SIZE gives way to the next one in that order and
+        // finally to "none".  (Only an unusually large certificate chain, or
+        // one combined with ML-DSA-87 self attestation, comes near the limit.)
+        let mut kinds = Vec::with_capacity(3);
+        if !(none_requested || self.suppress_attestation) {
+            if let Some(attestation) = self.attestation_record() {
+                kinds.push(Attestation::Basic(attestation));
+            }
+            kinds.push(Attestation::SelfSigned);
+        }
+        kinds.push(Attestation::None);
+
+        for kind in kinds {
+            let (attestation_format, att_stmt) = match &kind {
                 // Packed attestation with the attestation key and certificate
                 // chain (WebAuthn §8.2).
-                Some(attestation) => {
+                Attestation::Basic(attestation) => {
                     let signing_key = attestation.signing_key().map_err(|err| {
                         log::error!("the attestation key is unusable: {err}");
                         CTAP2_ERR_PROCESSING
@@ -337,7 +392,7 @@ impl CtapApp<'_> {
                     message.extend_from_slice(&auth_data);
                     message.extend_from_slice(&client_hash);
                     let signature: P256EcdsaSignature = signing_key.sign(&message);
-                    canonical_map(vec![
+                    let statement = canonical_map(vec![
                         (
                             Value::Text("alg".into()),
                             Value::Integer(Integer::from(COSE_ALG_ES256)),
@@ -357,44 +412,65 @@ impl CtapApp<'_> {
                                     .collect(),
                             ),
                         ),
-                    ])
+                    ]);
+                    ("packed", statement)
                 }
                 // Self attestation with the credential key.
-                None => {
+                Attestation::SelfSigned => {
                     let signature = try_sign_challenge(alg, &secret_key, &auth_data, &client_hash)
                         .map_err(|err| {
                             log::error!("self attestation with {alg:?} failed: {err}");
                             CTAP2_ERR_PROCESSING
                         })?;
-                    canonical_map(vec![
+                    let statement = canonical_map(vec![
                         (
                             Value::Text("alg".into()),
                             Value::Integer(Integer::from(alg as i32)),
                         ),
                         (Value::Text("sig".into()), Value::Bytes(signature)),
-                    ])
+                    ]);
+                    ("packed", statement)
                 }
+                Attestation::None => ("none", Value::Map(Vec::new())),
             };
-            (Value::Text("packed".into()), att_stmt)
-        };
 
-        let mut response_map = vec![
-            (Value::Integer(Integer::from(1)), attestation_format),
-            (Value::Integer(Integer::from(2)), Value::Bytes(auth_data)),
-            (Value::Integer(Integer::from(3)), att_stmt),
-        ];
+            let mut response_map = vec![
+                (
+                    Value::Integer(Integer::from(1)),
+                    Value::Text(attestation_format.into()),
+                ),
+                (
+                    Value::Integer(Integer::from(2)),
+                    Value::Bytes(auth_data.clone()),
+                ),
+                (Value::Integer(Integer::from(3)), att_stmt),
+            ];
+            canonical_sort(&mut response_map);
+            let mut encoded = Vec::new();
+            into_writer(&Value::Map(response_map), &mut encoded)
+                .map_err(|_| CTAP2_ERR_PROCESSING)?;
+            let mut out = Vec::with_capacity(1 + encoded.len());
+            out.push(CTAP2_OK);
+            out.extend_from_slice(&encoded);
 
-        canonical_sort(&mut response_map);
-        let mut encoded = Vec::new();
-        into_writer(&Value::Map(response_map), &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
-        let mut out = Vec::with_capacity(1 + encoded.len());
-        out.push(CTAP2_OK);
-        out.extend_from_slice(&encoded);
+            if out.len() > MAX_RESPONSE_SIZE {
+                log::warn!(
+                    "{} attestation would make the makeCredential response {} bytes, more than \
+                     the {MAX_RESPONSE_SIZE} a response can have",
+                    kind.name(),
+                    out.len()
+                );
+                continue;
+            }
 
-        // Stored only once the response is complete, so a request that fails
-        // leaves no credential behind that the platform never learned about.
-        self.store_new_credential(&record, rk)?;
-        Ok(out)
+            // Stored only once the response is complete, so a request that
+            // fails leaves no credential behind that the platform never
+            // learned about.
+            self.store_new_credential(&record, rk)?;
+            return Ok(out);
+        }
+        log::error!("the makeCredential response does not fit even without attestation");
+        Err(CTAP2_ERR_PROCESSING)
     }
 
     /// Persist a newly created credential.

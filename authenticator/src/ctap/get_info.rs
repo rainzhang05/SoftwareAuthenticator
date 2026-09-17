@@ -103,6 +103,10 @@ impl CtapApp<'_> {
             map.push((uint(0x14), uint(remaining as u64)));
         }
 
+        // attestationFormats: "Support for "none" attestation is implied and
+        // MUST be omitted."
+        map.push((uint(0x16), Value::Array(vec![text("packed")])));
+
         canonical_sort(&mut map);
         let mut encoded = Vec::new();
         into_writer(&Value::Map(map), &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;

@@ -51,15 +51,11 @@ fn request_log_counts_the_response_with_and_without_its_status_byte() {
 
 /// Send `request` through `App::call` into a CTAPHID-sized response buffer.
 pub(super) fn call(app: &mut TestApp, request: &[u8]) -> Vec<u8> {
-    let mut response = Bytes::<CTAPHID_MAX_MESSAGE>::new();
-    App::<CTAPHID_MAX_MESSAGE>::call(app, Command::Cbor, request, &mut response)
+    let mut response = Bytes::<MAX_RESPONSE_SIZE>::new();
+    App::<MAX_RESPONSE_SIZE>::call(app, Command::Cbor, request, &mut response)
         .expect("CTAPHID_CBOR is answered");
     response.to_vec()
 }
-
-/// CTAPHID's largest message: 64 - 7 + 128 * (64 - 5) bytes (CTAP 2.3
-/// §11.2.4).
-pub(super) const CTAPHID_MAX_MESSAGE: usize = 7609;
 
 /// The authenticator has no biometric sensor, so it implements neither
 /// authenticatorBioEnrollment (0x09) nor the FIDO_2_1_PRE prototype (0x40):

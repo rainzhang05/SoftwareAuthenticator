@@ -14,5 +14,6 @@ mod pin_uv_auth;
 mod pin_uv_auth_token;
 mod presence;
 mod reset;
+mod response_size;
 mod storage;
 mod support;
