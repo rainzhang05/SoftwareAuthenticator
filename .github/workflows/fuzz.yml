@@ -1,0 +1,191 @@
+name: Fuzz
+
+# libFuzzer targets in fuzz/ (see fuzz/src/lib.rs): the CTAPHID framing and the
+# CTAP2 engine, which parse whatever any local process writes to the key's
+# hidraw node. The fuzz crate is its own workspace and needs nightly, so the CI
+# workflow never compiles it; this one does.
+#
+# * Weekly and on demand, every target fuzzes for a bounded time (30 minutes by
+#   default) in its own job. This is where bugs are found.
+# * On pushes to main that touch the engine, the transport or the fuzz crate,
+#   one job checks that every target still builds and runs each for 30 seconds
+#   from the committed seeds. Without it an engine API change would break the
+#   fuzz crate silently until the weekly run; the half-minute runs also replay
+#   the seeds, which include the inputs of every crash fixed so far. It costs
+#   about five minutes of runner time per push, most of it the build. Pull
+#   requests do not run it: the weekly run and the push to main catch the
+#   same breakage, and PR runs would double the cost.
+#
+# A crash fails the job and its input is uploaded as an artifact. Reproduce it
+# locally with
+#     cargo +nightly fuzz run -O -a <target> <artifact file>
+
+on:
+  schedule:
+    # Sundays, 03:37 UTC: a quiet slot, well before the Monday dependency
+    # updates, security scan and CI runs. Off the hour because GitHub drops
+    # scheduled runs that pile up on hour boundaries.
+    - cron: "37 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: How long each target fuzzes, in seconds
+        required: false
+        default: "1800"
+  push:
+    branches: [main]
+    paths:
+      - authenticator/**
+      - pc-hid-runner/src/**
+      - trussed-mldsa/**
+      - Cargo.lock
+      - fuzz/**
+      - .github/workflows/fuzz.yml
+
+# Least privilege: the jobs only read the repository. Uploading artifacts uses
+# the runtime token, not GITHUB_TOKEN permissions.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  # A newer push supersedes a smoke run; a long scheduled or manual run is
+  # never cancelled by another.
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: 1
+  # cargo-fuzz needs nightly. A dated nightly keeps runs reproducible and a
+  # compiler regression from looking like a finding; bump it deliberately
+  # (Dependabot does not). rust-toolchain.toml pins stable for the rest of
+  # the repository, so every cargo invocation names this toolchain.
+  NIGHTLY: nightly-2026-09-16
+# Every target is built with `-O -a`: optimised, with debug assertions and
+# overflow checks, so integer overflow is a crash rather than a silent wrap.
+# libFuzzer runs with -timeout=30 (hangs) and -rss_limit_mb=2048 (unbounded
+# growth).
+
+jobs:
+  smoke:
+    name: build and smoke-run all targets
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: fuzz -> target
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2
+        with:
+          tool: cargo-fuzz@0.13.2
+
+      # cargo fuzz has no --locked; this fails if fuzz/Cargo.lock is stale.
+      - name: Check fuzz/Cargo.lock is up to date
+        run: cargo "+$NIGHTLY" metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
+
+      - name: Build every target
+        working-directory: fuzz
+        run: cargo "+$NIGHTLY" fuzz build -O -a
+
+      - name: Run every target for 30 seconds
+        working-directory: fuzz
+        run: |
+          for target in $(cargo "+$NIGHTLY" fuzz list); do
+            echo "::group::$target"
+            mkdir -p "corpus/$target"
+            cargo "+$NIGHTLY" fuzz run -O -a "$target" "corpus/$target" "seeds/$target" -- \
+              -max_total_time=30 -rss_limit_mb=2048 -timeout=30
+            echo "::endgroup::"
+          done
+
+      - name: Upload crash inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fuzz-artifacts-smoke
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+          retention-days: 30
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    # The default 30 minutes of fuzzing plus about ten of setup and build.
+    # A manual run asking for more than about 70 minutes is cut off here.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - ctaphid_packets
+          - ctap_request
+          - ctap_request_structured
+          - ctap_sequence
+          - credential_key
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: fuzz -> target
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2
+        with:
+          tool: cargo-fuzz@0.13.2
+
+      - name: Build
+        working-directory: fuzz
+        run: cargo "+$NIGHTLY" metadata --locked --format-version 1 > /dev/null && cargo "+$NIGHTLY" fuzz build -O -a "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+
+      - name: Fuzz
+        working-directory: fuzz
+        env:
+          TARGET: ${{ matrix.target }}
+          # Passed through the environment, never interpolated into the script.
+          REQUESTED_SECONDS: ${{ inputs.seconds }}
+        run: |
+          seconds="${REQUESTED_SECONDS:-1800}"
+          case "$seconds" in
+            ''|*[!0-9]*) echo "::error::seconds must be a whole number, not '$seconds'"; exit 1 ;;
+          esac
+          mkdir -p "corpus/$TARGET"
+          cargo "+$NIGHTLY" fuzz run -O -a "$TARGET" "corpus/$TARGET" "seeds/$TARGET" -- \
+            -max_total_time="$seconds" -rss_limit_mb=2048 -timeout=30 -print_final_stats=1 2>&1 | tee fuzz.log
+          status=${PIPESTATUS[0]}
+          {
+            echo "### $TARGET"
+            echo '```'
+            grep -E '^(stat::|Done )|DONE' fuzz.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Upload crash inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: |
+            fuzz/artifacts
+            fuzz/fuzz.log
+          if-no-files-found: ignore
+          retention-days: 30
