@@ -54,6 +54,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
+  # cargo-fuzz defaults to the target it was itself built for, and the prebuilt
+  # binary from install-action is a musl build, where AddressSanitizer cannot
+  # work. Always build the fuzz targets for the runner's glibc target.
+  FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
@@ -96,7 +100,7 @@ jobs:
 
       - name: Build every target
         working-directory: fuzz
-        run: cargo "+$NIGHTLY" fuzz build -O -a
+        run: cargo "+$NIGHTLY" fuzz build -O -a --target "$FUZZ_TARGET_TRIPLE"
 
       - name: Run every target for 30 seconds
         working-directory: fuzz
@@ -104,7 +108,7 @@ jobs:
           for target in $(cargo "+$NIGHTLY" fuzz list); do
             echo "::group::$target"
             mkdir -p "corpus/$target"
-            cargo "+$NIGHTLY" fuzz run -O -a "$target" "corpus/$target" "seeds/$target" -- \
+            cargo "+$NIGHTLY" fuzz run -O -a --target "$FUZZ_TARGET_TRIPLE" "$target" "corpus/$target" "seeds/$target" -- \
               -max_total_time=30 -rss_limit_mb=2048 -timeout=30
             echo "::endgroup::"
           done
@@ -152,7 +156,7 @@ jobs:
 
       - name: Build
         working-directory: fuzz
-        run: cargo "+$NIGHTLY" metadata --locked --format-version 1 > /dev/null && cargo "+$NIGHTLY" fuzz build -O -a "$TARGET"
+        run: cargo "+$NIGHTLY" metadata --locked --format-version 1 > /dev/null && cargo "+$NIGHTLY" fuzz build -O -a --target "$FUZZ_TARGET_TRIPLE" "$TARGET"
         env:
           TARGET: ${{ matrix.target }}
 
@@ -168,7 +172,7 @@ jobs:
             ''|*[!0-9]*) echo "::error::seconds must be a whole number, not '$seconds'"; exit 1 ;;
           esac
           mkdir -p "corpus/$TARGET"
-          cargo "+$NIGHTLY" fuzz run -O -a "$TARGET" "corpus/$TARGET" "seeds/$TARGET" -- \
+          cargo "+$NIGHTLY" fuzz run -O -a --target "$FUZZ_TARGET_TRIPLE" "$TARGET" "corpus/$TARGET" "seeds/$TARGET" -- \
             -max_total_time="$seconds" -rss_limit_mb=2048 -timeout=30 -print_final_stats=1 2>&1 | tee fuzz.log
           status=${PIPESTATUS[0]}
           {
