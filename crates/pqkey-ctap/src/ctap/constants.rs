@@ -17,6 +17,10 @@
 //! When adding a status code, copy the value straight out of the § 8.2 table and add
 //! a matching row to `STATUS_CODES` in the test module.
 
+// Each constant carries the name the specification gives the value, which is
+// its documentation; the module header says where to look them up.
+#![allow(missing_docs)]
+
 // -- Command codes (CTAP 2.1 § 6) --------------------------------------------
 
 pub const CTAP_CMD_MAKE_CREDENTIAL: u8 = 0x01;

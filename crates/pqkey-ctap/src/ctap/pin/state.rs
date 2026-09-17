@@ -103,10 +103,12 @@ impl PinRetryState {
         &self.persistent
     }
 
+    /// Whether a PIN is set.
     pub fn is_set(&self) -> bool {
         self.persistent.pin_hash.is_some()
     }
 
+    /// The pinRetries counter: wrong PINs left before the PIN is blocked.
     pub fn retries(&self) -> u8 {
         self.persistent.pin_retries
     }

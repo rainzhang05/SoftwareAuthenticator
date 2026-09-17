@@ -1,3 +1,13 @@
+//! The CTAP2 authenticator: the protocol engine in [`ctap`], the encrypted
+//! credential store in [`store`], and the cryptography they share at the top
+//! level: COSE keys, ES256 and ML-DSA signing, and the PIN/UV auth protocols'
+//! key derivation and encryption.
+
+// Everything here is safe Rust; the one place that needs `unsafe` (the uhid
+// device) lives in the pqkey crate.
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
 use aes::Aes256;
 use cbc::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::NoPadding};
 use cbc::{Decryptor, Encryptor};
@@ -35,9 +45,11 @@ type Aes256CbcDecryptor = Decryptor<Aes256>;
 /// COSE key type value assigned to Algorithm Key Pairs (AKP).
 pub const COSE_KEY_TYPE_AKP: i32 = 7;
 
-/// Standard COSE key map labels used by AKP keys.
+/// COSE_Key label 1, the key type (RFC 9052 §7.1).
 pub const COSE_KEY_LABEL_KTY: i32 = 1;
+/// COSE_Key label 3, the algorithm (RFC 9052 §7.1).
 pub const COSE_KEY_LABEL_ALG: i32 = 3;
+/// COSE_Key label -1 of an Algorithm Key Pair: the public key bytes.
 pub const COSE_KEY_PARAM_AKP_KEY: i32 = -1;
 
 /// Errors returned by the fallible (`try_*`) credential and COSE helpers.
@@ -106,7 +118,9 @@ impl std::error::Error for CryptoError {}
 /// its `Debug` output is redacted so the keys cannot leak into logs.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct PinUvSessionKeys {
+    /// The AES-256-CBC key of `encrypt` and `decrypt`.
     pub encryption_key: [u8; 32],
+    /// The HMAC-SHA-256 key of `authenticate` and `verify`.
     pub auth_key: [u8; 32],
 }
 
@@ -122,7 +136,9 @@ impl fmt::Debug for PinUvSessionKeys {
 /// Supported classic PIN/UV protocol variants.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ClassicPinProtocol {
+    /// PIN/UV auth protocol one (CTAP 2.3 §6.5.6).
     V1,
+    /// PIN/UV auth protocol two (CTAP 2.3 §6.5.7).
     V2,
 }
 
@@ -291,9 +307,13 @@ pub fn decrypt_classic_pin_block(
 /// * -50 -> ML-DSA-87
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum CoseAlg {
+    /// ECDSA with P-256 and SHA-256.
     ES256 = -7,
+    /// ML-DSA-44.
     MLDSA44 = -48,
+    /// ML-DSA-65.
     MLDSA65 = -49,
+    /// ML-DSA-87.
     MLDSA87 = -50,
 }
 
@@ -396,6 +416,7 @@ pub enum CredentialSecretKey {
     /// credentials use.  Signing expands the seed directly, so no expanded
     /// secret key encoding is produced or decoded.
     MlDsaSeed(MlDsaSeed),
+    /// A P-256 private key, for ES256.
     Es256(P256SigningKey),
 }
 
