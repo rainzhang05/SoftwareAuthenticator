@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashSet, VecDeque},
-    convert::TryInto,
-};
+use std::{collections::VecDeque, convert::TryInto};
 
 use log::debug;
 use rand::{rngs::OsRng, CryptoRng, RngCore};
@@ -18,6 +15,52 @@ const PACKET_SIZE: usize = CTAPHID_FRAME_LEN;
 const LOG_PREVIEW: usize = 8;
 const CHANNEL_GENERATION_RETRY_LIMIT: usize = 64;
 const APP_RESPONSE_TIMEOUT_MS: u64 = 2_000;
+
+/// How many channels CTAPHID_INIT keeps allocated. Every client that opens
+/// the device allocates one and none is ever released, so the least recently
+/// used channel is forgotten once this many exist.
+pub const MAX_CHANNELS: usize = 256;
+
+/// The channels allocated by CTAPHID_INIT, least recently used first.
+///
+/// CTAP 2.3 §11.2.3 leaves the allocation algorithm to the vendor: "The
+/// actual algorithm for generation of channel identifiers is vendor specific
+/// and not defined by this specification."
+#[derive(Debug, Default)]
+struct Channels {
+    ids: VecDeque<u32>,
+}
+
+impl Channels {
+    fn contains(&self, id: u32) -> bool {
+        self.ids.contains(&id)
+    }
+
+    /// Mark `id` as just used, if it is allocated.
+    fn touch(&mut self, id: u32) {
+        if let Some(index) = self.ids.iter().position(|&known| known == id) {
+            self.ids.remove(index);
+            self.ids.push_back(id);
+        }
+    }
+
+    /// Allocate `id`, forgetting the least recently used channel if the
+    /// table is full. Returns false if `id` is already allocated.
+    fn insert(&mut self, id: u32) -> bool {
+        if self.contains(id) {
+            return false;
+        }
+        if self.ids.len() == MAX_CHANNELS {
+            self.ids.pop_front();
+        }
+        self.ids.push_back(id);
+        true
+    }
+
+    fn len(&self) -> usize {
+        self.ids.len()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Version {
@@ -124,7 +167,7 @@ pub struct CtaphidHost<'pipe, const N: usize, R = OsRng> {
     state: State,
     buffer: [u8; N],
     pending: VecDeque<CtapHidFrame>,
-    allocated_channels: HashSet<u32>,
+    allocated_channels: Channels,
     rng: R,
     implements: u8,
     version: Version,
@@ -149,7 +192,7 @@ where
             state: State::Idle,
             buffer: [0u8; N],
             pending: VecDeque::new(),
-            allocated_channels: HashSet::new(),
+            allocated_channels: Channels::default(),
             rng,
             implements: 0x80,
             version: Version::default(),
@@ -183,6 +226,7 @@ where
                 }
             };
 
+            self.allocated_channels.touch(channel);
             let length = u16::from_be_bytes(packet[5..7].try_into().unwrap());
             let preview_len = usize::min(
                 length as usize,
@@ -451,7 +495,7 @@ where
                     return;
                 }
             }
-        } else if self.allocated_channels.contains(&request.channel) {
+        } else if self.allocated_channels.contains(request.channel) {
             request.channel
         } else {
             self.start_sending_error(request, AuthenticatorError::InvalidChannel);
@@ -615,6 +659,10 @@ where
                 continue;
             }
             if self.allocated_channels.insert(candidate) {
+                debug!(
+                    "allocated cid={candidate:08x} ({} channels)",
+                    self.allocated_channels.len()
+                );
                 return Ok(candidate);
             }
         }
@@ -825,6 +873,40 @@ mod tests {
         let mut echoed = frames[0][7..].to_vec();
         echoed.extend_from_slice(&frames[1][5..]);
         assert_eq!(echoed[..request.len()], request[..]);
+    }
+
+    /// Send CTAPHID_INIT on `channel` and return the response packet.
+    fn init_on<R: RngCore + CryptoRng>(
+        host: &mut CtaphidHost<'static, DEFAULT_MESSAGE_SIZE, R>,
+        channel: u32,
+    ) -> [u8; PACKET_SIZE] {
+        host.handle_frame(&message_packets(channel, Command::Init, &[0x5A; 8])[0], 0);
+        let frames = take_frame_bytes(host);
+        assert_eq!(frames.len(), 1);
+        frames[0]
+    }
+
+    /// Broadcast INITs never release a channel, so the table of allocated
+    /// channels is bounded and forgets the least recently used one.
+    #[test]
+    fn allocated_channels_are_bounded_and_the_least_recently_used_is_forgotten() {
+        let ids: Vec<u32> = (1..=MAX_CHANNELS as u32 + 1).collect();
+        let (mut host, _dispatch, _app) = init_host_with_rng(TestRng::new(&ids));
+        let invalid_channel = [Command::Error.into_u8() | 0x80, 0, 1, 0x0B];
+
+        for &id in &ids[..MAX_CHANNELS] {
+            let response = init_on(&mut host, 0xffff_ffff);
+            assert_eq!(response[15..19], id.to_be_bytes());
+        }
+        // Channel 1 is used again, so channel 2 is now the least recently used.
+        assert_eq!(init_on(&mut host, 1)[4], Command::Init.into_u8() | 0x80);
+
+        let response = init_on(&mut host, 0xffff_ffff);
+        assert_eq!(response[15..19], (MAX_CHANNELS as u32 + 1).to_be_bytes());
+        assert_eq!(host.allocated_channels.len(), MAX_CHANNELS);
+        assert_eq!(init_on(&mut host, 2)[4..8], invalid_channel, "forgotten");
+        assert_eq!(init_on(&mut host, 1)[4], Command::Init.into_u8() | 0x80);
+        assert_eq!(init_on(&mut host, 3)[4], Command::Init.into_u8() | 0x80);
     }
 
     #[test]
