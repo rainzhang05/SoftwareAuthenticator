@@ -2,6 +2,7 @@
 
 import os
 import struct
+import time
 
 import pytest
 from fido2 import cbor
@@ -101,3 +102,76 @@ def test_request_from_another_channel_does_not_corrupt_a_request_in_progress(hid
         raise CtapError(response.payload[0])
     auth_data = client.AuthData.parse(cbor.decode(response.payload[1:])[2])
     auth_data.check(rp_id, up=True, uv=False, at=True)
+
+
+def test_cancel_of_a_request_in_flight_gets_only_the_cbor_response(hid):
+    """CTAP 2.3 §11.2.9.1.5: CANCEL is never answered itself, and a cancelled
+    request is answered with CTAP2_ERR_KEEPALIVE_CANCEL in a CTAPHID_CBOR
+    response, not a CTAPHID_ERROR.
+
+    getInfo usually finishes before the CANCEL is seen, so either status is
+    fine; what matters is that exactly one CBOR response comes back.
+    """
+    cid = hid.allocate_channel()
+    hid.send(cid, ctaphid.CBOR, bytes([Ctap2.CMD.GET_INFO]))
+    hid.send(cid, ctaphid.CANCEL)
+    response = hid.receive()
+    assert (response.cid, response.cmd) == (cid, ctaphid.CBOR), str(response)
+    assert response.payload[0] in (0x00, 0x2D), str(response)
+
+    # Anything sent for the CANCEL would arrive before the PING's echo.
+    payload = os.urandom(16)
+    hid.send(cid, ctaphid.PING, payload)
+    message = hid.receive()
+    assert (message.cid, message.cmd, message.payload) == (cid, ctaphid.PING, payload), str(message)
+
+
+def test_init_resynchronises_a_channel_in_the_middle_of_a_message(hid):
+    """CTAP 2.3 §11.2.5.3: INIT on the channel of the transaction under way
+    aborts it, and the INIT is answered."""
+    cid = hid.allocate_channel()
+    packets = hid.init_packets(cid, ctaphid.PING, os.urandom(200))
+    hid.write_packet(packets[0])
+
+    nonce = os.urandom(8)
+    hid.send(cid, ctaphid.INIT, nonce)
+    response = hid.expect(cid, ctaphid.INIT)
+    assert response.payload[:8] == nonce
+    assert struct.unpack(">I", response.payload[8:12]) == (cid,)
+
+    # The rest of the aborted message is ignored and the channel works.
+    for packet in packets[1:]:
+        hid.write_packet(packet)
+    payload = os.urandom(16)
+    hid.send(cid, ctaphid.PING, payload)
+    message = hid.receive()
+    assert (message.cid, message.cmd, message.payload) == (cid, ctaphid.PING, payload), str(message)
+
+
+def test_a_message_sent_slowly_packet_by_packet_is_received(hid):
+    """CTAP 2.3 §11.2.5.4: the device assembles a message "until all parts of
+    it has been received or that the transaction times out". The timeout runs
+    between packets (550 ms), so a message whose packets are 300 ms apart
+    completes although it takes well over a second."""
+    cid = hid.allocate_channel()
+    payload = os.urandom(300)
+    packets = hid.init_packets(cid, ctaphid.PING, payload)
+    assert len(packets) == 6
+    for packet in packets:
+        hid.write_packet(packet)
+        time.sleep(0.3)
+    assert hid.expect(cid, ctaphid.PING).payload == payload
+
+
+def test_a_stalled_message_times_out(hid):
+    """CTAP 2.3 §11.2.5.2: a message whose next packet does not come is backed
+    out with ERR_MSG_TIMEOUT, and the device is free again."""
+    cid = hid.allocate_channel()
+    packets = hid.init_packets(cid, ctaphid.PING, os.urandom(100))
+    hid.write_packet(packets[0])
+    message = hid.expect(cid, ctaphid.ERROR)
+    assert message.payload == bytes([0x05]), str(message)
+
+    payload = os.urandom(16)
+    hid.send(cid, ctaphid.PING, payload)
+    assert hid.expect(cid, ctaphid.PING).payload == payload
