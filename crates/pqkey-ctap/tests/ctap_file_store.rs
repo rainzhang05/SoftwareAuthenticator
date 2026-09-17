@@ -13,11 +13,11 @@ use std::path::{Path, PathBuf};
 use ciborium::value::{Integer, Value};
 use ctaphid_app::{App, Command};
 use heapless_bytes::Bytes;
-use p256::ecdsa::{signature::Verifier, Signature, SigningKey, VerifyingKey};
+use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::Verifier};
 use pqkey_ctap::ctap::presence::AutoApprove;
 use pqkey_ctap::ctap::{AttestationMode, CtapApp, InterruptFlag};
 use pqkey_ctap::store::{AttestationRecord, CredentialStore, FileStore, PrivateKeyMaterial};
-use pqkey_ctap::{mldsa_paramset_from_alg, CoseAlg};
+use pqkey_ctap::{CoseAlg, mldsa_paramset_from_alg};
 
 /// CTAPHID's largest message: 64 - 7 + 128 * (64 - 5) bytes (CTAP 2.3
 /// §11.2.4).

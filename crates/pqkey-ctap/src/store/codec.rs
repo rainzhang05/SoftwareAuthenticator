@@ -48,7 +48,7 @@ use ciborium::value::{Integer, Value};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKeyMaterial};
-use super::{validate_attestation, validate_credential, Corruption, StoreError};
+use super::{Corruption, StoreError, validate_attestation, validate_credential};
 use crate::CoseAlg;
 
 const KEY_TYPE_ES256_SCALAR: u64 = 1;

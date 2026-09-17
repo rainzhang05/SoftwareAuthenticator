@@ -49,7 +49,7 @@ use rand_core::{CryptoRng, UnwrapErr};
 /// The operating system RNG; panics if it fails, as rand 0.8's `OsRng` did.
 type OsRng = UnwrapErr<SysRng>;
 
-use crate::uhid::{CtapHidFrame, CTAPHID_FRAME_LEN};
+use crate::uhid::{CTAPHID_FRAME_LEN, CtapHidFrame};
 
 const PACKET_SIZE: usize = CTAPHID_FRAME_LEN;
 const INIT_DATA: usize = PACKET_SIZE - 7;
@@ -1180,9 +1180,11 @@ mod tests {
             host.send_keepalive(true, now);
         }
         let messages = sent(&mut host);
-        assert!(messages
-            .iter()
-            .all(|m| *m == keepalive(FIRST, KeepaliveStatus::UpNeeded)));
+        assert!(
+            messages
+                .iter()
+                .all(|m| *m == keepalive(FIRST, KeepaliveStatus::UpNeeded))
+        );
         assert!(!host.take_interrupt());
         host.app_response(Ok(vec![0x00, 0xA0]));
         assert_eq!(

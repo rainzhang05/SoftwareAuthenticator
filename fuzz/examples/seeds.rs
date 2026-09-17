@@ -23,7 +23,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use ciborium::value::Value;
 use p256::elliptic_curve::sec1::ToSec1Point;
 use pqkey_fuzz::cbor::{bytes, int, text};
-use pqkey_fuzz::ctaphid::{Action, Channel, Mangle, CONT_DATA, INIT_DATA};
+use pqkey_fuzz::ctaphid::{Action, CONT_DATA, Channel, INIT_DATA, Mangle};
 use pqkey_fuzz::requests::command;
 use pqkey_fuzz::rng::SplitMix;
 use pqkey_fuzz::{sequence, structured};

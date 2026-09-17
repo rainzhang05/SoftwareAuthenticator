@@ -1,6 +1,6 @@
 use nix::errno::Errno;
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
-use nix::poll::{poll, PollFd, PollFlags};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use nix::poll::{PollFd, PollFlags, poll};
 use nix::unistd::{read, write};
 use std::fs::OpenOptions;
 use std::io;

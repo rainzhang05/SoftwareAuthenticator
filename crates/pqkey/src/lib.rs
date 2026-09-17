@@ -17,8 +17,9 @@ use std::{
     io::{self, Read, Write},
     os::{fd::AsFd, unix::net::UnixStream},
     sync::{
+        Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -28,8 +29,8 @@ use ctaphid_app::{App, Command, Error as AppError};
 use heapless_bytes::Bytes;
 use pqkey_ctap::ctap::InterruptFlag;
 use shutdown::ShutdownSignal;
-use transport::ctaphid_host::{AppRequest, CtaphidHost, Version, MAX_MESSAGE_SIZE};
-use uhid::{HidDeviceDescriptor, UhidDevice, CTAPHID_FRAME_LEN};
+use transport::ctaphid_host::{AppRequest, CtaphidHost, MAX_MESSAGE_SIZE, Version};
+use uhid::{CTAPHID_FRAME_LEN, HidDeviceDescriptor, UhidDevice};
 
 // CTAPHID capability flags (CTAP spec section 11.2.9.1.3)
 pub const CAPABILITY_CBOR: u8 = 0x04; // Implements CTAPHID_CBOR

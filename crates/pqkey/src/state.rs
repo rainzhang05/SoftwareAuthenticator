@@ -106,7 +106,7 @@ pub fn remove_legacy_state(state_dir: &Path) -> io::Result<Vec<&'static str>> {
                 return Err(io::Error::new(
                     err.kind(),
                     format!("cannot remove the legacy state file {name}: {err}"),
-                ))
+                ));
             }
         }
     }
@@ -327,8 +327,8 @@ fn pin_status_error(status: u8) -> io::Error {
 mod tests {
     use super::*;
     use crate::test_support::TempDir;
-    use pqkey_ctap::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial};
     use pqkey_ctap::CoseAlg;
+    use pqkey_ctap::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial};
 
     // Test characters by UTF-8 width, so the boundaries below are explicit.
     const TWO_BYTES: &str = "\u{e9}"; // e with acute accent

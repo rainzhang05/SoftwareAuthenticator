@@ -19,8 +19,8 @@ use ciborium::{
 };
 use hmac::{KeyInit, Mac};
 use p256::{
-    ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey as P256PublicKey, Sec1Point,
-    SecretKey as P256SecretKey,
+    PublicKey as P256PublicKey, Sec1Point, SecretKey as P256SecretKey, ecdh::diffie_hellman,
+    elliptic_curve::sec1::ToSec1Point,
 };
 use rand_core::{Infallible, TryCryptoRng, TryRng};
 use sha2::{Digest, Sha256};

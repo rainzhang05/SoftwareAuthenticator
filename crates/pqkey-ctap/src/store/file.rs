@@ -5,16 +5,16 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use super::codec;
-use super::envelope::{self, RecordType, MAX_ENVELOPE_LEN};
+use super::envelope::{self, MAX_ENVELOPE_LEN, RecordType};
 use super::fsio;
 use super::keys::{
-    is_credential_file_name, CredentialKeys, DeviceKeys, FileKeySource, KeyDomain, KeySource,
-    RootKey, SubKey,
+    CredentialKeys, DeviceKeys, FileKeySource, KeyDomain, KeySource, RootKey, SubKey,
+    is_credential_file_name,
 };
 use super::{
-    next_created_at, sort_newest_first, validate_attestation, validate_credential,
-    AttestationRecord, Corruption, CredentialRecord, CredentialStore, PinStateRecord, StoreError,
-    DEFAULT_MAX_CREDENTIALS,
+    AttestationRecord, Corruption, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS,
+    PinStateRecord, StoreError, next_created_at, sort_newest_first, validate_attestation,
+    validate_credential,
 };
 
 const CREDENTIALS_DIR: &str = "credentials";
@@ -560,9 +560,9 @@ fn exists(path: &Path) -> Result<bool, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::test_support::TempDir;
-    use crate::store::PrivateKeyMaterial;
     use crate::CoseAlg;
+    use crate::store::PrivateKeyMaterial;
+    use crate::store::test_support::TempDir;
 
     fn record(credential_id: &[u8]) -> CredentialRecord {
         CredentialRecord {

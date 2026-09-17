@@ -10,8 +10,8 @@ use std::{
     error::Error,
     fmt, io,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
 

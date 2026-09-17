@@ -3,13 +3,13 @@
 //! and the getNextAssertion timer (CTAP 2.3 §6.2.2, §6.3).
 
 use super::support::{
-    credential, encode, install_pin_uv_auth_token, int, pin_hash, response_auth_data, scripted_app,
-    token_pin_auth, PresenceEvent, PresenceLog, SeenRequest, TestApp, FLAG_UV,
+    FLAG_UV, PresenceEvent, PresenceLog, SeenRequest, TestApp, credential, encode,
+    install_pin_uv_auth_token, int, pin_hash, response_auth_data, scripted_app, token_pin_auth,
 };
 use crate::ctap::cbor::canonical_map;
 
 use crate::ctap::pin::permissions::PIN_PERMISSION_GA;
-use crate::ctap::pin::token::{ManualClock, MAX_USAGE_TIME_PERIOD};
+use crate::ctap::pin::token::{MAX_USAGE_TIME_PERIOD, ManualClock};
 use crate::ctap::presence::{PresenceOperation, PresenceOutcome};
 use crate::ctap::storage::CREDENTIAL_ID_LENGTH;
 use crate::store::CredentialRecord;

@@ -7,15 +7,15 @@
 //! added to the list runs against every store; there is no way to add it to
 //! only one.
 
-use pqkey_ctap::store::{
-    AttestationRecord, CredentialRecord, CredentialStore, FileStore, MemoryStore, PinStateRecord,
-    PrivateKeyMaterial, StoreError, DEFAULT_MAX_CREDENTIALS,
-};
 use pqkey_ctap::CoseAlg;
+use pqkey_ctap::store::{
+    AttestationRecord, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS, FileStore,
+    MemoryStore, PinStateRecord, PrivateKeyMaterial, StoreError,
+};
 
 use crate::common::{
-    assert_signature_verifies, attestation_record, ids, new_record, random_bytes, with_created_at,
-    TempDir, ALL_ALGS,
+    ALL_ALGS, TempDir, assert_signature_verifies, attestation_record, ids, new_record,
+    random_bytes, with_created_at,
 };
 
 /// A store under test and whatever has to outlive it.

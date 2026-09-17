@@ -1,11 +1,11 @@
 //! The authenticatorClientPIN command and its subcommands.
 
-use super::permissions::{requested_pin_permissions, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
-use super::protocol::{decrypt, parse_required_pin_uv_auth_protocol, verify, PinProtocol};
+use super::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC, requested_pin_permissions};
+use super::protocol::{PinProtocol, decrypt, parse_required_pin_uv_auth_protocol, verify};
 use super::state::PinState;
-use crate::ctap::cbor::{self, canonical_map};
-use crate::ctap::CtapApp;
 use crate::PinUvSessionKeys;
+use crate::ctap::CtapApp;
+use crate::ctap::cbor::{self, canonical_map};
 
 use ciborium::{
     ser::into_writer,

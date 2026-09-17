@@ -3,17 +3,17 @@
 
 use super::support::new_app;
 use super::support::{
-    encode, es256_credential, get_assertion_request, get_pin_token, get_pin_uv_auth_token, int,
-    make_credential_request, pin_hash, response_auth_data, set_pin_padded, token_pin_auth,
-    TestStore, FLAG_UV,
+    FLAG_UV, TestStore, encode, es256_credential, get_assertion_request, get_pin_token,
+    get_pin_uv_auth_token, int, make_credential_request, pin_hash, response_auth_data,
+    set_pin_padded, token_pin_auth,
 };
-use super::support::{insert_owned, stored, TestApp};
+use super::support::{TestApp, insert_owned, stored};
+use crate::ClassicPinProtocol;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::token::{
-    ManualClock, INITIAL_USAGE_TIME_LIMIT, MAX_USAGE_TIME_PERIOD, USER_PRESENT_TIME_LIMIT,
+    INITIAL_USAGE_TIME_LIMIT, MAX_USAGE_TIME_PERIOD, ManualClock, USER_PRESENT_TIME_LIMIT,
 };
-use crate::ClassicPinProtocol;
 
 use ciborium::value::Value;
 use core::time::Duration;

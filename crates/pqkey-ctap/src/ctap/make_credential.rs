@@ -14,7 +14,7 @@ use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
-use p256::ecdsa::{signature::Signer, Signature as P256EcdsaSignature};
+use p256::ecdsa::{Signature as P256EcdsaSignature, signature::Signer};
 use sha2::{Digest, Sha256};
 
 use crate::ctap::constants::*;

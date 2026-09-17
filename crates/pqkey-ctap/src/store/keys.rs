@@ -28,8 +28,8 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use super::fsio;
 use super::StoreError;
+use super::fsio;
 
 /// Length of every root key and subkey.
 pub(crate) const KEY_LEN: usize = 32;

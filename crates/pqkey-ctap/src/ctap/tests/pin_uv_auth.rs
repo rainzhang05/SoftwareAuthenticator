@@ -4,17 +4,18 @@
 
 use super::support::new_app;
 use super::support::{
-    client_pin, encode, es256_credential, get_assertion_request, get_assertion_request_with,
-    get_pin_uv_auth_token, install_pin_uv_auth_token, int, make_credential_request,
-    make_credential_request_with, padded_pin, pin_hash, platform_authenticate, response_auth_data,
-    set_pin_encrypted, set_pin_padded, token_pin_auth, PlatformPinSession, TestStore, FLAG_UV,
+    FLAG_UV, PlatformPinSession, TestStore, client_pin, encode, es256_credential,
+    get_assertion_request, get_assertion_request_with, get_pin_uv_auth_token,
+    install_pin_uv_auth_token, int, make_credential_request, make_credential_request_with,
+    padded_pin, pin_hash, platform_authenticate, response_auth_data, set_pin_encrypted,
+    set_pin_padded, token_pin_auth,
 };
 use super::support::{insert_owned, stored};
+use crate::ClassicPinProtocol;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
-use crate::ctap::pin::protocol::{authenticate, verify, HmacSha256};
+use crate::ctap::pin::protocol::{HmacSha256, authenticate, verify};
 use crate::ctap::pin::state::MAX_PIN_RETRIES;
-use crate::ClassicPinProtocol;
 
 use ciborium::{de::from_reader, value::Value};
 use hmac::{KeyInit as _, Mac as _};

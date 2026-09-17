@@ -1,10 +1,10 @@
 //! The authenticatorCredentialManagement command and its subcommands.
 
+use super::CtapApp;
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::protocol::parse_pin_uv_auth_param;
 use super::request::{self, truncate_utf8};
 use super::storage::{is_discoverable, store_status};
-use super::CtapApp;
 use crate::store::CredentialRecord;
 
 use ciborium::{

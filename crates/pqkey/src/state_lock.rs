@@ -23,7 +23,7 @@ use std::{
 
 use nix::{
     errno::Errno,
-    fcntl::{flock, FlockArg},
+    fcntl::{FlockArg, flock},
     unistd::Pid,
 };
 

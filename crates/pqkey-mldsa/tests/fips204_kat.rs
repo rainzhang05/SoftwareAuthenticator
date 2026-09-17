@@ -23,9 +23,9 @@
 #![cfg(all(feature = "mldsa44", feature = "mldsa65", feature = "mldsa87"))]
 
 use pqkey_mldsa::{
-    lengths, try_keypair_from_seed, try_public_key, try_sign, try_sign_deterministic,
-    try_sign_with_context, verify, verify_with_context, MlDsaError, ParamSet, PublicKey, SecretKey,
-    SEED_LEN,
+    MlDsaError, ParamSet, PublicKey, SEED_LEN, SecretKey, lengths, try_keypair_from_seed,
+    try_public_key, try_sign, try_sign_deterministic, try_sign_with_context, verify,
+    verify_with_context,
 };
 
 const KEYGEN_KAT: &str = include_str!("vectors/mldsa_keygen.kat");

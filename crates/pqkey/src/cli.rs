@@ -19,14 +19,13 @@ use nix::{
 };
 
 use crate::{
-    attestation, permissions,
+    HidDeviceDescriptor, attestation, permissions,
     pin_input::PinReader,
     presence::PresenceMode,
     service,
     shutdown::ShutdownSignal,
     state::{self, default_state_dir},
     state_lock::{self, DaemonState, StateLock},
-    HidDeviceDescriptor,
 };
 
 /// The AAGUID pqkey reports unless `--aaguid` says otherwise: a random
@@ -539,7 +538,7 @@ fn stop(state: StateArgs) -> io::Result<()> {
         Err(err) => {
             return Err(io::Error::other(format!(
                 "could not signal the authenticator (pid {pid}): {err}"
-            )))
+            )));
         }
     }
     // The daemon holds the lock until its very end, and unlike a pid the lock
@@ -673,7 +672,9 @@ fn pin_status(state: StateArgs) -> io::Result<()> {
     println!("Retries remaining: {}", info.retries);
     println!("Blocked:           {}", info.blocked);
     if let DaemonState::Running(_) = state_lock::daemon_state(&state.state_dir)? {
-        println!("(After 3 wrong PINs in a row the running daemon also refuses PIN checks until it restarts.)");
+        println!(
+            "(After 3 wrong PINs in a row the running daemon also refuses PIN checks until it restarts.)"
+        );
     }
     Ok(())
 }
@@ -681,7 +682,7 @@ fn pin_status(state: StateArgs) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::{error::ErrorKind, CommandFactory};
+    use clap::{CommandFactory, error::ErrorKind};
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("pqkey").chain(args.iter().copied()))

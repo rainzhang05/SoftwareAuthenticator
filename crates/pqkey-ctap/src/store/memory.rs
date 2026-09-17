@@ -3,9 +3,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    next_created_at, sort_newest_first, validate_attestation, validate_credential,
-    AttestationRecord, CredentialRecord, CredentialStore, PinStateRecord, StoreError,
-    DEFAULT_MAX_CREDENTIALS,
+    AttestationRecord, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS, PinStateRecord,
+    StoreError, next_created_at, sort_newest_first, validate_attestation, validate_credential,
 };
 
 /// A [`CredentialStore`] that keeps everything in memory.

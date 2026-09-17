@@ -229,9 +229,11 @@ mod tests {
             assert_eq!(sealed[4], VERSION);
             assert_eq!(sealed[5], RecordType::Credential as u8);
             if plaintext.len() >= 8 {
-                assert!(!sealed
-                    .windows(plaintext.len())
-                    .any(|window| window == plaintext));
+                assert!(
+                    !sealed
+                        .windows(plaintext.len())
+                        .any(|window| window == plaintext)
+                );
             }
             let opened = open(&key, RecordType::Credential, "credentials/ab", &sealed).unwrap();
             assert_eq!(opened.as_slice(), plaintext);

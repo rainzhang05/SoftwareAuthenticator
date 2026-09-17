@@ -2,13 +2,13 @@
 //! §6.1.3).
 
 use super::support::{
-    encode, es256_credential, get_assertion_request, install_pin_uv_auth_token, int, test_app,
-    token_pin_auth, TestApp,
+    TestApp, encode, es256_credential, get_assertion_request, install_pin_uv_auth_token, int,
+    test_app, token_pin_auth,
 };
+use crate::ctap::CtapApp;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::PIN_PERMISSION_CM;
-use crate::ctap::storage::{is_discoverable, CREDENTIAL_ID_LENGTH};
-use crate::ctap::CtapApp;
+use crate::ctap::storage::{CREDENTIAL_ID_LENGTH, is_discoverable};
 use crate::{ClassicPinProtocol, CoseAlg};
 
 use ciborium::{de::from_reader, value::Value};

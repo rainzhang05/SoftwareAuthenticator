@@ -1,17 +1,17 @@
 //! The authenticatorGetAssertion and authenticatorGetNextAssertion commands,
 //! including hmac-secret extension processing.
 
+use super::CtapApp;
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::pin::permissions::PIN_PERMISSION_GA;
 use super::pin::protocol::{
-    decrypt, parse_pin_uv_auth_param, parse_pin_uv_auth_protocol, verify, HmacSha256, PinProtocol,
+    HmacSha256, PinProtocol, decrypt, parse_pin_uv_auth_param, parse_pin_uv_auth_protocol, verify,
 };
 use super::presence::{PresenceOperation, PresenceRequest};
 use super::request;
 use super::storage::{is_discoverable, store_status};
-use super::CtapApp;
-use crate::store::{sort_newest_first, CredentialRecord};
-use crate::{try_sign_challenge, ClassicPinProtocol, PinUvSessionKeys};
+use crate::store::{CredentialRecord, sort_newest_first};
+use crate::{ClassicPinProtocol, PinUvSessionKeys, try_sign_challenge};
 
 use ciborium::{
     ser::into_writer,

@@ -1,9 +1,9 @@
 //! Parsing of request parameters shared by authenticatorMakeCredential and
 //! authenticatorGetAssertion.
 
+use super::CtapApp;
 use super::cbor;
 use super::presence::{PresenceOperation, PresenceOutcome, PresenceRequest};
-use super::CtapApp;
 use crate::CoseAlg;
 
 use ciborium::value::Value;

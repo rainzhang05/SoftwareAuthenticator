@@ -3,8 +3,8 @@
 
 use super::support::new_app;
 use super::support::{
-    classic_encrypt, classic_pin_auth, corrupt_mac, derive_classic_session,
-    install_pin_uv_auth_token, request_classic_key_agreement, token_pin_auth, TestStore,
+    TestStore, classic_encrypt, classic_pin_auth, corrupt_mac, derive_classic_session,
+    install_pin_uv_auth_token, request_classic_key_agreement, token_pin_auth,
 };
 use super::support::{credential, insert, stored, stored_by_id};
 use crate::ctap::cbor::canonical_map;
@@ -19,8 +19,8 @@ use ciborium::{
 };
 use hmac::{KeyInit, Mac};
 use p256::{
-    ecdsa::{signature::Verifier, Signature as P256EcdsaSignature},
     SecretKey as P256SecretKey,
+    ecdsa::{Signature as P256EcdsaSignature, signature::Verifier},
 };
 use sha2::{Digest, Sha256};
 

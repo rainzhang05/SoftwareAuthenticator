@@ -12,15 +12,15 @@ use std::{fs, path::PathBuf};
 use ciborium::value::{Integer, Value};
 use ctaphid_app::{App, Command};
 use heapless_bytes::Bytes;
-use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use pqkey::{
-    attestation::IdentityConfig,
-    service::{open_credential_store, AttestationConfig, IdentityStrings},
     MESSAGE_SIZE,
+    attestation::IdentityConfig,
+    service::{AttestationConfig, IdentityStrings, open_credential_store},
 };
-use pqkey_ctap::ctap::{presence::AutoApprove, AttestationMode, CtapApp, InterruptFlag};
-use pqkey_ctap::store::{CredentialStore, FileStore};
 use pqkey_ctap::CoseAlg;
+use pqkey_ctap::ctap::{AttestationMode, CtapApp, InterruptFlag, presence::AutoApprove};
+use pqkey_ctap::store::{CredentialStore, FileStore};
 use x509_parser::{certificate::X509Certificate, prelude::FromDer};
 
 /// An identity as `--manufacturer`, `--product`, `--country` and `--aaguid`

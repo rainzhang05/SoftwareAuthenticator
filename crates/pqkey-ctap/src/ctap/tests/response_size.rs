@@ -3,12 +3,12 @@
 
 use super::dispatch::call;
 use super::support::{
-    classic_pin_auth, encode, install_pin_uv_auth_token, int, test_app, token_pin_auth,
-    PlatformPinSession, TestApp,
+    PlatformPinSession, TestApp, classic_pin_auth, encode, install_pin_uv_auth_token, int,
+    test_app, token_pin_auth,
 };
+use crate::ctap::AttestationMode;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
-use crate::ctap::AttestationMode;
 use crate::store::AttestationRecord;
 use crate::{ClassicPinProtocol, CoseAlg};
 

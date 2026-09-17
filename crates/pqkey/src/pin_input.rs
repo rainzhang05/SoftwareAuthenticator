@@ -157,7 +157,7 @@ fn read_tty_line(tty: BorrowedFd<'_>) -> io::Result<Pin> {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "no PIN was entered",
-                ))
+                ));
             }
             Ok(0) => break,
             Ok(read) => {

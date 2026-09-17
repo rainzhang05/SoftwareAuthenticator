@@ -1,18 +1,18 @@
 //! PIN/UV auth protocol plumbing: protocol selection, the key-agreement
 //! session, shared-secret encryption and pinUvAuthParam verification.
 
-use crate::ctap::cbor::canonical_map;
 use crate::ctap::CtapApp;
+use crate::ctap::cbor::canonical_map;
 use crate::{
-    decrypt_classic_pin_block, derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
-    ClassicPinProtocol, PinUvSessionKeys,
+    ClassicPinProtocol, PinUvSessionKeys, decrypt_classic_pin_block,
+    derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
 };
 
 use ciborium::value::{Integer, Value};
 use hmac::{Hmac, KeyInit, Mac};
 use p256::{
-    ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey as P256PublicKey, Sec1Point,
-    SecretKey as P256SecretKey,
+    PublicKey as P256PublicKey, Sec1Point, SecretKey as P256SecretKey, ecdh::diffie_hellman,
+    elliptic_curve::sec1::ToSec1Point,
 };
 use sha2::Sha256;
 use subtle::ConstantTimeEq;

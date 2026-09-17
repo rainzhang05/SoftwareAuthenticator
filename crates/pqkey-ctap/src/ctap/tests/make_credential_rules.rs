@@ -2,8 +2,8 @@
 //! excludeList rules (CTAP 2.3 §6.1.2).
 
 use super::support::{
-    encode, install_pin_uv_auth_token, int, pin_hash, response_auth_data, scripted_app, stored,
-    token_pin_auth, PresenceEvent, SeenRequest, TestApp, FLAG_UV,
+    FLAG_UV, PresenceEvent, SeenRequest, TestApp, encode, install_pin_uv_auth_token, int, pin_hash,
+    response_auth_data, scripted_app, stored, token_pin_auth,
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::PIN_PERMISSION_MC;

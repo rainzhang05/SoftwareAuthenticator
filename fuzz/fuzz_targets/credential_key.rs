@@ -13,7 +13,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pqkey_ctap::{try_credential_secret_from_bytes, try_sign_challenge, CoseAlg};
+use pqkey_ctap::{CoseAlg, try_credential_secret_from_bytes, try_sign_challenge};
 
 const ALGORITHMS: [CoseAlg; 4] = [
     CoseAlg::ES256,

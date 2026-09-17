@@ -2,12 +2,12 @@
 
 use super::support::new_app;
 use super::support::stored;
-use super::support::{install_pin_uv_auth_token, token_pin_auth, TestStore};
+use super::support::{TestStore, install_pin_uv_auth_token, token_pin_auth};
+use crate::ctap::AttestationMode;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::make_credential::COSE_ALG_ES256;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
-use crate::ctap::AttestationMode;
 use crate::store::{AttestationRecord, PrivateKeyMaterial};
 use crate::{ClassicPinProtocol, CoseAlg, CredentialSecretKey};
 
@@ -16,7 +16,7 @@ use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
-use p256::ecdsa::{signature::Signer, Signature as P256EcdsaSignature, SigningKey};
+use p256::ecdsa::{Signature as P256EcdsaSignature, SigningKey, signature::Signer};
 
 use crate::ctap::constants::*;
 

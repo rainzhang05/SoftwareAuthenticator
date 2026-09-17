@@ -6,8 +6,8 @@
 //! a full store), and corrupt individual credentials are skipped by
 //! [`CredentialStore::list`] itself.
 
-use super::pin::state::{PersistentPinState, PinState};
 use super::CtapApp;
+use super::pin::state::{PersistentPinState, PinState};
 use crate::store::{
     AttestationRecord, CredentialRecord, CredentialStore, PinStateRecord, StoreError,
 };

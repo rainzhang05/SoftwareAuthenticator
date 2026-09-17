@@ -62,7 +62,7 @@ impl UserPresence for Unanswered {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pqkey_ctap::ctap::{presence::PresenceOperation, InterruptFlag};
+    use pqkey_ctap::ctap::{InterruptFlag, presence::PresenceOperation};
 
     #[test]
     fn unanswered_times_out() {

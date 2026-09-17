@@ -3,24 +3,24 @@
 
 use super::dispatch::call;
 use super::support::{
-    scripted_app, scripted_app_with_interrupt, PresenceEvent, PresenceLog, SeenRequest, TestRng,
-    TestStore, NEVER_INTERRUPTED,
+    NEVER_INTERRUPTED, PresenceEvent, PresenceLog, SeenRequest, TestRng, TestStore, scripted_app,
+    scripted_app_with_interrupt,
 };
-use super::support::{stored, TestApp};
+use super::support::{TestApp, stored};
+use crate::CoseAlg;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::presence::{
-    presence_status, AutoApprove, Cancellation, PresenceOperation, PresenceOutcome,
-    PresenceRequest, UserPresence, DEFAULT_PRESENCE_TIMEOUT,
+    AutoApprove, Cancellation, DEFAULT_PRESENCE_TIMEOUT, PresenceOperation, PresenceOutcome,
+    PresenceRequest, UserPresence, presence_status,
 };
 use crate::ctap::{CtapApp, InterruptFlag};
-use crate::CoseAlg;
 
 use ciborium::{
     de::from_reader,
     ser::into_writer,
     value::{Integer, Value},
 };
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
 use crate::ctap::constants::*;

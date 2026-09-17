@@ -1,17 +1,17 @@
 //! authenticatorCredentialManagement tests.
 
 use super::support::new_app;
-use super::support::{credential, insert, insert_owned, stored, TestApp};
+use super::support::{TestApp, credential, insert, insert_owned, stored};
 use super::support::{
-    es256_credential, get_pin_uv_auth_token, install_pin_uv_auth_token, pin_hash, token_pin_auth,
-    TestStore,
+    TestStore, es256_credential, get_pin_uv_auth_token, install_pin_uv_auth_token, pin_hash,
+    token_pin_auth,
 };
+use crate::ctap::CtapApp;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::credential_management::truncated_rp_id;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA};
 use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
-use crate::ctap::pin::token::{ManualClock, MAX_USAGE_TIME_PERIOD};
-use crate::ctap::CtapApp;
+use crate::ctap::pin::token::{MAX_USAGE_TIME_PERIOD, ManualClock};
 use crate::store::CredentialStore;
 use crate::{ClassicPinProtocol, CoseAlg};
 
@@ -211,9 +211,10 @@ fn credential_management_commands() {
     let Value::Map(map) = from_reader(&response[1..]).expect("decode credential next") else {
         panic!("response must be map");
     };
-    assert!(map
-        .iter()
-        .any(|(k, v)| *k == Value::Integer(Integer::from(7)) && matches!(v, Value::Map(_))));
+    assert!(
+        map.iter()
+            .any(|(k, v)| *k == Value::Integer(Integer::from(7)) && matches!(v, Value::Map(_)))
+    );
 
     let delete_descriptor = canonical_map(vec![
         (Value::Text("type".into()), Value::Text("public-key".into())),

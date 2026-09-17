@@ -1,7 +1,7 @@
 //! The authenticatorSelection command.
 
-use super::presence::{PresenceOperation, PresenceRequest};
 use super::CtapApp;
+use super::presence::{PresenceOperation, PresenceRequest};
 
 use crate::ctap::constants::*;
 

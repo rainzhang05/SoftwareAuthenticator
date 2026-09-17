@@ -214,8 +214,7 @@ enum Unavailable {
 
 impl Unavailable {
     fn message(&self, request: &PresenceRequest<'_>) -> String {
-        const OPT_OUT: &str =
-            "or, for tests only, start the daemon with --presence auto-approve, which approves everything without asking";
+        const OPT_OUT: &str = "or, for tests only, start the daemon with --presence auto-approve, which approves everything without asking";
         let denied = format!(
             "denied without asking ({}): ",
             prompt_text(request).trim_end_matches('?')
@@ -241,9 +240,9 @@ impl Unavailable {
                  notification server that supports actions, such as GNOME Shell, KDE Plasma or \
                  dunst, {OPT_OUT}"
             ),
-            Unavailable::Failed(err) => format!(
-                "{denied}the desktop notification server failed ({err}); {OPT_OUT}"
-            ),
+            Unavailable::Failed(err) => {
+                format!("{denied}the desktop notification server failed ({err}); {OPT_OUT}")
+            }
         }
     }
 }

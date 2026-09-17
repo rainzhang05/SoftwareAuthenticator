@@ -3,10 +3,10 @@
 
 use ciborium::value::Value;
 use hmac::{Hmac, KeyInit, Mac};
-use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey, SecretKey};
+use p256::{PublicKey, SecretKey, ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point};
 use pqkey_ctap::{
-    decrypt_classic_pin_block, derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
-    ClassicPinProtocol, PinUvSessionKeys,
+    ClassicPinProtocol, PinUvSessionKeys, decrypt_classic_pin_block,
+    derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
 };
 use sha2::{Digest, Sha256};
 

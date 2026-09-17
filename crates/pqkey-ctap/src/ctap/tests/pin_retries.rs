@@ -1,16 +1,16 @@
 //! The PIN retry state machine (CTAP 2.3 §6.5.2.3) on its own, and as
 //! authenticatorClientPIN drives and persists it.
 
-use super::support::new_app;
 use super::support::TestApp;
+use super::support::new_app;
 use super::support::{
-    client_pin, get_pin_retries, get_pin_token, int, padded_pin, pin_hash, PlatformPinSession,
-    TestStore,
-};
-use crate::ctap::pin::state::{
-    PersistentPinState, PinRetryState, MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES,
+    PlatformPinSession, TestStore, client_pin, get_pin_retries, get_pin_token, int, padded_pin,
+    pin_hash,
 };
 use crate::ClassicPinProtocol;
+use crate::ctap::pin::state::{
+    MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES, PersistentPinState, PinRetryState,
+};
 
 use crate::store::{CredentialStore, PinStateRecord};
 use ciborium::value::Value;

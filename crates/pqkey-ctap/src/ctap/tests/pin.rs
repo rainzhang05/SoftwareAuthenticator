@@ -1,25 +1,25 @@
 //! PIN tests: retry state, key agreement, and the authenticatorClientPIN
 //! subcommands over both PIN/UV auth protocols.
 
-use super::support::{app_with_store_and_rng, new_app, TestRng};
 use super::support::{
-    classic_encrypt, classic_pin_auth, client_pin, derive_classic_session, get_pin_retries,
-    get_pin_token, get_pin_token_with, get_pin_uv_auth_token, int, padded_pin, pin_hash,
-    request_classic_key_agreement, set_pin_encrypted, set_pin_padded, PlatformPinSession,
-    TestStore,
+    PlatformPinSession, TestStore, classic_encrypt, classic_pin_auth, client_pin,
+    derive_classic_session, get_pin_retries, get_pin_token, get_pin_token_with,
+    get_pin_uv_auth_token, int, padded_pin, pin_hash, request_classic_key_agreement,
+    set_pin_encrypted, set_pin_padded,
 };
+use super::support::{TestRng, app_with_store_and_rng, new_app};
+use crate::ClassicPinProtocol;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::{KeyAgreementKey, PIN_UV_AUTH_PROTOCOL_CLASSIC};
-use crate::ctap::pin::state::{PinState, MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES};
-use crate::ClassicPinProtocol;
+use crate::ctap::pin::state::{MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES, PinState};
 
 use ciborium::{
     de::from_reader,
     ser::into_writer,
     value::{Integer, Value},
 };
-use p256::{elliptic_curve::sec1::ToSec1Point, SecretKey as P256SecretKey};
+use p256::{SecretKey as P256SecretKey, elliptic_curve::sec1::ToSec1Point};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -100,9 +100,10 @@ fn client_pin_get_retries_reports_available_attempts() {
         })
         .expect("retry count is present");
     assert_eq!(retries, i128::from(MAX_PIN_RETRIES));
-    assert!(!map
-        .iter()
-        .any(|(k, _)| *k == Value::Integer(Integer::from(0x04))));
+    assert!(
+        !map.iter()
+            .any(|(k, _)| *k == Value::Integer(Integer::from(0x04)))
+    );
 }
 
 /// One complete PIN check of `candidate`, with nothing persisted in between.

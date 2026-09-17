@@ -9,15 +9,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 
 use ciborium::value::Value;
+use pqkey_ctap::CoseAlg;
 use pqkey_ctap::store::{
     Corruption, CredentialRecord, CredentialStore, FileKeySource, FileStore, KeyDomain, KeySource,
     PinStateRecord, PrivateKeyMaterial, StoreError,
 };
-use pqkey_ctap::CoseAlg;
 
 use crate::common::{
-    assert_signature_verifies, attestation_record, hex, ids, logs, new_record, random_bytes,
-    with_created_at, TempDir, ALL_ALGS,
+    ALL_ALGS, TempDir, assert_signature_verifies, attestation_record, hex, ids, logs, new_record,
+    random_bytes, with_created_at,
 };
 
 // The envelope layout, restated from the format documentation on purpose: a
@@ -1014,9 +1014,11 @@ fn nothing_is_stored_in_plaintext() {
 
     // Control: the scan does find bytes that really are on disk.
     let credential_key = fs::read(scratch.key_path(KeyDomain::Credential)).unwrap();
-    assert!(files
-        .values()
-        .any(|contents| contains(contents, &credential_key)));
+    assert!(
+        files
+            .values()
+            .any(|contents| contains(contents, &credential_key))
+    );
 }
 
 #[test]

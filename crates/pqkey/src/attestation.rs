@@ -27,12 +27,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use p256::ecdsa::{signature::Signer, DerSignature, SigningKey as EcdsaSigningKey};
+use p256::ecdsa::{DerSignature, SigningKey as EcdsaSigningKey, signature::Signer};
 use p256::elliptic_curve::Generate;
 use rcgen::{
-    date_time_ymd, string::PrintableString, CertificateParams, CustomExtension, DistinguishedName,
-    DnType, DnValue, IsCa, KeyIdMethod, PublicKeyData, SerialNumber, SignatureAlgorithm,
-    SigningKey, PKCS_ECDSA_P256_SHA256,
+    CertificateParams, CustomExtension, DistinguishedName, DnType, DnValue, IsCa, KeyIdMethod,
+    PKCS_ECDSA_P256_SHA256, PublicKeyData, SerialNumber, SignatureAlgorithm, SigningKey,
+    date_time_ymd, string::PrintableString,
 };
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -409,9 +409,10 @@ mod tests {
             0x04, 0x04, 0x12,
         ];
         extension.extend_from_slice(&expected);
-        assert!(der
-            .windows(extension.len())
-            .any(|window| window == extension));
+        assert!(
+            der.windows(extension.len())
+                .any(|window| window == extension)
+        );
 
         // "The Basic Constraints extension MUST have the CA component set to
         // false."
@@ -553,10 +554,11 @@ mod tests {
         assert_eq!(country.as_str().unwrap(), "US");
         let mut expected = vec![0x04, 0x10];
         expected.extend_from_slice(&[0xa5; 16]);
-        assert!(tbs
-            .extensions()
-            .iter()
-            .any(|extension| extension.value == expected));
+        assert!(
+            tbs.extensions()
+                .iter()
+                .any(|extension| extension.value == expected)
+        );
     }
 
     #[test]

@@ -13,14 +13,14 @@ use core::fmt;
 
 use p256::ecdsa::SigningKey as P256SigningKey;
 use p256::elliptic_curve::Generate;
-use pqkey_mldsa::{try_public_key_from_seed, SEED_LEN};
+use pqkey_mldsa::{SEED_LEN, try_public_key_from_seed};
 use rand_core::Rng;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
-    mldsa_paramset_from_alg, try_cose_es256_public_key, try_cose_public_key,
-    try_credential_secret_from_bytes, CoseAlg, CredentialSecretKey, CryptoError, MlDsaSeed,
+    CoseAlg, CredentialSecretKey, CryptoError, MlDsaSeed, mldsa_paramset_from_alg,
+    try_cose_es256_public_key, try_cose_public_key, try_credential_secret_from_bytes,
 };
 
 /// The private key of a credential, in its most compact form.
@@ -428,8 +428,8 @@ mod tests {
     use super::*;
     use crate::try_sign_challenge;
     use ciborium::value::{Integer, Value};
-    use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-    use pqkey_mldsa::{try_keypair_from_seed, verify, ParamSet, PublicKey};
+    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+    use pqkey_mldsa::{ParamSet, PublicKey, try_keypair_from_seed, verify};
 
     const ALL_ALGS: [CoseAlg; 4] = [
         CoseAlg::ES256,

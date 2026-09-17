@@ -6,7 +6,7 @@ use arbitrary::{Result, Unstructured};
 use ciborium::value::Value;
 use pqkey_ctap::ctap::constants::*;
 
-use crate::cbor::{arbitrary_bytes, arbitrary_value, bytes, encode, int, text, MAX_DEPTH};
+use crate::cbor::{MAX_DEPTH, arbitrary_bytes, arbitrary_value, bytes, encode, int, text};
 
 /// Relying party identifiers: short, over the 32 bytes credential management
 /// truncates to (with and without a scheme), multi-byte, and empty.

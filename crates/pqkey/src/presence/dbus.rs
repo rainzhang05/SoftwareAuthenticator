@@ -21,17 +21,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures_lite::{future, StreamExt};
+use futures_lite::{StreamExt, future};
 use zbus::{
-    blocking::{connection, fdo::DBusProxy, Connection, MessageIterator},
+    MatchRule, Message, MessageStream,
+    blocking::{Connection, MessageIterator, connection, fdo::DBusProxy},
     message::Type,
     names::BusName,
     zvariant::Value,
-    MatchRule, Message, MessageStream,
 };
 
 use super::notification::{
-    ConnectError, Notification, NotificationEvent, NotificationServer, APPROVE_ACTION, DENY_ACTION,
+    APPROVE_ACTION, ConnectError, DENY_ACTION, Notification, NotificationEvent, NotificationServer,
 };
 
 const NOTIFICATIONS_NAME: &str = "org.freedesktop.Notifications";

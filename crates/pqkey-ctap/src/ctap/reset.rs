@@ -1,9 +1,9 @@
 //! The authenticatorReset command.
 
+use super::CtapApp;
 use super::credential_management::CredentialManagementState;
 use super::presence::{PresenceOperation, PresenceRequest};
 use super::storage::store_status;
-use super::CtapApp;
 
 use core::time::Duration;
 

@@ -3,15 +3,15 @@
 //! fail-closed handling of an unreadable PIN state, and attestation.
 
 use super::support::{
-    app_with_store, credential, get_pin_retries, get_pin_token, insert, padded_pin, pin_hash,
-    set_pin_padded, stored, test_app, TestApp, TestStore, NEVER_INTERRUPTED,
+    NEVER_INTERRUPTED, TestApp, TestStore, app_with_store, credential, get_pin_retries,
+    get_pin_token, insert, padded_pin, pin_hash, set_pin_padded, stored, test_app,
 };
-use crate::ctap::cbor::canonical_map;
-use crate::ctap::pin::state::{MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES};
-use crate::ctap::AttestationMode;
-use crate::store::{CredentialStore, PinStateRecord};
 use crate::ClassicPinProtocol;
 use crate::CoseAlg;
+use crate::ctap::AttestationMode;
+use crate::ctap::cbor::canonical_map;
+use crate::ctap::pin::state::{MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES};
+use crate::store::{CredentialStore, PinStateRecord};
 
 use ciborium::{
     de::from_reader,
@@ -428,9 +428,11 @@ fn unreadable_attestation_falls_back_to_self_attestation() {
     let Value::Map(att_stmt) = att_stmt else {
         panic!("attStmt map");
     };
-    assert!(att_stmt
-        .iter()
-        .all(|(k, _)| *k != Value::Text("x5c".into())));
+    assert!(
+        att_stmt
+            .iter()
+            .all(|(k, _)| *k != Value::Text("x5c".into()))
+    );
     assert!(att_stmt.contains(&(
         Value::Text("alg".into()),
         Value::Integer(Integer::from(CoseAlg::ES256 as i32))

@@ -1,8 +1,8 @@
 //! Command dispatch and the request log.
 
-use super::support::{encode, int, test_app, TestApp};
-use crate::ctap::cbor::canonical_map;
+use super::support::{TestApp, encode, int, test_app};
 use crate::ctap::CtapApp;
+use crate::ctap::cbor::canonical_map;
 
 use ciborium::value::Value;
 use ctaphid_app::{App, Command};
@@ -72,14 +72,14 @@ fn bio_enrollment_commands_are_not_implemented() {
 }
 
 mod get_next_assertion_state {
-    use super::super::support::{credential, encode, int, scripted_app, TestApp};
+    use super::super::support::{TestApp, credential, encode, int, scripted_app};
     use super::call;
+    use crate::CoseAlg;
+    use crate::ctap::RESET_WINDOW_AFTER_POWER_UP;
     use crate::ctap::cbor::canonical_map;
     use crate::ctap::pin::token::ManualClock;
     use crate::ctap::presence::PresenceOutcome;
     use crate::ctap::storage::CREDENTIAL_ID_LENGTH;
-    use crate::ctap::RESET_WINDOW_AFTER_POWER_UP;
-    use crate::CoseAlg;
 
     use ciborium::value::Value;
     use core::time::Duration;

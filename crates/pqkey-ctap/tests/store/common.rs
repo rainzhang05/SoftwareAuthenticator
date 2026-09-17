@@ -5,9 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ciborium::value::Value;
-use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use pqkey_ctap::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial};
-use pqkey_ctap::{mldsa_paramset_from_alg, try_sign_challenge, CoseAlg};
+use pqkey_ctap::{CoseAlg, mldsa_paramset_from_alg, try_sign_challenge};
 use pqkey_mldsa::PublicKey;
 
 pub const ALL_ALGS: [CoseAlg; 4] = [

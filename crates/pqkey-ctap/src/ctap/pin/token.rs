@@ -4,8 +4,8 @@
 use core::time::Duration;
 #[cfg(test)]
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, Ordering},
 };
 use std::time::Instant;
 
@@ -13,7 +13,7 @@ use std::time::Instant;
 use zeroize::Zeroizing;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use super::protocol::{verify, PinProtocol};
+use super::protocol::{PinProtocol, verify};
 
 use crate::ctap::constants::*;
 

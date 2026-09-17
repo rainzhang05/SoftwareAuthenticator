@@ -1,7 +1,7 @@
 //! pinUvAuthToken permission bits and the checks that bind a token to an RP.
 
-use crate::ctap::cbor;
 use crate::ctap::CtapApp;
+use crate::ctap::cbor;
 
 use ciborium::value::{Integer, Value};
 

@@ -34,14 +34,14 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
-pub use self::pin::state::{PersistentPinState, PinAttempt, PinRetryState, MAX_PIN_RETRIES};
+pub use self::pin::state::{MAX_PIN_RETRIES, PersistentPinState, PinAttempt, PinRetryState};
 pub use self::reset::RESET_WINDOW_AFTER_POWER_UP;
 pub use trussed_core::InterruptFlag;
 
 use self::credential_management::CredentialManagementState;
 use self::get_assertion::PendingAssertion;
 use self::pin::state::PinState;
-use self::presence::{UserPresence, DEFAULT_PRESENCE_TIMEOUT};
+use self::presence::{DEFAULT_PRESENCE_TIMEOUT, UserPresence};
 use crate::store::{CredentialStore, FileStore};
 
 use ciborium::{de::from_reader, value::Value};

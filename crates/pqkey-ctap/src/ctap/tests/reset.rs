@@ -1,9 +1,9 @@
 //! authenticatorReset (CTAP 2.3 §6.6).
 
-use super::support::{es256_credential, pin_hash, scripted_app, stored, PresenceLog, TestApp};
+use super::support::{PresenceLog, TestApp, es256_credential, pin_hash, scripted_app, stored};
+use crate::ctap::RESET_WINDOW_AFTER_POWER_UP;
 use crate::ctap::pin::token::ManualClock;
 use crate::ctap::presence::PresenceOutcome;
-use crate::ctap::RESET_WINDOW_AFTER_POWER_UP;
 
 use core::time::Duration;
 

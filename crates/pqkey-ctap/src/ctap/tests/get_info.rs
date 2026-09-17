@@ -1,13 +1,13 @@
 //! authenticatorGetInfo tests.
 
-use super::support::{es256_credential, insert_owned, new_app, test_app, TestApp, TestStore};
+use super::support::{TestApp, TestStore, es256_credential, insert_owned, new_app, test_app};
+use crate::CoseAlg;
+use crate::ctap::AttestationMode;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::protocol::{
     PIN_UV_AUTH_PROTOCOL_CLASSIC_V1, PIN_UV_AUTH_PROTOCOL_CLASSIC_V2,
 };
 use crate::ctap::pin::state::PinState;
-use crate::ctap::AttestationMode;
-use crate::CoseAlg;
 
 use ciborium::{
     de::from_reader,

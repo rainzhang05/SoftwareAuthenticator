@@ -74,8 +74,8 @@ use core::fmt;
 use core::mem::size_of;
 
 use ml_dsa::{
-    EncodedSignature, EncodedVerifyingKey, ExpandedSigningKey, ExpandedSigningKeyBytes, Keypair,
-    MlDsaParams, Signature, VerifyingKey, B32,
+    B32, EncodedSignature, EncodedVerifyingKey, ExpandedSigningKey, ExpandedSigningKeyBytes,
+    Keypair, MlDsaParams, Signature, VerifyingKey,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 

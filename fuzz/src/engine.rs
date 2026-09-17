@@ -2,8 +2,8 @@
 //! response must pass.
 
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
     Arc,
+    atomic::{AtomicU8, Ordering},
 };
 
 use ciborium::value::Value;

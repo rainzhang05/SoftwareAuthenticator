@@ -5,19 +5,19 @@ use std::{
 };
 
 use pqkey_ctap::ctap::{
-    presence::{AutoApprove, UserPresence},
     AttestationMode, CtapApp, InterruptFlag, RESET_WINDOW_AFTER_POWER_UP,
+    presence::{AutoApprove, UserPresence},
 };
 use pqkey_ctap::store::{AttestationRecord, CredentialStore, FileStore};
 
 use crate::{
-    attestation::{certificate_aaguid, generate_attestation_certificate, IdentityConfig},
+    CTAPHID_FRAME_LEN, HidDeviceDescriptor, WaitingForUser,
+    attestation::{IdentityConfig, certificate_aaguid, generate_attestation_certificate},
     create_device, exec,
-    presence::{dbus::SessionBus, notification::NotificationPresence, PresenceMode, Unanswered},
-    shutdown::{is_shutdown, ok_if_shutdown, ShutdownSignal},
+    presence::{PresenceMode, Unanswered, dbus::SessionBus, notification::NotificationPresence},
+    shutdown::{ShutdownSignal, is_shutdown, ok_if_shutdown},
     state::remove_and_log_legacy_state,
     uhid::UhidDevice,
-    HidDeviceDescriptor, WaitingForUser, CTAPHID_FRAME_LEN,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,11 +235,13 @@ mod provisioning_tests {
         };
         let err = open_credential_store(dir.path(), identity).err().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        assert!(FileStore::open(dir.path())
-            .unwrap()
-            .attestation()
-            .unwrap()
-            .is_none());
+        assert!(
+            FileStore::open(dir.path())
+                .unwrap()
+                .attestation()
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -364,9 +366,13 @@ pub fn serve_ctap_with_presence(
     let window = reset_window(data.presence, data.allow_late_reset);
     if window.is_none() {
         if data.presence == PresenceMode::Notify {
-            log::info!("accepting authenticatorReset at any time: the notification says what a reset deletes and needs Approve");
+            log::info!(
+                "accepting authenticatorReset at any time: the notification says what a reset deletes and needs Approve"
+            );
         } else {
-            log::warn!("accepting authenticatorReset at any time (--allow-late-reset); this does not conform to CTAP");
+            log::warn!(
+                "accepting authenticatorReset at any time (--allow-late-reset); this does not conform to CTAP"
+            );
         }
     }
     ctap.set_reset_window(window);
@@ -584,8 +590,8 @@ mod tests {
     /// once requests are served, and the loop's result.
     fn start(
         serve: impl FnOnce(UhidDevice, Box<dyn FnOnce() -> io::Result<()>>) -> io::Result<()>
-            + Send
-            + 'static,
+        + Send
+        + 'static,
     ) -> (Host, mpsc::Receiver<io::Result<()>>) {
         let (device, host_end) = socket_device();
         let host = Host::new(host_end);
@@ -787,9 +793,11 @@ mod tests {
             .iter()
             .position(|s| *s == [STATUS_UPNEEDED])
             .unwrap();
-        assert!(statuses[..first_up_needed]
-            .iter()
-            .all(|s| *s == [STATUS_PROCESSING]));
+        assert!(
+            statuses[..first_up_needed]
+                .iter()
+                .all(|s| *s == [STATUS_PROCESSING])
+        );
         assert!(
             statuses[first_up_needed..]
                 .iter()
