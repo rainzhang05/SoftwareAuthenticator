@@ -12,6 +12,8 @@ edition = "2024"
 license = "Apache-2.0 OR MIT"
 authors = ["Rain Zhang"]
 repository = "https://github.com/rainzhang05/SoftwareAuthenticator"
+homepage = "https://github.com/rainzhang05/SoftwareAuthenticator"
+readme = "README.md"
 # The newest `rust-version` in the locked dependency graph: aes 0.9.3.
 rust-version = "1.89"
 
