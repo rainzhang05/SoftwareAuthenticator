@@ -1,0 +1,66 @@
+[package]
+name = "authenticator-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "libFuzzer targets for the CTAPHID framing and the CTAP2 engine"
+
+[package.metadata]
+cargo-fuzz = true
+
+# A workspace of its own: the fuzz targets need nightly and libFuzzer, so they
+# must never become part of the main workspace's `cargo build/test --workspace`.
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+authenticator = { path = "../authenticator" }
+pc-hid-runner = { path = "../pc-hid-runner" }
+ciborium = { version = "0.2", default-features = false, features = ["std"] }
+ctaphid-app = "0.1"
+heapless-bytes = "0.3"
+hmac = "0.13"
+p256 = { version = "0.14", features = ["ecdh"] }
+rand_core = "0.10"
+sha2 = "0.11"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "ctaphid_packets"
+path = "fuzz_targets/ctaphid_packets.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctap_request"
+path = "fuzz_targets/ctap_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctap_request_structured"
+path = "fuzz_targets/ctap_request_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctap_sequence"
+path = "fuzz_targets/ctap_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "credential_key"
+path = "fuzz_targets/credential_key.rs"
+test = false
+doc = false
+bench = false
