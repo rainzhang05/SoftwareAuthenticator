@@ -510,7 +510,13 @@ fn reset(args: ResetArgs) -> io::Result<()> {
         eprintln!("Reset cancelled.");
         return Ok(());
     }
-    state::reset_state(&args.state.state_dir)?;
+    let legacy = state::reset_state(&args.state.state_dir)?;
+    if !legacy.is_empty() {
+        println!(
+            "Removed state from an earlier version: {}.",
+            legacy.join(", ")
+        );
+    }
     println!("Authenticator state has been reset.");
     Ok(())
 }

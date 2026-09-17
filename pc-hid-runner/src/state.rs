@@ -231,11 +231,12 @@ pub fn pin_remove(state_dir: &Path, current_pin: &str) -> io::Result<()> {
 
 /// Factory reset: delete every credential and the PIN, replacing the key that
 /// protected them, and remove any legacy state. The attestation key is kept.
-/// Requires the state lock.
-pub fn reset_state(state_dir: &Path) -> io::Result<()> {
-    remove_and_log_legacy_state(state_dir)?;
+/// Returns the legacy state files that were removed. Requires the state lock.
+pub fn reset_state(state_dir: &Path) -> io::Result<Vec<&'static str>> {
+    let removed = remove_legacy_state(state_dir)?;
     let mut store = open_store(state_dir)?;
-    store.clear().map_err(store_error)
+    store.clear().map_err(store_error)?;
+    Ok(removed)
 }
 
 /// Check `candidate` against the stored PIN with the engine's state machine,
@@ -628,8 +629,9 @@ mod tests {
         fs::write(dir.path().join("master.seed"), [0u8; 32]).unwrap();
         fs::write(dir.path().join("internal.lfs2"), [0u8; 256]).unwrap();
 
-        reset_state(dir.path()).unwrap();
-
+        let mut removed = reset_state(dir.path()).unwrap();
+        removed.sort_unstable();
+        assert_eq!(removed, ["internal.lfs2", "master.seed"]);
         assert!(!dir.path().join("master.seed").exists());
         assert!(!dir.path().join("internal.lfs2").exists());
     }
