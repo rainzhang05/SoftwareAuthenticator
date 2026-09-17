@@ -160,10 +160,6 @@ impl<'interrupt> CtapApp<'interrupt> {
         bytes
     }
 
-    fn handle_bio_enrollment(&mut self, _payload: &[u8]) -> Result<Vec<u8>, u8> {
-        Err(CTAP1_ERR_INVALID_COMMAND)
-    }
-
     /// The log line for one CTAPHID_CBOR exchange: `request` is the command
     /// byte and its parameters, `response` the status byte and its CBOR.
     /// resp_bcnt counts the whole response, resp_payload_len only the CBOR
@@ -248,7 +244,12 @@ impl<'a, 'interrupt: 'a, const N: usize> App<'a, N> for CtapApp<'interrupt> {
                     CTAP_CMD_CLIENT_PIN => self.handle_client_pin(payload),
                     CTAP_CMD_RESET => self.handle_reset(),
                     CTAP_CMD_CREDENTIAL_MANAGEMENT => self.handle_credential_management(payload),
-                    CTAP_CMD_BIO_ENROLLMENT => self.handle_bio_enrollment(payload),
+                    // Neither authenticatorBioEnrollment (0x09) nor its
+                    // prototype (0x40) is implemented: "If an authenticator
+                    // receives a command code it does not implement, it MUST
+                    // return CTAP1_ERR_INVALID_COMMAND." (CTAP 2.3 §8.1)
+                    // getInfo accordingly has no bioEnroll or
+                    // userVerificationMgmtPreview option (§6.4, §6.7.1).
                     _ => Err(CTAP1_ERR_INVALID_COMMAND),
                 };
 

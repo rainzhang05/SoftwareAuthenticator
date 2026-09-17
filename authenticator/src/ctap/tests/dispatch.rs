@@ -1,10 +1,12 @@
 //! Command dispatch and the request log.
 
-use super::support::{encode, int};
+use super::support::{encode, int, test_app, TestApp};
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::CtapApp;
 
 use ciborium::value::Value;
+use ctaphid_app::{App, Command};
+use heapless_bytes::Bytes;
 
 use crate::ctap::constants::*;
 
@@ -45,4 +47,30 @@ fn request_log_counts_the_response_with_and_without_its_status_byte() {
         "{line}"
     );
     assert!(line.contains("sub=n/a pinProtocol=n/a"), "{line}");
+}
+
+/// Send `request` through `App::call` into a CTAPHID-sized response buffer.
+pub(super) fn call(app: &mut TestApp, request: &[u8]) -> Vec<u8> {
+    let mut response = Bytes::<CTAPHID_MAX_MESSAGE>::new();
+    App::<CTAPHID_MAX_MESSAGE>::call(app, Command::Cbor, request, &mut response)
+        .expect("CTAPHID_CBOR is answered");
+    response.to_vec()
+}
+
+/// CTAPHID's largest message: 64 - 7 + 128 * (64 - 5) bytes (CTAP 2.3
+/// §11.2.4).
+pub(super) const CTAPHID_MAX_MESSAGE: usize = 7609;
+
+/// The authenticator has no biometric sensor, so it implements neither
+/// authenticatorBioEnrollment (0x09) nor the FIDO_2_1_PRE prototype (0x40):
+/// "If an authenticator receives a command code it does not implement, it
+/// MUST return CTAP1_ERR_INVALID_COMMAND." (CTAP 2.3 §8.1)
+#[test]
+fn bio_enrollment_commands_are_not_implemented() {
+    let mut app = test_app([0x09; 16]);
+    // {subCommand (0x02): 0x06}; the parameters do not matter.
+    for command in [CTAP_CMD_BIO_ENROLLMENT, CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE] {
+        let request = request(command, vec![(int(2), int(0x06))]);
+        assert_eq!(call(&mut app, &request), [CTAP1_ERR_INVALID_COMMAND]);
+    }
 }

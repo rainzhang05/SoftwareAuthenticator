@@ -25,11 +25,13 @@ pub const CTAP_CMD_GET_INFO: u8 = 0x04;
 pub const CTAP_CMD_CLIENT_PIN: u8 = 0x06;
 pub const CTAP_CMD_RESET: u8 = 0x07;
 pub const CTAP_CMD_GET_NEXT_ASSERTION: u8 = 0x08;
+/// `authenticatorBioEnrollment`, CTAP 2.3 § 6.7.  Not implemented: this
+/// authenticator has no biometric sensor.
+pub const CTAP_CMD_BIO_ENROLLMENT: u8 = 0x09;
 pub const CTAP_CMD_CREDENTIAL_MANAGEMENT: u8 = 0x0A;
-/// Prototype `authenticatorBioEnrollment`, CTAP 2.1 § 6.12 (`FIDO_2_1_PRE`
-/// backwards compatibility). The standardised `authenticatorBioEnrollment`
-/// command is `0x09`; this crate currently only speaks the prototype number.
-pub const CTAP_CMD_BIO_ENROLLMENT: u8 = 0x40;
+/// Prototype `authenticatorBioEnrollment`, CTAP 2.3 § 6.12 (`FIDO_2_1_PRE`
+/// backwards compatibility).  Not implemented either.
+pub const CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE: u8 = 0x40;
 
 // -- Status codes (CTAP 2.1 § 8.2) -------------------------------------------
 //
@@ -249,8 +251,9 @@ mod tests {
         assert_eq!(CTAP_CMD_CLIENT_PIN, 0x06);
         assert_eq!(CTAP_CMD_RESET, 0x07);
         assert_eq!(CTAP_CMD_GET_NEXT_ASSERTION, 0x08);
+        assert_eq!(CTAP_CMD_BIO_ENROLLMENT, 0x09);
         assert_eq!(CTAP_CMD_CREDENTIAL_MANAGEMENT, 0x0A);
-        // § 6.12 prototype command, not the standardised 0x09.
-        assert_eq!(CTAP_CMD_BIO_ENROLLMENT, 0x40);
+        // § 6.12 prototype command.
+        assert_eq!(CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE, 0x40);
     }
 }
