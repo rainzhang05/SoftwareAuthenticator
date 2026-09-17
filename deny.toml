@@ -96,9 +96,15 @@ license-files = []
 [bans]
 # Duplicated crypto crates are a real hazard in an authenticator: two copies of
 # sha2 or p256 means two code paths, two audit surfaces, and larger binaries.
-# The duplicates Trussed brought in (p256 0.9, sha2 0.9, hmac 0.11) are gone;
-# the only duplicate left is syn 2 + 3, a build-time proc-macro dependency.
-# TODO: switch to "deny" once syn is unified. That single word is the whole
+# The duplicates Trussed brought in (p256 0.9, sha2 0.9, hmac 0.11) are gone,
+# and every RustCrypto crate is on a single generation (digest 0.11, cipher
+# 0.5, elliptic-curve 0.14, signature 3). The duplicates left are:
+# - syn 2 + 3, a build-time proc-macro dependency;
+# - rand_core 0.6 + 0.10: trussed-core (every release up to 0.2.2) still
+#   requires rand_core 0.6, and pc-hid-runner's rand 0.8 does too;
+# - getrandom 0.2 + 0.4: getrandom 0.2 only comes from rand 0.8's `std`
+#   feature, so it goes away when pc-hid-runner moves to rand 0.10.
+# TODO: switch to "deny" once these are unified. That single word is the whole
 # change.
 multiple-versions = "warn"
 
@@ -108,7 +114,7 @@ multiple-versions = "warn"
 wildcards = "warn"
 
 [bans.workspace-dependencies]
-# Members declare sha2 / p256 / log / zeroize / heapless-bytes
+# Members declare sha2 / p256 / getrandom / log / zeroize / heapless-bytes
 # independently instead of via [workspace.dependencies] + `workspace = true`,
 # which is how the duplicate versions above crept in. cargo-deny denies this by
 # default; downgraded to a warning until the manifests are unified.

@@ -29,8 +29,3 @@ mldsa44 = []
 mldsa65 = []
 mldsa87 = []
 log = ["dep:log"]
-
-[dev-dependencies]
-# Differential test (tests/differential.rs): the previous backend, kept only to
-# hold `ml-dsa` to it byte for byte.
-fips204 = "0.4.6"
