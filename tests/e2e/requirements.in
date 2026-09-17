@@ -1,0 +1,13 @@
+# Direct dependencies of the Python end-to-end tests. requirements.txt pins
+# these and everything they pull in, with hashes; regenerate it with:
+#
+#   uv pip compile tests/e2e/requirements.in --generate-hashes \
+#     --python-version 3.14 --python-platform x86_64-unknown-linux-gnu \
+#     -o tests/e2e/requirements.txt
+#
+# python-fido2: CTAPHID transport, CTAP2 commands and the PIN/UV protocols.
+fido2==2.2.1
+# cryptography: independent verification of ES256 and ML-DSA signatures. ML-DSA
+# needs 48.0.0 or later, whose wheels are built with OpenSSL's implementation.
+cryptography==50.0.1
+pytest==9.1.1

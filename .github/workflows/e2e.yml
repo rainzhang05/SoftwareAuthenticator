@@ -136,6 +136,26 @@ jobs:
       - name: libfido2 tests
         run: tests/e2e/libfido2.sh "$E2E_HIDRAW"
 
+      - name: Set up Python
+        if: success() || failure()
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14.7"
+      - name: Install Python test dependencies
+        if: success() || failure()
+        # Every package is pinned with its hashes; wheels only, so nothing
+        # from PyPI runs at install time.
+        run: |
+          python -m venv "$RUNNER_TEMP/e2e-venv"
+          "$RUNNER_TEMP/e2e-venv/bin/python" -m pip install --require-hashes --only-binary :all: \
+            -r tests/e2e/requirements.txt
+      # Runs even if the libfido2 tests failed: the two clients are independent.
+      - name: python-fido2 tests
+        if: (success() || failure()) && env.E2E_HIDRAW != ''
+        run: |
+          "$RUNNER_TEMP/e2e-venv/bin/python" -m pytest tests/e2e -v \
+            --junitxml="$RUNNER_TEMP/e2e-diagnostics/pytest-junit.xml"
+
       - name: Detach the virtual security key
         if: always() && env.E2E_STATE_DIR != ''
         run: |
