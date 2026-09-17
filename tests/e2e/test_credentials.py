@@ -14,6 +14,14 @@ RP_ID = "e2e.example"
 
 ALGORITHMS = [
     pytest.param(client.ES256, id="ES256"),
+    *(
+        pytest.param(
+            alg,
+            id=f"ML-DSA-{name}",
+            marks=known_bug(bugs.CREDENTIAL_STORE_CAPACITY, status=CtapError.ERR.PROCESSING),
+        )
+        for alg, name in ((client.ML_DSA_44, 44), (client.ML_DSA_65, 65), (client.ML_DSA_87, 87))
+    ),
 ]
 
 
