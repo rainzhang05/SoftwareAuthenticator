@@ -40,7 +40,6 @@ impl CtapApp<'_> {
         let timeout = self.presence_timeout;
         self.confirm_user_presence(PresenceRequest::new(PresenceOperation::Reset, timeout))?;
         self.cred_mgmt_state = CredentialManagementState::new();
-        self.pending_assertion = None;
         self.store
             .clear()
             .map_err(|err| store_status("reset the credential store", err))?;

@@ -70,3 +70,127 @@ fn bio_enrollment_commands_are_not_implemented() {
         assert_eq!(call(&mut app, &request), [CTAP1_ERR_INVALID_COMMAND]);
     }
 }
+
+mod get_next_assertion_state {
+    use super::super::support::{credential, encode, int, scripted_app, TestApp};
+    use super::call;
+    use crate::ctap::cbor::canonical_map;
+    use crate::ctap::pin::token::ManualClock;
+    use crate::ctap::presence::PresenceOutcome;
+    use crate::ctap::storage::CREDENTIAL_ID_LENGTH;
+    use crate::ctap::RESET_WINDOW_AFTER_POWER_UP;
+    use crate::CoseAlg;
+
+    use ciborium::value::Value;
+    use core::time::Duration;
+    use ctaphid_app::{App, Command};
+    use heapless_bytes::Bytes;
+
+    use crate::ctap::constants::*;
+
+    const RP_ID: &str = "example.com";
+
+    /// An app with three discoverable credentials for [`RP_ID`], whose user
+    /// answers presence requests with `outcomes` and then approves, on a
+    /// clock that starts at power-up.
+    fn three_credentials(outcomes: Vec<PresenceOutcome>) -> (TestApp, ManualClock) {
+        let (mut app, _) = scripted_app([0x5D; 16], outcomes);
+        let clock = ManualClock::default();
+        app.pin_state.set_clock(Box::new(clock.clone()));
+        for tag in 1..=3u8 {
+            let mut id = vec![tag; CREDENTIAL_ID_LENGTH];
+            id[0] = 1;
+            app.store
+                .put(&credential(RP_ID, &[tag], &id, CoseAlg::ES256))
+                .expect("store credential");
+        }
+        (app, clock)
+    }
+
+    /// getAssertion through the dispatcher, which finds three credentials.
+    fn begin(app: &mut TestApp) {
+        let mut request = vec![CTAP_CMD_GET_ASSERTION];
+        request.extend(encode(&canonical_map(vec![
+            (int(1), Value::Text(RP_ID.into())),
+            (int(2), Value::Bytes(vec![0x5E; 32])),
+        ])));
+        let response = call(app, &request);
+        assert_eq!(response[0], CTAP2_OK, "getAssertion");
+    }
+
+    fn get_next_assertion(app: &mut TestApp) -> u8 {
+        call(app, &[CTAP_CMD_GET_NEXT_ASSERTION])[0]
+    }
+
+    /// Without anything in between, getNextAssertion returns the other two.
+    #[test]
+    fn get_next_assertion_follows_get_assertion() {
+        let (mut app, _) = three_credentials(vec![]);
+        begin(&mut app);
+        assert_eq!(get_next_assertion(&mut app), CTAP2_OK);
+        assert_eq!(get_next_assertion(&mut app), CTAP2_OK);
+        assert_eq!(get_next_assertion(&mut app), CTAP2_ERR_NOT_ALLOWED);
+    }
+
+    /// "The authenticator MAY maintain state based on the assumption that
+    /// each stateful command is exclusively preceded by either another
+    /// instance of the same command, or by the corresponding state
+    /// initializing command [...]. If this pattern is violated then the
+    /// authenticator MAY fail any stateful command with the error
+    /// CTAP2_ERR_NOT_ALLOWED." (CTAP 2.3 §6)  Every other request, whatever
+    /// its outcome, ends the getAssertion state.
+    #[test]
+    fn any_other_request_discards_the_get_assertion_state() {
+        let malformed = |command: u8| vec![command, 0xFF];
+        let intervening: Vec<(&str, Vec<u8>)> = vec![
+            ("getInfo", vec![CTAP_CMD_GET_INFO]),
+            (
+                "malformed makeCredential",
+                malformed(CTAP_CMD_MAKE_CREDENTIAL),
+            ),
+            ("malformed getAssertion", malformed(CTAP_CMD_GET_ASSERTION)),
+            ("malformed clientPIN", malformed(CTAP_CMD_CLIENT_PIN)),
+            (
+                "malformed credentialManagement",
+                malformed(CTAP_CMD_CREDENTIAL_MANAGEMENT),
+            ),
+            ("unimplemented bioEnrollment", vec![CTAP_CMD_BIO_ENROLLMENT]),
+            ("undefined command", vec![0x3F]),
+            ("empty request", vec![]),
+        ];
+        for (name, request) in intervening {
+            let (mut app, _) = three_credentials(vec![]);
+            begin(&mut app);
+            // The empty request is answered with a CTAPHID error, the others
+            // with a CTAP status.
+            let mut response = Bytes::<MAX_RESPONSE_SIZE>::new();
+            let _ =
+                App::<MAX_RESPONSE_SIZE>::call(&mut app, Command::Cbor, &request, &mut response);
+            assert_eq!(
+                get_next_assertion(&mut app),
+                CTAP2_ERR_NOT_ALLOWED,
+                "after {name}"
+            );
+        }
+    }
+
+    /// authenticatorReset that fails, because it comes too late after
+    /// power-up or the user does not approve it, ends the state too.
+    #[test]
+    fn a_failed_reset_discards_the_get_assertion_state() {
+        let (mut app, clock) = three_credentials(vec![]);
+        begin(&mut app);
+        clock.advance(RESET_WINDOW_AFTER_POWER_UP + Duration::from_millis(1));
+        assert_eq!(call(&mut app, &[CTAP_CMD_RESET]), [CTAP2_ERR_NOT_ALLOWED]);
+        assert_eq!(get_next_assertion(&mut app), CTAP2_ERR_NOT_ALLOWED);
+
+        let (mut app, _) =
+            three_credentials(vec![PresenceOutcome::Approved, PresenceOutcome::Denied]);
+        begin(&mut app);
+        assert_eq!(
+            call(&mut app, &[CTAP_CMD_RESET]),
+            [CTAP2_ERR_OPERATION_DENIED]
+        );
+        assert_eq!(get_next_assertion(&mut app), CTAP2_ERR_NOT_ALLOWED);
+    }
+}

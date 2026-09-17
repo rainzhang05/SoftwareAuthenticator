@@ -364,7 +364,6 @@ impl CtapApp<'_> {
     }
 
     pub(super) fn handle_credential_management(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
-        self.pending_assertion = None;
         let request: Value = from_reader(payload).map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
         let map = match request {
             Value::Map(map) => map,

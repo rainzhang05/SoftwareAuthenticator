@@ -34,7 +34,6 @@ fn uint(value: u64) -> Value {
 
 impl CtapApp<'_> {
     pub(super) fn handle_get_info(&mut self) -> Result<Vec<u8>, u8> {
-        self.pending_assertion = None;
         let mut map = Vec::new();
 
         // FIDO_2_3 carries the obligations of CTAP 2.3 §9, all of which hold:

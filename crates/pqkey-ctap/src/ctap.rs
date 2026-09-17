@@ -273,6 +273,20 @@ impl<'a, 'interrupt: 'a, const N: usize> App<'a, N> for CtapApp<'interrupt> {
         request: &[u8],
         response: &mut heapless_bytes::Bytes<N>,
     ) -> Result<(), Error> {
+        // authenticatorGetNextAssertion is a stateful command: "The
+        // authenticator MAY maintain state based on the assumption that each
+        // stateful command is exclusively preceded by either another instance
+        // of the same command, or by the corresponding state initializing
+        // command [...]. If this pattern is violated then the authenticator
+        // MAY fail any stateful command with the error CTAP2_ERR_NOT_ALLOWED.
+        // Here, "exclusively preceded" means that no other authenticator
+        // operation occurs in between." (CTAP 2.3 §6)  Every request but
+        // getNextAssertion therefore discards the remembered getAssertion
+        // parameters before it is looked at, whatever it turns out to be and
+        // however it ends; a getAssertion that succeeds remembers its own.
+        if command != Command::Cbor || request.first() != Some(&CTAP_CMD_GET_NEXT_ASSERTION) {
+            self.pending_assertion = None;
+        }
         match command {
             Command::Cbor => {
                 if request.is_empty() {
