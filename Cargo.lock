@@ -10,7 +10,7 @@ checksum = "d122413f284cf2d62fb1b7db97e02edb8cda96d769b16e443a4f6195e35662b0"
 dependencies = [
  "crypto-common",
  "generic-array",
- "heapless",
+ "heapless 0.7.17",
 ]
 
 [[package]]
@@ -218,7 +218,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b6dd31f7069836e87169bc5910212571b873cebe389c7c7f2d8b1fb3e55c80d"
 dependencies = [
  "delog",
- "heapless",
+ "heapless 0.7.17",
  "heapless-bytes",
  "serde_core",
 ]
@@ -712,7 +712,7 @@ checksum = "a2510a9088d9557aab93401404fc6786fad82f55705dedf4ee5884a3ace9be9b"
 dependencies = [
  "delog",
  "flexiber_derive",
- "heapless",
+ "heapless 0.7.17",
 ]
 
 [[package]]
@@ -811,16 +811,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "heapless"
 version = "0.7.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdc6457c0eb62c71aac4bc17216026d8410337c4126773b9c5daba343f17964f"
 dependencies = [
  "atomic-polyfill",
- "hash32",
+ "hash32 0.2.1",
  "rustc_version",
  "serde",
  "spin 0.9.9",
+ "stable_deref_trait",
+]
+
+[[package]]
+name = "heapless"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
+dependencies = [
+ "hash32 0.3.1",
  "stable_deref_trait",
 ]
 
@@ -830,7 +849,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7285eba272c6af3e9f15fb9e1c1b6e7d35aa70580ffe0d47af017e97dfb6f48b"
 dependencies = [
- "heapless",
+ "heapless 0.7.17",
  "serde",
  "typenum",
 ]
@@ -958,9 +977,23 @@ checksum = "32a43f3c0c6a7d127e3e1241665dd896d8bf1ca31cf9d826a1dc65239bd59868"
 dependencies = [
  "delog",
  "generic-array",
- "heapless",
+ "heapless 0.7.17",
  "littlefs2-core",
- "littlefs2-sys",
+ "littlefs2-sys 0.3.2",
+]
+
+[[package]]
+name = "littlefs2"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "162d215700412b0173e3c8cfde130176fb799beccdd3d8db7cee57be3fb72ada"
+dependencies = [
+ "bitflags",
+ "delog",
+ "generic-array",
+ "heapless 0.9.3",
+ "littlefs2-core",
+ "littlefs2-sys 0.4.0",
 ]
 
 [[package]]
@@ -979,6 +1012,16 @@ name = "littlefs2-sys"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae112b732df34c1420471e1ff21c562dfdf81219efb5960dd15b3947097e784a"
+dependencies = [
+ "bindgen",
+ "cc",
+]
+
+[[package]]
+name = "littlefs2-sys"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "999d08bb7fae46d63ecb98d2474d28f7af1a6c928a51b4dfe5f1804abf9afc46"
 dependencies = [
  "bindgen",
  "cc",
@@ -1224,7 +1267,7 @@ version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a25c0b0ae06fcffe600ad392aabfa535696c8973f2253d9ac83171924c58a858"
 dependencies = [
- "heapless",
+ "heapless 0.7.17",
  "postcard-cobs",
  "serde",
 ]
@@ -1793,7 +1836,7 @@ dependencies = [
  "ciborium",
  "ctaphid-dispatch",
  "interchange",
- "littlefs2",
+ "littlefs2 0.8.1",
  "littlefs2-core",
  "log",
  "p256 0.13.2",
@@ -1821,12 +1864,12 @@ dependencies = [
  "delog",
  "flexiber",
  "generic-array",
- "heapless",
+ "heapless 0.7.17",
  "heapless-bytes",
  "hex-literal",
  "hmac 0.12.1",
  "interchange",
- "littlefs2",
+ "littlefs2 0.6.1",
  "littlefs2-core",
  "nb",
  "p256-cortex-m4",

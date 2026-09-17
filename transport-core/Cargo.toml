@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 interchange = "0.3.0"
-littlefs2 = "0.6"
+littlefs2 = "0.8"
 littlefs2-core = "0.1"
 log = { version = "0.4.14", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
