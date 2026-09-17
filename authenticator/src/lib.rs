@@ -14,13 +14,6 @@ use sha2::{Digest, Sha256};
 use trussed_mldsa::{try_keypair, try_sign, MlDsaError, ParamSet, PublicKey, SecretKey};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-// TEMPORARY: `ctap` still calls the deprecated infallible wrappers below
-// (`create_credential`, `sign_challenge`, `cose_public_key`,
-// `CredentialSecretKey::to_bytes`).  Suppressing the lint for that module only
-// keeps the build quiet without hiding the deprecation from this module, from
-// the new tests, or from downstream crates.  Remove this attribute once
-// `ctap.rs` has been migrated to the `try_*` API.
-#[allow(deprecated)]
 pub mod ctap;
 pub mod store;
 
@@ -329,29 +322,10 @@ pub(crate) fn cose_akp_key_map(alg_id: i32, public_key: &[u8]) -> Value {
     ])
 }
 
-/// Generate a COSE_Key for a given public key and parameter set.
-///
-/// The returned vector contains the CBOR encoding of the standard AKP
-/// structure:
-///
-/// * **1 (kty)**: the Algorithm Key Pair key type (7).
-/// * **3 (alg)**: the COSE algorithm identifier (-48/-49/-50).
-/// * **-1**: the raw public key bytes.
-///
-/// # Deprecated
-///
-/// This function panics if CBOR serialization fails.  Use
-/// [`try_cose_public_key`] instead.
-#[deprecated(
-    since = "0.1.0",
-    note = "panics on CBOR encoding failure; use `try_cose_public_key` instead"
-)]
-pub fn cose_public_key(ps: ParamSet, pk: &PublicKey) -> Vec<u8> {
-    try_cose_public_key(ps, pk).expect("CBOR encoding failed")
-}
-
-/// Fallible form of [`cose_public_key`]: build the CBOR COSE_Key for an ML-DSA
-/// public key, returning [`CryptoError::CborEncoding`] rather than panicking.
+/// Build the CBOR COSE_Key for an ML-DSA public key: the Algorithm Key Pair
+/// structure with 1 (kty) = 7 (AKP), 3 (alg) = -48/-49/-50, and -1 = the raw
+/// public key bytes.  Returns [`CryptoError::CborEncoding`] if serialization
+/// fails.
 pub fn try_cose_public_key(ps: ParamSet, pk: &PublicKey) -> Result<Vec<u8>, CryptoError> {
     let alg_id = match ps {
         ParamSet::MLDSA44 => CoseAlg::MLDSA44 as i32,
@@ -408,7 +382,7 @@ impl CredentialSecretKey {
     /// Serialize the secret key into a byte buffer suitable for storage.
     ///
     /// The returned buffer is wrapped in [`Zeroizing`], so the copy is wiped
-    /// when the caller drops it.  Prefer this over [`Self::to_bytes`].
+    /// when the caller drops it.
     pub fn secret_bytes(&self) -> Zeroizing<Vec<u8>> {
         match self {
             CredentialSecretKey::MlDsa(sk) => Zeroizing::new(sk.0.clone()),
@@ -419,21 +393,6 @@ impl CredentialSecretKey {
                 out
             }
         }
-    }
-
-    /// Serialize the secret key into a plain byte vector.
-    ///
-    /// # Deprecated
-    ///
-    /// The returned `Vec<u8>` is a bare copy of private key material that is
-    /// **not** wiped when it is dropped, so it can linger in freed heap memory.
-    /// Use [`Self::secret_bytes`] instead, which returns a [`Zeroizing`] buffer.
-    #[deprecated(
-        since = "0.1.0",
-        note = "returns un-zeroized private key material; use `secret_bytes` instead"
-    )]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.secret_bytes().to_vec()
     }
 }
 
@@ -473,24 +432,7 @@ pub fn try_credential_secret_from_bytes(
     }
 }
 
-/// Generate a new credential.  Returns the COSE_Key and a secret key wrapper.
-/// In a real authenticator you would store the secret key in secure
-/// persistent storage and return only the credential ID and public key to the
-/// client.
-///
-/// # Deprecated
-///
-/// This function panics when `alg` is not a supported algorithm and when key
-/// generation fails.  Use [`try_create_credential`] instead.
-#[deprecated(
-    since = "0.1.0",
-    note = "panics on unsupported algorithms and keygen failure; use `try_create_credential` instead"
-)]
-pub fn create_credential(alg: CoseAlg) -> (Vec<u8>, CredentialSecretKey) {
-    try_create_credential(alg).expect("credential generation failed")
-}
-
-/// Fallible form of [`create_credential`].
+/// Generate a new credential.
 ///
 /// Returns the CBOR COSE_Key for the new public key plus the secret key
 /// wrapper.  Errors instead of panicking when `alg` names no supported
@@ -514,44 +456,7 @@ pub fn try_create_credential(alg: CoseAlg) -> Result<(Vec<u8>, CredentialSecretK
     }
 }
 
-/// Produce a signature over `auth_data || client_data_hash` using the provided
-/// secret key.
-///
-/// # Deprecated
-///
-/// This function panics when `alg` and the secret key variant disagree - a
-/// condition driven by the `alg` field read back from persistent storage, so it
-/// is reachable with a corrupted or tampered credential record.  It is also
-/// unable to report a malformed stored key: it silently returns an **empty**
-/// signature, which callers then happily encode into an assertion response.
-/// Use [`try_sign_challenge`] instead.
-#[deprecated(
-    since = "0.1.0",
-    note = "panics when the stored `alg` and key variant disagree, and returns an empty signature for a malformed key; use `try_sign_challenge` instead"
-)]
-pub fn sign_challenge(
-    alg: CoseAlg,
-    sk: &CredentialSecretKey,
-    auth_data: &[u8],
-    client_data_hash: &[u8],
-) -> Vec<u8> {
-    match try_sign_challenge(alg, sk, auth_data, client_data_hash) {
-        Ok(signature) => signature,
-        // Preserve the historical behaviour of `trussed_mldsa::sign`, which
-        // logs and returns an empty signature rather than aborting when the
-        // stored secret key is malformed.  Existing callers depend on it.
-        // `try_sign_challenge` reports the real error instead.
-        Err(CryptoError::MlDsa(err)) => {
-            log::warn!("ML-DSA signing failed, returning an empty signature: {err:?}");
-            Vec::new()
-        }
-        Err(err) => panic!("sign_challenge: {err}"),
-    }
-}
-
-/// Fallible form of [`sign_challenge`].
-///
-/// Signs `auth_data || client_data_hash` and returns the encoded signature:
+/// Sign `auth_data || client_data_hash` and returns the encoded signature:
 ///
 /// * **ES256**: ECDSA over P-256 with SHA-256 (the message is hashed
 ///   internally), returned as an ASN.1 DER `Ecdsa-Sig-Value`, which is the
@@ -1041,23 +946,5 @@ mod tests {
         // A different message must not verify.
         let other = Sha256::digest(b"something else");
         assert!(verifying_key.verify_prehash(&other, &signature).is_err());
-    }
-
-    #[test]
-    fn deprecated_wrappers_still_agree_with_fallible_versions() {
-        #[allow(deprecated)]
-        {
-            let pk = PublicKey(vec![0x01, 0x02, 0x03]);
-            assert_eq!(
-                cose_public_key(ParamSet::MLDSA44, &pk),
-                try_cose_public_key(ParamSet::MLDSA44, &pk).unwrap()
-            );
-
-            let (_, secret_key) = try_create_credential(CoseAlg::ES256).unwrap();
-            assert_eq!(
-                secret_key.to_bytes().as_slice(),
-                secret_key.secret_bytes().as_slice()
-            );
-        }
     }
 }
