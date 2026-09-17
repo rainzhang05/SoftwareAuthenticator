@@ -4,7 +4,7 @@ A software-based FIDO2/WebAuthn authenticator written in Rust. It uses the
 Trussed framework and provides **Post-Quantum Cryptography** signatures
 (ML-DSA-44/65/87 per FIPS 204) alongside classical ES256, with no C
 dependencies — the cryptography is entirely pure Rust via the
-[`fips204`](https://docs.rs/fips204) crate.
+RustCrypto [`ml-dsa`](https://docs.rs/ml-dsa) crate.
 
 The application runs on a Linux host and provisions a virtual HID token
 through `/dev/uhid`. Web browsers and tools like `libfido2` interact with it
