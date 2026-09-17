@@ -24,8 +24,13 @@ def test_get_info(ctap: Ctap2):
     assert info[3] == client.DEFAULT_AAGUID
 
     options = info[4]
-    for option in ("rk", "up", "clientPin", "pinUvAuthToken", "credMgmt"):
+    for option in ("rk", "up", "pinUvAuthToken", "credMgmt"):
         assert options.get(option) is True, f"{option}: {options}"
+    # CTAP 2.3 6.4: clientPin is false while no PIN is set (the fixture has just
+    # reset the authenticator), and uv is absent without built-in user
+    # verification.
+    assert options.get("clientPin") is False, f"clientPin: {options}"
+    assert "uv" not in options, f"uv: {options}"
 
     assert info[5] >= 1024, "maxMsgSize"
     assert sorted(info[6]) == [1, 2], f"pinUvAuthProtocols {info[6]}"

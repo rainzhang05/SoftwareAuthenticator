@@ -46,8 +46,10 @@ def _retries(ctap: Ctap2) -> int:
     _protocols(),
 )
 def test_set_pin(ctap: Ctap2, protocol):
+    assert ctap.send_cbor(Ctap2.CMD.GET_INFO)[4]["clientPin"] is False
     _client_pin(ctap, protocol).set_pin(PIN)
 
+    assert ctap.send_cbor(Ctap2.CMD.GET_INFO)[4]["clientPin"] is True
     assert _retries(ctap) == MAX_RETRIES
     assert _token(ctap, PinProtocolV1, PIN, ClientPin.PERMISSION.GET_ASSERTION)
     with pytest.raises(CtapError) as excinfo:
