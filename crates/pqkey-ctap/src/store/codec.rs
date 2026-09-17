@@ -90,7 +90,7 @@ pub(crate) fn encode_credential(
 /// Decode and validate a credential record.
 pub(crate) fn decode_credential(bytes: &[u8]) -> Result<CredentialRecord, Corruption> {
     let mut fields = Fields::parse(bytes)?;
-    let alg = CoseAlg::try_from(fields.int::<i32>(6)?).map_err(|()| Corruption::Encoding)?;
+    let alg = CoseAlg::try_from(fields.int::<i32>(6)?).map_err(|_| Corruption::Encoding)?;
     let key_type = fields.uint::<u64>(7)?;
     let key = Zeroizing::new(fields.array::<32>(8)?);
     let private_key = match key_type {

@@ -317,15 +317,28 @@ pub enum CoseAlg {
     MLDSA87 = -50,
 }
 
+/// A COSE algorithm identifier that is not one of the [`CoseAlg`] values; it
+/// carries the identifier.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct UnsupportedCoseAlg(pub i32);
+
+impl fmt::Display for UnsupportedCoseAlg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unsupported COSE algorithm {}", self.0)
+    }
+}
+
+impl std::error::Error for UnsupportedCoseAlg {}
+
 impl TryFrom<i32> for CoseAlg {
-    type Error = ();
+    type Error = UnsupportedCoseAlg;
     fn try_from(value: i32) -> Result<Self, Self::Error> {
         match value {
             -7 => Ok(CoseAlg::ES256),
             -48 => Ok(CoseAlg::MLDSA44),
             -49 => Ok(CoseAlg::MLDSA65),
             -50 => Ok(CoseAlg::MLDSA87),
-            _ => Err(()),
+            _ => Err(UnsupportedCoseAlg(value)),
         }
     }
 }
@@ -988,10 +1001,16 @@ mod tests {
     fn try_create_credential_rejects_unsupported_algorithm() {
         // `CoseAlg` only carries supported identifiers, so exercise the parse
         // boundary that feeds it as well.
-        assert!(CoseAlg::try_from(-257).is_err());
-        assert!(CoseAlg::try_from(-8).is_err());
+        assert_eq!(CoseAlg::try_from(-257), Err(UnsupportedCoseAlg(-257)));
+        assert_eq!(CoseAlg::try_from(-8), Err(UnsupportedCoseAlg(-8)));
         assert_eq!(CoseAlg::try_from(-7), Ok(CoseAlg::ES256));
         assert_eq!(CoseAlg::try_from(-48), Ok(CoseAlg::MLDSA44));
+        assert_eq!(CoseAlg::try_from(-49), Ok(CoseAlg::MLDSA65));
+        assert_eq!(CoseAlg::try_from(-50), Ok(CoseAlg::MLDSA87));
+        assert_eq!(
+            UnsupportedCoseAlg(-257).to_string(),
+            "unsupported COSE algorithm -257"
+        );
         // ES256 has no ML-DSA parameter set.
         assert!(mldsa_paramset_from_alg(CoseAlg::ES256).is_none());
     }
