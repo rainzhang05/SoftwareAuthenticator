@@ -37,9 +37,16 @@ impl CtapApp<'_> {
         self.pending_assertion = None;
         let mut map = Vec::new();
 
+        // FIDO_2_3 carries the obligations of CTAP 2.3 §9, all of which hold:
+        // hmac-secret and credProtect are supported, the rk option ID comes
+        // with clientPin (true or false as a PIN is or is not set) and credMgmt
+        // true, pinUvAuthToken is true, and pinUvAuthProtocols includes 2.
+        // There is no minPinLength extension and no ep option ID.  "The
+        // string "FIDO_2_2" was not defined for CTAP2.2 and MUST not be
+        // present in versions member."
         map.push((
             uint(1),
-            Value::Array(vec![text("FIDO_2_1"), text("FIDO_2_0")]),
+            Value::Array(vec![text("FIDO_2_3"), text("FIDO_2_1"), text("FIDO_2_0")]),
         ));
         map.push((
             uint(2),

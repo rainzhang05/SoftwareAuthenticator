@@ -61,7 +61,7 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
     let expected_map = canonical_map(vec![
         (
             uint(1),
-            Value::Array(vec![text("FIDO_2_1"), text("FIDO_2_0")]),
+            Value::Array(vec![text("FIDO_2_3"), text("FIDO_2_1"), text("FIDO_2_0")]),
         ),
         (uint(2), extensions),
         (uint(3), Value::Bytes(aaguid.to_vec())),
