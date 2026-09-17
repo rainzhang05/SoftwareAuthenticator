@@ -4,7 +4,7 @@ use nix::poll::{PollFd, PollFlags, poll};
 use nix::unistd::{read, write};
 use std::fs::OpenOptions;
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::thread;
 use std::time::Duration;
 
@@ -140,9 +140,10 @@ impl UhidDevice {
         oflags.insert(OFlag::O_NONBLOCK);
         fcntl(fd, FcntlArg::F_SETFL(oflags)).map_err(to_io_error)?;
 
-        let owned = unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) };
         Ok(Self {
-            inner: UhidInner { fd: owned },
+            inner: UhidInner {
+                fd: OwnedFd::from(file),
+            },
             descriptor,
         })
     }
@@ -162,24 +163,25 @@ impl UhidDevice {
                 None => return Ok(None),
                 Some(event) => match event.type_ {
                     raw::UHID_EVENT_TYPE_OUTPUT => {
-                        let size = unsafe { event.u.output.size } as usize;
-                        let rtype = unsafe { event.u.output.rtype };
+                        // SAFETY: every union member is plain integers, valid
+                        // for any bytes; the type says which one is meant.
+                        let output = unsafe { event.u.output };
+                        let (size, rtype) = (output.size as usize, output.rtype);
                         if !matches!(
                             ReportType::from_raw(rtype),
                             Some(ReportType::Output) | Some(ReportType::Feature)
                         ) {
                             continue;
                         }
-                        if let Some(frame) =
-                            unsafe { frame_from_report_slice(&event.u.output.data[..size]) }
-                        {
+                        if let Some(frame) = frame_from_report_slice(&output.data[..size]) {
                             return Ok(Some(frame));
                         }
                     }
                     raw::UHID_EVENT_TYPE_SET_REPORT => {
-                        let size = unsafe { event.u.set_report.size } as usize;
-                        let id = unsafe { event.u.set_report.id };
-                        let rtype = unsafe { event.u.set_report.rtype };
+                        // SAFETY: as for the output event above.
+                        let set_report = unsafe { event.u.set_report };
+                        let (size, id, rtype) =
+                            (set_report.size as usize, set_report.id, set_report.rtype);
                         let status = if matches!(
                             ReportType::from_raw(rtype),
                             Some(ReportType::Output) | Some(ReportType::Feature)
@@ -192,15 +194,14 @@ impl UhidDevice {
                         if status != 0 {
                             continue;
                         }
-                        if let Some(frame) =
-                            unsafe { frame_from_report_slice(&event.u.set_report.data[..size]) }
-                        {
+                        if let Some(frame) = frame_from_report_slice(&set_report.data[..size]) {
                             return Ok(Some(frame));
                         }
                     }
                     raw::UHID_EVENT_TYPE_GET_REPORT => {
-                        let id = unsafe { event.u.get_report.id };
-                        let rtype = unsafe { event.u.get_report.rtype };
+                        // SAFETY: as for the output event above.
+                        let get_report = unsafe { event.u.get_report };
+                        let (id, rtype) = (get_report.id, get_report.rtype);
                         if ReportType::from_raw(rtype) != Some(ReportType::Feature) {
                             self.inner
                                 .send_get_report_reply(id, Errno::EINVAL as u16, &[])?;
@@ -264,6 +265,8 @@ impl UhidInner {
 
     fn send_input_report(&self, data: &[u8; CTAPHID_FRAME_LEN]) -> io::Result<()> {
         let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_INPUT2);
+        // SAFETY: every union member is plain integers, valid for any bytes,
+        // and the event was created for this member.
         let input = unsafe { &mut event.u.input2 };
         input.size = CTAPHID_FRAME_LEN as u16;
         input.data[..CTAPHID_FRAME_LEN].copy_from_slice(data);
@@ -278,6 +281,7 @@ impl UhidInner {
             ));
         }
         let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_GET_REPORT_REPLY);
+        // SAFETY: as for the input report above.
         let reply = unsafe { &mut event.u.get_report_reply };
         reply.id = id;
         reply.err = err;
@@ -288,6 +292,7 @@ impl UhidInner {
 
     fn send_set_report_reply(&self, id: u32, err: u16) -> io::Result<()> {
         let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_SET_REPORT_REPLY);
+        // SAFETY: as for the input report above.
         let reply = unsafe { &mut event.u.set_report_reply };
         reply.id = id;
         reply.err = err;
@@ -316,10 +321,9 @@ fn descriptor_to_create2(descriptor: &HidDeviceDescriptor) -> io::Result<raw::uh
     copy_str_to_array(&descriptor.name, &mut req.name);
     req.rd_size = CTAPHID_REPORT_DESCRIPTOR.len() as u16;
 
-    let rd_size: u16 = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(req.rd_size)) };
     log::debug!(
         "create2 rd_size={} (expected={})",
-        rd_size,
+        { req.rd_size },
         CTAPHID_REPORT_DESCRIPTOR.len() as u16
     );
     req.bus = BUS_USB;
@@ -371,6 +375,10 @@ fn read_event_nonblocking(fd: RawFd) -> io::Result<raw::uhid_event> {
 }
 
 fn event_as_bytes(event: &raw::uhid_event) -> &[u8] {
+    // SAFETY: `uhid_event` is `repr(C, packed)` plain integers with no
+    // padding, and every event is built by `uhid_event::new` or
+    // `event_from_bytes`, which initialize all of it, so the UHID_EVENT_SIZE
+    // bytes behind `event` are initialized. The slice borrows `event`.
     unsafe {
         std::slice::from_raw_parts(
             (event as *const raw::uhid_event) as *const u8,
@@ -383,6 +391,7 @@ fn event_as_bytes(event: &raw::uhid_event) -> &[u8] {
 #[cfg(test)]
 pub(crate) fn output_event(frame: &[u8; CTAPHID_FRAME_LEN]) -> Vec<u8> {
     let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_OUTPUT);
+    // SAFETY: as in `UhidInner::send_input_report`.
     let output = unsafe { &mut event.u.output };
     output.data[..CTAPHID_FRAME_LEN].copy_from_slice(frame);
     output.size = CTAPHID_FRAME_LEN as u16;
@@ -398,6 +407,7 @@ pub(crate) fn input_report(event: &[u8]) -> Option<[u8; CTAPHID_FRAME_LEN]> {
     if event.type_ != raw::UHID_EVENT_TYPE_INPUT2 {
         return None;
     }
+    // SAFETY: every union member is plain integers, valid for any bytes.
     let input = unsafe { event.u.input2 };
     if input.size as usize != CTAPHID_FRAME_LEN {
         return None;
@@ -432,6 +442,32 @@ mod raw {
 
     pub const UHID_EVENT_SIZE: usize = size_of::<uhid_event>();
 
+    /// `Default` as all-zero bytes, for the kernel structures below: arrays
+    /// longer than 32 elements have no `Default` to derive one from.
+    macro_rules! zeroed_default {
+        ($($name:ident),+ $(,)?) => {$(
+            impl Default for $name {
+                fn default() -> Self {
+                    // SAFETY: the type is made of integers and integer
+                    // arrays only, for which all-zero bytes are a valid value.
+                    unsafe { core::mem::zeroed() }
+                }
+            }
+        )+};
+    }
+
+    zeroed_default!(
+        uhid_create2_req,
+        uhid_input2_req,
+        uhid_output_req,
+        uhid_get_report_req,
+        uhid_get_report_reply_req,
+        uhid_set_report_req,
+        uhid_set_report_reply_req,
+        uhid_start_req,
+        uhid_event_union,
+    );
+
     #[repr(C, packed)]
     #[derive(Clone, Copy)]
     pub struct uhid_create2_req {
@@ -447,23 +483,11 @@ mod raw {
         pub rd_data: [u8; HID_MAX_DESCRIPTOR_SIZE],
     }
 
-    impl Default for uhid_create2_req {
-        fn default() -> Self {
-            unsafe { core::mem::zeroed() }
-        }
-    }
-
     #[repr(C, packed)]
     #[derive(Clone, Copy)]
     pub struct uhid_input2_req {
         pub size: u16,
         pub data: [u8; UHID_DATA_MAX],
-    }
-
-    impl Default for uhid_input2_req {
-        fn default() -> Self {
-            unsafe { core::mem::zeroed() }
-        }
     }
 
     #[repr(C, packed)]
@@ -474,24 +498,12 @@ mod raw {
         pub rtype: u8,
     }
 
-    impl Default for uhid_output_req {
-        fn default() -> Self {
-            unsafe { core::mem::zeroed() }
-        }
-    }
-
     #[repr(C, packed)]
     #[derive(Clone, Copy)]
     pub struct uhid_get_report_req {
         pub id: u32,
         pub rnum: u8,
         pub rtype: u8,
-    }
-
-    impl Default for uhid_get_report_req {
-        fn default() -> Self {
-            unsafe { core::mem::zeroed() }
-        }
     }
 
     #[repr(C, packed)]
@@ -501,12 +513,6 @@ mod raw {
         pub err: u16,
         pub size: u16,
         pub data: [u8; UHID_DATA_MAX],
-    }
-
-    impl Default for uhid_get_report_reply_req {
-        fn default() -> Self {
-            unsafe { core::mem::zeroed() }
-        }
     }
 
     #[repr(C, packed)]
@@ -519,12 +525,6 @@ mod raw {
         pub data: [u8; UHID_DATA_MAX],
     }
 
-    impl Default for uhid_set_report_req {
-        fn default() -> Self {
-            unsafe { core::mem::zeroed() }
-        }
-    }
-
     #[repr(C, packed)]
     #[derive(Clone, Copy)]
     pub struct uhid_set_report_reply_req {
@@ -532,22 +532,10 @@ mod raw {
         pub err: u16,
     }
 
-    impl Default for uhid_set_report_reply_req {
-        fn default() -> Self {
-            unsafe { core::mem::zeroed() }
-        }
-    }
-
     #[repr(C, packed)]
     #[derive(Clone, Copy)]
     pub struct uhid_start_req {
         pub dev_flags: u64,
-    }
-
-    impl Default for uhid_start_req {
-        fn default() -> Self {
-            unsafe { core::mem::zeroed() }
-        }
     }
 
     #[repr(C, packed)]
@@ -561,12 +549,6 @@ mod raw {
         pub set_report: uhid_set_report_req,
         pub set_report_reply: uhid_set_report_reply_req,
         pub start: uhid_start_req,
-    }
-
-    impl Default for uhid_event_union {
-        fn default() -> Self {
-            unsafe { core::mem::zeroed() }
-        }
     }
 
     #[repr(C, packed)]
@@ -589,6 +571,8 @@ mod raw {
     }
 
     pub fn event_from_bytes(bytes: &[u8; UHID_EVENT_SIZE]) -> uhid_event {
+        // SAFETY: `bytes` is exactly one `uhid_event` long, the packed type
+        // has alignment 1, and any bytes are a valid value of it.
         unsafe { core::ptr::read(bytes.as_ptr() as *const uhid_event) }
     }
 }
@@ -667,6 +651,7 @@ mod tests {
         event.u.create2 = req;
 
         let bytes = event_as_bytes(&event);
+        // SAFETY: both pointers are into `event`.
         let data_offset = unsafe {
             let base = (&event as *const raw::uhid_event).cast::<u8>();
             let data = event.u.create2.rd_data.as_ptr();
@@ -701,6 +686,7 @@ mod tests {
         close(read_fd).ok();
         assert_eq!(offset, UHID_EVENT_SIZE);
 
+        // SAFETY: both pointers are into `event`.
         let data_offset = unsafe {
             let base = (&event as *const raw::uhid_event).cast::<u8>();
             let data = event.u.create2.rd_data.as_ptr();

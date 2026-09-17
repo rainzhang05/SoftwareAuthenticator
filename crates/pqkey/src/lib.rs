@@ -1,3 +1,7 @@
+// The uhid device reads and writes kernel structures through `unsafe`; each
+// block says why it is sound.
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 pub mod attestation;
 pub mod cli;
 pub mod permissions;
