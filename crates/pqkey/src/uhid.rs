@@ -115,6 +115,13 @@ fn frame_from_report_slice(slice: &[u8]) -> Option<CtapHidFrame> {
     }
 }
 
+/// The first `size` bytes of the data of an output or set_report event, or
+/// `None` when the size the event gives is larger than its data array. The
+/// kernel never sends such an event, but the size is not trusted to index with.
+fn report_data(data: &[u8; raw::UHID_DATA_MAX], size: u16) -> Option<&[u8]> {
+    data.get(..usize::from(size))
+}
+
 /// A virtual HID device created through `/dev/uhid`. Dropping it destroys the
 /// device.
 pub struct UhidDevice {
@@ -166,35 +173,47 @@ impl UhidDevice {
                         // SAFETY: every union member is plain integers, valid
                         // for any bytes; the type says which one is meant.
                         let output = unsafe { event.u.output };
-                        let (size, rtype) = (output.size as usize, output.rtype);
+                        let (size, rtype) = (output.size, output.rtype);
                         if !matches!(
                             ReportType::from_raw(rtype),
                             Some(ReportType::Output) | Some(ReportType::Feature)
                         ) {
                             continue;
                         }
-                        if let Some(frame) = frame_from_report_slice(&output.data[..size]) {
+                        let Some(report) = report_data(&output.data, size) else {
+                            log::debug!("ignoring an output event with a malformed size of {size}");
+                            continue;
+                        };
+                        if let Some(frame) = frame_from_report_slice(report) {
                             return Ok(Some(frame));
                         }
                     }
                     raw::UHID_EVENT_TYPE_SET_REPORT => {
                         // SAFETY: as for the output event above.
                         let set_report = unsafe { event.u.set_report };
-                        let (size, id, rtype) =
-                            (set_report.size as usize, set_report.id, set_report.rtype);
-                        let status = if matches!(
-                            ReportType::from_raw(rtype),
-                            Some(ReportType::Output) | Some(ReportType::Feature)
-                        ) {
+                        let (size, id, rtype) = (set_report.size, set_report.id, set_report.rtype);
+                        let report = report_data(&set_report.data, size);
+                        if report.is_none() {
+                            log::debug!(
+                                "rejecting a set_report event with a malformed size of {size}"
+                            );
+                        }
+                        // The kernel holds the writer until a reply comes or
+                        // its timeout runs out, so a malformed request is
+                        // answered with an error rather than ignored.
+                        let report = report.filter(|_| {
+                            matches!(
+                                ReportType::from_raw(rtype),
+                                Some(ReportType::Output) | Some(ReportType::Feature)
+                            )
+                        });
+                        let status = if report.is_some() {
                             0
                         } else {
                             Errno::EINVAL as u16
                         };
                         self.inner.send_set_report_reply(id, status)?;
-                        if status != 0 {
-                            continue;
-                        }
-                        if let Some(frame) = frame_from_report_slice(&set_report.data[..size]) {
+                        if let Some(frame) = report.and_then(frame_from_report_slice) {
                             return Ok(Some(frame));
                         }
                     }
@@ -390,12 +409,31 @@ fn event_as_bytes(event: &raw::uhid_event) -> &[u8] {
 /// The event the kernel sends when a host writes `frame` to the hidraw node.
 #[cfg(test)]
 pub(crate) fn output_event(frame: &[u8; CTAPHID_FRAME_LEN]) -> Vec<u8> {
+    output_event_with_size(frame, CTAPHID_FRAME_LEN as u16)
+}
+
+/// An output event carrying `data`, with `size` taken as given.
+#[cfg(test)]
+fn output_event_with_size(data: &[u8], size: u16) -> Vec<u8> {
     let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_OUTPUT);
     // SAFETY: as in `UhidInner::send_input_report`.
     let output = unsafe { &mut event.u.output };
-    output.data[..CTAPHID_FRAME_LEN].copy_from_slice(frame);
-    output.size = CTAPHID_FRAME_LEN as u16;
+    output.data[..data.len()].copy_from_slice(data);
+    output.size = size;
     output.rtype = raw::UHID_REPORT_TYPE_OUTPUT;
+    event_as_bytes(&event).to_vec()
+}
+
+/// A set_report event as the kernel sends it, with `size` taken as given.
+#[cfg(test)]
+fn set_report_event(id: u32, rtype: u8, data: &[u8], size: u16) -> Vec<u8> {
+    let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_SET_REPORT);
+    // SAFETY: as in `UhidInner::send_input_report`.
+    let set_report = unsafe { &mut event.u.set_report };
+    set_report.id = id;
+    set_report.rtype = rtype;
+    set_report.data[..data.len()].copy_from_slice(data);
+    set_report.size = size;
     event_as_bytes(&event).to_vec()
 }
 
@@ -694,6 +732,79 @@ mod tests {
         };
         let descriptor_bytes = &buffer[data_offset..data_offset + CTAPHID_REPORT_DESCRIPTOR.len()];
         assert_eq!(descriptor_bytes, &CTAPHID_REPORT_DESCRIPTOR);
+    }
+
+    /// Every size above the data array, up to the largest a `u16` can say.
+    const OVERSIZE: [u16; 3] = [raw::UHID_DATA_MAX as u16 + 1, 0x8000, u16::MAX];
+
+    /// The id and status of the set_report reply `stream` holds next.
+    fn read_set_report_reply(stream: &mut std::os::unix::net::UnixStream) -> (u32, u16) {
+        use std::io::Read;
+        let mut bytes = [0u8; UHID_EVENT_SIZE];
+        stream.read_exact(&mut bytes).unwrap();
+        let event = raw::event_from_bytes(&bytes);
+        assert_eq!({ event.type_ }, raw::UHID_EVENT_TYPE_SET_REPORT_REPLY);
+        // SAFETY: every union member is plain integers, valid for any bytes.
+        let reply = unsafe { event.u.set_report_reply };
+        (reply.id, reply.err)
+    }
+
+    #[test]
+    fn report_data_rejects_sizes_beyond_the_array() {
+        let data = [0u8; raw::UHID_DATA_MAX];
+        assert_eq!(report_data(&data, 0).map(<[u8]>::len), Some(0));
+        let max = raw::UHID_DATA_MAX as u16;
+        assert_eq!(
+            report_data(&data, max).map(<[u8]>::len),
+            Some(raw::UHID_DATA_MAX)
+        );
+        for size in OVERSIZE {
+            assert!(report_data(&data, size).is_none(), "size {size}");
+        }
+    }
+
+    #[test]
+    fn ignores_output_events_with_an_oversize_size() {
+        use std::io::Write;
+        let (device, mut kernel) = crate::tests::socket_device();
+        let frame = ping_frame();
+        for size in OVERSIZE {
+            kernel
+                .write_all(&output_event_with_size(&frame, size))
+                .unwrap();
+        }
+        assert_eq!(device.try_read_frame().unwrap(), None);
+
+        // The device still reads the next well-formed event.
+        kernel.write_all(&output_event(&frame)).unwrap();
+        assert_eq!(
+            device.try_read_frame().unwrap(),
+            Some(CtapHidFrame::new(frame))
+        );
+    }
+
+    #[test]
+    fn answers_set_report_events_with_an_oversize_size_with_einval() {
+        use std::io::Write;
+        let (device, mut kernel) = crate::tests::socket_device();
+        let frame = init_frame();
+        for (id, size) in (1..).zip(OVERSIZE) {
+            let event = set_report_event(id, raw::UHID_REPORT_TYPE_OUTPUT, &frame, size);
+            kernel.write_all(&event).unwrap();
+            assert_eq!(device.try_read_frame().unwrap(), None);
+            assert_eq!(
+                read_set_report_reply(&mut kernel),
+                (id, Errno::EINVAL as u16)
+            );
+        }
+
+        let event = set_report_event(9, raw::UHID_REPORT_TYPE_OUTPUT, &frame, 64);
+        kernel.write_all(&event).unwrap();
+        assert_eq!(
+            device.try_read_frame().unwrap(),
+            Some(CtapHidFrame::new(frame))
+        );
+        assert_eq!(read_set_report_reply(&mut kernel), (9, 0));
     }
 
     // NOTE: previous versions of this file contained tests for an in-place
