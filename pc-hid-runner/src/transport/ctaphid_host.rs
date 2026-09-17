@@ -201,15 +201,20 @@ where
                 timestamp: timestamp_ms,
             };
 
+            // CTAP 2.3 §11.2.9.1.5: "the authenticator MUST NOT reply to the
+            // CTAPHID_CANCEL message itself", and one "received while no
+            // CTAPHID_CBOR request is being processed, or on a non-active CID
+            // SHALL be ignored".
+            if command == Command::Cancel {
+                self.cancel_ongoing_activity(channel);
+                return;
+            }
+
             if !matches!(self.state, State::Idle) {
                 if let State::WaitingOnAuthenticator {
                     request: current, ..
                 } = self.state
                 {
-                    if command == Command::Cancel && channel == current.channel {
-                        self.cancel_ongoing_activity();
-                        return;
-                    }
                     if channel == current.channel {
                         self.start_sending_error(current, AuthenticatorError::InvalidSeq);
                     } else {
@@ -219,10 +224,6 @@ where
                     request: current, ..
                 } = self.state
                 {
-                    if command == Command::Cancel && channel == current.channel {
-                        self.cancel_ongoing_activity();
-                        return;
-                    }
                     if channel == current.channel {
                         self.start_sending_error(current, AuthenticatorError::InvalidSeq);
                     } else {
@@ -427,7 +428,6 @@ where
         match request.command {
             Command::Init => self.handle_init(request),
             Command::Ping => self.handle_ping(request),
-            Command::Cancel => self.handle_cancel(request),
             _ => self.handle_application_request(request),
         }
     }
@@ -479,24 +479,6 @@ where
         self.state = State::Idle;
     }
 
-    fn handle_cancel(&mut self, request: Request) {
-        if let State::WaitingOnAuthenticator {
-            request: current, ..
-        } = self.state
-        {
-            if current.channel == request.channel {
-                let _ = self.requester.cancel();
-                self.enqueue_error_on_channel(current.channel, AuthenticatorError::Canceled);
-                self.state = State::Idle;
-                self.needs_keepalive = false;
-            } else {
-                self.enqueue_error_on_channel(request.channel, AuthenticatorError::InvalidChannel);
-            }
-        } else {
-            self.enqueue_error_on_channel(request.channel, AuthenticatorError::InvalidSeq);
-        }
-    }
-
     fn handle_application_request(&mut self, request: Request) {
         if request.channel == 0xffffffff {
             self.start_sending_error(request, AuthenticatorError::InvalidChannel);
@@ -538,8 +520,11 @@ where
         }
     }
 
-    fn cancel_ongoing_activity(&mut self) {
+    fn cancel_ongoing_activity(&mut self, channel: u32) {
         if let State::WaitingOnAuthenticator { request, .. } = self.state {
+            if request.channel != channel {
+                return;
+            }
             let _ = self.requester.cancel();
             self.enqueue_error_on_channel(request.channel, AuthenticatorError::Canceled);
             self.state = State::Idle;
@@ -775,6 +760,35 @@ mod tests {
             sequence += 1;
         }
         packets
+    }
+
+    /// CTAP 2.3 §11.2.9.1.5: "A CTAPHID_CANCEL received while no
+    /// CTAPHID_CBOR request is being processed, or on a non-active CID SHALL
+    /// be ignored by the authenticator."
+    #[test]
+    fn cancel_while_idle_or_on_another_channel_is_ignored() {
+        let (mut host, mut dispatch, mut app) = init_host();
+        let (first, second) = (0x0A0A_0A0Au32, 0x0B0B_0B0Bu32);
+
+        host.handle_frame(&message_packets(first, Command::Cancel, &[])[0], 0);
+        assert!(take_frame_bytes(&mut host).is_empty(), "CANCEL while idle");
+
+        let request = [0x04u8; 100];
+        let packets = message_packets(first, Command::Cbor, &request);
+        host.handle_frame(&packets[0], 1);
+        host.handle_frame(&message_packets(second, Command::Cancel, &[])[0], 2);
+        assert!(
+            take_frame_bytes(&mut host).is_empty(),
+            "CANCEL on another channel"
+        );
+
+        host.handle_frame(&packets[1], 3);
+        let mut apps: [&mut dyn App<'static, DEFAULT_MESSAGE_SIZE>; 1] = [&mut app];
+        let _ = host.poll_dispatch(&mut dispatch, &mut apps);
+        let frames = take_frame_bytes(&mut host);
+        assert_eq!(frames.len(), 2, "the request is still answered");
+        assert_eq!(frames[0][..4], first.to_be_bytes());
+        assert_eq!(frames[0][4], Command::Cbor.into_u8() | 0x80);
     }
 
     /// CTAP 2.3 §11.2.5.1: a request from another channel while a request is

@@ -8,10 +8,8 @@ from fido2 import cbor
 from fido2.ctap import CtapError
 from fido2.ctap2 import Ctap2
 
-import bugs
 import ctap as client
 import ctaphid
-from bugs import known_bug
 
 
 @pytest.fixture
@@ -54,7 +52,6 @@ def test_ping_echoes_a_multi_packet_payload(hid):
     assert hid.expect(cid, ctaphid.PING).payload == payload
 
 
-@known_bug(bugs.CTAPHID_CANCEL_WHILE_IDLE, raises=ctaphid.UnexpectedPacket, match=r"answered with ERROR 0x04")
 def test_cancel_while_idle_gets_no_response(hid):
     cid = hid.allocate_channel()
     hid.send(cid, ctaphid.CANCEL)

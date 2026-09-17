@@ -44,8 +44,3 @@ def is_expected(marker, exc: BaseException) -> bool:
     if kwargs["match"] and not re.search(kwargs["match"], str(exc)):
         return False
     return True
-
-
-# Bug 3. The CTAPHID layer answers CANCEL on an idle channel with an ERROR
-# packet.
-CTAPHID_CANCEL_WHILE_IDLE = "bug 3: CTAPHID answers CANCEL on an idle channel with ERROR 0x04 (invalid sequence)"
