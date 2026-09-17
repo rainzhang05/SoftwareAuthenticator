@@ -347,8 +347,65 @@ fn get_assertion_options_uv_and_rk() {
     assert_eq!(flags(&response) & FLAG_UV, FLAG_UV);
 }
 
-/// A zero length pinUvAuthParam asks for a touch and reports whether a PIN
-/// is set (CTAP 2.3 §6.2.2 step 1).
+/// The account a sign-in prompt names, if any.
+fn prompted_account(log: &PresenceLog) -> Option<(Option<String>, Option<String>)> {
+    log.take().into_iter().find_map(|event| match event {
+        PresenceEvent::Asked(request) => {
+            assert_eq!(request.operation, PresenceOperation::Authenticate);
+            assert_eq!(request.rp_id.as_deref(), Some(RP_ID));
+            Some((request.user_name, request.user_display_name))
+        }
+        PresenceEvent::Waiting(_) => None,
+    })
+}
+
+/// When getAssertion applies to a single discoverable credential, the prompt
+/// names its account, while the response still leaves name and displayName
+/// out without user verification: "User identifiable information (name,
+/// DisplayName, icon) inside the publicKeyCredentialUserEntity MUST NOT be
+/// returned if user verification is not done by the authenticator." (CTAP
+/// 2.3 §6.2.2 step 12)
+#[test]
+fn the_prompt_names_the_account_of_a_single_discoverable_credential() {
+    let id = credential_id(true, 0xE1);
+    for extra in [vec![], vec![allow_list(&[&id])]] {
+        let (mut app, log) = app_with(&[named_credential(&id, 1)], vec![]);
+        let response = app
+            .handle_get_assertion(&request(extra))
+            .expect("getAssertion");
+        assert_eq!(
+            prompted_account(&log),
+            Some((Some("user1".into()), Some("User 1".into())))
+        );
+        let user = user_member(&response).expect("user");
+        assert_eq!(user, vec![(text("id"), Value::Bytes(vec![1]))]);
+    }
+}
+
+/// With several credentials to choose from, or a non-discoverable one, which
+/// has no account stored with it, the prompt names only the relying party.
+#[test]
+fn the_prompt_names_no_account_otherwise() {
+    let (mut app, log) = app_with(
+        &[
+            named_credential(&credential_id(true, 0xE2), 1),
+            named_credential(&credential_id(true, 0xE3), 2),
+        ],
+        vec![],
+    );
+    app.handle_get_assertion(&request(vec![]))
+        .expect("getAssertion");
+    assert_eq!(prompted_account(&log), Some((None, None)));
+
+    let id = credential_id(false, 0xE4);
+    let (mut app, log) = app_with(&[named_credential(&id, 3)], vec![]);
+    app.handle_get_assertion(&request(vec![allow_list(&[&id])]))
+        .expect("getAssertion");
+    assert_eq!(prompted_account(&log), Some((None, None)));
+}
+
+/// A zero length pinUvAuthParam asks the user to select the authenticator and
+/// reports whether a PIN is set (CTAP 2.3 §6.2.2 step 1).
 #[test]
 fn a_zero_length_pin_uv_auth_param_asks_for_a_touch() {
     let id = credential_id(true, 0xD2);
@@ -356,6 +413,12 @@ fn a_zero_length_pin_uv_auth_param_asks_for_a_touch() {
         (false, PresenceOutcome::Approved, CTAP2_ERR_PIN_NOT_SET),
         (true, PresenceOutcome::Approved, CTAP2_ERR_PIN_INVALID),
         (true, PresenceOutcome::Denied, CTAP2_ERR_OPERATION_DENIED),
+        (false, PresenceOutcome::TimedOut, CTAP2_ERR_OPERATION_DENIED),
+        (
+            false,
+            PresenceOutcome::Cancelled,
+            CTAP2_ERR_KEEPALIVE_CANCEL,
+        ),
     ] {
         let (mut app, log) = app_with(&[named_credential(&id, 1)], vec![outcome]);
         if pin_set {
@@ -370,7 +433,7 @@ fn a_zero_length_pin_uv_auth_param_asks_for_a_touch() {
             log.take(),
             vec![
                 PresenceEvent::Waiting(true),
-                PresenceEvent::Asked(SeenRequest::new(PresenceOperation::Authenticate, None)),
+                PresenceEvent::Asked(SeenRequest::new(PresenceOperation::Select, None)),
                 PresenceEvent::Waiting(false),
             ]
         );

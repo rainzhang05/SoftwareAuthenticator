@@ -442,6 +442,7 @@ pub fn any_request(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
             CTAP_CMD_GET_INFO,
             CTAP_CMD_RESET,
             CTAP_CMD_GET_NEXT_ASSERTION,
+            CTAP_CMD_SELECTION,
         ])?],
         9 => {
             // A parameterless command with parameters, or a command code
@@ -452,7 +453,7 @@ pub fn any_request(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
                 CTAP_CMD_GET_NEXT_ASSERTION,
                 CTAP_CMD_BIO_ENROLLMENT,
                 CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE,
-                0x0B,
+                CTAP_CMD_SELECTION,
                 0x41,
                 0xFF,
             ])?;

@@ -195,7 +195,7 @@ impl CtapApp<'_> {
         // Step 1: a zero length pinUvAuthParam asks the user to select this
         // authenticator.
         if request::is_zero_length(parameter(6)) {
-            return Err(self.select_for_pin_uv_auth(PresenceOperation::Authenticate));
+            return Err(self.select_for_pin_uv_auth());
         }
 
         // Step 2.
@@ -297,12 +297,22 @@ impl CtapApp<'_> {
         // authenticated the request, then "Call clearUserPresentFlag(),
         // clearUserVerifiedFlag(), and clearPinUvAuthTokenPermissionsExceptLbw()."
         // With "up" false the assertion is silent and the "up" bit false.
+        //
+        // When the request applies to a single discoverable credential, the
+        // prompt names its account; see PresenceRequest::user_name for why
+        // that is only shown to the user and not returned.
         let mut user_present = false;
         if up_option {
             if !(pin_uv_auth.is_some() && self.pin_state.user_present_flag()) {
+                let account = match applicable.as_slice() {
+                    [only] if is_discoverable(&only.credential_id) => Some(only),
+                    _ => None,
+                };
                 let timeout = self.presence_timeout;
                 self.confirm_user_presence(PresenceRequest {
                     rp_id: Some(&rp_id),
+                    user_name: account.and_then(|cred| cred.user_name.as_deref()),
+                    user_display_name: account.and_then(|cred| cred.user_display_name.as_deref()),
                     ..PresenceRequest::new(PresenceOperation::Authenticate, timeout)
                 })?;
             }

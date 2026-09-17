@@ -29,6 +29,8 @@ pub const CTAP_CMD_GET_NEXT_ASSERTION: u8 = 0x08;
 /// authenticator has no biometric sensor.
 pub const CTAP_CMD_BIO_ENROLLMENT: u8 = 0x09;
 pub const CTAP_CMD_CREDENTIAL_MANAGEMENT: u8 = 0x0A;
+/// `authenticatorSelection`, CTAP 2.3 § 6.9.
+pub const CTAP_CMD_SELECTION: u8 = 0x0B;
 /// Prototype `authenticatorBioEnrollment`, CTAP 2.3 § 6.12 (`FIDO_2_1_PRE`
 /// backwards compatibility).  Not implemented either.
 pub const CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE: u8 = 0x40;
@@ -258,6 +260,7 @@ mod tests {
         assert_eq!(CTAP_CMD_GET_NEXT_ASSERTION, 0x08);
         assert_eq!(CTAP_CMD_BIO_ENROLLMENT, 0x09);
         assert_eq!(CTAP_CMD_CREDENTIAL_MANAGEMENT, 0x0A);
+        assert_eq!(CTAP_CMD_SELECTION, 0x0B);
         // § 6.12 prototype command.
         assert_eq!(CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE, 0x40);
     }

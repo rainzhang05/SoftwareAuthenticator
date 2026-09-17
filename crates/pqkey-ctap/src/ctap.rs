@@ -29,6 +29,7 @@ mod pin;
 pub mod presence;
 mod request;
 mod reset;
+mod selection;
 mod storage;
 #[cfg(test)]
 mod tests;
@@ -302,6 +303,7 @@ impl<'a, 'interrupt: 'a, const N: usize> App<'a, N> for CtapApp<'interrupt> {
                     CTAP_CMD_CLIENT_PIN => self.handle_client_pin(payload),
                     CTAP_CMD_RESET => self.handle_reset(),
                     CTAP_CMD_CREDENTIAL_MANAGEMENT => self.handle_credential_management(payload),
+                    CTAP_CMD_SELECTION => self.handle_selection(),
                     // Neither authenticatorBioEnrollment (0x09) nor its
                     // prototype (0x40) is implemented: "If an authenticator
                     // receives a command code it does not implement, it MUST

@@ -115,6 +115,7 @@ fn ctap_request(dir: &Path) {
         vec![0x07],
         vec![0x08],
         vec![0x09],
+        vec![0x0B],
         vec![0x04, 0xA0],
     ];
     for alg in [-7, -48, -49, -50] {

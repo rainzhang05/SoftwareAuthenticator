@@ -96,7 +96,7 @@ impl CtapApp<'_> {
         // Step 1: a zero length pinUvAuthParam asks the user to select this
         // authenticator.
         if request::is_zero_length(parameter(8)) {
-            return Err(self.select_for_pin_uv_auth(PresenceOperation::Register));
+            return Err(self.select_for_pin_uv_auth());
         }
 
         // Step 2.

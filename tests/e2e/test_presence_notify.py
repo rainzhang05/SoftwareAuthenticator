@@ -75,6 +75,33 @@ def test_approve_registers_and_signs_in_with_user_presence(notify_ctap, notifica
     assert shown.body == f"Sign in to {RP_ID}?"
 
 
+def test_signing_in_with_the_only_discoverable_credential_names_its_account(notify_ctap, notifications):
+    credential = client.register(notify_ctap, RP_ID, client.ES256, user=client.user_entity("frank"), options={"rk": True})
+    notifications.wait_for_shown(1)
+
+    response, _ = client.authenticate(notify_ctap, credential, allow_list=False)
+    shown = notifications.wait_for_shown(2)
+    assert shown.summary == "Sign in with a passkey"
+    assert shown.body == f"Sign in to {RP_ID} as frank (Frank)?"
+    # The account is only shown to the user: without user verification the
+    # response carries the user ID alone (CTAP 2.3 §6.2.2 step 12).
+    assert set(response[4]) == {"id"}
+
+
+def test_selection_asks_the_user_to_select_the_key(notify_ctap, notifications):
+    """authenticatorSelection (CTAP 2.3 §6.9)."""
+    notify_ctap.selection()
+    shown = notifications.wait_for_shown(1)
+    assert shown.summary == "Select a security key"
+    assert shown.body == "Select this security key?"
+
+    notifications.answer = "deny"
+    with pytest.raises(CtapError) as excinfo:
+        notify_ctap.selection()
+    assert excinfo.value.code == CtapError.ERR.OPERATION_DENIED
+    notifications.wait_for_shown(2)
+
+
 @pytest.mark.parametrize("answer", ["deny", "dismiss"])
 def test_deny_or_dismiss_refuses_the_operation(notify_ctap, notifications, answer):
     notifications.answer = answer

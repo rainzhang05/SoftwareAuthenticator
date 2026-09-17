@@ -193,13 +193,16 @@ fn a_pin_uv_auth_param_takes_precedence_over_the_uv_option() {
 /// out, then end the operation by returning CTAP2_ERR_OPERATION_DENIED. If
 /// evidence of user interaction is provided in this step then return either
 /// CTAP2_ERR_PIN_NOT_SET if PIN is not set or CTAP2_ERR_PIN_INVALID if PIN has
-/// been set." (CTAP 2.3 §6.1.2 step 1)
+/// been set." (CTAP 2.3 §6.1.2 step 1)  The user is asked to select the
+/// authenticator: "This is done for backwards compatibility with CTAP2.0
+/// platforms in the case where [...] the user has to select which
+/// authenticator to get the pinUvAuthToken from."
 #[test]
 fn a_zero_length_pin_uv_auth_param_asks_for_a_touch() {
     let touch = || {
         vec![
             PresenceEvent::Waiting(true),
-            PresenceEvent::Asked(SeenRequest::new(PresenceOperation::Register, None)),
+            PresenceEvent::Asked(SeenRequest::new(PresenceOperation::Select, None)),
             PresenceEvent::Waiting(false),
         ]
     };
@@ -213,6 +216,11 @@ fn a_zero_length_pin_uv_auth_param_asks_for_a_touch() {
             (true, PresenceOutcome::Approved, CTAP2_ERR_PIN_INVALID),
             (true, PresenceOutcome::Denied, CTAP2_ERR_OPERATION_DENIED),
             (false, PresenceOutcome::TimedOut, CTAP2_ERR_OPERATION_DENIED),
+            (
+                false,
+                PresenceOutcome::Cancelled,
+                CTAP2_ERR_KEEPALIVE_CANCEL,
+            ),
         ] {
             let (mut app, log) = app(vec![outcome]);
             if pin_set {

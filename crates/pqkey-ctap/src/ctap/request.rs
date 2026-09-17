@@ -2,7 +2,7 @@
 //! authenticatorGetAssertion.
 
 use super::cbor;
-use super::presence::{PresenceOperation, PresenceRequest};
+use super::presence::{PresenceOperation, PresenceOutcome, PresenceRequest};
 use super::CtapApp;
 use crate::CoseAlg;
 
@@ -162,12 +162,20 @@ impl CtapApp<'_> {
     /// interaction is provided in this step then return either
     /// CTAP2_ERR_PIN_NOT_SET if PIN is not set or CTAP2_ERR_PIN_INVALID if PIN
     /// has been set."
-    pub(super) fn select_for_pin_uv_auth(&mut self, operation: PresenceOperation) -> u8 {
+    ///
+    /// The user is asked to select this authenticator
+    /// ([`PresenceOperation::Select`]), which is what the platform wants: "This
+    /// is done for backwards compatibility with CTAP2.0 platforms in the case
+    /// where multiple authenticators are attached to the platform and the
+    /// platform wants to enforce pinUvAuthToken feature semantics, but the user
+    /// has to select which authenticator to get the pinUvAuthToken from."
+    pub(super) fn select_for_pin_uv_auth(&mut self) -> u8 {
         let timeout = self.presence_timeout;
-        match self.confirm_user_presence(PresenceRequest::new(operation, timeout)) {
-            Err(status) => status,
-            Ok(()) if self.pin_state.is_set() => CTAP2_ERR_PIN_INVALID,
-            Ok(()) => CTAP2_ERR_PIN_NOT_SET,
+        match self.ask_user(&PresenceRequest::new(PresenceOperation::Select, timeout)) {
+            PresenceOutcome::Approved if self.pin_state.is_set() => CTAP2_ERR_PIN_INVALID,
+            PresenceOutcome::Approved => CTAP2_ERR_PIN_NOT_SET,
+            PresenceOutcome::Denied | PresenceOutcome::TimedOut => CTAP2_ERR_OPERATION_DENIED,
+            PresenceOutcome::Cancelled => CTAP2_ERR_KEEPALIVE_CANCEL,
         }
     }
 }

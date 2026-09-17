@@ -33,6 +33,14 @@ pub enum PresenceOperation {
     Authenticate,
     /// authenticatorReset: erase every credential and the PIN.
     Reset,
+    /// The platform asks the user to pick this authenticator among several:
+    /// authenticatorSelection (CTAP 2.3 §6.9), or authenticatorMakeCredential
+    /// or authenticatorGetAssertion with a zero length pinUvAuthParam, which
+    /// "is done for backwards compatibility with CTAP2.0 platforms in the case
+    /// where [...] the user has to select which authenticator to get the
+    /// pinUvAuthToken from" (§6.1.2 step 1, §6.2.2 step 1).  No relying party
+    /// is involved.
+    Select,
     /// authenticatorCredentialManagement.  CTAP 2.3 §6.8 does not require user
     /// presence for it and the engine does not ask for it today; the variant
     /// exists so implementations can already describe such a request.
@@ -47,10 +55,21 @@ pub struct PresenceRequest<'a> {
     /// The relying party the operation is for, if there is one, so a prompt
     /// can say "Sign in to example.com".
     pub rp_id: Option<&'a str>,
-    /// `user.name` of the account a new credential is for, when registering.
+    /// `user.name` of the account: when registering, of the account the new
+    /// credential is for; when signing in, of the credential that will be
+    /// used if it is the only discoverable credential the request applies to.
+    ///
+    /// When signing in, the name comes from the authenticator's store and is
+    /// given to the prompt before any user verification, which is why it is
+    /// only for the user at this computer: the engine never returns it to the
+    /// platform without user verification ("User identifiable information
+    /// (name, DisplayName, icon) inside the publicKeyCredentialUserEntity MUST
+    /// NOT be returned if user verification is not done by the
+    /// authenticator", CTAP 2.3 §6.2.2 step 12).  Like the relying party ID it
+    /// was chosen by a website, so a prompt must treat it as untrusted text.
     pub user_name: Option<&'a str>,
-    /// `user.displayName` of the account a new credential is for, when
-    /// registering.
+    /// `user.displayName` of the same account as
+    /// [`user_name`](Self::user_name), under the same rules.
     pub user_display_name: Option<&'a str>,
     /// How long to wait for the user before answering
     /// [`PresenceOutcome::TimedOut`].
@@ -149,7 +168,11 @@ impl UserPresence for AutoApprove {
 ///   by returning CTAP2_ERR_OPERATION_DENIED".  authenticatorReset returns
 ///   CTAP2_ERR_USER_ACTION_TIMEOUT (§6.6), and so does credential management,
 ///   for which §6.8 defines no presence step, following the definition of a
-///   user action timeout in §5.
+///   user action timeout in §5.  So does authenticatorSelection: "If a user
+///   action timeout occurs, the authenticator will return
+///   CTAP2_ERR_USER_ACTION_TIMEOUT." (§6.9)  The selection a zero length
+///   pinUvAuthParam asks for maps a timeout itself, to
+///   CTAP2_ERR_OPERATION_DENIED.
 /// * Cancelled: CTAP2_ERR_KEEPALIVE_CANCEL (§11.2.9.1.5, CTAPHID_CANCEL).
 pub(super) fn presence_status(
     operation: PresenceOperation,
@@ -162,9 +185,9 @@ pub(super) fn presence_status(
             PresenceOperation::Register | PresenceOperation::Authenticate => {
                 Err(CTAP2_ERR_OPERATION_DENIED)
             }
-            PresenceOperation::Reset | PresenceOperation::CredentialManagement => {
-                Err(CTAP2_ERR_USER_ACTION_TIMEOUT)
-            }
+            PresenceOperation::Reset
+            | PresenceOperation::CredentialManagement
+            | PresenceOperation::Select => Err(CTAP2_ERR_USER_ACTION_TIMEOUT),
         },
         PresenceOutcome::Cancelled => Err(CTAP2_ERR_KEEPALIVE_CANCEL),
     }
@@ -194,13 +217,18 @@ impl CtapApp<'_> {
     /// anything but approval.  A request the platform has already cancelled
     /// is never shown to the user.
     pub(super) fn confirm_user_presence(&mut self, request: PresenceRequest<'_>) -> Result<(), u8> {
-        let cancellation = Cancellation::new(self.interrupt);
-        let outcome = if cancellation.is_cancelled() {
-            PresenceOutcome::Cancelled
-        } else {
-            let _waiting = WaitingForUser::begin(&mut *self.keepalive);
-            self.presence.confirm(&request, cancellation)
-        };
+        let outcome = self.ask_user(&request);
         presence_status(request.operation, outcome)
+    }
+
+    /// Ask the user to approve `request` and return how that ended.  A
+    /// request the platform has already cancelled is never shown to the user.
+    pub(super) fn ask_user(&mut self, request: &PresenceRequest<'_>) -> PresenceOutcome {
+        let cancellation = Cancellation::new(self.interrupt);
+        if cancellation.is_cancelled() {
+            return PresenceOutcome::Cancelled;
+        }
+        let _waiting = WaitingForUser::begin(&mut *self.keepalive);
+        self.presence.confirm(request, cancellation)
     }
 }

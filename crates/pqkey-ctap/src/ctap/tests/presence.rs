@@ -1,6 +1,7 @@
 //! User-presence tests: what the engine asks for, how each outcome maps to a
 //! CTAP status, keepalive signalling and cancellation.
 
+use super::dispatch::call;
 use super::support::{
     scripted_app, scripted_app_with_interrupt, PresenceEvent, PresenceLog, SeenRequest, TestRng,
     TestStore, NEVER_INTERRUPTED,
@@ -198,6 +199,16 @@ fn cancelled_request_is_not_shown_to_the_user() {
     assert!(stored(&app).is_empty());
 }
 
+/// The request of a sign-in with the only credential, which is discoverable,
+/// so the prompt can name its account.
+fn sign_in_request() -> SeenRequest {
+    SeenRequest {
+        user_name: Some("alice".into()),
+        user_display_name: Some("Alice".into()),
+        ..SeenRequest::new(PresenceOperation::Authenticate, Some(RP_ID))
+    }
+}
+
 #[test]
 fn get_assertion_asks_the_user_to_sign_in() {
     let (mut app, log) = app_with_credential([PresenceOutcome::Approved]);
@@ -205,13 +216,7 @@ fn get_assertion_asks_the_user_to_sign_in() {
         .handle_get_assertion(&get_assertion_payload())
         .expect("getAssertion succeeds");
 
-    assert_eq!(
-        log.take(),
-        asked(SeenRequest::new(
-            PresenceOperation::Authenticate,
-            Some(RP_ID)
-        ))
-    );
+    assert_eq!(log.take(), asked(sign_in_request()));
     assert_eq!(auth_data_flags(&response) & 0x01, 0x01, "UP flag");
 }
 
@@ -230,12 +235,33 @@ fn get_assertion_refused_timed_out_or_cancelled_signs_nothing() {
         );
         assert_eq!(stored(&app)[0].sign_count, 0, "{outcome:?}");
         assert!(app.pending_assertion.is_none(), "{outcome:?}");
+        assert_eq!(log.take(), asked(sign_in_request()), "{outcome:?}");
+    }
+}
+
+/// "When the authenticatorSelection command is received, the authenticator
+/// will ask for user presence: If User Presence is received, the
+/// authenticator will return CTAP2_OK. If User Presence is explicitly denied
+/// by the user, the authenticator will return CTAP2_ERR_OPERATION_DENIED.
+/// [...] If a user action timeout occurs, the authenticator will return
+/// CTAP2_ERR_USER_ACTION_TIMEOUT." (CTAP 2.3 §6.9)
+#[test]
+fn selection_asks_the_user_to_select_the_authenticator() {
+    for (outcome, response) in [
+        (PresenceOutcome::Approved, CTAP2_OK),
+        (PresenceOutcome::Denied, CTAP2_ERR_OPERATION_DENIED),
+        (PresenceOutcome::TimedOut, CTAP2_ERR_USER_ACTION_TIMEOUT),
+        (PresenceOutcome::Cancelled, CTAP2_ERR_KEEPALIVE_CANCEL),
+    ] {
+        let (mut app, log) = scripted_app([0x2A; 16], [outcome]);
+        assert_eq!(
+            call(&mut app, &[CTAP_CMD_SELECTION]),
+            [response],
+            "{outcome:?}"
+        );
         assert_eq!(
             log.take(),
-            asked(SeenRequest::new(
-                PresenceOperation::Authenticate,
-                Some(RP_ID)
-            )),
+            asked(SeenRequest::new(PresenceOperation::Select, None)),
             "{outcome:?}"
         );
     }
@@ -284,8 +310,8 @@ fn presence_timeout_is_passed_to_the_implementation() {
 
 /// CTAP 2.3 §6.1.2 step 14.2.1.2 and §6.2.2 step 9.2.1.2 (declined or timed
 /// out: OPERATION_DENIED), §6.6 (reset: denied is OPERATION_DENIED, a user
-/// action timeout is USER_ACTION_TIMEOUT), §11.2.9.1.5 (cancelled:
-/// KEEPALIVE_CANCEL).
+/// action timeout is USER_ACTION_TIMEOUT), §6.9 (selection: likewise),
+/// §11.2.9.1.5 (cancelled: KEEPALIVE_CANCEL).
 #[test]
 fn presence_outcomes_map_to_ctap_status_codes() {
     use PresenceOperation::*;
@@ -308,6 +334,9 @@ fn presence_outcomes_map_to_ctap_status_codes() {
             CTAP2_ERR_USER_ACTION_TIMEOUT,
         ),
         (CredentialManagement, Cancelled, CTAP2_ERR_KEEPALIVE_CANCEL),
+        (Select, Denied, CTAP2_ERR_OPERATION_DENIED),
+        (Select, TimedOut, CTAP2_ERR_USER_ACTION_TIMEOUT),
+        (Select, Cancelled, CTAP2_ERR_KEEPALIVE_CANCEL),
     ];
     for (operation, outcome, status) in expected {
         assert_eq!(
@@ -316,7 +345,7 @@ fn presence_outcomes_map_to_ctap_status_codes() {
             "{operation:?} {outcome:?}"
         );
     }
-    for operation in [Register, Authenticate, Reset, CredentialManagement] {
+    for operation in [Register, Authenticate, Reset, CredentialManagement, Select] {
         assert_eq!(
             presence_status(operation, Approved),
             Ok(()),
@@ -369,6 +398,7 @@ fn auto_approve_approves_every_request() {
         PresenceOperation::Authenticate,
         PresenceOperation::Reset,
         PresenceOperation::CredentialManagement,
+        PresenceOperation::Select,
     ] {
         let request = PresenceRequest::new(operation, DEFAULT_PRESENCE_TIMEOUT);
         assert_eq!(

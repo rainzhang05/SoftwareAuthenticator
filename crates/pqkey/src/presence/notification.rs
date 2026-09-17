@@ -256,6 +256,7 @@ pub fn notification_for(request: &PresenceRequest<'_>, markup: bool) -> Notifica
         PresenceOperation::Authenticate => "Sign in with a passkey",
         PresenceOperation::Reset => "Reset the security key",
         PresenceOperation::CredentialManagement => "Manage passkeys",
+        PresenceOperation::Select => "Select a security key",
         _ => "Security key request",
     };
     let text = prompt_text(request);
@@ -287,8 +288,11 @@ pub fn prompt_text(request: &PresenceRequest<'_>) -> String {
     match (request.operation, rp) {
         (PresenceOperation::Register, Some(rp)) => format!("Create a passkey for {rp}{as_user}?"),
         (PresenceOperation::Authenticate, Some(rp)) => format!("Sign in to {rp}{as_user}?"),
-        // The engine names no relying party when the platform only asks the
-        // user to pick this authenticator among several.
+        // The platform asks the user to pick this authenticator among
+        // several; no relying party is involved.
+        (PresenceOperation::Select, _) => "Select this security key?".to_owned(),
+        // The engine always names the relying party of a registration or
+        // sign-in; a request without a usable one is not described as either.
         (PresenceOperation::Register | PresenceOperation::Authenticate, None) => {
             "Use this security key?".to_owned()
         }
@@ -721,7 +725,22 @@ mod tests {
             text(CredentialManagement, None, None),
             "Allow access to the passkeys stored on the security key?"
         );
+        assert_eq!(text(Select, None, None), "Select this security key?");
+        // A name without a relying party is not shown.
+        assert_eq!(
+            text(Select, None, Some("alice")),
+            "Select this security key?"
+        );
         assert_eq!(text(Authenticate, None, None), "Use this security key?");
+        assert_eq!(
+            prompt_text(&PresenceRequest {
+                rp_id: Some("example.com"),
+                user_name: Some("alice"),
+                user_display_name: Some("Alice"),
+                ..PresenceRequest::new(Authenticate, TIMEOUT)
+            }),
+            "Sign in to example.com as alice (Alice)?"
+        );
         assert_eq!(
             prompt_text(&PresenceRequest {
                 rp_id: Some("example.com"),
@@ -731,7 +750,7 @@ mod tests {
             "Create a passkey for example.com as Alice?"
         );
 
-        let summaries: Vec<_> = [Register, Authenticate, Reset, CredentialManagement]
+        let summaries: Vec<_> = [Register, Authenticate, Reset, CredentialManagement, Select]
             .into_iter()
             .map(|op| notification_for(&PresenceRequest::new(op, TIMEOUT), false).summary)
             .collect();
@@ -741,7 +760,8 @@ mod tests {
                 "Create a passkey",
                 "Sign in with a passkey",
                 "Reset the security key",
-                "Manage passkeys"
+                "Manage passkeys",
+                "Select a security key"
             ]
         );
     }
