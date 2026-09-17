@@ -1,12 +1,13 @@
 [package]
 name = "pqkey-mldsa"
 version = "0.1.0"
-edition = "2021"
-
 description = "Safe Rust wrapper around pure-Rust ML-DSA (FIPS 204) signatures"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 authors.workspace = true
 repository.workspace = true
-license = "Apache-2.0 OR MIT"
+publish = false
 
 [dependencies]
 # RustCrypto's ML-DSA.  0.1.0 and later include the fixes for RUSTSEC-2025-0144

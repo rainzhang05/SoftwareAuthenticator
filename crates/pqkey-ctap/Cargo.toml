@@ -1,12 +1,13 @@
 [package]
 name = "pqkey-ctap"
 version = "0.1.0"
-edition = "2021"
-
 description = "FIDO2/CTAP2 authenticator core with post-quantum ML-DSA support"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 authors.workspace = true
 repository.workspace = true
-license = "Apache-2.0 OR MIT"
+publish = false
 
 [dependencies]
 ciborium = { version = "0.2", default-features = false, features = ["std"] }

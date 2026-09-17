@@ -74,21 +74,9 @@ allow = [
 # The list above is the usual permissive set rather than the exact set the tree
 # happens to use today, so don't nag about entries nothing currently needs.
 unused-allowed-license = "allow"
-# Workspace members that are never published don't need a license expression.
-# Note: this only takes effect for crates marked `publish = false`; see the
-# clarification below for why pqkey still needs one.
+# Every workspace member sets `publish = false`, and is licensed through
+# `license.workspace = true` anyway.
 private = { ignore = true }
-
-# pqkey declares no `license` at all: the root Cargo.toml sets
-# `license = "Apache-2.0 OR MIT"` under [workspace.package], but the member never
-# inherits it with `license.workspace = true`. `license-files = []` makes the
-# clarification apply unconditionally.
-# TODO: delete this entry once the member manifest inherits the workspace
-# license (that also makes `private.ignore` above do the right thing).
-[[licenses.clarify]]
-crate = "pqkey"
-expression = "Apache-2.0 OR MIT"
-license-files = []
 
 # ---------------------------------------------------------------------------
 # bans

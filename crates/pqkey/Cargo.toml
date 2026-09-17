@@ -1,9 +1,13 @@
 [package]
 name = "pqkey"
 version = "0.1.0"
-edition = "2021"
+description = "FIDO2 security key daemon: a virtual USB-HID authenticator for Linux"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish = false
 
 [dependencies]
 # The CTAPHID app interface the CTAP engine implements. The transport frames
