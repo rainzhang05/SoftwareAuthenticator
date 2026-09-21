@@ -1871,9 +1871,9 @@ dependencies = [
 
 [[package]]
 name = "trussed-core"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f17331879d2f22b2fec393716fd1bd50b018bfbf070b96e4cd6ee552aa3f710"
+checksum = "4ad3077bed1856e91ddc734fbce89d7b04c736056e91446eb8716c97707ccc70"
 dependencies = [
  "heapless-bytes",
  "littlefs2-core",
