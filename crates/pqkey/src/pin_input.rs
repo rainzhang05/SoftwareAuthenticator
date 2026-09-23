@@ -100,7 +100,9 @@ fn read_new_pin(confirm: bool, mut read: impl FnMut(&str) -> io::Result<Pin>) ->
 
 /// Read one line, without its line ending, from non-terminal input.
 fn read_line(input: &mut impl BufRead) -> io::Result<Pin> {
-    let mut line = Zeroizing::new(Vec::with_capacity(128));
+    // Room for all the input read, so the buffer never grows and leaves a copy
+    // of the PIN behind in freed memory.
+    let mut line = Zeroizing::new(Vec::with_capacity(MAX_INPUT_BYTES + 1));
     input
         .take(MAX_INPUT_BYTES as u64 + 1)
         .read_until(b'\n', &mut line)?;
@@ -144,8 +146,10 @@ fn read_hidden_line(
 }
 
 fn read_tty_line(tty: BorrowedFd<'_>) -> io::Result<Pin> {
-    let mut line = Zeroizing::new(Vec::with_capacity(128));
     let mut chunk = Zeroizing::new([0u8; 128]);
+    // Room for the most the loop below reads, so the buffer never grows and
+    // leaves a copy of the PIN behind in freed memory.
+    let mut line = Zeroizing::new(Vec::with_capacity(MAX_INPUT_BYTES + chunk.len()));
     loop {
         if SignalCatcher::caught().is_some() {
             return Err(io::ErrorKind::Interrupted.into());
