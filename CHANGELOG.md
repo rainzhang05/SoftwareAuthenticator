@@ -132,7 +132,8 @@ Upgrading from `867a591` or earlier is not an in-place update:
   longer leaves the running daemon with a PIN that is not on disk.
 - pinUvAuthToken usage timer, permissions, RP binding and per-protocol key
   agreement keys follow CTAP 2.3.
-- CTAP status codes for invalid parameters, unsupported options, unimplemented
+- CTAP status codes for invalid parameters, wrongly typed parameters
+  (CTAP2_ERR_CBOR_UNEXPECTED_TYPE), unsupported options, unimplemented
   clientPIN subcommands and bio enrollment.
 - makeCredential and getAssertion follow the CTAP 2.3 steps for `uv`, `up`,
   excludeList, allowList, discoverable credentials once a PIN is set, and user

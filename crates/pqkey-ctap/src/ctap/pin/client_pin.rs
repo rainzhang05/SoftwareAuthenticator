@@ -5,7 +5,7 @@ use super::protocol::{PinProtocol, decrypt, parse_required_pin_uv_auth_protocol,
 use super::state::{MAX_PIN_RETRIES, PersistentPinState, PinState};
 use crate::PinUvSessionKeys;
 use crate::ctap::CtapApp;
-use crate::ctap::cbor::{self, canonical_map};
+use crate::ctap::cbor::{self, canonical_map, required_bytes, required_map};
 
 use ciborium::{
     ser::into_writer,
@@ -49,22 +49,6 @@ impl ClientPinSubcommand {
             0x09 => Ok(Self::GetPinUvAuthTokenUsingPinWithPermissions),
             _ => Err(CTAP2_ERR_INVALID_SUBCOMMAND),
         }
-    }
-}
-
-/// A mandatory map-valued parameter such as keyAgreement (0x03).
-fn required_map(map: &[(Value, Value)], key: i32) -> Result<&[(Value, Value)], u8> {
-    match cbor::map_get(map, Value::Integer(Integer::from(key))) {
-        Some(Value::Map(entries)) => Ok(entries),
-        _ => Err(CTAP2_ERR_MISSING_PARAMETER),
-    }
-}
-
-/// A mandatory byte-string parameter such as pinHashEnc (0x06).
-fn required_bytes(map: &[(Value, Value)], key: i32) -> Result<&[u8], u8> {
-    match cbor::map_get(map, Value::Integer(Integer::from(key))) {
-        Some(Value::Bytes(bytes)) => Ok(bytes),
-        _ => Err(CTAP2_ERR_MISSING_PARAMETER),
     }
 }
 

@@ -3,8 +3,8 @@
 use super::support::new_app;
 use super::support::{TestApp, credential, insert, insert_owned, stored};
 use super::support::{
-    TestStore, es256_credential, get_pin_uv_auth_token, install_pin_uv_auth_token, pin_hash,
-    token_pin_auth,
+    TestStore, encode, es256_credential, get_pin_uv_auth_token, install_pin_uv_auth_token, int,
+    pin_hash, token_pin_auth,
 };
 use crate::ctap::CtapApp;
 use crate::ctap::cbor::canonical_map;
@@ -756,4 +756,58 @@ fn enumerate_rps_returns_truncated_rp_ids() {
             Value::Text("\u{2026}aaaaaaaaaaaaaaaaaaaaa.example".into())
         )])
     );
+}
+
+/// Once the request is authenticated, a wrongly typed subcommand parameter
+/// is CTAP2_ERR_CBOR_UNEXPECTED_TYPE (CTAP 2.3 §8).
+#[test]
+fn wrongly_typed_subcommand_parameters_are_unexpected_types() {
+    let text = |value: &str| Value::Text(value.into());
+    let descriptor =
+        |id: Value| canonical_map(vec![(text("id"), id), (text("type"), text("public-key"))]);
+    let cases = [
+        (0x04, canonical_map(vec![(int(1), text("not a hash"))])),
+        (
+            0x06,
+            canonical_map(vec![(int(2), Value::Bytes(vec![0xC1]))]),
+        ),
+        (0x06, canonical_map(vec![(int(2), descriptor(text("C1")))])),
+        (
+            0x07,
+            canonical_map(vec![
+                (int(2), descriptor(Value::Bytes(vec![0xC1]))),
+                (int(3), Value::Bytes(vec![0x01])),
+            ]),
+        ),
+        (
+            0x07,
+            canonical_map(vec![
+                (int(2), descriptor(Value::Bytes(vec![0xC1]))),
+                (int(3), canonical_map(vec![(text("id"), int(1))])),
+            ]),
+        ),
+    ];
+    let token = [0x6E; 32];
+    for (subcommand, params) in cases {
+        let mut app = new_app(TestStore::new(), [0x6E; 16]);
+        install_pin_uv_auth_token(
+            &mut app,
+            ClassicPinProtocol::V2,
+            token,
+            PIN_PERMISSION_CM,
+            None,
+        );
+        let param = cm_pin_param(&token, subcommand, Some(params.clone()));
+        let request = canonical_map(vec![
+            (int(1), int(subcommand.into())),
+            (int(2), params.clone()),
+            (int(3), int(2)),
+            (int(4), Value::Bytes(param)),
+        ]);
+        assert_eq!(
+            app.handle_credential_management(&encode(&request)),
+            Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            "subcommand {subcommand:#04x}, {params:?}"
+        );
+    }
 }

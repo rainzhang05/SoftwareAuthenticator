@@ -211,9 +211,11 @@ impl CtapApp<'_> {
         let mut hmac_secret_requested = false;
         let mut cred_protect_requested: Option<u8> = None;
 
+        // A wrongly typed extensions map or extension input is
+        // CTAP2_ERR_CBOR_UNEXPECTED_TYPE (CTAP 2.3 §8).
         if let Some(value) = parameter(6) {
             let Value::Map(extension_map) = value else {
-                return Err(CTAP2_ERR_INVALID_CBOR);
+                return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
             };
             for (key, value) in extension_map.iter() {
                 match key {
@@ -221,13 +223,13 @@ impl CtapApp<'_> {
                         Value::Bool(flag) => {
                             hmac_secret_requested = *flag;
                         }
-                        _ => return Err(CTAP2_ERR_INVALID_CBOR),
+                        _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
                     },
                     Value::Text(text) if text == "credProtect" => {
                         let policy_value = match value {
                             Value::Integer(int) => u8::try_from(i128::from(*int))
                                 .map_err(|_| CTAP2_ERR_INVALID_OPTION)?,
-                            _ => return Err(CTAP2_ERR_INVALID_CBOR),
+                            _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
                         };
                         match policy_value {
                             1..=3 => cred_protect_requested = Some(policy_value),

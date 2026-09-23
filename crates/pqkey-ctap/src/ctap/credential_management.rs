@@ -1,7 +1,7 @@
 //! The authenticatorCredentialManagement command and its subcommands.
 
 use super::CtapApp;
-use super::cbor::{self, canonical_map, canonical_sort};
+use super::cbor::{self, canonical_map, canonical_sort, required_bytes, required_map};
 use super::pin::protocol::parse_pin_uv_auth_param;
 use super::request::{self, truncate_utf8};
 use super::storage::{is_discoverable, store_status};
@@ -260,10 +260,7 @@ impl CtapApp<'_> {
         &mut self,
         params: &[(Value, Value)],
     ) -> Result<Vec<(Value, Value)>, u8> {
-        let rp_hash = match cbor::map_get(params, Value::Integer(Integer::from(1))) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
+        let rp_hash = required_bytes(params, 1)?;
 
         let credentials: Vec<CredentialRecord> = self
             .discoverable_credentials()?
@@ -311,13 +308,7 @@ impl CtapApp<'_> {
     }
 
     fn cm_delete_credential(&mut self, params: &[(Value, Value)]) -> Result<(), u8> {
-        let descriptor = match cbor::map_get(params, Value::Integer(Integer::from(2))) {
-            Some(Value::Map(map)) => map,
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
-        let Some(Value::Bytes(id)) = cbor::map_get(descriptor, Value::Text("id".into())) else {
-            return Err(CTAP2_ERR_MISSING_PARAMETER);
-        };
+        let id = required_bytes(required_map(params, 2)?, "id")?;
         let deleted = self
             .store
             .delete(id)
@@ -331,26 +322,14 @@ impl CtapApp<'_> {
     }
 
     fn cm_update_user_information(&mut self, params: &[(Value, Value)]) -> Result<(), u8> {
-        let descriptor = match cbor::map_get(params, Value::Integer(Integer::from(2))) {
-            Some(Value::Map(map)) => map,
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
-        let Some(Value::Bytes(id)) = cbor::map_get(descriptor, Value::Text("id".into())) else {
-            return Err(CTAP2_ERR_MISSING_PARAMETER);
-        };
-
-        let user_map = match cbor::map_get(params, Value::Integer(Integer::from(3))) {
-            Some(Value::Map(map)) => map,
-            _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
-        let Some(Value::Bytes(user_id)) = cbor::map_get(user_map, Value::Text("id".into())) else {
-            return Err(CTAP2_ERR_MISSING_PARAMETER);
-        };
+        let id = required_bytes(required_map(params, 2)?, "id")?;
+        let user_map = required_map(params, 3)?;
+        let user_id = required_bytes(user_map, "id")?;
 
         let Some(mut credential) = self.stored_credential(id)? else {
             return Err(CTAP2_ERR_NO_CREDENTIALS);
         };
-        if credential.user_id != *user_id {
+        if credential.user_id != user_id {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
 

@@ -3,7 +3,9 @@
 use ciborium::{ser::into_writer, value::Value};
 use std::cmp::Ordering;
 
-use crate::ctap::constants::CTAP2_ERR_INVALID_CBOR;
+use crate::ctap::constants::{
+    CTAP2_ERR_CBOR_UNEXPECTED_TYPE, CTAP2_ERR_INVALID_CBOR, CTAP2_ERR_MISSING_PARAMETER,
+};
 
 /// The CBOR encoding of a map key.
 fn encode_key(key: &Value) -> Vec<u8> {
@@ -31,6 +33,36 @@ pub(super) fn canonical_map(mut entries: Vec<(Value, Value)>) -> Value {
 
 pub(super) fn map_get(map: &[(Value, Value)], key: Value) -> Option<&Value> {
     map.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+}
+
+/// The value under `key`, which the request must have: "If the authenticator
+/// does not receive mandatory parameters for this command, it returns
+/// CTAP2_ERR_MISSING_PARAMETER error."
+pub(super) fn required(map: &[(Value, Value)], key: impl Into<Value>) -> Result<&Value, u8> {
+    map_get(map, key.into()).ok_or(CTAP2_ERR_MISSING_PARAMETER)
+}
+
+/// A required byte string.  A value of another type is
+/// CTAP2_ERR_CBOR_UNEXPECTED_TYPE: "If structures in messages from the host
+/// are missing required members, or the values of those members have the
+/// wrong type, then the authenticator SHOULD return
+/// CTAP2_ERR_CBOR_UNEXPECTED_TYPE." (CTAP 2.3 §8)
+pub(super) fn required_bytes(map: &[(Value, Value)], key: impl Into<Value>) -> Result<&[u8], u8> {
+    match required(map, key)? {
+        Value::Bytes(bytes) => Ok(bytes),
+        _ => Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+    }
+}
+
+/// A required map, typed as [`required_bytes`] is.
+pub(super) fn required_map(
+    map: &[(Value, Value)],
+    key: impl Into<Value>,
+) -> Result<&[(Value, Value)], u8> {
+    match required(map, key)? {
+        Value::Map(entries) => Ok(entries),
+        _ => Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+    }
 }
 
 /// How deeply [`raw_map_value`] and [`request_parameters`] follow nested

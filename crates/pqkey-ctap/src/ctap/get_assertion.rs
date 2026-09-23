@@ -218,7 +218,7 @@ impl CtapApp<'_> {
         let mut hmac_secret_request: Option<HmacSecretRequest> = None;
         if let Some(value) = parameter(4) {
             let Value::Map(extension_map) = value else {
-                return Err(CTAP2_ERR_INVALID_CBOR);
+                return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
             };
             for (key, value) in extension_map.iter() {
                 if let Value::Text(text) = key
@@ -504,23 +504,16 @@ impl CtapApp<'_> {
     }
 }
 
-/// Parse the hmac-secret getAssertion input (CTAP 2.3 §12.7).
+/// Parse the hmac-secret getAssertion input (CTAP 2.3 §12.7): a missing
+/// member is CTAP2_ERR_MISSING_PARAMETER, a wrongly typed input or member
+/// CTAP2_ERR_CBOR_UNEXPECTED_TYPE (§8).
 fn parse_hmac_secret_request(value: &Value) -> Result<HmacSecretRequest, u8> {
     let Value::Map(params) = value else {
-        return Err(CTAP2_ERR_INVALID_CBOR);
+        return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
     };
-    let key_agreement = match cbor::map_get(params, Value::Integer(Integer::from(1))) {
-        Some(Value::Map(entries)) => entries.clone(),
-        _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-    };
-    let salt_enc = match cbor::map_get(params, Value::Integer(Integer::from(2))) {
-        Some(Value::Bytes(bytes)) => bytes.clone(),
-        _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-    };
-    let salt_auth = match cbor::map_get(params, Value::Integer(Integer::from(3))) {
-        Some(Value::Bytes(bytes)) => bytes.clone(),
-        _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-    };
+    let key_agreement = cbor::required_map(params, 1)?.to_vec();
+    let salt_enc = cbor::required_bytes(params, 2)?.to_vec();
+    let salt_auth = cbor::required_bytes(params, 3)?.to_vec();
     // "If pinUvAuthProtocol is absent and a pinUvAuthProtocol value of 1 is
     // supported by the authenticator, let the value of pinUvAuthProtocol be 1"
     // (CTAP 2.3 §12.7).
