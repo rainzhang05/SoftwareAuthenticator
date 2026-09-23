@@ -201,9 +201,13 @@ impl CtapApp<'_> {
         ])
     }
 
+    /// One credential of an enumeration.  `total` is totalCredentials, which
+    /// only enumerateCredentialsBegin reports: the enumerateCredentialsGetNext
+    /// response is user, credentialID, publicKey and credProtect (CTAP 2.3
+    /// §6.8.4).
     fn cm_credential_response(
         credential: &CredentialRecord,
-        total: usize,
+        total: Option<usize>,
     ) -> Result<Vec<(Value, Value)>, u8> {
         let mut user_entries = vec![(
             Value::Text("id".into()),
@@ -234,19 +238,22 @@ impl CtapApp<'_> {
         let public_key_value: Value =
             from_reader::<Value, _>(&public_key[..]).map_err(|_| CTAP2_ERR_PROCESSING)?;
 
-        Ok(vec![
+        let mut entries = vec![
             (Value::Integer(Integer::from(6)), user_map),
             (Value::Integer(Integer::from(7)), credential_descriptor),
             (Value::Integer(Integer::from(8)), public_key_value),
             (
-                Value::Integer(Integer::from(9)),
-                Value::Integer(Integer::from(total as u64)),
-            ),
-            (
                 Value::Integer(Integer::from(10)),
                 Value::Integer(Integer::from(u64::from(credential.cred_protect))),
             ),
-        ])
+        ];
+        if let Some(total) = total {
+            entries.push((
+                Value::Integer(Integer::from(9)),
+                Value::Integer(Integer::from(total as u64)),
+            ));
+        }
+        Ok(entries)
     }
 
     fn cm_enumerate_credentials_begin(
@@ -267,7 +274,7 @@ impl CtapApp<'_> {
             return Err(CTAP2_ERR_NO_CREDENTIALS);
         };
 
-        let response = Self::cm_credential_response(first, credentials.len())?;
+        let response = Self::cm_credential_response(first, Some(credentials.len()))?;
         self.cred_mgmt_state.current_rp = Some(first.rp_id.clone());
         self.cred_mgmt_state.credential_list = credentials
             .iter()
@@ -298,8 +305,7 @@ impl CtapApp<'_> {
             };
             self.cred_mgmt_state.credential_index += 1;
             if let Some(credential) = self.stored_credential(&credential_id)? {
-                let total = self.cred_mgmt_state.credential_list.len();
-                return Self::cm_credential_response(&credential, total);
+                return Self::cm_credential_response(&credential, None);
             }
         }
     }

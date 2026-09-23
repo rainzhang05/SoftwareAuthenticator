@@ -140,8 +140,9 @@ Upgrading from `867a591` or earlier is not an in-place update:
 - CTAPHID: CANCEL while idle or on another channel is ignored, error packets no
   longer overwrite the request buffer, the number of allocated channels is
   bounded, and malformed uhid events are rejected instead of panicking.
-- Credential management truncates long RP IDs and user names, and continues
-  enumerations without pinUvAuthParam.
+- Credential management truncates long RP IDs and user names, continues
+  enumerations without pinUvAuthParam, and reports totalCredentials only in
+  the enumerateCredentialsBegin response.
 - The udev hidraw rule never matched the uhid-created device.
 - Panics removed from fallible ML-DSA paths.
 

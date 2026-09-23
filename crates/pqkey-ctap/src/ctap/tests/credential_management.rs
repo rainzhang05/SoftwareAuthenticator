@@ -215,6 +215,13 @@ fn credential_management_commands() {
         map.iter()
             .any(|(k, v)| *k == Value::Integer(Integer::from(7)) && matches!(v, Value::Map(_)))
     );
+    // totalCredentials only comes with enumerateCredentialsBegin (CTAP 2.3
+    // §6.8.4).
+    assert!(
+        !map.iter()
+            .any(|(k, _)| *k == Value::Integer(Integer::from(9))),
+        "totalCredentials in a get-next response"
+    );
 
     let delete_descriptor = canonical_map(vec![
         (Value::Text("type".into()), Value::Text("public-key".into())),
