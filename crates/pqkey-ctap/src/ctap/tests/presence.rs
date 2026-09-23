@@ -417,3 +417,28 @@ fn cancellation_reports_the_interrupt_flag() {
     assert!(flag.interrupt());
     assert!(Cancellation::new(&flag).is_cancelled());
 }
+
+/// A cancellation only reaches a request that is being worked on: one that
+/// arrives while the flag is idle, or a second one, changes nothing, and the
+/// next request starts uncancelled.
+#[test]
+fn the_interrupt_flag_only_cancels_a_request_in_progress() {
+    let flag = InterruptFlag::default();
+    assert!(!flag.interrupt(), "idle");
+    assert!(!flag.is_interrupted());
+
+    flag.set_working();
+    assert!(flag.interrupt());
+    assert!(flag.is_interrupted());
+    assert!(!flag.interrupt(), "already interrupted");
+    assert!(flag.is_interrupted());
+
+    flag.set_idle();
+    assert!(!flag.is_interrupted());
+    assert!(!flag.interrupt(), "idle again");
+    flag.set_working();
+    assert!(
+        !flag.is_interrupted(),
+        "the next request starts uncancelled"
+    );
+}

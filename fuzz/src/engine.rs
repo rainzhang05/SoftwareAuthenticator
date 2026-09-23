@@ -7,8 +7,6 @@ use std::sync::{
 };
 
 use ciborium::value::Value;
-use ctaphid_app::{App, Command, Error};
-use heapless_bytes::Bytes;
 use pqkey_ctap::ctap::constants::*;
 use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest, UserPresence};
 use pqkey_ctap::ctap::{CtapApp, InterruptFlag};
@@ -16,8 +14,8 @@ use pqkey_ctap::store::MemoryStore;
 
 use crate::rng::SplitMix;
 
-/// The interrupt flag of every fuzzed engine.  Nothing marks it: the CTAPHID
-/// dispatcher, which would, is not part of these targets.
+/// The interrupt flag of every fuzzed engine.  Nothing marks it: the
+/// transport, which would, is not part of these targets.
 static NEVER_INTERRUPTED: InterruptFlag = InterruptFlag::new();
 
 /// The message size the daemon builds the app for (`pqkey::MESSAGE_SIZE`).
@@ -96,7 +94,6 @@ impl UserPresence for FuzzPresence {
 pub struct Engine {
     app: CtapApp<'static>,
     presence: FuzzPresence,
-    response: Box<Bytes<MESSAGE_SIZE>>,
     /// The command byte and response status of every request so far.
     pub(crate) trace: Vec<(u8, u8)>,
 }
@@ -119,7 +116,6 @@ impl Engine {
         Self {
             app,
             presence,
-            response: Box::new(Bytes::new()),
             trace: Vec::new(),
         }
     }
@@ -136,20 +132,22 @@ impl Engine {
     /// Send one CTAPHID_CBOR message, `request` being the command byte and
     /// its parameters, check the response and return it.
     pub fn call(&mut self, request: &[u8]) -> Vec<u8> {
-        let result = App::call(
-            &mut self.app,
-            Command::Cbor,
-            request,
-            self.response.as_mut_view(),
-        );
+        let response = self.app.call(request);
         if request.is_empty() {
-            assert_eq!(result, Err(Error::InvalidLength), "an empty CBOR message");
+            // The transport answers an empty CTAPHID_CBOR message itself.
+            assert_eq!(
+                response,
+                [CTAP1_ERR_INVALID_LENGTH],
+                "an empty CBOR message"
+            );
             return Vec::new();
         }
-        // An engine answer that does not fit the buffer turns into a CTAPHID
-        // error instead of a CTAP status: the platform learns nothing.
-        assert_eq!(result, Ok(()), "the response must fit {MESSAGE_SIZE} bytes");
-        let response = self.response.to_vec();
+        // An engine answer longer than a CTAPHID message turns into a
+        // CTAPHID error instead of a CTAP status: the platform learns nothing.
+        assert!(
+            response.len() <= MESSAGE_SIZE,
+            "the response must fit {MESSAGE_SIZE} bytes"
+        );
         check_response(request[0], &response);
         self.trace.push((request[0], response[0]));
         response

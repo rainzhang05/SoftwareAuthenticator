@@ -15,9 +15,9 @@
 //! concrete type: its many `impl` blocks carry no bounds, the daemon and tests
 //! name it without spelling out a combination, and a failing test store or a
 //! different presence prompt does not produce a new monomorphised copy of the
-//! engine.  All three are required to be `Send`, so the engine can later be
-//! moved to a worker thread and let the transport handle CTAPHID_CANCEL while
-//! a prompt is open.
+//! engine.  All three are required to be `Send`, so the engine can run on a
+//! worker thread while the transport keeps serving the device and passes
+//! cancellations on through the [`InterruptFlag`].
 
 mod cbor;
 pub mod constants;
@@ -35,8 +35,8 @@ mod storage;
 mod tests;
 
 pub use self::pin::state::{MAX_PIN_RETRIES, PersistentPinState, PinAttempt, PinRetryState};
+pub use self::presence::InterruptFlag;
 pub use self::reset::RESET_WINDOW_AFTER_POWER_UP;
-pub use trussed_core::InterruptFlag;
 
 use self::credential_management::CredentialManagementState;
 use self::get_assertion::PendingAssertion;
@@ -46,7 +46,6 @@ use crate::store::{CredentialStore, FileStore};
 
 use ciborium::{de::from_reader, value::Value};
 use core::fmt;
-use ctaphid_app::{App, Command, Error};
 use log::info;
 use rand_core::CryptoRng;
 use std::time::Duration;
@@ -90,10 +89,11 @@ pub enum AttestationMode {
     None,
 }
 
-/// The CTAP2 authenticator: a CTAPHID application answering CTAPHID_CBOR.
+/// The CTAP2 authenticator: [`call`](Self::call) answers one CTAP request, the
+/// payload of a CTAPHID_CBOR message.
 ///
-/// `'interrupt` is the lifetime of the interrupt flag the CTAPHID dispatcher
-/// uses to cancel a request.
+/// `'interrupt` is the lifetime of the interrupt flag the transport uses to
+/// cancel a request.
 pub struct CtapApp<'interrupt> {
     store: Box<dyn CredentialStore + Send>,
     rng: Box<dyn CryptoRng + Send>,
@@ -125,8 +125,9 @@ impl<'interrupt> CtapApp<'interrupt> {
     ///   the operating system's generator.)
     /// * `presence` is asked whenever an operation needs evidence of user
     ///   interaction.
-    /// * `interrupt` is the flag through which the CTAPHID dispatcher cancels
-    ///   the request being processed; it is what [`App::interrupt`] returns.
+    /// * `interrupt` is the flag through which the transport cancels the
+    ///   request being processed; it is what [`interrupt`](Self::interrupt)
+    ///   returns.
     ///
     /// [`PrivateKeyMaterial::generate`]: crate::store::PrivateKeyMaterial::generate
     pub fn new(
@@ -259,21 +260,20 @@ impl<'interrupt> CtapApp<'interrupt> {
     }
 }
 
-impl<'a, 'interrupt: 'a> App<'a> for CtapApp<'interrupt> {
-    fn interrupt(&self) -> Option<&'a InterruptFlag> {
-        Some(self.interrupt)
+impl<'interrupt> CtapApp<'interrupt> {
+    /// The flag through which the transport cancels the request [`call`]
+    /// is working on.
+    ///
+    /// [`call`]: Self::call
+    pub fn interrupt(&self) -> &'interrupt InterruptFlag {
+        self.interrupt
     }
 
-    fn commands(&self) -> &'static [Command] {
-        &[Command::Cbor]
-    }
-
-    fn call(
-        &mut self,
-        command: Command,
-        request: &[u8],
-        response: &mut heapless_bytes::BytesView,
-    ) -> Result<(), Error> {
+    /// Answer one CTAP request: the command byte followed by its CBOR
+    /// parameters, as a CTAPHID_CBOR message carries them (CTAP 2.3 §8.1).
+    /// The answer is a status byte, followed by the response parameters when
+    /// the status is CTAP2_OK.
+    pub fn call(&mut self, request: &[u8]) -> Vec<u8> {
         // authenticatorGetNextAssertion is a stateful command: "The
         // authenticator MAY maintain state based on the assumption that each
         // stateful command is exclusively preceded by either another instance
@@ -285,44 +285,34 @@ impl<'a, 'interrupt: 'a> App<'a> for CtapApp<'interrupt> {
         // getNextAssertion therefore discards the remembered getAssertion
         // parameters before it is looked at, whatever it turns out to be and
         // however it ends; a getAssertion that succeeds remembers its own.
-        if command != Command::Cbor || request.first() != Some(&CTAP_CMD_GET_NEXT_ASSERTION) {
+        if request.first() != Some(&CTAP_CMD_GET_NEXT_ASSERTION) {
             self.pending_assertion = None;
         }
-        match command {
-            Command::Cbor => {
-                if request.is_empty() {
-                    return Err(Error::InvalidLength);
-                }
-                let ctap_cmd = request[0];
-                let payload = &request[1..];
-                let result = match ctap_cmd {
-                    CTAP_CMD_GET_INFO => self.handle_get_info(),
-                    CTAP_CMD_MAKE_CREDENTIAL => self.handle_make_credential(payload),
-                    CTAP_CMD_GET_ASSERTION => self.handle_get_assertion(payload),
-                    CTAP_CMD_GET_NEXT_ASSERTION => self.handle_get_next_assertion(),
-                    CTAP_CMD_CLIENT_PIN => self.handle_client_pin(payload),
-                    CTAP_CMD_RESET => self.handle_reset(),
-                    CTAP_CMD_CREDENTIAL_MANAGEMENT => self.handle_credential_management(payload),
-                    CTAP_CMD_SELECTION => self.handle_selection(),
-                    // Neither authenticatorBioEnrollment (0x09) nor its
-                    // prototype (0x40) is implemented: "If an authenticator
-                    // receives a command code it does not implement, it MUST
-                    // return CTAP1_ERR_INVALID_COMMAND." (CTAP 2.3 §8.1)
-                    // getInfo accordingly has no bioEnroll or
-                    // userVerificationMgmtPreview option (§6.4, §6.7.1).
-                    _ => Err(CTAP1_ERR_INVALID_COMMAND),
-                };
+        // A CTAPHID_CBOR message carries at least the command byte (§11.2.9.1.2);
+        // the transport answers an empty one itself.
+        let Some((&ctap_cmd, payload)) = request.split_first() else {
+            return vec![CTAP1_ERR_INVALID_LENGTH];
+        };
+        let result = match ctap_cmd {
+            CTAP_CMD_GET_INFO => self.handle_get_info(),
+            CTAP_CMD_MAKE_CREDENTIAL => self.handle_make_credential(payload),
+            CTAP_CMD_GET_ASSERTION => self.handle_get_assertion(payload),
+            CTAP_CMD_GET_NEXT_ASSERTION => self.handle_get_next_assertion(),
+            CTAP_CMD_CLIENT_PIN => self.handle_client_pin(payload),
+            CTAP_CMD_RESET => self.handle_reset(),
+            CTAP_CMD_CREDENTIAL_MANAGEMENT => self.handle_credential_management(payload),
+            CTAP_CMD_SELECTION => self.handle_selection(),
+            // Neither authenticatorBioEnrollment (0x09) nor its prototype
+            // (0x40) is implemented: "If an authenticator receives a command
+            // code it does not implement, it MUST return
+            // CTAP1_ERR_INVALID_COMMAND." (CTAP 2.3 §8.1)  getInfo accordingly
+            // has no bioEnroll or userVerificationMgmtPreview option (§6.4,
+            // §6.7.1).
+            _ => Err(CTAP1_ERR_INVALID_COMMAND),
+        };
 
-                let message = result.unwrap_or_else(|status| vec![status]);
-
-                info!("{}", Self::request_log_line(request, &message));
-
-                response.clear();
-                response
-                    .extend_from_slice(&message)
-                    .map_err(|_| Error::InvalidLength)
-            }
-            _ => Err(Error::InvalidCommand),
-        }
+        let message = result.unwrap_or_else(|status| vec![status]);
+        info!("{}", Self::request_log_line(request, &message));
+        message
     }
 }

@@ -29,18 +29,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ctaphid_app::{App, Command, Error as AppError};
-use heapless_bytes::Bytes;
-use pqkey_ctap::ctap::InterruptFlag;
+use pqkey_ctap::ctap::{CtapApp, InterruptFlag};
 use shutdown::ShutdownSignal;
-use transport::ctaphid_host::{AppRequest, CtaphidHost, MAX_MESSAGE_SIZE, Version};
+use transport::ctaphid_host::{CtaphidHost, MAX_MESSAGE_SIZE, Version};
 use uhid::{CTAPHID_FRAME_LEN, HidDeviceDescriptor, UhidDevice};
 
 // CTAPHID capability flags (CTAP spec section 11.2.9.1.3)
 pub const CAPABILITY_CBOR: u8 = 0x04; // Implements CTAPHID_CBOR
 pub const CAPABILITY_NMSG: u8 = 0x08; // Does NOT implement CTAPHID_MSG
 
-/// The message size the app is built for: the largest CTAPHID message.
+/// The largest CTAPHID message, and so the longest answer the app can give.
 pub const MESSAGE_SIZE: usize = MAX_MESSAGE_SIZE;
 
 /// Pause between input reports of a multi-packet message.
@@ -78,17 +76,39 @@ impl WaitingForUser {
     }
 }
 
-/// The app's answer to one request.
-type AppResponse = Result<Vec<u8>, AppError>;
+/// What the transport runs on its worker thread: the CTAP app, which answers
+/// complete CTAPHID_CBOR requests.
+///
+/// `'interrupt` is the lifetime of the app's [`InterruptFlag`], apart from any
+/// borrow of the app, so the transport can hold on to the flag while the
+/// worker thread has the app.
+pub trait App<'interrupt> {
+    /// The flag through which the transport cancels the request the app is
+    /// working on.
+    fn interrupt(&self) -> &'interrupt InterruptFlag;
+
+    /// Answer `request`, the payload of a CTAPHID_CBOR message.
+    fn call(&mut self, request: &[u8]) -> Vec<u8>;
+}
+
+impl<'interrupt> App<'interrupt> for CtapApp<'interrupt> {
+    fn interrupt(&self) -> &'interrupt InterruptFlag {
+        CtapApp::interrupt(self)
+    }
+
+    fn call(&mut self, request: &[u8]) -> Vec<u8> {
+        CtapApp::call(self, request)
+    }
+}
 
 /// The transport thread's end of the app worker: requests go out, answers
 /// come back, and the worker writes a byte to `wake` after each answer so the
 /// loop does not sleep through it.
 struct AppWorker<'interrupt> {
-    requests: Option<mpsc::Sender<AppRequest>>,
-    responses: mpsc::Receiver<AppResponse>,
+    requests: Option<mpsc::Sender<Vec<u8>>>,
+    responses: mpsc::Receiver<Vec<u8>>,
     wake: UnixStream,
-    interrupt: Option<&'interrupt InterruptFlag>,
+    interrupt: &'interrupt InterruptFlag,
 }
 
 impl AppWorker<'_> {
@@ -99,10 +119,8 @@ impl AppWorker<'_> {
     /// up is not lost. The worker marks it idle again after the call, before
     /// it answers, and a request is only sent once the previous answer has
     /// arrived, so the two never overlap.
-    fn submit(&mut self, request: AppRequest) -> io::Result<()> {
-        if let Some(flag) = self.interrupt {
-            flag.set_working();
-        }
+    fn submit(&mut self, request: Vec<u8>) -> io::Result<()> {
+        self.interrupt.set_working();
         self.requests
             .as_ref()
             .and_then(|requests| requests.send(request).ok())
@@ -113,13 +131,11 @@ impl AppWorker<'_> {
     /// changes while a request is being worked on, so this never affects a
     /// later request.
     fn interrupt(&self) {
-        if let Some(flag) = self.interrupt {
-            flag.interrupt();
-        }
+        self.interrupt.interrupt();
     }
 
     /// The app's next answer, if one has arrived.
-    fn try_response(&self) -> io::Result<Option<AppResponse>> {
+    fn try_response(&self) -> io::Result<Option<Vec<u8>>> {
         let mut drained = [0u8; 16];
         while matches!((&self.wake).read(&mut drained), Ok(n) if n > 0) {}
         match self.responses.try_recv() {
@@ -144,22 +160,16 @@ fn app_stopped() -> io::Error {
 /// up.
 fn run_app<'interrupt, A>(
     app: &mut A,
-    requests: mpsc::Receiver<AppRequest>,
-    responses: mpsc::Sender<AppResponse>,
+    requests: mpsc::Receiver<Vec<u8>>,
+    responses: mpsc::Sender<Vec<u8>>,
     wake: UnixStream,
 ) where
     A: App<'interrupt> + ?Sized,
 {
     let interrupt = app.interrupt();
-    let mut buffer = Box::new(Bytes::<MESSAGE_SIZE>::new());
     for request in requests {
-        buffer.clear();
-        let response = app
-            .call(request.command, &request.payload, buffer.as_mut_view())
-            .map(|()| buffer.to_vec());
-        if let Some(flag) = interrupt {
-            flag.set_idle();
-        }
+        let response = app.call(&request);
+        interrupt.set_idle();
         if responses.send(response).is_err() {
             return;
         }
@@ -307,7 +317,6 @@ where
     A: App<'interrupt> + Send + ?Sized,
 {
     let interrupt = app.interrupt();
-    let app_commands: &'static [Command] = app.commands();
     let (wake, worker_wake) = UnixStream::pair()?;
     wake.set_nonblocking(true)?;
     worker_wake.set_nonblocking(true)?;
@@ -321,7 +330,7 @@ where
                 run_app(app, request_receiver, response_sender, worker_wake)
             })?;
 
-        let mut host = CtaphidHost::new(app_commands);
+        let mut host = CtaphidHost::new();
         host.set_version(Version {
             major: 2,
             minor: 1,
@@ -358,6 +367,7 @@ where
 pub(crate) mod tests {
     use super::*;
     use crate::shutdown::is_shutdown;
+    use crate::transport::ctaphid_host::Command;
     use std::os::fd::{AsRawFd, OwnedFd};
 
     /// A uhid device whose descriptor is one end of a socket pair; the other
@@ -390,22 +400,18 @@ pub(crate) mod tests {
     }
 
     /// Answers CTAPHID_CBOR by echoing the request, or panics on 0xFF.
-    struct EchoApp;
+    struct EchoApp<'interrupt> {
+        interrupt: &'interrupt InterruptFlag,
+    }
 
-    impl App<'static> for EchoApp {
-        fn commands(&self) -> &'static [Command] {
-            &[Command::Cbor]
+    impl<'interrupt> App<'interrupt> for EchoApp<'interrupt> {
+        fn interrupt(&self) -> &'interrupt InterruptFlag {
+            self.interrupt
         }
 
-        fn call(
-            &mut self,
-            _command: Command,
-            request: &[u8],
-            response: &mut heapless_bytes::BytesView,
-        ) -> Result<(), AppError> {
+        fn call(&mut self, request: &[u8]) -> Vec<u8> {
             assert_ne!(request, [0xFF], "the app fails");
-            response.extend_from_slice(request).unwrap();
-            Ok(())
+            request.to_vec()
         }
     }
 
@@ -421,7 +427,9 @@ pub(crate) mod tests {
         let mut ready = false;
         let err = exec(
             device,
-            &mut EchoApp,
+            &mut EchoApp {
+                interrupt: &InterruptFlag::new(),
+            },
             &WaitingForUser::new(),
             shutdown,
             || {
@@ -444,7 +452,9 @@ pub(crate) mod tests {
         let (device, mut device_side) = socket_device();
         let err = exec(
             device,
-            &mut EchoApp,
+            &mut EchoApp {
+                interrupt: &InterruptFlag::new(),
+            },
             &WaitingForUser::new(),
             ShutdownSignal::new(),
             || Err(io::Error::other("not ready")),
@@ -471,7 +481,9 @@ pub(crate) mod tests {
 
         let err = exec(
             device,
-            &mut EchoApp,
+            &mut EchoApp {
+                interrupt: &InterruptFlag::new(),
+            },
             &WaitingForUser::new(),
             ShutdownSignal::new(),
             || Ok(()),

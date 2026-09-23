@@ -22,19 +22,15 @@ use std::collections::HashSet;
 
 use crate::rng::NarrowRng;
 use arbitrary::{Arbitrary, Unstructured};
-use ctaphid_app::{Command, Error as AppError};
 use pqkey::transport::ctaphid_host::{
-    CONTINUATION_TIMEOUT_MS, CTAP2_ERR_KEEPALIVE_CANCEL, CtaphidHost, KEEPALIVE_INTERVAL_MS,
-    MAX_MESSAGE_SIZE,
+    CONTINUATION_TIMEOUT_MS, CTAP2_ERR_KEEPALIVE_CANCEL, Command, CtaphidHost,
+    KEEPALIVE_INTERVAL_MS, MAX_MESSAGE_SIZE,
 };
 use pqkey::uhid::{CTAPHID_FRAME_LEN, CtapHidFrame};
 
 pub const INIT_DATA: usize = CTAPHID_FRAME_LEN - 7;
 pub const CONT_DATA: usize = CTAPHID_FRAME_LEN - 5;
 const BROADCAST: u32 = 0xffff_ffff;
-
-const ONLY_CBOR: &[Command] = &[Command::Cbor];
-const WITH_WINK: &[Command] = &[Command::Cbor, Command::Wink, Command::Lock];
 
 const ERROR_CODES: &[u8] = &[0x01, 0x03, 0x04, 0x05, 0x06, 0x0B, 0x7F];
 
@@ -89,7 +85,6 @@ pub enum Action {
     TakeRequest,
     /// The app answers the request it is working on.
     Respond {
-        error: Option<u8>,
         length: u16,
         fill: u8,
     },
@@ -99,7 +94,6 @@ pub enum Action {
 
 struct Harness {
     host: CtaphidHost<NarrowRng>,
-    app_commands: &'static [Command],
     now: u64,
     /// Channels allocated by INIT, as the host announced them.
     allocated: Vec<u32>,
@@ -226,13 +220,7 @@ impl Harness {
                     "a CBOR response the app did not give"
                 );
             }
-            other => {
-                assert!(
-                    self.app_commands.contains(&other),
-                    "{other:?} is not the app's"
-                );
-                assert_eq!(self.app_answer.take().as_deref(), Some(payload));
-            }
+            Command::Cancel => panic!("CTAPHID_CANCEL is never sent"),
         }
     }
 
@@ -318,33 +306,21 @@ impl Harness {
             Action::TakeRequest => {
                 if let Some(request) = self.host.take_app_request() {
                     assert!(!self.app_busy, "a request for a busy app");
-                    assert!(self.app_commands.contains(&request.command));
-                    assert!(request.payload.len() <= MAX_MESSAGE_SIZE);
+                    assert!(!request.is_empty(), "an empty CBOR request");
+                    assert!(request.len() <= MAX_MESSAGE_SIZE);
                     self.app_busy = true;
                 }
             }
-            Action::Respond {
-                error,
-                length,
-                fill,
-            } => {
+            Action::Respond { length, fill } => {
                 if !self.app_busy {
                     return;
                 }
                 self.app_busy = false;
-                let response = match error {
-                    Some(code) => Err(match code % 3 {
-                        0 => AppError::InvalidCommand,
-                        1 => AppError::InvalidLength,
-                        _ => AppError::NoResponse,
-                    }),
-                    None => {
-                        // The daemon's response buffer holds MAX_MESSAGE_SIZE.
-                        let length = usize::from(length) % (MAX_MESSAGE_SIZE + 1);
-                        Ok((0..length).map(|i| fill.wrapping_add(i as u8)).collect())
-                    }
-                };
-                self.app_answer = response.as_ref().ok().cloned();
+                // Up to a little more than a message holds: a longer answer
+                // goes out as ERR_OTHER.
+                let length = usize::from(length) % (MAX_MESSAGE_SIZE + 64);
+                let response: Vec<u8> = (0..length).map(|i| fill.wrapping_add(i as u8)).collect();
+                self.app_answer = Some(response.clone());
                 self.host.app_response(response);
                 assert!(self.drain() <= 1);
             }
@@ -360,14 +336,11 @@ impl Harness {
 /// Run one fuzz input.
 pub fn run(data: &[u8]) {
     let mut u = Unstructured::new(data);
-    let Ok(config) = u.arbitrary::<(u64, u16, bool)>() else {
+    let Ok((seed, range)) = u.arbitrary::<(u64, u16)>() else {
         return;
     };
-    let (seed, range, vendor) = config;
-    let app_commands = if vendor { WITH_WINK } else { ONLY_CBOR };
     let mut harness = Harness {
-        host: CtaphidHost::with_rng(app_commands, NarrowRng::new(seed, u32::from(range) + 1)),
-        app_commands,
+        host: CtaphidHost::with_rng(NarrowRng::new(seed, u32::from(range) + 1)),
         now: 0,
         allocated: Vec::new(),
         senders: HashSet::new(),

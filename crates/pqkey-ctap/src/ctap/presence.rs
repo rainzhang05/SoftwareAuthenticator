@@ -11,9 +11,8 @@
 //!
 //! [`AutoApprove`] approves every request immediately.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
-
-use trussed_core::InterruptFlag;
 
 use super::CtapApp;
 use crate::ctap::constants::*;
@@ -104,6 +103,53 @@ pub enum PresenceOutcome {
     Cancelled,
 }
 
+const IDLE: u8 = 0;
+const WORKING: u8 = 1;
+const INTERRUPTED: u8 = 2;
+
+/// Through this flag the transport cancels the request the engine works on.
+///
+/// The transport marks it working when it hands the engine a request and
+/// interrupts it when the platform cancels that request (CTAPHID_CANCEL, or
+/// CTAPHID_INIT on its channel); it is marked idle again once the engine has
+/// answered.  An interrupt only takes while a request is being worked on, so a
+/// cancellation that arrives after the answer never reaches the next request.
+/// A [`Cancellation`] reads it for the [`UserPresence`] implementation.
+#[derive(Debug, Default)]
+pub struct InterruptFlag(AtomicU8);
+
+impl InterruptFlag {
+    /// An idle flag.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(AtomicU8::new(IDLE))
+    }
+
+    /// No request is being worked on.
+    pub fn set_idle(&self) {
+        self.0.store(IDLE, Ordering::Relaxed);
+    }
+
+    /// A request has been handed to the engine.
+    pub fn set_working(&self) {
+        self.0.store(WORKING, Ordering::Relaxed);
+    }
+
+    /// Cancel the request being worked on.  Returns whether there was one to
+    /// cancel; an idle or already interrupted flag stays as it is.
+    pub fn interrupt(&self) -> bool {
+        self.0
+            .compare_exchange(WORKING, INTERRUPTED, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    /// Whether the request being worked on has been cancelled.
+    #[must_use]
+    pub fn is_interrupted(&self) -> bool {
+        self.0.load(Ordering::Relaxed) == INTERRUPTED
+    }
+}
+
 /// Lets a [`UserPresence`] implementation notice that the platform cancelled
 /// the request it is waiting on.
 #[derive(Clone, Copy, Debug)]
@@ -112,8 +158,8 @@ pub struct Cancellation<'a> {
 }
 
 impl<'a> Cancellation<'a> {
-    /// Observe `flag`, the interrupt flag the CTAPHID dispatcher marks when a
-    /// CTAPHID_CANCEL arrives for the request being processed.
+    /// Observe `flag`, the interrupt flag the transport marks when the
+    /// platform cancels the request being processed.
     #[must_use]
     pub fn new(flag: &'a InterruptFlag) -> Self {
         Self { flag }

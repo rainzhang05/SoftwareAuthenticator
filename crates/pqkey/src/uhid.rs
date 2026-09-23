@@ -620,7 +620,7 @@ mod raw {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ctaphid_app::Command;
+    use crate::transport::ctaphid_host::Command;
 
     fn init_frame() -> [u8; CTAPHID_FRAME_LEN] {
         let mut frame = [0u8; CTAPHID_FRAME_LEN];

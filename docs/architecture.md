@@ -38,9 +38,11 @@ contrib/            udev rules and systemd user unit
   three FIPS 204 parameter sets, working from the 32-byte seed. Signing is pure
   ML-DSA over the external interface, hedged (randomised) by default. Each
   parameter set is a Cargo feature; all are on by default.
-- **`pqkey-ctap`** implements the `ctaphid_app::App` trait: it takes a
-  CTAPHID_CBOR payload and returns a response. Everything outside the protocol
-  is injected: a `CredentialStore`, a random number generator and a
+- **`pqkey-ctap`** answers CTAP requests: `CtapApp::call` takes a CTAP
+  command byte and its CBOR parameters, the payload of a CTAPHID_CBOR message,
+  and returns the response, and an `InterruptFlag` lets the transport cancel
+  it. Nothing in it knows about CTAPHID framing or I/O. Everything outside the
+  protocol is injected: a `CredentialStore`, a random number generator and a
   `UserPresence` implementation. It forbids `unsafe` code.
 - **`pqkey`** is the Linux program: it creates the uhid device, runs CTAPHID,
   runs the engine on a worker thread, asks for user presence over D-Bus, and
@@ -112,8 +114,8 @@ sends what it queues. `crates/pqkey/src/uhid.rs` reads and writes kernel
 `0xF1D0`) with 64-byte input and output reports.
 
 - **Message size.** With 64-byte packets the largest message is
-  64 − 7 + 128 × (64 − 5) = **7,609 bytes** (§11.2.4). The engine's response
-  buffer has that size. A response that does not fit is answered with
+  64 − 7 + 128 × (64 − 5) = **7,609 bytes** (§11.2.4). The engine keeps its
+  responses within that size; an answer that did not fit would go out as
   CTAPHID_ERROR ERR_OTHER.
 - **Pacing.** A real USB full-speed HID endpoint delivers at most one report
   per millisecond. uhid has no such flow control: each input report goes

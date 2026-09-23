@@ -114,8 +114,8 @@ Upgrading from `867a591` or earlier is not an in-place update:
 - Relying party IDs and user names are logged at debug level only.
 - CLI errors are printed as messages.
 - Dependencies updated to current majors (for example sha2 0.11, p256 0.14,
-  getrandom 0.4, rand_core 0.10, ctaphid-app 0.2); `pretty_env_logger` replaced
-  by `env_logger`.
+  getrandom 0.4, rand_core 0.10); `pretty_env_logger` replaced by
+  `env_logger`.
 
 ### Fixed
 
@@ -148,7 +148,11 @@ Upgrading from `867a591` or earlier is not an in-place update:
 
 - The Trussed dependency and its `[patch.crates-io]` git pin, the
   `transport-core` crate, the unused CCID feature, and the littlefs, p256
-  0.9 and bindgen dependencies that came with Trussed.
+  0.9 and bindgen dependencies that came with Trussed. The last pieces,
+  ctaphid-app and trussed-core, which only supplied the CTAPHID app trait and
+  the interrupt flag, are replaced by local code, which takes postcard 0.7,
+  heapless 0.7 and the unmaintained atomic-polyfill out of the dependency
+  tree.
 - `--manual-user-presence`, `--suppress-attestation` and the PIN arguments of
   the `pin` commands (see Breaking changes).
 - The system-wide systemd service.
@@ -169,4 +173,5 @@ Upgrading from `867a591` or earlier is not an in-place update:
 - User presence is no longer approved without asking by default.
 - Self attestation by default avoids linking a user's credentials across sites
   through a shared attestation certificate.
-- Supply-chain checks (cargo-audit, cargo-deny) run on every push and weekly.
+- Supply-chain checks (cargo-audit, cargo-deny) run on every push and weekly,
+  and tolerate no advisory.

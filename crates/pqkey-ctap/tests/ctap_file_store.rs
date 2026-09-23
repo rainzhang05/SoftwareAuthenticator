@@ -1,7 +1,7 @@
 //! CTAP-level tests of the engine over a real `FileStore`.
 //!
-//! Every request is CBOR sent through `App::call`, as the CTAPHID dispatcher
-//! sends it, into a response buffer of the CTAPHID maximum message size.
+//! Every request is CBOR sent through `CtapApp::call`, as the transport sends
+//! it, and every response must fit the CTAPHID maximum message size.
 //! Between requests the app is dropped and rebuilt over the same state
 //! directory, as a daemon restart would.  These are the tests that would
 //! have caught the 1,024-byte limit of the old Trussed-backed store: every
@@ -11,8 +11,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ciborium::value::{Integer, Value};
-use ctaphid_app::{App, Command};
-use heapless_bytes::Bytes;
 use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::Verifier};
 use pqkey_ctap::ctap::presence::AutoApprove;
 use pqkey_ctap::ctap::{AttestationMode, CtapApp, InterruptFlag};
@@ -110,10 +108,12 @@ fn bytes(value: Value) -> Vec<u8> {
 fn call(app: &mut CtapApp<'static>, command: u8, payload: &Value) -> Vec<u8> {
     let mut request = vec![command];
     ciborium::ser::into_writer(payload, &mut request).expect("encode request");
-    let mut response = Bytes::<CTAPHID_MAX_MESSAGE>::new();
-    App::call(app, Command::Cbor, &request, &mut response)
-        .expect("the response fits a CTAPHID message");
-    response.to_vec()
+    let response = app.call(&request);
+    assert!(
+        response.len() <= CTAPHID_MAX_MESSAGE,
+        "the response fits a CTAPHID message"
+    );
+    response
 }
 
 /// Send a request that must succeed, and decode its response map.

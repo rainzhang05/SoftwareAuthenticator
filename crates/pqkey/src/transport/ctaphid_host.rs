@@ -18,8 +18,9 @@
 //!   processed, keepalives go out every [`KEEPALIVE_INTERVAL_MS`] and
 //!   whenever their status changes.
 //!
-//! INIT and PING never reach the app; they are answered as soon as they are
-//! complete. While a transaction is under way:
+//! CTAPHID_CBOR is the only request the app answers. INIT and PING are
+//! answered as soon as they are complete, and every other command with
+//! ERR_INVALID_CMD. While a transaction is under way:
 //!
 //! * a request on any other channel fails with ERR_CHANNEL_BUSY;
 //! * CTAPHID_INIT on the transaction's channel aborts it (resynchronisation);
@@ -41,7 +42,6 @@
 
 use std::{collections::VecDeque, convert::TryInto};
 
-use ctaphid_app::{Command, Error as AppError};
 use getrandom::SysRng;
 use log::debug;
 use rand_core::{CryptoRng, UnwrapErr};
@@ -91,6 +91,45 @@ pub const MAX_CHANNELS: usize = 256;
 const CHANNEL_GENERATION_RETRY_LIMIT: usize = 64;
 const LOG_PREVIEW: usize = 8;
 
+/// The CTAPHID commands this transport handles (CTAP 2.3 §11.2.9), with the
+/// code they carry in an initialization packet, high bit cleared. Every other
+/// code, CTAPHID_MSG, CTAPHID_WINK and CTAPHID_LOCK included, is answered with
+/// ERR_INVALID_CMD.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Command {
+    Ping = 0x01,
+    Init = 0x06,
+    Cbor = 0x10,
+    Cancel = 0x11,
+    KeepAlive = 0x3B,
+    Error = 0x3F,
+}
+
+impl Command {
+    pub fn into_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+impl TryFrom<u8> for Command {
+    type Error = u8;
+
+    /// The command with `code`, or `code` back if this transport does not
+    /// handle it.
+    fn try_from(code: u8) -> Result<Self, u8> {
+        Ok(match code {
+            0x01 => Command::Ping,
+            0x06 => Command::Init,
+            0x10 => Command::Cbor,
+            0x11 => Command::Cancel,
+            0x3B => Command::KeepAlive,
+            0x3F => Command::Error,
+            _ => return Err(code),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Version {
     pub major: u8,
@@ -117,13 +156,6 @@ pub enum ErrorCode {
 pub enum KeepaliveStatus {
     Processing = 1,
     UpNeeded = 2,
-}
-
-/// A complete request for the app.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AppRequest {
-    pub command: Command,
-    pub payload: Vec<u8>,
 }
 
 /// The channels allocated by CTAPHID_INIT, least recently used first.
@@ -167,11 +199,10 @@ impl Channels {
     }
 }
 
-/// A complete request being processed by the app.
+/// A complete CTAPHID_CBOR request being processed by the app.
 #[derive(Debug)]
 struct Processing {
     channel: u32,
-    command: Command,
     /// The payload, until the request is handed to the app.
     request: Option<Vec<u8>>,
     /// When the last keepalive was sent, or the request completed.
@@ -202,8 +233,6 @@ pub struct CtaphidHost<R = OsRng> {
     rng: R,
     capabilities: u8,
     version: Version,
-    /// The commands the app answers.
-    app_commands: &'static [Command],
     /// Whether the app is working on a request, possibly for a transaction
     /// that has since been aborted.
     app_busy: bool,
@@ -212,13 +241,19 @@ pub struct CtaphidHost<R = OsRng> {
 }
 
 impl CtaphidHost<OsRng> {
-    pub fn new(app_commands: &'static [Command]) -> Self {
-        Self::with_rng(app_commands, UnwrapErr(SysRng))
+    pub fn new() -> Self {
+        Self::with_rng(UnwrapErr(SysRng))
+    }
+}
+
+impl Default for CtaphidHost<OsRng> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl<R: CryptoRng> CtaphidHost<R> {
-    pub fn with_rng(app_commands: &'static [Command], rng: R) -> Self {
+    pub fn with_rng(rng: R) -> Self {
         Self {
             state: State::Idle,
             message: Vec::with_capacity(MAX_MESSAGE_SIZE),
@@ -227,7 +262,6 @@ impl<R: CryptoRng> CtaphidHost<R> {
             rng,
             capabilities: 0,
             version: Version::default(),
-            app_commands,
             app_busy: false,
             interrupt_app: false,
         }
@@ -280,7 +314,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
         }
     }
 
-    /// Queue a keepalive if one is due for the CBOR request being processed:
+    /// Queue a keepalive if one is due for the request being processed:
     /// [`KEEPALIVE_INTERVAL_MS`] after the last one, or at once when the
     /// status changes. `waiting_for_user` is what the app reports. Returns
     /// whether one was queued.
@@ -288,9 +322,6 @@ impl<R: CryptoRng> CtaphidHost<R> {
         let State::Processing(processing) = &mut self.state else {
             return false;
         };
-        if processing.command != Command::Cbor {
-            return false;
-        }
         // A held request is not being worked on, whatever the app reports
         // about the one it is finishing.
         let status = if waiting_for_user && processing.request.is_none() {
@@ -325,17 +356,14 @@ impl<R: CryptoRng> CtaphidHost<R> {
             State::Receiving { last_packet_at, .. } => {
                 Some(last_packet_at + CONTINUATION_TIMEOUT_MS)
             }
-            State::Processing(processing) if processing.command == Command::Cbor => {
-                Some(processing.keepalive_at + KEEPALIVE_INTERVAL_MS)
-            }
-            State::Processing(_) => None,
+            State::Processing(processing) => Some(processing.keepalive_at + KEEPALIVE_INTERVAL_MS),
         }
     }
 
-    /// The request the app should work on next, if the app is free and one
-    /// is ready. The app must answer it through
+    /// The payload of the CTAPHID_CBOR request the app should work on next,
+    /// if the app is free and one is ready. The app must answer it through
     /// [`app_response`](Self::app_response).
-    pub fn take_app_request(&mut self) -> Option<AppRequest> {
+    pub fn take_app_request(&mut self) -> Option<Vec<u8>> {
         if self.app_busy {
             return None;
         }
@@ -344,10 +372,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
         };
         let payload = processing.request.take()?;
         self.app_busy = true;
-        Some(AppRequest {
-            command: processing.command,
-            payload,
-        })
+        Some(payload)
     }
 
     /// Whether the app should be asked to cancel the request it is working
@@ -363,7 +388,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
     /// The app's answer to the request last taken with
     /// [`take_app_request`](Self::take_app_request).
-    pub fn app_response(&mut self, response: Result<Vec<u8>, AppError>) {
+    pub fn app_response(&mut self, response: Vec<u8>) {
         self.app_busy = false;
         let State::Processing(processing) = &self.state else {
             debug!("discarding the app's response to an aborted transaction");
@@ -375,19 +400,9 @@ impl<R: CryptoRng> CtaphidHost<R> {
             debug!("discarding the app's response to an aborted transaction");
             return;
         }
-        let (channel, command) = (processing.channel, processing.command);
+        let channel = processing.channel;
         self.state = State::Idle;
-        match response {
-            Ok(payload) => self.enqueue_message(channel, command, &payload),
-            Err(error) => {
-                let code = match error {
-                    AppError::InvalidCommand => ErrorCode::InvalidCommand,
-                    AppError::InvalidLength => ErrorCode::InvalidLength,
-                    AppError::NoResponse => ErrorCode::Other,
-                };
-                self.enqueue_error(channel, code);
-            }
-        }
+        self.enqueue_message(channel, Command::Cbor, &response);
     }
 
     pub fn has_pending_frames(&self) -> bool {
@@ -418,7 +433,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
         let State::Processing(processing) = &self.state else {
             return;
         };
-        if processing.channel != channel || processing.command != Command::Cbor {
+        if processing.channel != channel {
             return;
         }
         if processing.request.is_some() {
@@ -524,14 +539,15 @@ impl<R: CryptoRng> CtaphidHost<R> {
             return;
         }
         let command = match command {
-            Some(command @ Command::Ping) => command,
-            Some(command) if self.app_commands.contains(&command) => command,
+            Some(command @ (Command::Ping | Command::Cbor)) => command,
             _ => {
                 self.enqueue_error(channel, ErrorCode::InvalidCommand);
                 return;
             }
         };
-        if length > MAX_MESSAGE_SIZE {
+        // A CTAPHID_CBOR request carries at least the CTAP command byte
+        // (§11.2.9.1.2: "BCNT 1..(n + 1)").
+        if length > MAX_MESSAGE_SIZE || (command == Command::Cbor && length == 0) {
             self.enqueue_error(channel, ErrorCode::InvalidLength);
             return;
         }
@@ -596,16 +612,13 @@ impl<R: CryptoRng> CtaphidHost<R> {
             self.message = message;
             return;
         }
-        if command == Command::Cbor {
-            debug!(
-                "request cid={channel:08x} ctap=0x{:02x} len={}",
-                self.message.first().copied().unwrap_or_default(),
-                self.message.len()
-            );
-        }
+        debug!(
+            "request cid={channel:08x} ctap=0x{:02x} len={}",
+            self.message.first().copied().unwrap_or_default(),
+            self.message.len()
+        );
         self.state = State::Processing(Processing {
             channel,
-            command,
             request: Some(self.message.clone()),
             keepalive_at: now,
             keepalive_status: KeepaliveStatus::Processing,
@@ -684,7 +697,6 @@ mod tests {
     use crate::{CAPABILITY_CBOR, CAPABILITY_NMSG};
     use rand_core::{Infallible, TryCryptoRng, TryRng};
 
-    const APP_COMMANDS: &[Command] = &[Command::Cbor];
     const FIRST: u32 = 0x0A0A_0A0A;
     const SECOND: u32 = 0x0B0B_0B0B;
 
@@ -728,7 +740,7 @@ mod tests {
     }
 
     fn host_with_channels(ids: &[u32]) -> CtaphidHost<TestRng> {
-        let mut host = CtaphidHost::with_rng(APP_COMMANDS, TestRng::new(ids));
+        let mut host = CtaphidHost::with_rng(TestRng::new(ids));
         host.set_capabilities(CAPABILITY_CBOR | CAPABILITY_NMSG);
         host
     }
@@ -821,8 +833,7 @@ mod tests {
     fn start_cbor<R: CryptoRng>(host: &mut CtaphidHost<R>, channel: u32, payload: &[u8], now: u64) {
         send(host, channel, Command::Cbor, payload, now);
         let request = host.take_app_request().expect("a request for the app");
-        assert_eq!(request.command, Command::Cbor);
-        assert_eq!(request.payload, payload);
+        assert_eq!(request, payload);
     }
 
     #[test]
@@ -947,25 +958,22 @@ mod tests {
         assert!(host.app_busy());
 
         let response = vec![0x00; 1000];
-        host.app_response(Ok(response.clone()));
+        host.app_response(response.clone());
         assert!(!host.app_busy());
         assert_eq!(sent(&mut host), [message(FIRST, Command::Cbor, &response)]);
         assert!(!host.send_keepalive(true, 1_000), "no transaction");
     }
 
+    /// A CTAPHID_CBOR request carries at least the CTAP command byte (CTAP 2.3
+    /// §11.2.9.1.2), so an empty one never reaches the app.
     #[test]
-    fn app_errors_are_ctaphid_errors() {
+    fn an_empty_cbor_request_is_an_invalid_length() {
         let mut host = host();
-        for (error_from_app, code) in [
-            (AppError::InvalidCommand, ErrorCode::InvalidCommand),
-            (AppError::InvalidLength, ErrorCode::InvalidLength),
-            // ERR_OTHER is 0x7F (§11.2.9.1.6); it used to be sent as 0x0C.
-            (AppError::NoResponse, ErrorCode::Other),
-        ] {
-            start_cbor(&mut host, FIRST, &[0x04], 0);
-            host.app_response(Err(error_from_app));
-            assert_eq!(sent(&mut host), [error(FIRST, code)]);
-        }
+        send(&mut host, FIRST, Command::Cbor, &[], 0);
+        assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidLength)]);
+        assert!(host.take_app_request().is_none());
+        // The channel is free again.
+        start_cbor(&mut host, FIRST, &[0x04], 1);
     }
 
     /// The largest response goes out in 129 packets; a longer one would need
@@ -976,13 +984,13 @@ mod tests {
         let mut host = host();
         let largest: Vec<u8> = (0..=255).cycle().take(MAX_MESSAGE_SIZE).collect();
         start_cbor(&mut host, FIRST, &[0x04], 0);
-        host.app_response(Ok(largest.clone()));
+        host.app_response(largest.clone());
         assert_eq!(host.pending.len(), 129);
         assert_eq!(sent(&mut host), [message(FIRST, Command::Cbor, &largest)]);
 
         for length in [MAX_MESSAGE_SIZE + 1, usize::from(u16::MAX) + 1] {
             start_cbor(&mut host, FIRST, &[0x04], 0);
-            host.app_response(Ok(vec![0; length]));
+            host.app_response(vec![0; length]);
             assert_eq!(
                 sent(&mut host),
                 [error(FIRST, ErrorCode::Other)],
@@ -1047,7 +1055,7 @@ mod tests {
         assert_eq!(sent(&mut host), [error(SECOND, ErrorCode::ChannelBusy)]);
 
         host.handle_frame(&packets[1], 2);
-        assert_eq!(host.take_app_request().unwrap().payload, request);
+        assert_eq!(host.take_app_request().unwrap(), request);
     }
 
     /// CTAP 2.3 §11.2.9.1.5: "A CTAPHID_CANCEL received while no
@@ -1066,7 +1074,7 @@ mod tests {
         send(&mut host, FIRST, Command::Cancel, &[], 2);
         assert!(sent(&mut host).is_empty(), "CANCEL while receiving");
         host.handle_frame(&packets[1], 3);
-        assert_eq!(host.take_app_request().unwrap().payload, request);
+        assert_eq!(host.take_app_request().unwrap(), request);
 
         send(&mut host, SECOND, Command::Cancel, &[], 4);
         assert!(sent(&mut host).is_empty(), "CANCEL on another channel");
@@ -1097,7 +1105,7 @@ mod tests {
             ]
         );
 
-        host.app_response(Ok(vec![CTAP2_ERR_KEEPALIVE_CANCEL]));
+        host.app_response(vec![CTAP2_ERR_KEEPALIVE_CANCEL]);
         assert_eq!(
             sent(&mut host),
             [message(FIRST, Command::Cbor, &[CTAP2_ERR_KEEPALIVE_CANCEL])]
@@ -1120,7 +1128,7 @@ mod tests {
             sent(&mut host),
             [message(FIRST, Command::Cbor, &[CTAP2_ERR_KEEPALIVE_CANCEL])]
         );
-        host.app_response(Ok(vec![0x00]));
+        host.app_response(vec![0x00]);
         assert!(sent(&mut host).is_empty());
         assert!(host.take_app_request().is_none());
     }
@@ -1160,7 +1168,7 @@ mod tests {
             ]
         );
 
-        host.app_response(Ok(vec![0x00]));
+        host.app_response(vec![0x00]);
         assert!(
             !host.send_keepalive(true, 2_000),
             "no keepalive after the response"
@@ -1185,26 +1193,11 @@ mod tests {
                 .all(|m| *m == keepalive(FIRST, KeepaliveStatus::UpNeeded))
         );
         assert!(!host.take_interrupt());
-        host.app_response(Ok(vec![0x00, 0xA0]));
+        host.app_response(vec![0x00, 0xA0]);
         assert_eq!(
             sent(&mut host),
             [message(FIRST, Command::Cbor, &[0x00, 0xA0])]
         );
-    }
-
-    /// Only CTAPHID_CBOR is cancellable and gets keepalives.
-    #[test]
-    fn requests_other_than_cbor_get_no_keepalives() {
-        const VENDOR: &[Command] = &[Command::Cbor, Command::Wink];
-        let mut host = CtaphidHost::with_rng(VENDOR, TestRng::new(&[]));
-        send(&mut host, FIRST, Command::Wink, &[], 0);
-        assert_eq!(host.take_app_request().unwrap().command, Command::Wink);
-        assert_eq!(host.next_deadline(), None);
-        assert!(!host.send_keepalive(true, 1_000));
-        send(&mut host, FIRST, Command::Cancel, &[], 1_000);
-        assert!(!host.take_interrupt());
-        host.app_response(Ok(vec![]));
-        assert_eq!(sent(&mut host), [message(FIRST, Command::Wink, &[])]);
     }
 
     /// CTAP 2.3 §11.2.5.2 and §11.2.5.4: a message must be completed in time,
@@ -1300,10 +1293,10 @@ mod tests {
             [keepalive(FIRST, KeepaliveStatus::Processing)]
         );
 
-        host.app_response(Ok(vec![CTAP2_ERR_KEEPALIVE_CANCEL]));
+        host.app_response(vec![CTAP2_ERR_KEEPALIVE_CANCEL]);
         assert!(sent(&mut host).is_empty(), "the late answer is discarded");
-        assert_eq!(host.take_app_request().unwrap().payload, [0x04]);
-        host.app_response(Ok(vec![0x00]));
+        assert_eq!(host.take_app_request().unwrap(), [0x04]);
+        host.app_response(vec![0x00]);
         assert_eq!(sent(&mut host), [message(FIRST, Command::Cbor, &[0x00])]);
     }
 
@@ -1325,7 +1318,7 @@ mod tests {
             ]
         );
         assert!(host.take_app_request().is_none());
-        host.app_response(Ok(vec![0x00]));
+        host.app_response(vec![0x00]);
         assert_eq!(sent(&mut host), [message(FIRST, Command::Cbor, &[0x00])]);
 
         // While receiving, a new message on the same channel replaces nothing.

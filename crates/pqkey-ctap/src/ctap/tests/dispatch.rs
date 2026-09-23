@@ -5,8 +5,6 @@ use crate::ctap::CtapApp;
 use crate::ctap::cbor::canonical_map;
 
 use ciborium::value::Value;
-use ctaphid_app::{App, Command};
-use heapless_bytes::Bytes;
 
 use crate::ctap::constants::*;
 
@@ -49,11 +47,12 @@ fn request_log_counts_the_response_with_and_without_its_status_byte() {
     assert!(line.contains("sub=n/a pinProtocol=n/a"), "{line}");
 }
 
-/// Send `request` through `App::call` into a CTAPHID-sized response buffer.
+/// Send `request` through [`CtapApp::call`], checking that the answer fits a
+/// CTAPHID message.
 pub(super) fn call(app: &mut TestApp, request: &[u8]) -> Vec<u8> {
-    let mut response = Bytes::<MAX_RESPONSE_SIZE>::new();
-    App::call(app, Command::Cbor, request, &mut response).expect("CTAPHID_CBOR is answered");
-    response.to_vec()
+    let response = app.call(request);
+    assert!(response.len() <= MAX_RESPONSE_SIZE, "response too long");
+    response
 }
 
 /// The authenticator has no biometric sensor, so it implements neither
@@ -70,6 +69,16 @@ fn bio_enrollment_commands_are_not_implemented() {
     }
 }
 
+/// A CTAPHID_CBOR message carries at least the command byte (CTAP 2.3
+/// §11.2.9.1.2).  The transport answers an empty one with a CTAPHID error
+/// before it gets here; the engine, asked anyway, answers
+/// CTAP1_ERR_INVALID_LENGTH.
+#[test]
+fn an_empty_request_is_an_invalid_length() {
+    let mut app = test_app([0x0E; 16]);
+    assert_eq!(call(&mut app, &[]), [CTAP1_ERR_INVALID_LENGTH]);
+}
+
 mod get_next_assertion_state {
     use super::super::support::{TestApp, credential, encode, int, scripted_app};
     use super::call;
@@ -82,8 +91,6 @@ mod get_next_assertion_state {
 
     use ciborium::value::Value;
     use core::time::Duration;
-    use ctaphid_app::{App, Command};
-    use heapless_bytes::Bytes;
 
     use crate::ctap::constants::*;
 
@@ -106,7 +113,7 @@ mod get_next_assertion_state {
         (app, clock)
     }
 
-    /// getAssertion through the dispatcher, which finds three credentials.
+    /// getAssertion, which finds three credentials.
     fn begin(app: &mut TestApp) {
         let mut request = vec![CTAP_CMD_GET_ASSERTION];
         request.extend(encode(&canonical_map(vec![
@@ -160,10 +167,7 @@ mod get_next_assertion_state {
         for (name, request) in intervening {
             let (mut app, _) = three_credentials(vec![]);
             begin(&mut app);
-            // The empty request is answered with a CTAPHID error, the others
-            // with a CTAP status.
-            let mut response = Bytes::<MAX_RESPONSE_SIZE>::new();
-            let _ = App::call(&mut app, Command::Cbor, &request, &mut response);
+            call(&mut app, &request);
             assert_eq!(
                 get_next_assertion(&mut app),
                 CTAP2_ERR_NOT_ALLOWED,

@@ -377,17 +377,8 @@ impl Encoder {
             Action::Timeout => self.variant(5, 10),
             Action::Keepalive(waiting) => self.variant(6, 10).raw(&[u8::from(*waiting)]),
             Action::TakeRequest => self.variant(7, 10),
-            Action::Respond {
-                error,
-                length,
-                fill,
-            } => {
-                self.variant(8, 10);
-                match error {
-                    Some(code) => self.raw(&[1, *code]),
-                    None => self.raw(&[0]),
-                };
-                self.raw(&length.to_le_bytes()).raw(&[*fill])
+            Action::Respond { length, fill } => {
+                self.variant(8, 10).raw(&length.to_le_bytes()).raw(&[*fill])
             }
             Action::TakeInterrupt => self.variant(9, 10),
         }
@@ -406,29 +397,24 @@ fn message(channel: Channel, command: u8, length: u16, fill: u8) -> Action {
 }
 
 fn respond(length: u16, fill: u8) -> Action {
-    Action::Respond {
-        error: None,
-        length,
-        fill,
-    }
+    Action::Respond { length, fill }
 }
 
-/// An exchange: `(seed, channel range, vendor commands)` and its actions,
-/// encoded and checked to decode back to the same actions.
-fn exchange(vendor: bool, actions: &[Action]) -> Vec<u8> {
+/// An exchange: `(seed, channel range)` and its actions, encoded and checked
+/// to decode back to the same actions.
+fn exchange(actions: &[Action]) -> Vec<u8> {
     let mut encoder = Encoder::default();
     encoder
         .raw(&0x5EED_u64.to_le_bytes())
-        .raw(&u16::MAX.to_le_bytes())
-        .raw(&[u8::from(vendor)]);
+        .raw(&u16::MAX.to_le_bytes());
     for action in actions {
         encoder.action(action);
     }
     let encoded = encoder.0;
 
     let mut u = Unstructured::new(&encoded);
-    let (seed, range, decoded_vendor) = u.arbitrary::<(u64, u16, bool)>().expect("config");
-    assert_eq!((seed, range, decoded_vendor), (0x5EED, u16::MAX, vendor));
+    let (seed, range) = u.arbitrary::<(u64, u16)>().expect("config");
+    assert_eq!((seed, range), (0x5EED, u16::MAX));
     for action in actions {
         let decoded = Action::arbitrary(&mut u).expect("an action");
         assert_eq!(
@@ -455,135 +441,110 @@ fn ctaphid_packets(dir: &Path) {
     let seeds = vec![
         // Allocate a channel, ping, and a CBOR request answered after
         // keepalives.
-        exchange(
-            false,
-            &[
-                init(),
-                message(first(), PING, 200, 1),
-                message(first(), CBOR, 1, 0x04),
-                Action::TakeRequest,
-                Action::Keepalive(false),
-                Action::Advance(60),
-                Action::Keepalive(true),
-                Action::Advance(60),
-                Action::Keepalive(true),
-                respond(300, 0),
-            ],
-        ),
+        exchange(&[
+            init(),
+            message(first(), PING, 200, 1),
+            message(first(), CBOR, 1, 0x04),
+            Action::TakeRequest,
+            Action::Keepalive(false),
+            Action::Advance(60),
+            Action::Keepalive(true),
+            Action::Advance(60),
+            Action::Keepalive(true),
+            respond(300, 0),
+        ]),
         // CANCEL of a request the app works on.
-        exchange(
-            false,
-            &[
-                init(),
-                message(first(), CBOR, 100, 0x01),
-                Action::TakeRequest,
-                message(first(), CANCEL, 0, 0),
-                Action::TakeInterrupt,
-                respond(1, 0x2D),
-            ],
-        ),
+        exchange(&[
+            init(),
+            message(first(), CBOR, 100, 0x01),
+            Action::TakeRequest,
+            message(first(), CANCEL, 0, 0),
+            Action::TakeInterrupt,
+            respond(1, 0x2D),
+        ]),
         // A message whose continuation packets stop coming.
-        exchange(
-            false,
-            &[
-                init(),
-                Action::Init {
-                    channel: first(),
-                    command: CBOR,
-                    length: 300,
-                    data: Box::new([0x01; INIT_DATA]),
-                },
-                Action::Advance(600),
-                Action::Timeout,
-                Action::Continuation {
-                    channel: first(),
-                    sequence: 0,
-                    data: Box::new([0x02; CONT_DATA]),
-                },
-            ],
-        ),
+        exchange(&[
+            init(),
+            Action::Init {
+                channel: first(),
+                command: CBOR,
+                length: 300,
+                data: Box::new([0x01; INIT_DATA]),
+            },
+            Action::Advance(600),
+            Action::Timeout,
+            Action::Continuation {
+                channel: first(),
+                sequence: 0,
+                data: Box::new([0x02; CONT_DATA]),
+            },
+        ]),
         // Two channels: the second is busy while the first is served, and
         // INIT on the first aborts its transaction.
-        exchange(
-            false,
-            &[
-                init(),
-                init(),
-                message(first(), CBOR, 10, 0x02),
-                Action::TakeRequest,
-                message(second(), PING, 4, 9),
-                message(first(), INIT, 8, 0xB0),
-                Action::TakeInterrupt,
-                message(first(), CBOR, 1, 0x04),
-                respond(1, 0x2D),
-                Action::TakeRequest,
-                respond(64, 0),
-            ],
-        ),
+        exchange(&[
+            init(),
+            init(),
+            message(first(), CBOR, 10, 0x02),
+            Action::TakeRequest,
+            message(second(), PING, 4, 9),
+            message(first(), INIT, 8, 0xB0),
+            Action::TakeInterrupt,
+            message(first(), CBOR, 1, 0x04),
+            respond(1, 0x2D),
+            Action::TakeRequest,
+            respond(64, 0),
+        ]),
         // The largest message in both directions.
-        exchange(
-            false,
-            &[
-                init(),
-                message(first(), PING, 7609, 3),
-                message(first(), CBOR, 7609, 0x02),
-                Action::TakeRequest,
-                respond(7609, 7),
-            ],
-        ),
+        exchange(&[
+            init(),
+            message(first(), PING, 7609, 3),
+            message(first(), CBOR, 7609, 0x02),
+            Action::TakeRequest,
+            respond(7609, 7),
+        ]),
         // Packets out of order, missing and repeated.
-        exchange(
-            false,
-            &[
-                init(),
-                Action::Message {
-                    channel: first(),
-                    command: PING,
-                    length: 300,
-                    fill: 0,
-                    mangle: Mangle::Swap(1, 2),
-                    gap_ms: 5,
-                },
-                Action::Message {
-                    channel: first(),
-                    command: PING,
-                    length: 300,
-                    fill: 0,
-                    mangle: Mangle::Drop(1),
-                    gap_ms: 5,
-                },
-                Action::Advance(1000),
-                Action::Timeout,
-                Action::Message {
-                    channel: first(),
-                    command: CBOR,
-                    length: 130,
-                    fill: 0,
-                    mangle: Mangle::Duplicate(1),
-                    gap_ms: 5,
-                },
-            ],
-        ),
-        // Reserved channels, an unallocated channel, bad lengths, and a
-        // vendor command the app answers with an error.
-        exchange(
-            true,
-            &[
-                message(Channel::Zero, PING, 1, 0),
-                message(Channel::Broadcast, CBOR, 1, 0),
-                message(Channel::Raw(0x1234_5678), INIT, 8, 0),
-                message(Channel::Broadcast, INIT, 7, 0),
-                init(),
-                message(first(), WINK, 0, 0),
-                Action::TakeRequest,
-                Action::Respond {
-                    error: Some(2),
-                    length: 0,
-                    fill: 0,
-                },
-                Action::Packet(Box::new([0xFF; 64])),
-            ],
-        ),
+        exchange(&[
+            init(),
+            Action::Message {
+                channel: first(),
+                command: PING,
+                length: 300,
+                fill: 0,
+                mangle: Mangle::Swap(1, 2),
+                gap_ms: 5,
+            },
+            Action::Message {
+                channel: first(),
+                command: PING,
+                length: 300,
+                fill: 0,
+                mangle: Mangle::Drop(1),
+                gap_ms: 5,
+            },
+            Action::Advance(1000),
+            Action::Timeout,
+            Action::Message {
+                channel: first(),
+                command: CBOR,
+                length: 130,
+                fill: 0,
+                mangle: Mangle::Duplicate(1),
+                gap_ms: 5,
+            },
+        ]),
+        // Reserved channels, an unallocated channel, bad lengths, an empty
+        // CBOR request, and a command the transport does not implement.
+        exchange(&[
+            message(Channel::Zero, PING, 1, 0),
+            message(Channel::Broadcast, CBOR, 1, 0),
+            message(Channel::Raw(0x1234_5678), INIT, 8, 0),
+            message(Channel::Broadcast, INIT, 7, 0),
+            init(),
+            message(first(), CBOR, 0, 0),
+            message(first(), WINK, 0, 0),
+            Action::TakeRequest,
+            Action::Packet(Box::new([0xFF; 64])),
+        ]),
     ];
     write_all(dir, &seeds);
 }

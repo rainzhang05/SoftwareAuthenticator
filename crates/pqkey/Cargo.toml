@@ -15,10 +15,6 @@ publish = false
 workspace = true
 
 [dependencies]
-# The CTAPHID app interface the CTAP engine implements. The transport frames
-# CTAPHID itself and runs the app on a worker thread.
-ctaphid-app.workspace = true
-heapless-bytes.workspace = true
 nix = { version = "0.31", default-features = false, features = ["fs", "poll", "signal", "term", "user"] }
 signal-hook = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }

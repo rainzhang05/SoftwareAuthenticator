@@ -24,10 +24,6 @@ sha2 = { workspace = true, features = ["zeroize"] }
 hmac = { version = "0.13", features = ["zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 serde = { version = "1", features = ["derive"] }
-ctaphid-app.workspace = true
-# `InterruptFlag`, through which the CTAPHID dispatcher cancels a request.
-trussed-core = "0.2"
-heapless-bytes.workspace = true
 p256 = { workspace = true, features = ["ecdh"] }
 rand_core.workspace = true
 # `SysRng`, the operating system RNG that key generation uses.
