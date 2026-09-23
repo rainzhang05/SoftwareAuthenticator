@@ -130,7 +130,10 @@ that is deliberately allowed carries an `#[allow]` with a comment saying why.
 daemon on an Ubuntu runner and tests it through its hidraw node with libfido2's
 command-line tools and python-fido2. The tests reset the authenticator before
 each test: never point them at a pqkey whose credentials matter. They use their
-own state directories.
+own state directories. The CLI tests
+([`tests/e2e/test_cli.py`](../tests/e2e/test_cli.py)) also start and stop a
+daemon of their own, as product ID `0005` on a temporary state directory: it
+needs access to `/dev/uhid`, but not to its hidraw node.
 
 To run them on a Linux machine:
 
