@@ -35,6 +35,7 @@ mod storage;
 mod tests;
 
 pub use self::pin::state::{MAX_PIN_RETRIES, PersistentPinState, PinAttempt, PinRetryState};
+pub use self::pin::token::Clock;
 pub use self::presence::InterruptFlag;
 pub use self::reset::RESET_WINDOW_AFTER_POWER_UP;
 
@@ -190,6 +191,15 @@ impl<'interrupt> CtapApp<'interrupt> {
     /// every test; user presence is still required.
     pub fn set_reset_window(&mut self, window: Option<Duration>) {
         self.reset_window = window;
+    }
+
+    /// The clock the engine's timers run on (see [`Clock`]).  The default,
+    /// the system's monotonic clock, stops while the system is suspended; a
+    /// clock that keeps counting then, such as Linux's CLOCK_BOOTTIME, ends a
+    /// pinUvAuthToken after the same real time however long the system
+    /// slept.  Set it before the engine handles its first request.
+    pub fn set_clock(&mut self, clock: impl Clock + 'static) {
+        self.pin_state.set_clock(Box::new(clock));
     }
 
     /// Which attestation statement makeCredential returns.  Defaults to

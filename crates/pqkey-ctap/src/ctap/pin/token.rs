@@ -35,9 +35,16 @@ pub(crate) const MAX_USAGE_TIME_PERIOD: Duration = Duration::from_secs(600);
 /// §6.5.5.7).  This authenticator never grants it.
 const PIN_PERMISSION_LBW: u8 = 0x10;
 
-/// A monotonic time source for the pinUvAuthToken usage timer.
-pub(crate) trait Clock: Send + Sync {
-    /// Time elapsed since an arbitrary, fixed origin.
+/// The time source of the engine's timers: the pinUvAuthToken usage timer
+/// (CTAP 2.3 §6.5.2.1), the authenticatorGetNextAssertion timer (§6.3) and the
+/// reset window after power-up (§6.6).
+///
+/// [`CtapApp`](crate::ctap::CtapApp) uses the system's monotonic clock unless
+/// given another with [`set_clock`](crate::ctap::CtapApp::set_clock).
+pub trait Clock: Send + Sync {
+    /// Time elapsed since power-up, which for this engine is when the clock was
+    /// created; the reset window is measured from it.  It never goes
+    /// backwards.
     fn now(&self) -> Duration;
 }
 

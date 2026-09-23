@@ -194,3 +194,6 @@ Upgrading from `867a591` or earlier is not an in-place update:
   through a shared attestation certificate.
 - Supply-chain checks (cargo-audit, cargo-deny) run on every push and weekly,
   and tolerate no advisory.
+- pinUvAuthTokens, the authenticatorGetNextAssertion state and the reset
+  window after start-up run on CLOCK_BOOTTIME, so time the system spends
+  suspended counts and a token no longer outlives a suspend.

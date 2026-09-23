@@ -224,7 +224,6 @@ impl PinState {
         self.token.stop_using();
     }
 
-    #[cfg(test)]
     pub(crate) fn set_clock(&mut self, clock: Box<dyn Clock>) {
         self.clock = clock;
     }

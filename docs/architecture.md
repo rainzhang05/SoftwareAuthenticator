@@ -195,9 +195,11 @@ and at reset.
 both protocols and starts a usage timer. Token lifetime follows §6.5.2.1 with
 the USB defaults: the token must first be used within 30 seconds, the user
 present flag lasts 30 seconds, and the token expires after at most 600
-seconds. Permissions (mc, ga, cm, ...) and an optional RP ID bind the token;
-a user presence test clears every permission but `lbw`, which pqkey never
-grants.
+seconds. The daemon runs these timers, like the engine's other timers, on
+CLOCK_BOOTTIME, which keeps counting while the system is suspended, so a token
+does not outlive a suspend. Permissions (mc, ga, cm, ...) and an optional RP ID
+bind the token; a user presence test clears every permission but `lbw`, which
+pqkey never grants.
 
 **Reset.** authenticatorReset asks for user presence and calls
 `CredentialStore::clear`. Without a display CTAP only accepts it within 10

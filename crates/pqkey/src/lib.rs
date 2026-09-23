@@ -4,6 +4,7 @@
 
 pub mod attestation;
 pub mod cli;
+mod clock;
 pub mod permissions;
 pub mod pin_input;
 pub mod presence;

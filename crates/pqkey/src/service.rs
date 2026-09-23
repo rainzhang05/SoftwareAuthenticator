@@ -13,6 +13,7 @@ use pqkey_ctap::store::{AttestationRecord, CredentialStore, FileStore};
 use crate::{
     CTAPHID_FRAME_LEN, HidDeviceDescriptor, WaitingForUser,
     attestation::{IdentityConfig, certificate_aaguid, generate_attestation_certificate},
+    clock::BootTimeClock,
     create_device, exec,
     presence::{PresenceMode, Unanswered, dbus::SessionBus, notification::NotificationPresence},
     shutdown::{ShutdownSignal, is_shutdown, ok_if_shutdown},
@@ -348,6 +349,7 @@ pub fn serve_ctap_with_presence(
     let interrupt = InterruptFlag::new();
     let waiting = WaitingForUser::new();
     let mut ctap = CtapApp::with_file_store(data.store, presence, &interrupt, data.aaguid);
+    ctap.set_clock(BootTimeClock::new()?);
     ctap.set_attestation_mode(data.attestation);
     if let Some(timeout) = data.presence_timeout {
         ctap.set_presence_timeout(timeout);
