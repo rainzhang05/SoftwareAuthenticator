@@ -101,9 +101,11 @@ CTAPHID_CANCEL on.
   the way out it interrupts the request in progress, destroys the uhid device,
   closes the request channel and joins the worker; the shutdown error then
   becomes a successful exit. A presence prompt must honour cancellation for
-  this to finish, which the notification prompt does within about 20 ms plus
-  one D-Bus call (each call is limited to 2 seconds). A panic in the engine
-  ends the loop with an error.
+  this to finish. The notification prompt checks for it before showing its
+  notification and every 20 ms while it is shown; connecting to the session
+  bus and each D-Bus call are limited to 2 seconds, so a hung bus or
+  notification server delays shutdown by seconds, not forever. A panic in the
+  engine ends the loop with an error.
 
 ## CTAPHID
 

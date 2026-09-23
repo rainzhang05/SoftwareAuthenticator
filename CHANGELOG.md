@@ -149,6 +149,9 @@ Upgrading from `867a591` or earlier is not an in-place update:
   enumerations without pinUvAuthParam, reports totalCredentials only in the
   enumerateCredentialsBegin response, and reports missing parameters before
   it checks pinUvAuthProtocol and pinUvAuthParam.
+- The notification prompt gives up on a session bus that accepts the
+  connection but never answers after 2 seconds, as it does on a D-Bus call,
+  instead of holding the request and the daemon's shutdown forever.
 - The udev hidraw rule never matched the uhid-created device.
 - Panics removed from fallible ML-DSA paths.
 

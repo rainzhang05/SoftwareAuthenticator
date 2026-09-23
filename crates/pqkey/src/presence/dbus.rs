@@ -24,7 +24,8 @@ use std::{
 use futures_lite::{StreamExt, future};
 use zbus::{
     MatchRule, Message, MessageStream,
-    blocking::{Connection, MessageIterator, connection, fdo::DBusProxy},
+    blocking::{Connection, MessageIterator, fdo::DBusProxy},
+    connection,
     message::Type,
     names::BusName,
     zvariant::Value,
@@ -38,9 +39,9 @@ const NOTIFICATIONS_NAME: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 const NOTIFICATIONS_INTERFACE: &str = "org.freedesktop.Notifications";
 
-/// The longest a single D-Bus call may take. It bounds how long a hung
-/// notification server can hold up a cancelled request or the daemon's
-/// shutdown.
+/// The longest connecting to the session bus, or a single D-Bus call, may
+/// take. It bounds how long a hung bus or notification server can hold up a
+/// cancelled request or the daemon's shutdown.
 const METHOD_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How often [`SessionBus::next_event`] looks for a signal.
@@ -83,10 +84,9 @@ impl NotificationServer for SessionBus {
     fn connect(&mut self) -> Result<Vec<String>, ConnectError> {
         self.disconnect();
         // Uses DBUS_SESSION_BUS_ADDRESS, or $XDG_RUNTIME_DIR/bus without it.
-        let connection = connection::Builder::session()
-            .map(|builder| builder.method_timeout(METHOD_TIMEOUT))
-            .and_then(|builder| builder.build())
+        let builder = connection::Builder::session()
             .map_err(|err| ConnectError::NoSessionBus(err.to_string()))?;
+        let connection = connect_bus(builder, METHOD_TIMEOUT)?;
 
         // Also starts a D-Bus activatable server that is not running yet.
         let capabilities: Vec<String> = connection
@@ -215,6 +215,34 @@ impl Drop for SessionBus {
     }
 }
 
+/// Connect to the bus `builder` names within `timeout`, with every method
+/// call on the connection limited to `timeout` as well.
+///
+/// zbus limits method calls with the builder's `method_timeout`, but not
+/// connecting: authentication and `Hello` wait as long as the bus takes, so a
+/// bus that accepts the connection and never answers would hold the presence
+/// request, and the daemon's shutdown, forever.
+fn connect_bus(
+    builder: connection::Builder<'_>,
+    timeout: Duration,
+) -> Result<Connection, ConnectError> {
+    let connect = async {
+        builder
+            .method_timeout(timeout)
+            .build()
+            .await
+            .map_err(|err| ConnectError::NoSessionBus(err.to_string()))
+    };
+    let expire = async {
+        async_io::Timer::after(timeout).await;
+        Err(ConnectError::Failed(format!(
+            "the session bus did not answer within {} ms",
+            timeout.as_millis()
+        )))
+    };
+    async_io::block_on(future::or(connect, expire)).map(Connection::from)
+}
+
 /// The event an ActionInvoked or NotificationClosed signal reports.
 fn parse_signal(message: &Message) -> Option<NotificationEvent> {
     let header = message.header();
@@ -229,5 +257,38 @@ fn parse_signal(message: &Message) -> Option<NotificationEvent> {
             Some(NotificationEvent::Closed { id, reason })
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixListener;
+
+    use super::*;
+    use crate::test_support::TempDir;
+
+    #[test]
+    fn connecting_to_a_bus_that_never_answers_times_out() {
+        let dir = TempDir::new("silent-bus");
+        let path = dir.path().join("bus");
+        // The kernel accepts connections into the backlog; nothing ever reads
+        // from them or answers.
+        let _listener = UnixListener::bind(&path).unwrap();
+        let address = format!("unix:path={}", path.display());
+        let builder = connection::Builder::address(address.as_str()).unwrap();
+
+        let timeout = Duration::from_millis(200);
+        let started = Instant::now();
+        match connect_bus(builder, timeout) {
+            Err(ConnectError::Failed(err)) => assert!(err.contains("did not answer"), "{err}"),
+            Err(err) => panic!("unexpected error: {err:?}"),
+            Ok(_) => panic!("connected to a bus that never answers"),
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed >= timeout, "gave up after {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "gave up only after {elapsed:?}"
+        );
     }
 }
