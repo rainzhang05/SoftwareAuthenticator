@@ -1,5 +1,5 @@
 //! attestationFormatsPreference, and responses that must fit the transport
-//! (CTAP 2.3 §6.1.2 steps 18 and 19, §11.2.4).
+//! (CTAP 2.3 §6.1.2 step 19, §11.2.4).
 
 use super::dispatch::call;
 use super::support::{
@@ -83,7 +83,7 @@ fn preference(formats: &[&str]) -> (Value, Value) {
 
 /// "If attestationFormatsPreference is present and contains only one entry
 /// with the value "none", omit attestation from the output." (CTAP 2.3
-/// §6.1.2 step 18)  Any other preference gets the authenticator's one other
+/// §6.1.2 step 19)  Any other preference gets the authenticator's one other
 /// format, "packed".
 #[test]
 fn attestation_formats_preference_none_omits_attestation() {

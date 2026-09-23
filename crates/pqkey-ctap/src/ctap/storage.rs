@@ -174,7 +174,7 @@ const NON_DISCOVERABLE_MARKER: u8 = 0x00;
 
 /// Whether a credential is discoverable, which its ID records.
 ///
-/// CTAP 2.3 §6.1.2 step 17: "Otherwise, if the "rk" option is false: the
+/// CTAP 2.3 §6.1.2 step 18: "Otherwise, if the "rk" option is false: the
 /// authenticator MUST create a non-discoverable credential", one whose
 /// "credential IDs MUST be supplied by the Relying Party in
 /// authenticatorGetAssertion's allowList parameter in order for the

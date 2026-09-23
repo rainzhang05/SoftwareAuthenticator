@@ -307,7 +307,7 @@ fn a_user_verification_required_credential_excludes_only_with_user_verification(
 
 /// "If the authenticator is not enterprise attestation capable [...] then
 /// end the operation by returning CTAP1_ERR_INVALID_PARAMETER." (CTAP 2.3
-/// §6.1.2 step 8)
+/// §6.1.2 step 9)
 #[test]
 fn enterprise_attestation_is_not_supported() {
     let (mut app, _) = app(vec![]);

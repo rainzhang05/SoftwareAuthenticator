@@ -185,7 +185,7 @@ impl CtapApp<'_> {
             return Err(CTAP2_ERR_PUAT_REQUIRED);
         }
 
-        // Step 8: "If the authenticator is not enterprise attestation capable
+        // Step 9: "If the authenticator is not enterprise attestation capable
         // [...] end the operation by returning CTAP1_ERR_INVALID_PARAMETER."
         if parameter(0x0A).is_some() {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
@@ -353,7 +353,7 @@ impl CtapApp<'_> {
             uv_bit,
             extension_bytes.as_deref(),
         );
-        // Steps 18 and 19.  "If attestationFormatsPreference is present and
+        // Step 19.  "If attestationFormatsPreference is present and
         // contains only one entry with the value "none", omit attestation from
         // the output."  Otherwise this authenticator, whose only format besides
         // "none" is "packed", generates the statement its attestation mode
