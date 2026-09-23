@@ -374,7 +374,7 @@ the stored record cannot be read, registrations fall back to self attestation.
 | Engine over files | `crates/pqkey-ctap/tests/ctap_file_store.rs` | CTAP requests over a real `FileStore`, rebuilding the engine between requests as a restart would |
 | ML-DSA KATs | `crates/pqkey-mldsa/tests/fips204_kat.rs` | NIST ACVP key generation, signing and verification vectors for all three parameter sets |
 | Attestation | `crates/pqkey/tests/packed_attestation.rs` | The provisioned certificate's AAGUID matches authenticatorData and the signature verifies |
-| End to end | `tests/e2e/`, `.github/workflows/e2e.yml` | The release daemon on a GitHub Actions Ubuntu runner, driven through its hidraw node by libfido2's tools and python-fido2: getInfo, ES256 and ML-DSA credentials, PINs with both protocols, CTAPHID edge cases, certificate attestation, notification presence on a private session bus |
+| End to end | `tests/e2e/`, `.github/workflows/e2e.yml` | The release daemon on a GitHub Actions Ubuntu runner, driven through its hidraw node by libfido2's tools and python-fido2: getInfo, ES256 and ML-DSA credentials, PINs, hmac-secret and credential management with both PIN/UV auth protocols, CTAPHID edge cases, certificate attestation, notification presence on a private session bus, and the CLI's `attach`, `status`, `detach`, `pin` and `reset` commands |
 | Fuzzing | `fuzz/`, `.github/workflows/fuzz.yml` | libFuzzer targets `ctaphid_packets`, `ctap_request`, `ctap_request_structured`, `ctap_sequence`, `credential_key` |
 
 How to run each of these is in [development-notes.md](development-notes.md).
