@@ -41,7 +41,9 @@ pub(crate) fn io_error(path: &Path, source: io::Error) -> StoreError {
 ///
 /// A directory created here gets mode `0700` at creation.  An existing
 /// directory with group or other permission bits is tightened to `0700`, which
-/// is safe because nothing is written into it before that happens.
+/// is safe because nothing is written into it before that happens.  A shared
+/// directory, one with the sticky bit set such as `/tmp`, is refused rather
+/// than taken away from everyone else.
 pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), StoreError> {
     match DirBuilder::new().mode(DIR_MODE).create(dir) {
         Ok(()) => return sync_dir(parent_of(dir)),
@@ -53,6 +55,12 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), StoreError> {
         return Err(io_error(
             dir,
             io::Error::new(ErrorKind::NotADirectory, "exists but is not a directory"),
+        ));
+    }
+    if metadata.permissions().mode() & 0o1000 != 0 {
+        return Err(io_error(
+            dir,
+            io::Error::other("a shared directory (its sticky bit is set) cannot be made private"),
         ));
     }
     let mode = metadata.permissions().mode() & 0o777;
@@ -302,6 +310,20 @@ mod tests {
             ensure_private_dir(&file),
             Err(StoreError::Io { .. })
         ));
+    }
+
+    #[test]
+    fn refuses_a_shared_directory() {
+        let scratch = scratch_dir();
+        let shared = scratch.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, Permissions::from_mode(0o1777)).unwrap();
+        assert!(matches!(
+            ensure_private_dir(&shared),
+            Err(StoreError::Io { .. })
+        ));
+        let mode = fs::metadata(&shared).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o1777);
     }
 
     #[test]

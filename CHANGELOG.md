@@ -157,6 +157,9 @@ Upgrading from `867a591` or earlier is not an in-place update:
   instead of holding the request and the daemon's shutdown forever.
 - `status` and `detach` ignore a pid file naming pid 0, 1 or a negative pid,
   which `detach` would have signalled as a process group or as every process.
+- The state directory is created with mode 0700 instead of being made
+  private after it is created, and a shared directory with the sticky bit set,
+  such as `/tmp`, is refused instead of having its permissions changed.
 - The udev hidraw rule never matched the uhid-created device.
 - Panics removed from fallible ML-DSA paths.
 

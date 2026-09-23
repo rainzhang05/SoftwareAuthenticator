@@ -358,9 +358,11 @@ the stored record cannot be read, registrations fall back to self attestation.
   per PIN from a non-terminal standard input. PINs are zeroized on drop and
   never accepted as arguments.
 - **State directory** defaults to `$XDG_DATA_HOME/pqkey` or
-  `~/.local/share/pqkey`, and is set to mode `0700`. If it does not exist yet
-  but the pre-rename default `feitian-mldsa-authenticator` does, the CLI prints
-  a note that the old directory is unused.
+  `~/.local/share/pqkey`, and is created with mode `0700` or tightened to it.
+  A shared directory with the sticky bit set, such as `/tmp`, is refused
+  rather than made private. If the state directory does not exist yet but the
+  pre-rename default `feitian-mldsa-authenticator` does, the CLI prints a note
+  that the old directory is unused.
 
 ## Testing
 
