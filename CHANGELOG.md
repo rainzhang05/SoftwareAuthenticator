@@ -113,6 +113,9 @@ Upgrading from `867a591` or earlier is not an in-place update:
 - The udev rules grant `/dev/uhid` to `plugdev` and the virtual key's hidraw
   node to the active session user only (`uaccess`, mode 0600).
 - Relying party IDs and user names are logged at debug level only.
+- Warnings are logged without `RUST_LOG`, not only errors, so the warnings
+  about `--presence auto-approve`, `--attestation certificate` and a
+  world-accessible hidraw node reach the log.
 - CLI errors are printed as messages.
 - Dependencies updated to current majors (for example sha2 0.11, p256 0.14,
   getrandom 0.4, rand_core 0.10); `pretty_env_logger` replaced by

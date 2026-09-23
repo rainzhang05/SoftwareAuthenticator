@@ -120,8 +120,8 @@ PIN costs one of 8 retries; at 0 it is blocked until a reset.
 | `--vendor-id` / `--product-id` | `0x1209` / `0x0001` | USB IDs. The default is a [pid.codes](https://pid.codes/1209/0001/) *test* ID, which must not be used on a redistributed device. |
 
 `RUST_LOG` sets the log level (`RUST_LOG=pqkey=debug,pqkey_ctap=debug`).
-Without it only errors are logged; debug logs contain relying party IDs and
-user names from requests.
+Without it warnings and errors are logged; debug logs contain relying party
+IDs and user names from requests.
 
 ## Client support for ML-DSA
 

@@ -333,7 +333,9 @@ fn run_foreground(
     state: &StateArgs,
     config: service::RunnerConfig,
 ) -> io::Result<()> {
-    let _ = env_logger::try_init();
+    // Without RUST_LOG, warnings too: that --presence auto-approve asks
+    // nobody, for example, is only ever logged.
+    let _ = env_logger::try_init_from_env(env_logger::Env::default().default_filter_or("warn"));
     let shutdown = ShutdownSignal::new();
     shutdown.install_signal_handlers()?;
     let result = service::run(config, shutdown, || {
