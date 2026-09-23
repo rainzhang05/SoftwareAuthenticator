@@ -197,6 +197,7 @@ def make_credential(
     algs: list[int],
     client_data_hash: bytes,
     *,
+    extensions: Mapping[str, Any] | None = None,
     options: Mapping[str, bool] | None = None,
     pin_uv_param: bytes | None = None,
     pin_uv_protocol: int | None = None,
@@ -207,6 +208,8 @@ def make_credential(
         3: dict(user),
         4: [{"type": "public-key", "alg": alg} for alg in algs],
     }
+    if extensions:
+        request[6] = dict(extensions)
     if options:
         request[7] = dict(options)
     if pin_uv_param is not None:
@@ -221,12 +224,18 @@ def get_assertion(
     client_data_hash: bytes,
     allow_ids: list[bytes] | None = None,
     *,
+    extensions: Mapping[str, Any] | None = None,
+    options: Mapping[str, bool] | None = None,
     pin_uv_param: bytes | None = None,
     pin_uv_protocol: int | None = None,
 ) -> Mapping[int, Any]:
     request: dict[int, Any] = {1: rp_id, 2: client_data_hash}
     if allow_ids is not None:
         request[3] = [{"type": "public-key", "id": cred_id} for cred_id in allow_ids]
+    if extensions:
+        request[4] = dict(extensions)
+    if options:
+        request[5] = dict(options)
     if pin_uv_param is not None:
         request[6] = pin_uv_param
         request[7] = pin_uv_protocol
