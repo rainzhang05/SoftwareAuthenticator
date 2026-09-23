@@ -52,7 +52,8 @@ Upgrading from `867a591` or earlier is not an in-place update:
   `--suppress-attestation` (use `--attestation none`), and `--pin`,
   `--current` and `--new` of the `pin` commands (PINs are now read from the
   terminal or standard input). `--manufacturer` no longer has a default.
-  `--serial`, `--vid` and `--pid` are still accepted but ignored.
+  `--serial`, `--vid`, `--pid` and `--backend` are still accepted but
+  ignored.
 - **Build requirements:** Rust 1.89 or later (was 1.85), edition 2024.
 
 ### Added

@@ -229,9 +229,10 @@ pub struct DeviceArgs {
     /// With --presence notify a reset is accepted at any time anyway.
     #[clap(long, hide = true)]
     pub allow_late_reset: bool,
-    /// Backend transport to use
-    #[clap(long, value_enum, default_value_t = BackendArg::Uhid)]
-    pub backend: BackendArg,
+    /// Ignored; accepted so that existing command lines keep working. uhid
+    /// is the only backend.
+    #[clap(long, value_enum, hide = true)]
+    pub backend: Option<BackendArg>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
@@ -254,14 +255,6 @@ pub enum AttestationArg {
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub enum BackendArg {
     Uhid,
-}
-
-impl BackendArg {
-    fn into_backend(self) -> service::Backend {
-        match self {
-            BackendArg::Uhid => service::Backend::Uhid,
-        }
-    }
 }
 
 impl StateArgs {
@@ -328,7 +321,6 @@ impl StartCommand {
             presence: self.presence.presence.into_mode(),
             presence_timeout: self.presence.presence_timeout.map(Duration::from_secs),
             allow_late_reset: self.device.allow_late_reset,
-            backend: self.device.backend.into_backend(),
         })
     }
 }
@@ -811,6 +803,7 @@ mod tests {
         assert_eq!(config.aaguid[..4], [0x00, 0x11, 0x22, 0x33]);
         // The ignored legacy flags still parse.
         assert!(attach_config(&["--vid", "0x1998", "-p", "0x0616"]).is_ok());
+        assert!(attach_config(&["--backend", "uhid"]).is_ok());
     }
 
     #[test]

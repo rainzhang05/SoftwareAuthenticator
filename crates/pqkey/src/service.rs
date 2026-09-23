@@ -20,11 +20,6 @@ use crate::{
     uhid::UhidDevice,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Backend {
-    Uhid,
-}
-
 /// Who a newly provisioned attestation certificate names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IdentityStrings {
@@ -66,7 +61,6 @@ pub struct RunnerConfig {
     /// default.
     pub presence_timeout: Option<Duration>,
     pub allow_late_reset: bool,
-    pub backend: Backend,
 }
 
 /// What the CTAP app is built from.
@@ -263,7 +257,6 @@ pub fn run(
         presence,
         presence_timeout,
         allow_late_reset,
-        backend,
     } = config;
 
     remove_and_log_legacy_state(&state_dir)?;
@@ -296,16 +289,12 @@ pub fn run(
         allow_late_reset,
     };
 
-    match backend {
-        Backend::Uhid => {
-            let result = create_device(descriptor)
-                .and_then(|device| serve_ctap(device, data, shutdown, on_ready));
-            if result.as_ref().is_err_and(is_shutdown) {
-                log::info!("shutdown requested; the virtual authenticator has been removed");
-            }
-            ok_if_shutdown(result)
-        }
+    let result =
+        create_device(descriptor).and_then(|device| serve_ctap(device, data, shutdown, on_ready));
+    if result.as_ref().is_err_and(is_shutdown) {
+        log::info!("shutdown requested; the virtual authenticator has been removed");
     }
+    ok_if_shutdown(result)
 }
 
 /// Build the CTAP app from `data` and serve it on `device` until the device
