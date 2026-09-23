@@ -96,9 +96,6 @@ impl Case {
     }
 }
 
-// `as_chunks` (clippy's suggestion) is only stable since Rust 1.88, and the
-// workspace declares `rust-version = "1.85"`.
-#[allow(clippy::chunks_exact_to_as_chunks)]
 fn unhex(s: &str, label: &str) -> Vec<u8> {
     let digit = |c: u8| -> u8 {
         match c {
@@ -108,16 +105,15 @@ fn unhex(s: &str, label: &str) -> Vec<u8> {
             _ => panic!("{label}: invalid hex digit {:?}", c as char),
         }
     };
-    let mut pairs = s.as_bytes().chunks_exact(2);
-    let out: Vec<u8> = pairs
-        .by_ref()
-        .map(|pair| digit(pair[0]) << 4 | digit(pair[1]))
-        .collect();
+    let (pairs, rest) = s.as_bytes().as_chunks::<2>();
     assert!(
-        pairs.remainder().is_empty(),
+        rest.is_empty(),
         "{label}: hex string has an odd number of digits"
     );
-    out
+    pairs
+        .iter()
+        .map(|&[high, low]| digit(high) << 4 | digit(low))
+        .collect()
 }
 
 fn parse(raw: &str) -> Vec<Case> {
