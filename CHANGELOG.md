@@ -143,8 +143,9 @@ Upgrading from `867a591` or earlier is not an in-place update:
   longer overwrite the request buffer, the number of allocated channels is
   bounded, and malformed uhid events are rejected instead of panicking.
 - Credential management truncates long RP IDs and user names, continues
-  enumerations without pinUvAuthParam, and reports totalCredentials only in
-  the enumerateCredentialsBegin response.
+  enumerations without pinUvAuthParam, reports totalCredentials only in the
+  enumerateCredentialsBegin response, and reports missing parameters before
+  it checks pinUvAuthProtocol and pinUvAuthParam.
 - The udev hidraw rule never matched the uhid-created device.
 - Panics removed from fallible ML-DSA paths.
 

@@ -608,6 +608,57 @@ fn credential_management_requires_pin_uv_auth_param_then_protocol() {
     }
 }
 
+/// A subcommand's missing parameters are reported after a missing
+/// pinUvAuthParam but before an unsupported pinUvAuthProtocol or a wrong
+/// pinUvAuthParam (CTAP 2.3 §6.8.4 to §6.8.6).
+#[test]
+fn credential_management_reports_missing_parameters_before_the_protocol_and_param() {
+    let descriptor = || {
+        canonical_map(vec![
+            (Value::Text("id".into()), Value::Bytes(vec![0xC1])),
+            (Value::Text("type".into()), Value::Text("public-key".into())),
+        ])
+    };
+    let user = || canonical_map(vec![(Value::Text("id".into()), Value::Bytes(vec![0x01]))]);
+    let incomplete = [
+        (0x04, None),
+        (0x04, Some(canonical_map(vec![(int(2), descriptor())]))),
+        (0x06, None),
+        (
+            0x06,
+            Some(canonical_map(vec![(int(1), Value::Bytes(vec![0; 32]))])),
+        ),
+        (0x07, Some(canonical_map(vec![(int(2), descriptor())]))),
+        (0x07, Some(canonical_map(vec![(int(3), user())]))),
+    ];
+    let wrong_param = Value::Bytes(vec![0x5A; 32]);
+    for (subcommand, params) in incomplete {
+        for protocol in [int(2), int(3)] {
+            let mut app = new_app(TestStore::new(), [0x6B; 16]);
+            install_pin_uv_auth_token(
+                &mut app,
+                ClassicPinProtocol::V2,
+                [0x7F; 32],
+                PIN_PERMISSION_CM,
+                None,
+            );
+            let mut entries = vec![
+                (int(1), int(subcommand)),
+                (int(3), protocol.clone()),
+                (int(4), wrong_param.clone()),
+            ];
+            if let Some(params) = params.clone() {
+                entries.push((int(2), params));
+            }
+            assert_eq!(
+                app.handle_credential_management(&encode(&canonical_map(entries))),
+                Err(CTAP2_ERR_MISSING_PARAMETER),
+                "subcommand {subcommand:#04x}, params {params:?}, protocol {protocol:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn hmac_secret_defaults_to_pin_uv_auth_protocol_one() {
     let salt = [0x98; 32];

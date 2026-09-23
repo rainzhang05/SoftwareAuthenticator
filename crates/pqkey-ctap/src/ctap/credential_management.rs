@@ -369,6 +369,33 @@ impl CtapApp<'_> {
             .map_err(|err| store_status("update a credential", err))
     }
 
+    /// The subCommandParams members a subcommand cannot do without:
+    /// rpIDHash for enumerateCredentialsBegin (CTAP 2.3 §6.8.4), credentialId
+    /// for deleteCredential (§6.8.5), and credentialId and user for
+    /// updateUserInformation (§6.8.6).  Any of them missing is
+    /// CTAP2_ERR_MISSING_PARAMETER.
+    fn cm_check_mandatory_parameters(
+        subcommand: u8,
+        params: Option<&[(Value, Value)]>,
+    ) -> Result<(), u8> {
+        let required: &[i64] = match subcommand {
+            ENUMERATE_CREDENTIALS_BEGIN => &[1],
+            DELETE_CREDENTIAL => &[2],
+            UPDATE_USER_INFORMATION => &[2, 3],
+            _ => &[],
+        };
+        let missing = |key: &i64| {
+            params.is_none_or(|params| {
+                cbor::map_get(params, Value::Integer(Integer::from(*key))).is_none()
+            })
+        };
+        if required.iter().any(missing) {
+            Err(CTAP2_ERR_MISSING_PARAMETER)
+        } else {
+            Ok(())
+        }
+    }
+
     pub(super) fn handle_credential_management(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
         let map = cbor::request_parameters(payload)?;
 
@@ -401,10 +428,18 @@ impl CtapApp<'_> {
             }
             _ => {
                 // "If pinUvAuthParam is missing from the input map, end the
-                // operation by returning CTAP2_ERR_PUAT_REQUIRED." (CTAP 2.3
-                // §6.8.2 to §6.8.6)
+                // operation by returning CTAP2_ERR_PUAT_REQUIRED. If the
+                // authenticator does not receive mandatory parameters for this
+                // subcommand, end the operation by returning
+                // CTAP2_ERR_MISSING_PARAMETER. If pinUvAuthProtocol is not
+                // supported, return CTAP1_ERR_INVALID_PARAMETER." (CTAP 2.3
+                // §6.8.2 to §6.8.6), in that order, and all before the
+                // pinUvAuthParam is verified.
+                let pin_auth_param = cbor::map_get(&map, Value::Integer(Integer::from(4)))
+                    .ok_or(CTAP2_ERR_PUAT_REQUIRED)?;
+                Self::cm_check_mandatory_parameters(subcommand, subcommand_params.as_deref())?;
                 let (protocol, pin_auth_param) = parse_pin_uv_auth_param(
-                    cbor::map_get(&map, Value::Integer(Integer::from(4))),
+                    Some(pin_auth_param),
                     cbor::map_get(&map, Value::Integer(Integer::from(3))),
                 )?
                 .ok_or(CTAP2_ERR_PUAT_REQUIRED)?;
