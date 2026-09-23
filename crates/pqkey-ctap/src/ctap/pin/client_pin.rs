@@ -251,13 +251,13 @@ impl CtapApp<'_> {
         let encrypted = self.encrypt_for_platform(protocol, &keys, &token)?;
         self.pin_state
             .issue_pin_uv_auth_token(protocol, token, permissions, rp_id);
-        let response = canonical_map(vec![
-            (Value::Integer(Integer::from(2)), Value::Bytes(encrypted)),
-            (
-                Value::Integer(Integer::from(3)),
-                Value::Integer(Integer::from(u64::from(self.pin_state.retries()))),
-            ),
-        ]);
+        // "The authenticator returns the encrypted pinUvAuthToken for the
+        // specified pinUvAuthProtocol" (CTAP 2.3 §6.5.5.7.1, §6.5.5.7.2), and
+        // nothing else.
+        let response = canonical_map(vec![(
+            Value::Integer(Integer::from(2)),
+            Value::Bytes(encrypted),
+        )]);
         let mut encoded = Vec::new();
         into_writer(&response, &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
         let mut out = Vec::with_capacity(1 + encoded.len());

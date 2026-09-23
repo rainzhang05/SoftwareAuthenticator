@@ -1131,3 +1131,33 @@ fn a_pin_mismatch_regenerates_that_protocols_key_agreement_key() {
     );
     get_pin_token(&mut app, ClassicPinProtocol::V2, b"1234").expect("fresh key agreement");
 }
+
+/// Both token subcommands answer with the encrypted pinUvAuthToken alone:
+/// "The authenticator returns the encrypted pinUvAuthToken for the specified
+/// pinUvAuthProtocol" (CTAP 2.3 §6.5.5.7.1, §6.5.5.7.2).
+#[test]
+fn token_responses_carry_only_the_token() {
+    const PIN: &[u8] = b"4821";
+    for subcommand in [0x05, 0x09] {
+        let mut app = new_app(TestStore::new(), [0x3E; 16]);
+        set_pin_padded(&mut app, ClassicPinProtocol::V2, &padded_pin(PIN)).expect("setPIN");
+        let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V2, 0x3E);
+        let mut entries = vec![
+            (int(1), int(2)),
+            (int(2), int(subcommand)),
+            (int(3), session.key_agreement.clone()),
+            (int(6), Value::Bytes(session.encrypt(&pin_hash(PIN)))),
+        ];
+        if subcommand == 0x09 {
+            entries.push((int(9), int(PIN_PERMISSION_GA.into())));
+            entries.push((int(10), Value::Text("example.com".into())));
+        }
+        let response = client_pin(&mut app, entries).expect("a pinUvAuthToken");
+        assert_eq!(response[0], CTAP2_OK);
+        let Value::Map(map) = from_reader(&response[1..]).expect("decode the response") else {
+            panic!("the response is a map");
+        };
+        let keys: Vec<Value> = map.into_iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, [int(2)], "subcommand {subcommand:#04x}");
+    }
+}
