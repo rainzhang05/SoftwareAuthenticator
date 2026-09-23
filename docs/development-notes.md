@@ -12,7 +12,7 @@ code is organised.
   the root `Cargo.toml`), and CI checks the workspace builds with it.
 - **Linux** is needed to run the daemon: it creates the virtual key through
   `/dev/uhid`. Set up device access as in the README's
-  [Installation](../README.md#installation) section.
+  [Install](../README.md#install) section.
 - **macOS** works for everything else: the whole workspace builds, and the
   unit and integration tests run.
 - No system libraries are needed to build. The end-to-end tests need
@@ -32,8 +32,7 @@ the same commit.
 
 Set up `/dev/uhid` access once, with the shipped udev rules (the comments in
 [`contrib/udev/70-pqkey.rules`](../contrib/udev/70-pqkey.rules) explain them),
-exactly as in step 2 of the README's
-[Installation](../README.md#installation) section:
+exactly as in the README's [Install](../README.md#install) section:
 
 ```bash
 sudo install -m 644 contrib/udev/70-pqkey.rules /etc/udev/rules.d/
@@ -270,6 +269,33 @@ these hold
 After merging it starts CI, Security and E2E on `main`, since a merge made
 with `GITHUB_TOKEN` starts no push workflows. Everything else, including GitHub
 Actions updates (which `GITHUB_TOKEN` may not merge), waits for a person.
+
+## Troubleshooting
+
+**Every registration or sign-in fails immediately.** No notification could be
+shown, so presence was denied. The log says why: `journalctl --user -u pqkey`,
+`<state dir>/authenticator.log`, or the terminal with `--foreground`. Run the
+daemon inside your desktop session and check `DBUS_SESSION_BUS_ADDRESS`; the
+comments in
+[`contrib/systemd/user/pqkey.service`](../contrib/systemd/user/pqkey.service)
+cover desktops that start their own bus.
+
+**`insufficient permissions to access /dev/uhid`.** The udev rules are not
+installed, you are not in `plugdev`, or you have not logged in again since
+joining it. `ls -l /dev/uhid` should show group `plugdev` and mode
+`crw-rw----`. If the file is missing, run `sudo modprobe uhid`.
+
+**The key does not show up in the browser.** Check `pqkey status`, then
+`fido2-token -L`. If the daemon runs but nothing is listed, the hidraw node is
+not accessible to you: check the hidraw rule, and its `DEVPATH` pattern if you
+changed the USB IDs with `--vendor-id` or `--product-id`.
+
+**The service and the CLI use different state.** If you set `XDG_DATA_HOME` in
+your shell, set it for the systemd user manager too (`environment.d(5)`).
+
+`RUST_LOG` sets the log level (`RUST_LOG=pqkey=debug,pqkey_ctap=debug`).
+Without it warnings and errors are logged; debug logs contain relying party IDs
+and user names from requests.
 
 ## Confirm the virtual HID device is visible to userspace
 

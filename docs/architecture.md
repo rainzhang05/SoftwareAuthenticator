@@ -158,6 +158,9 @@ sends what it queues. `crates/pqkey/src/uhid.rs` reads and writes kernel
 
 authenticatorBioEnrollment (0x09 and 0x40) is answered with
 CTAP1_ERR_INVALID_COMMAND. Request parameters must be canonical CBOR.
+authenticatorGetInfo reports the versions `FIDO_2_3`, `FIDO_2_1` and
+`FIDO_2_0`, the `credProtect` and `hmac-secret` extensions, and PIN/UV auth
+protocols 2 and 1. It has no `uv` option: user verification is by PIN only.
 
 **Credentials.** A discoverable credential (`rk` true) is a record in the
 store with a 33-byte ID, the marker 0x01 and 32 random bytes. The store holds
