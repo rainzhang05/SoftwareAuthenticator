@@ -56,6 +56,9 @@ impl CtapApp<'_> {
     ///   ("matches the RP ID of this request") and CTAP 2.3 §6.8 still describes
     ///   it for fetching a credential's public key, although 2.3's step text
     ///   asks for no RP ID; libfido2 and OpenSSH request exactly this token.
+    ///
+    /// enumerateRPsGetNextRP and enumerateCredentialsGetNextCredential carry
+    /// no pinUvAuthParam and never come here: their begin subcommand did.
     pub(crate) fn ensure_pin_token_permission_for_cm(
         &mut self,
         subcommand: u8,
@@ -68,7 +71,7 @@ impl CtapApp<'_> {
             return Ok(());
         };
         match subcommand {
-            0x01..=0x03 => Err(CTAP2_ERR_PIN_AUTH_INVALID),
+            0x01 | 0x02 => Err(CTAP2_ERR_PIN_AUTH_INVALID),
             0x04 => {
                 let params = params.ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
                 let rp_hash = match cbor::map_get(params, Value::Integer(Integer::from(1))) {
@@ -81,10 +84,6 @@ impl CtapApp<'_> {
                     Err(CTAP2_ERR_PIN_AUTH_INVALID)
                 }
             }
-            0x05 => match self.cred_mgmt_state.current_rp.as_deref() {
-                Some(current) if current == binding => Ok(()),
-                _ => Err(CTAP2_ERR_PIN_AUTH_INVALID),
-            },
             0x06 | 0x07 => {
                 let params = params.ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
                 let descriptor = match cbor::map_get(params, Value::Integer(Integer::from(2))) {
@@ -104,7 +103,7 @@ impl CtapApp<'_> {
                     Err(CTAP2_ERR_PIN_AUTH_INVALID)
                 }
             }
-            _ => Ok(()),
+            _ => Err(CTAP2_ERR_PIN_AUTH_INVALID),
         }
     }
 }

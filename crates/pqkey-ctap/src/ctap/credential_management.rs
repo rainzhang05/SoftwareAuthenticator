@@ -81,7 +81,6 @@ pub(super) struct CredentialManagementState {
     credential_list: Vec<Vec<u8>>,
     credential_index: usize,
     credential_token: Option<u64>,
-    pub(super) current_rp: Option<String>,
 }
 
 impl CredentialManagementState {
@@ -93,7 +92,6 @@ impl CredentialManagementState {
             credential_list: Vec::new(),
             credential_index: 0,
             credential_token: None,
-            current_rp: None,
         }
     }
 
@@ -107,7 +105,6 @@ impl CredentialManagementState {
         self.credential_list.clear();
         self.credential_index = 0;
         self.credential_token = None;
-        self.current_rp = None;
     }
 }
 
@@ -272,7 +269,6 @@ impl CtapApp<'_> {
         };
 
         let response = Self::cm_credential_response(first, Some(credentials.len()))?;
-        self.cred_mgmt_state.current_rp = Some(first.rp_id.clone());
         self.cred_mgmt_state.credential_list = credentials
             .iter()
             .map(|credential| credential.credential_id.clone())
