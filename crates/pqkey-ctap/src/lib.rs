@@ -22,9 +22,9 @@ use p256::ecdsa::{
 };
 use p256::elliptic_curve::Generate;
 use pqkey_mldsa::{
-    MlDsaError, ParamSet, PublicKey, SEED_LEN, SecretKey, try_keypair, try_sign, try_sign_from_seed,
+    MlDsaError, ParamSet, PublicKey, SEED_LEN, try_public_key_from_seed, try_sign_from_seed,
 };
-use rand_core::UnwrapErr;
+use rand_core::{Rng, UnwrapErr};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -423,8 +423,6 @@ pub fn try_cose_es256_public_key(point: &Sec1Point) -> Result<Vec<u8>, CryptoErr
 /// Credential secret key variants supported by the authenticator.
 #[derive(Debug)]
 pub enum CredentialSecretKey {
-    /// An expanded FIPS 204 ML-DSA secret key.
-    MlDsa(SecretKey),
     /// An ML-DSA key held as its 32-byte FIPS 204 seed `ξ`, the form stored
     /// credentials use.  Signing expands the seed directly, so no expanded
     /// secret key encoding is produced or decoded.
@@ -461,12 +459,10 @@ impl CredentialSecretKey {
     /// Serialize the secret key into a byte buffer suitable for storage.
     ///
     /// The returned buffer is wrapped in [`Zeroizing`], so the copy is wiped
-    /// when the caller drops it.  An ML-DSA key held as a seed serializes to
-    /// the 32-byte seed, which [`try_credential_secret_from_bytes`] accepts
-    /// back.
+    /// when the caller drops it.  An ML-DSA key serializes to its 32-byte
+    /// seed, which [`try_credential_secret_from_bytes`] accepts back.
     pub fn secret_bytes(&self) -> Zeroizing<Vec<u8>> {
         match self {
-            CredentialSecretKey::MlDsa(sk) => Zeroizing::new(sk.0.clone()),
             CredentialSecretKey::MlDsaSeed(seed) => Zeroizing::new(seed.as_bytes().to_vec()),
             CredentialSecretKey::Es256(sk) => {
                 let mut scalar = sk.to_bytes();
@@ -483,9 +479,9 @@ impl CredentialSecretKey {
 /// `bytes` comes from persistent storage and is therefore not trusted: a
 /// corrupted or truncated record must produce an error, never a panic.
 ///
-/// Returns [`CryptoError::InvalidKey`] when the bytes are not a valid scalar
-/// for the requested algorithm (wrong length, zero, or >= the group order for
-/// P-256).
+/// Returns [`CryptoError::InvalidKey`] when the bytes are not a valid key for
+/// the requested algorithm: a P-256 scalar (non-zero and below the group
+/// order) or a 32-byte ML-DSA seed.
 pub fn try_credential_secret_from_bytes(
     alg: CoseAlg,
     bytes: &[u8],
@@ -499,24 +495,19 @@ pub fn try_credential_secret_from_bytes(
                 P256SigningKey::from_slice(bytes).map_err(|_| CryptoError::InvalidKey)?;
             Ok(CredentialSecretKey::Es256(signing_key))
         }
-        CoseAlg::MLDSA44 | CoseAlg::MLDSA65 | CoseAlg::MLDSA87 => {
-            // A 32-byte value is a seed: no expanded ML-DSA secret key is
-            // shorter than 2,560 bytes, so the two cannot be confused.
-            if let Ok(seed) = <[u8; SEED_LEN]>::try_from(bytes) {
-                return Ok(CredentialSecretKey::MlDsaSeed(MlDsaSeed::new(seed)));
-            }
-            // `SecretKey` zeroizes its buffer on drop.  Length and encoding
-            // validation happens in `try_sign`, which rejects a malformed key
-            // with `MlDsaError::InvalidKeyLength`.
-            Ok(CredentialSecretKey::MlDsa(SecretKey(bytes.to_vec())))
-        }
+        // Stored ML-DSA keys are seeds; an expanded secret key is never
+        // stored, so it is not accepted either.
+        CoseAlg::MLDSA44 | CoseAlg::MLDSA65 | CoseAlg::MLDSA87 => <[u8; SEED_LEN]>::try_from(bytes)
+            .map(|seed| CredentialSecretKey::MlDsaSeed(MlDsaSeed::new(seed)))
+            .map_err(|_| CryptoError::InvalidKey),
     }
 }
 
 /// Generate a new credential.
 ///
 /// Returns the CBOR COSE_Key for the new public key plus the secret key
-/// wrapper.  Errors instead of panicking when `alg` names no supported
+/// wrapper, for ML-DSA the seed.  Errors instead of panicking when `alg` names
+/// no supported
 /// algorithm ([`CryptoError::UnsupportedAlgorithm`]), when ML-DSA key
 /// generation fails ([`CryptoError::MlDsa`]), or when the generated P-256
 /// point cannot be encoded ([`CryptoError::InvalidPublicKey`]).
@@ -530,9 +521,13 @@ pub fn try_create_credential(alg: CoseAlg) -> Result<(Vec<u8>, CredentialSecretK
         }
         _ => {
             let ps = mldsa_paramset_from_alg(alg).ok_or(CryptoError::UnsupportedAlgorithm)?;
-            let (pk, sk) = try_keypair(ps)?;
+            let mut seed = [0u8; SEED_LEN];
+            os_rng().fill_bytes(&mut seed);
+            let key = MlDsaSeed::new(seed);
+            seed.zeroize();
+            let pk = try_public_key_from_seed(ps, key.as_bytes())?;
             let cose = try_cose_public_key(ps, &pk)?;
-            Ok((cose, CredentialSecretKey::MlDsa(sk)))
+            Ok((cose, CredentialSecretKey::MlDsaSeed(key)))
         }
     }
 }
@@ -571,10 +566,6 @@ pub fn try_sign_challenge(
             Ok(signature.to_der().as_bytes().to_vec())
         }
         (CoseAlg::ES256, _) => Err(CryptoError::KeyTypeMismatch),
-        (_, CredentialSecretKey::MlDsa(sk)) => {
-            let ps = mldsa_paramset_from_alg(alg).ok_or(CryptoError::UnsupportedAlgorithm)?;
-            Ok(try_sign(ps, sk, &msg)?)
-        }
         (_, CredentialSecretKey::MlDsaSeed(seed)) => {
             let ps = mldsa_paramset_from_alg(alg).ok_or(CryptoError::UnsupportedAlgorithm)?;
             Ok(try_sign_from_seed(ps, seed.as_bytes(), &msg)?)
@@ -948,15 +939,19 @@ mod tests {
         }
     }
 
+    /// A stored ML-DSA key is its 32-byte seed. Anything else, a truncated
+    /// or corrupted record or an expanded secret key, is not a key.
     #[test]
-    fn try_sign_challenge_rejects_malformed_ml_dsa_key_bytes() {
-        // A truncated / corrupted ML-DSA secret key record read back from disk.
-        let junk = try_credential_secret_from_bytes(CoseAlg::MLDSA65, &[0x42; 7]).unwrap();
-        let result = try_sign_challenge(CoseAlg::MLDSA65, &junk, b"auth", b"hash");
-        assert!(
-            matches!(result, Err(CryptoError::MlDsa(_))),
-            "expected an ML-DSA error, got {result:?}"
-        );
+    fn try_credential_secret_from_bytes_accepts_only_ml_dsa_seeds() {
+        for alg in [CoseAlg::MLDSA44, CoseAlg::MLDSA65, CoseAlg::MLDSA87] {
+            for len in [0, 7, SEED_LEN - 1, SEED_LEN + 1, 2560] {
+                assert_eq!(
+                    try_credential_secret_from_bytes(alg, &vec![0x42; len]).err(),
+                    Some(CryptoError::InvalidKey),
+                    "{alg:?}, {len} bytes"
+                );
+            }
+        }
     }
 
     #[test]
