@@ -21,7 +21,9 @@ pub(super) const MAX_CREDENTIAL_COUNT_IN_LIST: u64 = 8;
 /// longer IDs in a list can never name one of its credentials.
 pub(super) const MAX_CREDENTIAL_ID_LENGTH: u64 = 128;
 
-/// maxMsgSize: the largest request the engine accepts.
+/// maxMsgSize: the largest request platforms should send.  It is advertised,
+/// not enforced: the engine takes any request the transport delivers, and
+/// CTAPHID carries up to 7,609 bytes.
 pub(super) const MAX_MSG_SIZE: u64 = 2048;
 
 fn text(value: &str) -> Value {

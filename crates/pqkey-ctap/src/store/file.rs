@@ -110,8 +110,9 @@ const ATTESTATION_FILE: &str = "attestation";
 ///
 /// The plaintext is a CBOR map with unsigned integer keys, written in
 /// ascending key order with shortest-form integers and lengths.  Optional
-/// fields are omitted when absent.  Decoding rejects anything else, including
-/// unknown keys.
+/// fields are omitted when absent.  Decoding accepts the keys in any order and
+/// longer encodings than needed, but nothing else: unknown, duplicate or
+/// missing keys and wrong types make the record corrupt.
 ///
 /// ```text
 /// credential record (type 1)

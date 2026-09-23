@@ -321,7 +321,7 @@ impl CtapApp<'_> {
             sign_count: 0,
             created_at: 0,
         };
-        // One key expansion yields both the signing key and the public key.
+        // The signing key and the public key in one step.
         let (secret_key, cose_key) = record.keypair().map_err(|err| {
             log::error!("cannot use a newly generated {alg:?} key: {err}");
             CTAP2_ERR_PROCESSING

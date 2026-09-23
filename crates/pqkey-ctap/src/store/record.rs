@@ -185,8 +185,9 @@ impl CredentialRecord {
     /// step.
     ///
     /// Prefer this over calling [`Self::secret_key`] and
-    /// [`Self::cose_public_key`] separately when both are needed: for ML-DSA
-    /// each of those expands the seed, which is a full key generation.
+    /// [`Self::cose_public_key`] separately when both are needed: for ES256
+    /// each of those derives the public key.  (An ML-DSA signing key is the
+    /// seed itself: deriving the public key expands it, and so does signing.)
     ///
     /// Returns [`CryptoError::KeyTypeMismatch`] when `alg` and the key material
     /// disagree, and [`CryptoError::InvalidKey`] for an out-of-range P-256
