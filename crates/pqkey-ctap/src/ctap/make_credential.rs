@@ -5,7 +5,7 @@ use super::pin::permissions::PIN_PERMISSION_MC;
 use super::pin::protocol::parse_pin_uv_auth_param;
 use super::presence::{PresenceOperation, PresenceRequest};
 use super::request;
-use super::storage::{is_discoverable, store_status};
+use super::storage::{derive_sealed_cred_randoms, is_discoverable, store_status};
 use super::{AttestationMode, CtapApp};
 use crate::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial, StoreError};
 use crate::try_sign_challenge;
@@ -263,12 +263,9 @@ impl CtapApp<'_> {
 
         // Step 12.
         for id in &exclude_list {
-            let Some(excluded) = self.stored_credential(id)? else {
+            let Some(excluded) = self.credential_for_rp(id, &rp_id)? else {
                 continue;
             };
-            if excluded.rp_id != rp_id {
-                continue;
-            }
             // "Else (implying the credential's credProtect value is
             // userVerificationRequired): [...] Else (implying user
             // verification was not collected in Step 11), remove the
@@ -306,21 +303,31 @@ impl CtapApp<'_> {
         self.pin_state
             .consume_pin_uv_auth_token_after_user_presence();
 
-        // ML-DSA keys are stored as their 32-byte seed (RFC 9964 §4).
-        let record = CredentialRecord {
-            credential_id: self.new_credential_id(rk),
+        // ML-DSA keys are kept as their 32-byte seed (RFC 9964 §4).  A
+        // discoverable credential is stored; a non-discoverable one is sealed
+        // into its credential ID (see is_discoverable).
+        let mut record = CredentialRecord {
+            credential_id: Vec::new(),
             rp_id,
             user_id,
             user_name,
             user_display_name,
             alg,
             private_key: PrivateKeyMaterial::generate(alg),
-            cred_random_with_uv: self.random_array(),
-            cred_random_without_uv: self.random_array(),
+            cred_random_with_uv: [0; 32],
+            cred_random_without_uv: [0; 32],
             cred_protect: cred_protect_value,
             sign_count: 0,
             created_at: 0,
         };
+        if rk {
+            record.credential_id = self.new_credential_id();
+            record.cred_random_with_uv = self.random_array();
+            record.cred_random_without_uv = self.random_array();
+        } else {
+            derive_sealed_cred_randoms(&mut record)?;
+            record.credential_id = self.seal_credential(&record)?;
+        }
         // The signing key and the public key in one step.
         let (secret_key, cose_key) = record.keypair().map_err(|err| {
             log::error!("cannot use a newly generated {alg:?} key: {err}");
@@ -467,14 +474,16 @@ impl CtapApp<'_> {
             // Stored only once the response is complete, so a request that
             // fails leaves no credential behind that the platform never
             // learned about.
-            self.store_new_credential(&record, rk)?;
+            if rk {
+                self.store_new_credential(&record)?;
+            }
             return Ok(out);
         }
         log::error!("the makeCredential response does not fit even without attestation");
         Err(CTAP2_ERR_PROCESSING)
     }
 
-    /// Persist a newly created credential.
+    /// Persist a newly created discoverable credential.
     ///
     /// CTAP 2.3 §6.1.2 step 17.2: when a discoverable credential is created
     /// ("rk" true) and "a credential for the same rp.id and account ID already
@@ -488,24 +497,17 @@ impl CtapApp<'_> {
     /// a failure can leave a duplicate but never loses the account.  Only when
     /// the store is full is the replaced credential deleted first, because the
     /// overwrite needs no extra space (step 17.4 is checked after step 17.2).
-    fn store_new_credential(
-        &mut self,
-        record: &CredentialRecord,
-        discoverable: bool,
-    ) -> Result<(), u8> {
-        let replaced: Vec<Vec<u8>> = if discoverable {
-            self.stored_credentials()?
-                .iter()
-                .filter(|existing| {
-                    existing.rp_id == record.rp_id
-                        && existing.user_id == record.user_id
-                        && is_discoverable(&existing.credential_id)
-                })
-                .map(|existing| existing.credential_id.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
+    fn store_new_credential(&mut self, record: &CredentialRecord) -> Result<(), u8> {
+        let replaced: Vec<Vec<u8>> = self
+            .stored_credentials()?
+            .iter()
+            .filter(|existing| {
+                existing.rp_id == record.rp_id
+                    && existing.user_id == record.user_id
+                    && is_discoverable(&existing.credential_id)
+            })
+            .map(|existing| existing.credential_id.clone())
+            .collect();
         // `put` replaces a credential with the same ID; a random 32-byte ID
         // only collides if the random number generator is broken.
         if self.stored_credential(&record.credential_id)?.is_some() {

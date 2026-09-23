@@ -64,15 +64,23 @@ group is a privilege in its own right.
 Each record is a separate file encrypted and authenticated with
 XChaCha20-Poly1305 under keys derived from two 32-byte root keys. By default
 the root keys are files in `keys/` inside the same state directory as the data.
+Non-discoverable credentials are not stored at all: each credential ID holds
+its private key, sealed the same way under a key derived from the credential
+root key and bound to its relying party. Credential IDs are not secret, since a
+relying party hands them to anyone who starts a sign-in, so those private keys
+are exactly as safe as the credential root key.
 The full format is in [docs/architecture.md](docs/architecture.md#credential-store)
 and in the documentation of `crates/pqkey-ctap/src/store/`.
 
 It does **not** protect against:
 
 - **Anyone who can read the state directory as your user, or as root.** They
-  read the key files and decrypt everything, private keys included. The `0700`
-  directory and `0600` file permissions are the access control, and they only
-  keep out other unprivileged local users.
+  read the key files and decrypt everything, private keys included. A single
+  copy of `keys/credential.key` also yields the private key and hmac-secret of
+  every non-discoverable credential until the next reset, including ones
+  created after the copy, because their credential IDs come from relying
+  parties. The `0700` directory and `0600` file permissions are the access
+  control, and they only keep out other unprivileged local users.
 - **Offline PIN guessing by such an attacker.** The stored PIN hash is an
   unsalted, truncated SHA-256. The retry counter only limits guessing through
   CTAP.
@@ -81,6 +89,9 @@ It does **not** protect against:
   restores PIN retries and rolling back a credential file restores its
   signature counter.
 - **Anyone holding the keys forging records.**
+- **Clones, as far as non-discoverable credentials go.** They report a
+  signature count of 0, so a relying party cannot spot a copy of the
+  authenticator through the counter.
 - **Reading the daemon's memory.** Secrets are zeroized when they are dropped,
   but the daemon does not lock its memory or disable core dumps, and a process
   that can debug it (subject to the kernel's ptrace restrictions) can read
@@ -93,7 +104,8 @@ It does provide:
   corrupt and never used. Corrupt records are not deleted automatically.
 - **Crypto-shredding on reset.** `pqkey reset` and authenticatorReset replace
   the key that protects credentials and PIN state. Ciphertext left behind in
-  free blocks, snapshots or backups can no longer be decrypted. The old key
+  free blocks, snapshots or backups can no longer be decrypted, and neither can
+  the non-discoverable credential IDs relying parties hold. The old key
   file is overwritten with zeros as a best effort, but on SSDs and
   copy-on-write filesystems that 32-byte file may survive too.
 - **No plaintext secrets in copies that leave out `keys/`**, such as a backup

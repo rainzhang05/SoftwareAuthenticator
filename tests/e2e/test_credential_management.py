@@ -86,14 +86,15 @@ def test_metadata_counts_discoverable_credentials_and_free_space(ctap: Ctap2, ca
     """getCredsMetadata (CTAP 2.3 §6.8.2): existingResidentCredentialsCount
     counts the discoverable credentials, and
     maxPossibleRemainingResidentCredentialsCount is the room left in the store,
-    which non-discoverable credentials take up as well: this authenticator
-    stores every credential, and only a credential's ID says whether it is
-    discoverable (is_discoverable in crates/pqkey-ctap/src/ctap/storage.rs).
-    getInfo's remainingDiscoverableCredentials says the same."""
+    which only they take up: a non-discoverable credential is sealed into its
+    credential ID and not stored (is_discoverable in
+    crates/pqkey-ctap/src/ctap/storage.rs). getInfo's
+    remainingDiscoverableCredentials says the same."""
+    discoverable = len(registered) - 1
     metadata = credman.get_metadata()
-    assert metadata[RESULT.EXISTING_CRED_COUNT] == 3
-    assert metadata[RESULT.MAX_REMAINING_COUNT] == capacity - len(registered)
-    assert ctap.send_cbor(Ctap2.CMD.GET_INFO)[0x14] == capacity - len(registered)
+    assert metadata[RESULT.EXISTING_CRED_COUNT] == discoverable
+    assert metadata[RESULT.MAX_REMAINING_COUNT] == capacity - discoverable
+    assert ctap.send_cbor(Ctap2.CMD.GET_INFO)[0x14] == capacity - discoverable
 
 
 def test_enumerate_rps(credman):
@@ -168,7 +169,8 @@ def test_delete_credential(ctap: Ctap2, capacity, registered, credman):
     assert set(_enumerated(credman, RP_A)) == {kept.credential_id}
     metadata = credman.get_metadata()
     assert metadata[RESULT.EXISTING_CRED_COUNT] == 2
-    assert metadata[RESULT.MAX_REMAINING_COUNT] == capacity - len(registered) + 1
+    # Of the four credentials, three were stored, and one of those is gone.
+    assert metadata[RESULT.MAX_REMAINING_COUNT] == capacity - 2
 
     # Assertions only now that the pinUvAuthToken is no longer needed.
     with pytest.raises(CtapError) as excinfo:

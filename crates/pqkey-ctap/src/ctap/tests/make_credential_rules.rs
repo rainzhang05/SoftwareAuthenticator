@@ -2,8 +2,9 @@
 //! excludeList rules (CTAP 2.3 §6.1.2).
 
 use super::support::{
-    FLAG_UV, PresenceEvent, SeenRequest, TestApp, encode, install_pin_uv_auth_token, int, pin_hash,
-    response_auth_data, scripted_app, stored, token_pin_auth,
+    FLAG_UV, PresenceEvent, SeenRequest, TestApp, created_credential, encode,
+    install_pin_uv_auth_token, int, pin_hash, response_auth_data, scripted_app, stored,
+    token_pin_auth,
 };
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::PIN_PERMISSION_MC;
@@ -243,30 +244,39 @@ fn a_zero_length_pin_uv_auth_param_asks_for_a_touch() {
 /// return CTAP2_ERR_CREDENTIAL_EXCLUDED." (CTAP 2.3 §6.1.2 step 12.1)
 #[test]
 fn an_excluded_credential_is_reported_after_user_presence() {
-    for outcome in [
-        PresenceOutcome::Approved,
-        PresenceOutcome::Denied,
-        PresenceOutcome::TimedOut,
-    ] {
-        let (mut app, log) = app(vec![PresenceOutcome::Approved, outcome]);
-        app.handle_make_credential(&request(vec![]))
-            .expect("first registration");
-        let existing = stored(&app)[0].credential_id.clone();
-        log.take();
+    // A stored discoverable credential, and a sealed non-discoverable one.
+    for rk in [true, false] {
+        for outcome in [
+            PresenceOutcome::Approved,
+            PresenceOutcome::Denied,
+            PresenceOutcome::TimedOut,
+        ] {
+            let (mut app, log) = app(vec![PresenceOutcome::Approved, outcome]);
+            let first = app
+                .handle_make_credential(&request(vec![options(&[("rk", rk)])]))
+                .expect("first registration");
+            let existing = created_credential(&app, &first, RP_ID)
+                .credential_id
+                .clone();
+            log.take();
 
-        assert_eq!(
-            app.handle_make_credential(&request(vec![exclude_list(&existing)])),
-            Err(CTAP2_ERR_CREDENTIAL_EXCLUDED),
-            "{outcome:?}"
-        );
-        assert_eq!(log.take(), asked_to_register(), "{outcome:?}");
-        assert_eq!(stored(&app).len(), 1);
+            assert_eq!(
+                app.handle_make_credential(&request(vec![exclude_list(&existing)])),
+                Err(CTAP2_ERR_CREDENTIAL_EXCLUDED),
+                "rk {rk}, {outcome:?}"
+            );
+            assert_eq!(log.take(), asked_to_register(), "rk {rk}, {outcome:?}");
+            assert_eq!(stored(&app).len(), usize::from(rk));
+        }
     }
 
     let (mut app, _) = app(vec![PresenceOutcome::Approved, PresenceOutcome::Cancelled]);
-    app.handle_make_credential(&request(vec![]))
+    let first = app
+        .handle_make_credential(&request(vec![]))
         .expect("first registration");
-    let existing = stored(&app)[0].credential_id.clone();
+    let existing = created_credential(&app, &first, RP_ID)
+        .credential_id
+        .clone();
     assert_eq!(
         app.handle_make_credential(&request(vec![exclude_list(&existing)])),
         Err(CTAP2_ERR_KEEPALIVE_CANCEL)
@@ -281,13 +291,20 @@ fn an_excluded_credential_is_reported_after_user_presence() {
 fn a_user_verification_required_credential_excludes_only_with_user_verification() {
     let (mut app, _) = app(vec![]);
     let cred_protect = (int(6), canonical_map(vec![(text("credProtect"), int(3))]));
-    app.handle_make_credential(&request(vec![cred_protect]))
+    let first = app
+        .handle_make_credential(&request(vec![cred_protect]))
         .expect("first registration");
-    let existing = stored(&app)[0].credential_id.clone();
+    let existing = created_credential(&app, &first, RP_ID)
+        .credential_id
+        .clone();
 
-    app.handle_make_credential(&request(vec![exclude_list(&existing)]))
+    let second = app
+        .handle_make_credential(&request(vec![exclude_list(&existing)]))
         .expect("not excluded without user verification");
-    assert_eq!(stored(&app).len(), 2);
+    assert_ne!(
+        created_credential(&app, &second, RP_ID).credential_id,
+        existing
+    );
 
     let token = [0x5F; 32];
     install_pin_uv_auth_token(
@@ -328,6 +345,7 @@ fn the_up_option_false_is_invalid() {
     );
 }
 
+/// A discoverable registration for `user`, which the authenticator stores.
 fn request_for_user(user: Value) -> Vec<u8> {
     let entries = vec![
         (int(1), Value::Bytes(CLIENT_DATA_HASH.to_vec())),
@@ -340,6 +358,7 @@ fn request_for_user(user: Value) -> Vec<u8> {
                 (text("alg"), int(CoseAlg::ES256 as i64)),
             ])]),
         ),
+        options(&[("rk", true)]),
     ];
     encode(&canonical_map(entries))
 }

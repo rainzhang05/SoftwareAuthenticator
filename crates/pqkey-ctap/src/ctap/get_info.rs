@@ -17,8 +17,8 @@ use crate::ctap::constants::*;
 /// to keep a list of maxCredentialIdLength IDs within maxMsgSize.
 pub(super) const MAX_CREDENTIAL_COUNT_IN_LIST: u64 = 8;
 
-/// maxCredentialIdLength.  The engine's own credential IDs are much shorter;
-/// longer IDs in a list can never name one of its credentials.
+/// maxCredentialIdLength.  The engine's own credential IDs are at most 75
+/// bytes; longer IDs in a list can never name one of its credentials.
 pub(super) const MAX_CREDENTIAL_ID_LENGTH: u64 = 128;
 
 /// maxMsgSize: the largest request platforms should send.  It is advertised,
@@ -103,9 +103,10 @@ impl CtapApp<'_> {
 
         map.push((uint(13), uint(PinState::MIN_PIN_LENGTH as u64)));
 
-        // remainingDiscoverableCredentials: every credential takes a slot in
-        // the store, whether discoverable or not, and a record's size does not
-        // matter to it.  Omitted rather than failing getInfo if the store
+        // remainingDiscoverableCredentials: the free slots of the store,
+        // which holds the discoverable credentials (and non-discoverable ones
+        // made before they were sealed into their IDs); a record's size does
+        // not matter to it.  Omitted rather than failing getInfo if the store
         // cannot be counted.
         if let Some(remaining) = self.remaining_credential_slots() {
             map.push((uint(0x14), uint(remaining as u64)));

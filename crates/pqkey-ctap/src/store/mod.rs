@@ -340,7 +340,8 @@ pub(crate) fn validate_attestation(record: &AttestationRecord) -> Result<(), Sto
 
 /// Sort most recently created first.  Creation orders are unique within a
 /// store; the credential ID only makes the order total should a concurrent
-/// writer have produced a tie.
+/// writer have produced a tie, or among credentials opened from sealed IDs,
+/// which all have 0.
 ///
 /// The sort is in place: a stable sort would copy records, secrets included,
 /// into a scratch buffer that is freed without being wiped.  The key is unique

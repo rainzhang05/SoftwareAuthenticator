@@ -54,8 +54,9 @@ pub enum KeyDomain {
     /// Protects the attestation record.  Survives
     /// [`clear`](super::CredentialStore::clear).
     Device,
-    /// Protects credential records, the names of credential files, and the
-    /// PIN state.  Replaced by [`clear`](super::CredentialStore::clear).
+    /// Protects credential records, the names of credential files, the PIN
+    /// state and sealed credential IDs.  Replaced by
+    /// [`clear`](super::CredentialStore::clear).
     Credential,
 }
 

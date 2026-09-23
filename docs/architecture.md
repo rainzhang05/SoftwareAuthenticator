@@ -159,16 +159,19 @@ sends what it queues. `crates/pqkey/src/uhid.rs` reads and writes kernel
 authenticatorBioEnrollment (0x09 and 0x40) is answered with
 CTAP1_ERR_INVALID_COMMAND. Request parameters must be canonical CBOR.
 
-**Credentials.** Every credential, discoverable or not, is a record in the
-store. The engine's credential IDs are 33 bytes: a marker byte (0x01 for
-`rk` true, 0x00 for `rk` false) and 32 random bytes. Private keys are a P-256
-scalar or an ML-DSA seed. The store holds at most 1,000 credentials. A new
-discoverable credential for the same relying party and user ID replaces the
-old one. Non-discoverable credentials count against the limit, and against
-`remainingDiscoverableCredentials`, but credential management does not list
-them, so short of a deleteCredential with an ID the platform already knows,
-only a reset frees their slots. Extensions: `credProtect` (levels 1 to 3) and `hmac-secret`
-(`CredRandom` with and without user verification).
+**Credentials.** A discoverable credential (`rk` true) is a record in the
+store with a 33-byte ID, the marker 0x01 and 32 random bytes. The store holds
+at most 1,000 of them, and a new one for the same relying party and user ID
+replaces the old one. A non-discoverable credential is not stored: its 75-byte
+ID is the marker 0x02 followed by its algorithm, credProtect level and private
+key, sealed with XChaCha20-Poly1305 under a key derived from the credential
+root key and bound to the SHA-256 hash of the relying party ID. It works only
+for that relying party and only until a reset replaces the key, reports a
+signature count of 0, and derives its hmac-secret `CredRandom` values from its
+key with HKDF. Non-discoverable credentials stored before they were sealed
+(IDs starting with 0x00) keep working until a reset. Private keys are a P-256
+scalar or an ML-DSA seed. Extensions: `credProtect` (levels 1 to 3) and
+`hmac-secret` (`CredRandom` with and without user verification).
 
 **Assertions.** Without an allowList the most recently created credential
 comes first; further ones are fetched with authenticatorGetNextAssertion, whose

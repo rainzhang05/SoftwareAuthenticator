@@ -124,6 +124,17 @@ fn call_ok(app: &mut CtapApp<'static>, command: u8, payload: &Value) -> Value {
 }
 
 fn make_credential_request(client_data_hash: &[u8], user_id: &[u8], alg: CoseAlg) -> Value {
+    make_credential_request_rk(client_data_hash, user_id, alg, true)
+}
+
+/// makeCredential for a discoverable credential if `rk`, else for a
+/// non-discoverable one, which is sealed into its ID and not stored.
+fn make_credential_request_rk(
+    client_data_hash: &[u8],
+    user_id: &[u8],
+    alg: CoseAlg,
+    rk: bool,
+) -> Value {
     map(vec![
         (int(1), Value::Bytes(client_data_hash.to_vec())),
         (int(2), map(vec![(text("id"), text("example.com"))])),
@@ -141,7 +152,7 @@ fn make_credential_request(client_data_hash: &[u8], user_id: &[u8], alg: CoseAlg
                 (text("type"), text("public-key")),
             ])]),
         ),
-        (int(7), map(vec![(text("rk"), Value::Bool(true))])),
+        (int(7), map(vec![(text("rk"), Value::Bool(rk))])),
     ])
 }
 
@@ -185,11 +196,15 @@ fn attested_credential(auth_data: &[u8]) -> (Vec<u8>, Value) {
 }
 
 fn register(app: &mut CtapApp<'static>, user_id: &[u8], alg: CoseAlg) -> Registration {
+    register_rk(app, user_id, alg, true)
+}
+
+fn register_rk(app: &mut CtapApp<'static>, user_id: &[u8], alg: CoseAlg, rk: bool) -> Registration {
     let client_data_hash = random_32();
     let response = call_ok(
         app,
         0x01,
-        &make_credential_request(&client_data_hash, user_id, alg),
+        &make_credential_request_rk(&client_data_hash, user_id, alg, rk),
     );
     let auth_data = bytes(get(&response, &int(2)));
     let (credential_id, public_key) = attested_credential(&auth_data);
@@ -264,6 +279,36 @@ fn every_algorithm_registers_and_authenticates_across_restarts() {
             authenticate(&mut open_app(&dir.state()), &registration),
             2,
             "{alg:?}: the signature counter survives a restart"
+        );
+    }
+}
+
+/// A non-discoverable credential is sealed into its ID: nothing is stored,
+/// yet it works across restarts, with a signature count of 0, until a reset
+/// replaces the key that sealed it.
+#[test]
+fn a_sealed_credential_works_across_restarts_until_a_reset() {
+    for alg in ALL_ALGS {
+        let dir = TempDir::new();
+        let registration = register_rk(&mut open_app(&dir.state()), &[0x01], alg, false);
+        assert_eq!(FileStore::open(dir.state()).unwrap().count().unwrap(), 0);
+        assert_eq!(authenticate(&mut open_app(&dir.state()), &registration), 0);
+        assert_eq!(
+            authenticate(&mut open_app(&dir.state()), &registration),
+            0,
+            "{alg:?}"
+        );
+
+        FileStore::open(dir.state()).unwrap().clear().unwrap();
+        let response = call(
+            &mut open_app(&dir.state()),
+            0x02,
+            &get_assertion_request(&random_32(), Some(&registration.credential_id)),
+        );
+        assert_eq!(
+            response,
+            [0x2E],
+            "{alg:?}: CTAP2_ERR_NO_CREDENTIALS after a reset"
         );
     }
 }
@@ -466,9 +511,25 @@ fn re_registering_an_account_replaces_its_credential() {
 }
 
 /// The ML-DSA-87 makeCredential response in both attestation modes, against
-/// the CTAPHID message limit.  Run with `--nocapture` to see the sizes.
+/// the CTAPHID message limit.  The largest is a self-attested
+/// non-discoverable one, whose sealed credential ID is 75 bytes.  Run with
+/// `--nocapture` to see the sizes.
 #[test]
 fn ml_dsa_87_make_credential_response_sizes() {
+    let sealed = {
+        let dir = TempDir::new();
+        let mut app = open_app(&dir.state());
+        let request = make_credential_request_rk(&random_32(), &[0x2F], CoseAlg::MLDSA87, false);
+        let response = call(&mut app, 0x01, &request);
+        assert_eq!(response[0], 0x00, "CTAP status {:#04x}", response[0]);
+        let decoded: Value = ciborium::de::from_reader(&response[1..]).expect("decode");
+        assert_eq!(
+            get(&decoded, &int(1)),
+            text("packed"),
+            "self attestation kept"
+        );
+        response.len()
+    };
     let self_attested = {
         let dir = TempDir::new();
         let mut app = open_app(&dir.state());
@@ -497,10 +558,11 @@ fn ml_dsa_87_make_credential_response_sizes() {
         .len()
     };
     println!(
-        "ML-DSA-87 makeCredential response: self attestation {self_attested} bytes, \
-         packed attestation with a 641-byte certificate {packed_with_certificate} bytes \
-         (CTAPHID limit {CTAPHID_MAX_MESSAGE})"
+        "ML-DSA-87 makeCredential response: self attestation {self_attested} bytes \
+         ({sealed} non-discoverable), packed attestation with a 641-byte certificate \
+         {packed_with_certificate} bytes (CTAPHID limit {CTAPHID_MAX_MESSAGE})"
     );
-    assert!(self_attested <= CTAPHID_MAX_MESSAGE);
+    assert!(sealed <= CTAPHID_MAX_MESSAGE);
+    assert!(self_attested < sealed);
     assert!(packed_with_certificate < self_attested);
 }

@@ -4,11 +4,11 @@
 
 use super::support::new_app;
 use super::support::{
-    FLAG_UV, PlatformPinSession, TestStore, client_pin, encode, es256_credential,
-    get_assertion_request, get_assertion_request_with, get_pin_retries, get_pin_uv_auth_token,
-    install_pin_uv_auth_token, int, make_credential_request, make_credential_request_with,
-    padded_pin, pin_hash, platform_authenticate, response_auth_data, set_pin_encrypted,
-    set_pin_padded, token_pin_auth,
+    FLAG_UV, PlatformPinSession, TestStore, client_pin, created_credential, encode,
+    es256_credential, get_assertion_request, get_assertion_request_with, get_pin_retries,
+    get_pin_uv_auth_token, install_pin_uv_auth_token, int, make_credential_request,
+    make_credential_request_with, padded_pin, pin_hash, platform_authenticate, response_auth_data,
+    set_pin_encrypted, set_pin_padded, token_pin_auth,
 };
 use super::support::{insert_owned, stored};
 use crate::ClassicPinProtocol;
@@ -267,7 +267,7 @@ fn make_credential_verifies_pin_uv_auth_param_per_protocol() {
         if variant == MacCase::Correct {
             let response = result.unwrap_or_else(|err| panic!("{protocol:?}: {err:#04x}"));
             assert_eq!(response_auth_data(&response)[32] & FLAG_UV, FLAG_UV);
-            assert_eq!(stored(&app).len(), 1);
+            created_credential(&app, &response, "example.com");
         } else {
             assert_eq!(
                 result,

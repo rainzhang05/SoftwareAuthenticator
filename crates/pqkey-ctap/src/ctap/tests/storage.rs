@@ -116,13 +116,22 @@ fn discoverable_registration_overwrites_the_same_account() {
     assert!(app.store.get(&old).unwrap().is_none(), "the old ID is gone");
 }
 
+/// A non-discoverable registration overwrites nothing: both credentials of
+/// the same account stay usable, and neither takes room in the store.
 #[test]
 fn non_discoverable_registration_does_not_overwrite() {
     for rk in [None, Some(false)] {
         let mut app = test_app([0x62; 16]);
         let first = register(&mut app, RP_ID, &[0x01], rk);
         let second = register(&mut app, RP_ID, &[0x01], rk);
-        assert_eq!(ids(&app), [second, first], "{rk:?}");
+        assert_ne!(first, second);
+        assert!(ids(&app).is_empty(), "{rk:?}");
+        for id in [&first, &second] {
+            assert!(
+                app.credential_for_rp(id, RP_ID).expect("look up").is_some(),
+                "{rk:?}"
+            );
+        }
     }
 }
 

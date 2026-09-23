@@ -128,7 +128,8 @@ impl fmt::Debug for PrivateKeyMaterial {
     }
 }
 
-/// One discoverable credential.
+/// One credential: a stored one, or the credential a sealed credential ID
+/// carries, which is never stored.
 ///
 /// # Creation order
 ///

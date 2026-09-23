@@ -1,8 +1,8 @@
 //! authenticatorMakeCredential tests.
 
 use super::support::new_app;
-use super::support::stored;
 use super::support::{TestStore, install_pin_uv_auth_token, token_pin_auth};
+use super::support::{created_credential, stored};
 use crate::ctap::AttestationMode;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::make_credential::COSE_ALG_ES256;
@@ -84,8 +84,7 @@ fn make_credential_includes_extensions() {
         .expect("makeCredential succeeds");
     assert_eq!(response[0], CTAP2_OK);
 
-    let credentials = stored(&app);
-    let credential = &credentials[0];
+    let credential = created_credential(&app, &response, "example.com");
     assert_eq!(credential.cred_protect, 3);
     assert_ne!(
         credential.cred_random_with_uv, credential.cred_random_without_uv,
@@ -171,9 +170,7 @@ fn make_credential_supports_es256() {
         .expect("makeCredential succeeds");
     assert_eq!(response[0], CTAP2_OK);
 
-    assert_eq!(stored(&app).len(), 1);
-    let credentials = stored(&app);
-    let credential = &credentials[0];
+    let credential = created_credential(&app, &response, "example.com");
     assert_eq!(credential.alg, CoseAlg::ES256);
     assert!(matches!(
         credential.private_key,
@@ -483,7 +480,7 @@ fn make_credential_can_omit_attestation() {
         .handle_make_credential(&payload)
         .expect("makeCredential succeeds");
     assert_eq!(response[0], CTAP2_OK);
-    assert_eq!(stored(&app).len(), 1);
+    created_credential(&app, &response, "example.com");
 
     let Value::Map(entries) = from_reader(&response[1..]).expect("decode response map") else {
         panic!("response must be a map");
@@ -633,9 +630,13 @@ fn make_credential_chooses_the_first_supported_algorithm_in_rp_order() {
         (vec![public_key(-50), public_key(-7)], CoseAlg::MLDSA87),
     ] {
         let mut app = new_app(TestStore::new(), [0x71; 16]);
-        app.handle_make_credential(&request_with_params(params, None))
+        let response = app
+            .handle_make_credential(&request_with_params(params, None))
             .expect("makeCredential succeeds");
-        assert_eq!(stored(&app)[0].alg, expected);
+        assert_eq!(
+            created_credential(&app, &response, "example.com").alg,
+            expected
+        );
     }
 }
 
@@ -694,9 +695,12 @@ fn make_credential_validates_every_pub_key_cred_params_element() {
 #[test]
 fn make_credential_exclude_list_ignores_other_credential_types() {
     let mut app = new_app(TestStore::new(), [0x74; 16]);
-    app.handle_make_credential(&request_with_params(vec![public_key(-7)], None))
+    let response = app
+        .handle_make_credential(&request_with_params(vec![public_key(-7)], None))
         .expect("first registration");
-    let existing = stored(&app)[0].credential_id.clone();
+    let existing = created_credential(&app, &response, "example.com")
+        .credential_id
+        .clone();
 
     let descriptor = |credential_type: &str| {
         Value::Array(vec![canonical_map(vec![

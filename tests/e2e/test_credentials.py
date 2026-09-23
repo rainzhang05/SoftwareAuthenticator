@@ -21,7 +21,19 @@ ALGORITHMS = [
 
 @pytest.mark.parametrize("alg", ALGORITHMS)
 def test_register_and_authenticate(ctap: Ctap2, alg):
+    """A non-discoverable credential is sealed into its credential ID, with no
+    state on the authenticator to count signatures in: its signature count
+    stays 0, which WebAuthn Level 3 §6.1.1 reads as having no counter."""
     credential = client.register(ctap, RP_ID, alg)
+
+    _, first = client.authenticate(ctap, credential)
+    _, second = client.authenticate(ctap, credential)
+    assert credential.auth_data.sign_count == first.sign_count == second.sign_count == 0
+
+
+@pytest.mark.parametrize("alg", ALGORITHMS)
+def test_a_discoverable_credential_counts_signatures(ctap: Ctap2, alg):
+    credential = client.register(ctap, RP_ID, alg, options={"rk": True})
 
     _, first = client.authenticate(ctap, credential)
     _, second = client.authenticate(ctap, credential)

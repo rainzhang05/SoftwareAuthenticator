@@ -31,8 +31,9 @@ fn text(value: &str) -> Value {
     Value::Text(value.into())
 }
 
-/// An ID of the form makeCredential gives a discoverable (`discoverable`)
-/// or non-discoverable credential.
+/// The ID of a stored credential: a discoverable one (`discoverable`) as
+/// makeCredential makes them, or a non-discoverable one as it made them
+/// before they were sealed into their IDs.
 fn credential_id(discoverable: bool, tag: u8) -> Vec<u8> {
     let mut id = vec![tag; CREDENTIAL_ID_LENGTH];
     id[0] = u8::from(discoverable);

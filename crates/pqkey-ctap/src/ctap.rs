@@ -120,10 +120,12 @@ impl<'interrupt> CtapApp<'interrupt> {
     /// * `store` holds credentials, the PIN state and the attestation key.
     ///   The persistent PIN state is read from it here; construction performs
     ///   no other I/O and never blocks on anything else.
-    /// * `rng` provides every random value the engine chooses: credential IDs,
-    ///   `CredRandom`, key-agreement keys, pinUvAuthTokens and IVs.  (Credential
-    ///   private keys come from [`PrivateKeyMaterial::generate`], which uses
-    ///   the operating system's generator.)
+    /// * `rng` provides every random value the engine chooses: discoverable
+    ///   credentials' IDs and `CredRandom`, key-agreement keys,
+    ///   pinUvAuthTokens and IVs.  (Credential private keys come from
+    ///   [`PrivateKeyMaterial::generate`], which uses the operating system's
+    ///   generator, and so do the nonces of the store sealing
+    ///   non-discoverable credentials into their IDs.)
     /// * `presence` is asked whenever an operation needs evidence of user
     ///   interaction.
     /// * `interrupt` is the flag through which the transport cancels the

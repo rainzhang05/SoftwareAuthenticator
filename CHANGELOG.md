@@ -71,7 +71,10 @@ Upgrading from `867a591` or earlier is not an in-place update:
   record, root keys with HKDF-derived subkeys, atomic writes, and a reset that
   replaces the key protecting credentials and PIN state.
 - authenticatorSelection.
-- Non-discoverable credentials for `rk` false.
+- Non-discoverable credentials for `rk` false. They are not stored: each
+  credential ID holds its credential, sealed with XChaCha20-Poly1305 under a
+  key that a reset replaces and bound to the relying party, so they take no
+  room in the store and report a signature count of 0.
 - `FIDO_2_3` in getInfo versions, plus `maxCredentialCountInList`,
   `remainingDiscoverableCredentials`, `attestationFormats` and the
   `makeCredUvNotRqd` option. `clientPin` is reported as false until a PIN is

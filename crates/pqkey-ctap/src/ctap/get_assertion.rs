@@ -9,7 +9,7 @@ use super::pin::protocol::{
 };
 use super::presence::{PresenceOperation, PresenceRequest};
 use super::request;
-use super::storage::{is_discoverable, store_status};
+use super::storage::{is_discoverable, is_sealed, store_status};
 use crate::store::{CredentialRecord, sort_newest_first};
 use crate::{ClassicPinProtocol, PinUvSessionKeys, try_sign_challenge};
 
@@ -268,8 +268,7 @@ impl CtapApp<'_> {
                 if applicable.iter().any(|cred| cred.credential_id == *id) {
                     continue;
                 }
-                if let Some(cred) = self.stored_credential(id)?
-                    && cred.rp_id == rp_id
+                if let Some(cred) = self.credential_for_rp(id, &rp_id)?
                     && Self::credential_allows(&cred, user_verified, true)
                 {
                     applicable.push(cred);
@@ -458,8 +457,9 @@ impl CtapApp<'_> {
         assertion_response(&credential, auth_data, signature, user_verified, None)
     }
 
-    /// Increment `credential`'s signature counter, persist it, and sign
-    /// `authData || clientDataHash` with the new count.
+    /// Increment a stored `credential`'s signature counter, persist it, and
+    /// sign `authData || clientDataHash` with the new count.  A sealed
+    /// credential signs with a count of 0.
     ///
     /// The counter is written before the signature is made, and a failed
     /// write fails the command: a signature is never returned for a counter
@@ -467,7 +467,7 @@ impl CtapApp<'_> {
     /// backwards after a restart (WebAuthn Level 3 §6.1.1, "SHOULD ensure
     /// that the signature counter value does not accidentally decrease").
     /// The signing key is materialised once, which for ML-DSA is one key
-    /// expansion from the stored seed.
+    /// expansion from the seed.
     fn sign_assertion(
         &mut self,
         mut credential: CredentialRecord,
@@ -478,13 +478,18 @@ impl CtapApp<'_> {
         extensions: Option<&[u8]>,
     ) -> Result<(CredentialRecord, Vec<u8>, Vec<u8>), u8> {
         let secret_key = credential.secret_key().map_err(|err| {
-            log::error!("cannot use a stored credential's key: {err}");
+            log::error!("cannot use a credential's key: {err}");
             CTAP2_ERR_PROCESSING
         })?;
-        credential.sign_count = credential.sign_count.saturating_add(1);
-        self.store
-            .put(&credential)
-            .map_err(|err| store_status("save the signature counter", err))?;
+        // A sealed credential has no state to keep a counter in, so its
+        // signature counter stays 0, which WebAuthn Level 3 §6.1.1 reads as
+        // "no counter".
+        if !is_sealed(&credential.credential_id) {
+            credential.sign_count = credential.sign_count.saturating_add(1);
+            self.store
+                .put(&credential)
+                .map_err(|err| store_status("save the signature counter", err))?;
+        }
 
         let auth_data = self.assertion_auth_data(
             rp_id,

@@ -959,6 +959,16 @@ pub(super) fn response_auth_data(response: &[u8]) -> Vec<u8> {
         .expect("authData present")
 }
 
+/// The credential a makeCredential `response` created for `rp_id`, whether
+/// stored (discoverable) or sealed into its ID (non-discoverable).
+pub(super) fn created_credential(app: &TestApp, response: &[u8], rp_id: &str) -> CredentialRecord {
+    let auth_data = response_auth_data(response);
+    let length = usize::from(u16::from_be_bytes([auth_data[53], auth_data[54]]));
+    app.credential_for_rp(&auth_data[55..55 + length], rp_id)
+        .expect("look up the new credential")
+        .expect("the new credential exists")
+}
+
 /// The user verified (UV) bit of the authenticator data flags.
 pub(super) const FLAG_UV: u8 = 0x04;
 
