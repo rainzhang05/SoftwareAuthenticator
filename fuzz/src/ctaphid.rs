@@ -7,16 +7,17 @@
 //!   length of at most 7,609 bytes followed by exactly the continuation
 //!   packets it needs, on the same channel, numbered from 0, zero padded, and
 //!   never interleaved with another message;
-//! * only defined commands go out; errors carry one defined CTAPHID error
-//!   code and keepalives one defined status;
+//! * only INIT, PING, CBOR, KEEPALIVE and ERROR go out, never CANCEL; errors
+//!   carry one defined CTAPHID error code and keepalives one defined status;
 //! * messages only go to channels that sent an initialization packet, and
 //!   channels allocated by INIT are neither 0 nor the broadcast channel;
 //! * a CBOR response carries exactly what the app answered, or
-//!   CTAP2_ERR_KEEPALIVE_CANCEL;
+//!   CTAP2_ERR_KEEPALIVE_CANCEL; an answer longer than a message goes out as
+//!   ERR_OTHER instead;
 //! * at most one message is queued per packet, answer or timer (no unbounded
-//!   growth), requests for the app are never handed out while it is busy and
-//!   never exceed 7,609 bytes, and timers are never further away than the
-//!   longest timeout.
+//!   growth), requests for the app are never empty, never handed out while it
+//!   is busy and never exceed 7,609 bytes, and timers are never further away
+//!   than the longest timeout.
 
 use std::collections::HashSet;
 

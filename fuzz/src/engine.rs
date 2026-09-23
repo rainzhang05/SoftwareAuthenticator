@@ -18,7 +18,8 @@ use crate::rng::SplitMix;
 /// transport, which would, is not part of these targets.
 static NEVER_INTERRUPTED: InterruptFlag = InterruptFlag::new();
 
-/// The message size the daemon builds the app for (`pqkey::MESSAGE_SIZE`).
+/// The largest CTAPHID message, and so the longest answer the engine may give
+/// (`pqkey::MESSAGE_SIZE`).
 pub const MESSAGE_SIZE: usize = pqkey::MESSAGE_SIZE;
 
 /// Every status code CTAP defines (CTAP 2.3 §8.2) that the engine may answer.

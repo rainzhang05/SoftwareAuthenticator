@@ -7,8 +7,9 @@
 //! * `ctap_request`: real CTAP2 requests, one per file, as a platform sends
 //!   them.
 //! * `ctaphid_packets`: CTAPHID exchanges (INIT, PING, CBOR with keepalives,
-//!   CANCEL, timeouts, busy channels, the largest message), encoded in the
-//!   target's input format and checked by decoding them back.
+//!   CANCEL, timeouts, busy channels, the largest message, an empty request
+//!   and an answer too long for a message), encoded in the target's input
+//!   format and checked by decoding them back.
 //! * `ctap_request_structured` and `ctap_sequence`: inputs picked from a
 //!   deterministic random search, each kept because it reached a command and
 //!   status no earlier one did (for the sequence target: PIN set, tokens,
@@ -494,13 +495,17 @@ fn ctaphid_packets(dir: &Path) {
             Action::TakeRequest,
             respond(64, 0),
         ]),
-        // The largest message in both directions.
+        // The largest message in both directions, and an answer too long for
+        // one, which goes out as ERR_OTHER.
         exchange(&[
             init(),
             message(first(), PING, 7609, 3),
             message(first(), CBOR, 7609, 0x02),
             Action::TakeRequest,
             respond(7609, 7),
+            message(first(), CBOR, 1, 0x04),
+            Action::TakeRequest,
+            respond(7610, 7),
         ]),
         // Packets out of order, missing and repeated.
         exchange(&[
