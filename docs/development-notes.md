@@ -267,8 +267,9 @@ these hold
   bump counts as breaking);
 - it changes nothing but `Cargo.toml` and `Cargo.lock` files.
 
-After merging it starts CI and Security on `main`. Everything else, including
-GitHub Actions updates (which `GITHUB_TOKEN` may not merge), waits for a person.
+After merging it starts CI, Security and E2E on `main`, since a merge made
+with `GITHUB_TOKEN` starts no push workflows. Everything else, including GitHub
+Actions updates (which `GITHUB_TOKEN` may not merge), waits for a person.
 
 ## Confirm the virtual HID device is visible to userspace
 

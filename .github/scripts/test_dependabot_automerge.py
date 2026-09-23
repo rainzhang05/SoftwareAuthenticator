@@ -139,10 +139,11 @@ class AutomergeScriptTest(unittest.TestCase):
 
     script = SCRIPTS / "dependabot-automerge.sh"
 
-    def run_script(self, files, lockfiles, runs=None, branch="dependabot/cargo/sha2-0.11.1"):
+    def run_script(self, files, lockfiles, runs=None, branch="dependabot/cargo/sha2-0.11.1", dry_run=True):
         """Run the script for a Dependabot PR changing `files`.
 
-        `lockfiles` maps "path@ref" (ref "base" or "head") to content.
+        `lockfiles` maps "path@ref" (ref "base" or "head") to content. With
+        `dry_run` false the script goes on to merge, against the fake gh.
         """
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp, "bin")
@@ -173,7 +174,7 @@ class AutomergeScriptTest(unittest.TestCase):
                 os.environ,
                 PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                 FAKE_GH_STATE=str(state_path),
-                DRY_RUN="1",
+                DRY_RUN="1" if dry_run else "0",
                 REPO=REPO,
                 HEAD_SHA=HEAD_SHA,
                 HEAD_BRANCH=branch,
@@ -200,6 +201,24 @@ class AutomergeScriptTest(unittest.TestCase):
         queried = [c for c in calls if c[0] == "api" and "/actions/workflows/" in c[1]]
         self.assertEqual(len(queried), 3, "no fuzz.yml for a root update")
         self.assertFalse(any(c[:2] == ["pr", "merge"] for c in calls))
+
+    def test_a_merge_runs_the_gates_on_main(self):
+        """A merge made with GITHUB_TOKEN starts no push workflows, so the
+        script starts CI, Security and E2E on main after merging."""
+        out, calls = self.run_script(
+            ["Cargo.lock"],
+            {"Cargo.lock@base": lockfile(sha2="0.11.0"), "Cargo.lock@head": lockfile(sha2="0.11.1")},
+            dry_run=False,
+        )
+        self.assertIn("merged PR #7", out)
+        merges = [i for i, call in enumerate(calls) if call[:2] == ["pr", "merge"]]
+        self.assertEqual(len(merges), 1)
+        self.assertEqual(calls[merges[0]][2:], ["7", "--repo", REPO, "--rebase", "--match-head-commit", HEAD_SHA])
+        dispatched = [call[2:] for call in calls[merges[0] + 1 :] if call[:2] == ["workflow", "run"]]
+        self.assertEqual(
+            dispatched,
+            [[workflow, "--repo", REPO, "--ref", "main"] for workflow in ("ci.yml", "security.yml", "e2e.yml")],
+        )
 
     def test_an_incompatible_fuzz_lockfile_update_is_not_merged(self):
         # The root lockfile is untouched; only fuzz/Cargo.lock says what changes.

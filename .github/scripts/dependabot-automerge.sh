@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Merge a Dependabot cargo PR once it is proven safe. Invoked by
-# .github/workflows/dependabot-automerge.yml after CI or Security completes.
+# .github/workflows/dependabot-automerge.yml after CI, Security, E2E or Fuzz
+# completes.
 #
 # Every condition below must hold, otherwise the script explains why and exits 0:
 #   - the PR is open, authored by Dependabot, on a dependabot/cargo/ branch
@@ -90,3 +91,4 @@ echo "merged PR #$number"
 # gates on main explicitly to validate the combined result.
 gh workflow run ci.yml --repo "$REPO" --ref main
 gh workflow run security.yml --repo "$REPO" --ref main
+gh workflow run e2e.yml --repo "$REPO" --ref main

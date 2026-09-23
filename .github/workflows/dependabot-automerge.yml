@@ -39,7 +39,7 @@ jobs:
     permissions:
       contents: write # merge the PR
       pull-requests: write # merge the PR
-      actions: write # dispatch CI and Security on main after merging
+      actions: write # dispatch CI, Security and E2E on main after merging
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
