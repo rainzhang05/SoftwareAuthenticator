@@ -2,7 +2,7 @@
 
 use super::support::{TestApp, encode, int, test_app};
 use crate::ctap::CtapApp;
-use crate::ctap::cbor::canonical_map;
+use crate::ctap::cbor::{canonical_map, is_canonical};
 
 use ciborium::value::Value;
 
@@ -48,11 +48,45 @@ fn request_log_counts_the_response_with_and_without_its_status_byte() {
 }
 
 /// Send `request` through [`CtapApp::call`], checking that the answer fits a
-/// CTAPHID message.
+/// CTAPHID message and that response parameters are in the CTAP2 canonical
+/// CBOR encoding form ("All encoders MUST serialize CBOR in the CTAP2
+/// canonical CBOR encoding form", CTAP 2.3 §8).
 pub(super) fn call(app: &mut TestApp, request: &[u8]) -> Vec<u8> {
     let response = app.call(request);
     assert!(response.len() <= MAX_RESPONSE_SIZE, "response too long");
+    if let [CTAP2_OK, parameters @ ..] = response.as_slice()
+        && !parameters.is_empty()
+    {
+        assert!(
+            is_canonical(parameters),
+            "not canonical CBOR: {response:02x?}"
+        );
+    }
     response
+}
+
+/// Map keys sort by major type first (CTAP 2.3 §8): every unsigned integer
+/// before every negative one, whatever their encoded length, and integers
+/// before strings.
+#[test]
+fn response_map_keys_sort_by_major_type_first() {
+    let Value::Map(entries) = canonical_map(vec![
+        (Value::Text("a".into()), Value::Null),
+        (int(-25), Value::Null),
+        (int(-1), Value::Null),
+        (int(24), Value::Null),
+        (int(1), Value::Null),
+    ]) else {
+        unreachable!("canonical_map builds a map");
+    };
+    let keys: Vec<Value> = entries.into_iter().map(|(key, _)| key).collect();
+    assert_eq!(
+        keys,
+        [int(1), int(24), int(-1), int(-25), Value::Text("a".into())]
+    );
+    assert!(is_canonical(&encode(&Value::Map(
+        keys.into_iter().map(|key| (key, Value::Null)).collect()
+    ))));
 }
 
 /// The authenticator has no biometric sensor, so it implements neither

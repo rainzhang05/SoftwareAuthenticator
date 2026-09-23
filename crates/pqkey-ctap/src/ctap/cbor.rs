@@ -5,37 +5,19 @@ use std::cmp::Ordering;
 
 use crate::ctap::constants::CTAP2_ERR_INVALID_CBOR;
 
-fn canonical_fallback_cmp(left: &Value, right: &Value) -> Ordering {
-    let mut left_bytes = Vec::new();
-    into_writer(left, &mut left_bytes).expect("serialize left key for canonical ordering");
-    let mut right_bytes = Vec::new();
-    into_writer(right, &mut right_bytes).expect("serialize right key for canonical ordering");
-    match left_bytes.len().cmp(&right_bytes.len()) {
-        Ordering::Equal => left_bytes.cmp(&right_bytes),
-        other => other,
-    }
+/// The CBOR encoding of a map key.
+fn encode_key(key: &Value) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    into_writer(key, &mut bytes).expect("serialize a map key into memory");
+    bytes
 }
 
+/// The order of two map keys in the CTAP2 canonical CBOR encoding form: by
+/// major type first, then by encoded length and bytes (see
+/// [`canonical_key_order`]).  ciborium's `Integer::canonical_cmp` compares
+/// lengths first, the older RFC 7049 rule, which would put -1 before 24.
 fn canonical_key_cmp(left: &Value, right: &Value) -> Ordering {
-    use Value::{Integer as IntValue, Text};
-
-    match (left, right) {
-        (IntValue(left_int), IntValue(right_int)) => left_int.canonical_cmp(right_int),
-        (IntValue(_), Text(_)) => Ordering::Less,
-        (Text(_), IntValue(_)) => Ordering::Greater,
-        (Text(left_text), Text(right_text)) => match left_text.len().cmp(&right_text.len()) {
-            Ordering::Equal => left_text.cmp(right_text),
-            other => other,
-        },
-        (Value::Bytes(left_bytes), Value::Bytes(right_bytes)) => {
-            match left_bytes.len().cmp(&right_bytes.len()) {
-                Ordering::Equal => left_bytes.cmp(right_bytes),
-                other => other,
-            }
-        }
-        (Value::Bool(left_bool), Value::Bool(right_bool)) => left_bool.cmp(right_bool),
-        _ => canonical_fallback_cmp(left, right),
-    }
+    canonical_key_order(&encode_key(left), &encode_key(right))
 }
 
 pub(super) fn canonical_sort(entries: &mut [(Value, Value)]) {
@@ -235,6 +217,13 @@ fn canonical_item_end(bytes: &[u8], pos: usize, depth: usize) -> Option<usize> {
         _ => return None,
     }
     Some(end)
+}
+
+/// Whether `bytes` is exactly one data item in the CTAP2 canonical CBOR
+/// encoding form.
+#[cfg(test)]
+pub(super) fn is_canonical(bytes: &[u8]) -> bool {
+    canonical_item_end(bytes, 0, 0) == Some(bytes.len())
 }
 
 /// The order of two encoded map keys: "If the major types are different, the
