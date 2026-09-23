@@ -405,10 +405,6 @@ impl<R: CryptoRng> CtaphidHost<R> {
         self.enqueue_message(channel, Command::Cbor, &response);
     }
 
-    pub fn has_pending_frames(&self) -> bool {
-        !self.pending.is_empty()
-    }
-
     pub fn next_outgoing_frame(&mut self) -> Option<CtapHidFrame> {
         self.pending.pop_front()
     }

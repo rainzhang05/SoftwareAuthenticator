@@ -243,13 +243,10 @@ impl UhidDevice {
         self.inner.send_input_report(frame.as_bytes())
     }
 
-    pub fn wait(&self, timeout: Option<Duration>) -> io::Result<bool> {
-        self.inner.wait(timeout, None)
-    }
-
-    /// Like [`wait`](Self::wait), but also return once `other` is readable.
+    /// Wait until the device or `other` is readable, or `timeout` passes (no
+    /// timeout waits indefinitely). Returns whether either became readable.
     pub fn wait_with(&self, other: BorrowedFd<'_>, timeout: Option<Duration>) -> io::Result<bool> {
-        self.inner.wait(timeout, Some(other))
+        self.inner.wait(timeout, other)
     }
 }
 
@@ -266,11 +263,11 @@ impl UhidInner {
         }
     }
 
-    fn wait(&self, timeout: Option<Duration>, other: Option<BorrowedFd<'_>>) -> io::Result<bool> {
-        let mut fds = vec![PollFd::new(self.fd.as_fd(), PollFlags::POLLIN)];
-        if let Some(other) = other {
-            fds.push(PollFd::new(other, PollFlags::POLLIN));
-        }
+    fn wait(&self, timeout: Option<Duration>, other: BorrowedFd<'_>) -> io::Result<bool> {
+        let mut fds = [
+            PollFd::new(self.fd.as_fd(), PollFlags::POLLIN),
+            PollFd::new(other, PollFlags::POLLIN),
+        ];
         // `PollTimeout::NONE` blocks indefinitely; a wait longer than
         // `PollTimeout::MAX` can say is capped rather than rejected.
         let timeout = timeout.map_or(PollTimeout::NONE, |d| {
