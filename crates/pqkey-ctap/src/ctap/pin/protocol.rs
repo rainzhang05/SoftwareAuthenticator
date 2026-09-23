@@ -198,6 +198,20 @@ impl KeyAgreementKey {
         protocol: PinProtocol,
         platform_key: &[(Value, Value)],
     ) -> Result<PinUvSessionKeys, u8> {
+        // "Parse peerCoseKey as specified for getPublicKey" (§6.5.6): an EC2
+        // key (kty 2) on P-256 (crv 1).  Its alg, -25 in getPublicKey, names
+        // no algorithm that is actually used, so it is not checked.
+        let label = |label: i64| {
+            platform_key
+                .iter()
+                .find(|(k, _)| *k == Value::Integer(Integer::from(label)))
+                .map(|(_, v)| v)
+        };
+        if label(1) != Some(&Value::Integer(Integer::from(2)))
+            || label(-1) != Some(&Value::Integer(Integer::from(1)))
+        {
+            return Err(CTAP1_ERR_INVALID_PARAMETER);
+        }
         let Some(peer_x) = platform_key
             .iter()
             .find(|(k, _)| *k == Value::Integer(Integer::from(-2)))

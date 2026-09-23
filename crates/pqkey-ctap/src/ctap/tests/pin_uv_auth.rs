@@ -5,7 +5,7 @@
 use super::support::new_app;
 use super::support::{
     FLAG_UV, PlatformPinSession, TestStore, client_pin, encode, es256_credential,
-    get_assertion_request, get_assertion_request_with, get_pin_uv_auth_token,
+    get_assertion_request, get_assertion_request_with, get_pin_retries, get_pin_uv_auth_token,
     install_pin_uv_auth_token, int, make_credential_request, make_credential_request_with,
     padded_pin, pin_hash, platform_authenticate, response_auth_data, set_pin_encrypted,
     set_pin_padded, token_pin_auth,
@@ -700,6 +700,125 @@ fn hmac_secret_defaults_to_pin_uv_auth_protocol_one() {
                 );
             }
             Some(_) => assert_eq!(result, Err(CTAP1_ERR_INVALID_PARAMETER)),
+        }
+    }
+}
+
+// -- the platform's key agreement key ------------------------------------------------
+
+/// `key` with the value of COSE key label `label` replaced by `value`.
+fn with_label(key: &Value, label: i64, value: Value) -> Value {
+    let Value::Map(entries) = key else {
+        panic!("a COSE key is a map");
+    };
+    canonical_map(
+        entries
+            .iter()
+            .map(|(k, v)| {
+                let v = if *k == int(label) {
+                    value.clone()
+                } else {
+                    v.clone()
+                };
+                (k.clone(), v)
+            })
+            .collect(),
+    )
+}
+
+/// Platform keys decapsulate must refuse: "Parse peerCoseKey as specified for
+/// getPublicKey [...]. If unsuccessful, or if the resulting point is not on
+/// the curve, return error." (CTAP 2.3 §6.5.6)  getPublicKey gives an EC2 key
+/// (kty 2) on P-256 (crv 1).
+fn unusable_platform_keys(key: &Value) -> Vec<(&'static str, Value)> {
+    let Value::Map(entries) = key else {
+        panic!("a COSE key is a map");
+    };
+    let mut y = entries
+        .iter()
+        .find_map(|(k, v)| match v {
+            Value::Bytes(y) if *k == int(-3) => Some(y.clone()),
+            _ => None,
+        })
+        .expect("a y coordinate");
+    y[31] ^= 1;
+    vec![
+        ("an OKP key", with_label(key, 1, int(1))),
+        ("a P-384 key", with_label(key, -1, int(2))),
+        (
+            "a point off the curve",
+            with_label(key, -3, Value::Bytes(y)),
+        ),
+    ]
+}
+
+/// An unusable platform key is CTAP1_ERR_INVALID_PARAMETER before a PIN retry
+/// is spent, a PIN is set or hmac-secret answers: "If an error results, it
+/// returns CTAP1_ERR_INVALID_PARAMETER." (CTAP 2.3 §6.5.5.5, §6.5.5.7.1)
+#[test]
+fn an_unusable_platform_key_agreement_key_is_an_invalid_parameter() {
+    const PIN: &[u8] = b"4821";
+    for protocol in PROTOCOLS {
+        let identifier = || int(protocol.identifier().into());
+        let session = PlatformPinSession::establish(
+            &mut new_app(TestStore::new(), [0x6C; 16]),
+            protocol,
+            0x42,
+        );
+        for (name, key) in unusable_platform_keys(&session.key_agreement) {
+            let mut app = new_app(TestStore::new(), [0x6C; 16]);
+            set_pin_padded(&mut app, protocol, &padded_pin(PIN)).expect("setPIN");
+            let result = client_pin(
+                &mut app,
+                vec![
+                    (int(1), identifier()),
+                    (int(2), int(0x05)),
+                    (int(3), key.clone()),
+                    (int(6), Value::Bytes(session.encrypt(&pin_hash(PIN)))),
+                ],
+            );
+            assert_eq!(
+                result,
+                Err(CTAP1_ERR_INVALID_PARAMETER),
+                "getPinToken, {name}"
+            );
+            assert_eq!(get_pin_retries(&mut app).0, MAX_PIN_RETRIES, "{name}");
+
+            let mut app = new_app(TestStore::new(), [0x6C; 16]);
+            let new_pin_enc = session.encrypt(&padded_pin(PIN));
+            let param = platform_authenticate(protocol, &session.keys.auth_key, &new_pin_enc);
+            let result = client_pin(
+                &mut app,
+                vec![
+                    (int(1), identifier()),
+                    (int(2), int(0x03)),
+                    (int(3), key.clone()),
+                    (int(4), Value::Bytes(param)),
+                    (int(5), Value::Bytes(new_pin_enc)),
+                ],
+            );
+            assert_eq!(result, Err(CTAP1_ERR_INVALID_PARAMETER), "setPIN, {name}");
+            assert!(!app.pin_state.is_set(), "{name}");
+
+            let mut app = new_app(TestStore::new(), [0x6C; 16]);
+            insert_owned(&mut app, es256_credential("example.com", &[0xE3]));
+            let salt_enc = session.encrypt(&[0x98; 32]);
+            let salt_auth = platform_authenticate(protocol, &session.keys.auth_key, &salt_enc);
+            let extensions = canonical_map(vec![(
+                Value::Text("hmac-secret".into()),
+                canonical_map(vec![
+                    (int(1), key.clone()),
+                    (int(2), Value::Bytes(salt_enc)),
+                    (int(3), Value::Bytes(salt_auth)),
+                    (int(4), identifier()),
+                ]),
+            )]);
+            let request = get_assertion_request(&[0x49; 32], "example.com", None, Some(extensions));
+            assert_eq!(
+                app.handle_get_assertion(&request),
+                Err(CTAP1_ERR_INVALID_PARAMETER),
+                "hmac-secret, {name}"
+            );
         }
     }
 }
