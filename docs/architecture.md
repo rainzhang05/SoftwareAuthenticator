@@ -79,9 +79,9 @@ opens the credential store, creates the uhid device, writes
 ```
 
 The engine runs on its own thread so that the device keeps being served while
-a request waits for the user: the transport sends keepalives, answers
-CTAPHID_INIT and PING, tells other channels the device is busy, and passes
-CTAPHID_CANCEL on.
+a request waits for the user: the transport sends keepalives, answers other
+channels (INIT and PING included) with ERR_CHANNEL_BUSY, resynchronises the
+request's own channel on CTAPHID_INIT, and passes CTAPHID_CANCEL on.
 
 - **Requests** go to the worker over an `mpsc` channel. The transport marks
   the `InterruptFlag` as working before it sends a request, so a CANCEL that
@@ -134,7 +134,10 @@ sends what it queues. `crates/pqkey/src/uhid.rs` reads and writes kernel
   processed. A transaction aborted while the engine works on it is cancelled
   through the interrupt flag, and the engine's late answer is discarded.
 - **Channels.** CTAPHID_INIT allocates random channel IDs; the 256 most
-  recently used are kept.
+  recently used are kept. Requests are served on any channel but 0 and the
+  broadcast channel, allocated or not, so a long-lived client whose channel
+  was forgotten keeps working; only CTAPHID_INIT on such a channel is
+  refused.
 - **Capabilities.** The INIT response reports CAPABILITY_CBOR and
   CAPABILITY_NMSG (no CTAPHID_MSG, so no U2F).
 

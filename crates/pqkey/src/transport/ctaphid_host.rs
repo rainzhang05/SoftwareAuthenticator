@@ -85,7 +85,10 @@ pub const CTAP2_ERR_KEEPALIVE_CANCEL: u8 = 0x2D;
 
 /// How many channels CTAPHID_INIT keeps allocated. Every client that opens
 /// the device allocates one and none is ever released, so the least recently
-/// used channel is forgotten once this many exist.
+/// used channel is forgotten once this many exist. Requests on a forgotten
+/// channel are still served, so a long-lived client is not cut off by others
+/// coming and going; only CTAPHID_INIT there, to resynchronise it, is
+/// refused.
 pub const MAX_CHANNELS: usize = 256;
 
 const CHANNEL_GENERATION_RETRY_LIMIT: usize = 64;
@@ -530,6 +533,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
             return;
         }
 
+        // Any other channel is served, allocated or not (see MAX_CHANNELS).
         if channel == 0 || channel == BROADCAST_CID {
             self.enqueue_error(channel, ErrorCode::InvalidChannel);
             return;
@@ -932,6 +936,9 @@ mod tests {
         );
         assert_eq!(host.channels.len(), MAX_CHANNELS);
         assert_eq!(init_on(&mut host, 2), error(2, ErrorCode::InvalidChannel));
+        // Only INIT is refused there: its requests are still served.
+        send(&mut host, 2, Command::Ping, &[7], 0);
+        assert_eq!(sent(&mut host), [message(2, Command::Ping, &[7])]);
         assert_eq!(init_on(&mut host, 1).command, init);
         assert_eq!(init_on(&mut host, 3).command, init);
     }
