@@ -488,11 +488,15 @@ pub fn try_credential_secret_from_bytes(
 ) -> Result<CredentialSecretKey, CryptoError> {
     match alg {
         CoseAlg::ES256 => {
-            // `SigningKey::from_slice` performs the full range check (non-zero
-            // and below the group order) and rejects wrong lengths, so no
-            // intermediate `SecretKey` copy of the scalar is needed.
+            // Exactly 32 bytes: `SigningKey::from_slice` would left-pad a
+            // slice of 24 to 31 bytes, reading a truncated key as some other
+            // key.  `from_bytes` performs the full range check (non-zero and
+            // below the group order), and borrowing the bytes in place needs
+            // no intermediate copy of the scalar.
+            let scalar =
+                <&p256::FieldBytes>::try_from(bytes).map_err(|_| CryptoError::InvalidKey)?;
             let signing_key =
-                P256SigningKey::from_slice(bytes).map_err(|_| CryptoError::InvalidKey)?;
+                P256SigningKey::from_bytes(scalar).map_err(|_| CryptoError::InvalidKey)?;
             Ok(CredentialSecretKey::Es256(signing_key))
         }
         // Stored ML-DSA keys are seeds; an expanded secret key is never
@@ -961,8 +965,15 @@ mod tests {
         let err = |bytes: &[u8]| {
             try_credential_secret_from_bytes(CoseAlg::ES256, bytes).expect_err("must be rejected")
         };
-        // Wrong length.
-        assert_eq!(err(&[0x11; 5]), CryptoError::InvalidKey);
+        // Wrong length, including the 24 to 31 bytes that elliptic-curve's
+        // `from_slice` would pad into a valid scalar.
+        for len in [5, 24, 31, 33] {
+            assert_eq!(
+                err(&vec![0x11; len]),
+                CryptoError::InvalidKey,
+                "{len} bytes"
+            );
+        }
         // Correct length but not a valid scalar: zero is rejected.
         assert_eq!(err(&[0x00; 32]), CryptoError::InvalidKey);
         // Correct length but above the group order.
