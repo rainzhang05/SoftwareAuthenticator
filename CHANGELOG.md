@@ -3,8 +3,8 @@
 All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-The project has not made a release yet, and does not follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html) until it does.
+pqkey is a test project that makes no releases, so it does not follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 

@@ -194,8 +194,9 @@ installation it is.
 
 The default USB IDs `1209:0001` are a [pid.codes](https://pid.codes/1209/0001/)
 test assignment that pid.codes says must not be used on redistributed devices.
-They are not unique to pqkey, so other test devices may use them too. A
-dedicated product ID has to be registered before a release.
+They are not unique to pqkey, so other test devices may use them too. pqkey is
+a test project that is not released, so it keeps this test ID; a build that is
+redistributed needs a product ID of its own.
 
 ### Testing and its scope
 

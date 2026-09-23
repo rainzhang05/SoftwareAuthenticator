@@ -41,8 +41,8 @@ pub const DEFAULT_VENDOR_ID: u32 = 0x1209;
 /// The USB product ID the virtual key reports unless `--product-id` says
 /// otherwise: 0x0001, the first of pid.codes' test product IDs (0x0001 to
 /// 0x0010 under vendor 0x1209). pid.codes reserves them for private testing,
-/// and they are not unique to this project; this is an interim default until
-/// the project has a product ID of its own.
+/// and they are not unique to this project, a test project that is not
+/// released and so keeps one of them.
 pub const DEFAULT_PRODUCT_ID: u32 = 0x0001;
 
 #[derive(Debug, Clone)]

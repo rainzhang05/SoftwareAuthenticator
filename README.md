@@ -8,7 +8,8 @@ Besides classical ES256 it can create post-quantum **ML-DSA-44, ML-DSA-65 and
 ML-DSA-87** credentials (FIPS 204). Written in Rust, with pure-Rust
 cryptography and no C dependencies.
 
-> **Pre-release software (0.1.0), and a software key is not a hardware key.**
+> **A test project (0.1.0), not for production use, and a software key is not
+> a hardware key.**
 > Credential private keys are files in your home directory; anything running as
 > your user, or as root, can read and use them. User presence is a desktop
 > notification, not a touch. The on-disk format and command line may still
