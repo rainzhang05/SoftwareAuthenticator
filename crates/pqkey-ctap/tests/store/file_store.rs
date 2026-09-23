@@ -228,8 +228,9 @@ fn data_persists_across_reopen() {
     assert_eq!(scratch.open().count().unwrap(), ALL_ALGS.len());
 }
 
-/// A sealed credential ID needs only the credential key: sealing creates that
-/// key and nothing else, and a later process opens the ID with it.
+/// A sealed credential ID needs only the credential key, which a later process
+/// opens it with.  Sealing stores no credential file, only the default PIN
+/// state that marks the key as in use.
 #[test]
 fn sealed_credential_ids_survive_reopen() {
     let scratch = Scratch::new();
@@ -239,9 +240,27 @@ fn sealed_credential_ids_survive_reopen() {
         .unwrap();
     assert!(scratch.key_path(KeyDomain::Credential).exists());
     assert!(credential_files(&scratch).is_empty());
-    assert!(!scratch.pin_state_path().exists());
+    assert!(scratch.pin_state_path().exists());
     let opened = scratch.open().open_credential_id(&sealed, b"aad").unwrap();
     assert_eq!(opened.as_deref().map(Vec::as_slice), Some(&b"secret"[..]));
+}
+
+/// With only sealed credentials, which relying parties hold, a lost
+/// credential key is still reported rather than silently replaced.
+#[test]
+fn a_lost_key_is_reported_when_only_sealed_credentials_depend_on_it() {
+    let scratch = Scratch::new();
+    let sealed = scratch
+        .open()
+        .seal_credential_id(b"secret", b"aad")
+        .unwrap();
+    fs::remove_file(scratch.key_path(KeyDomain::Credential)).unwrap();
+
+    let mut store = scratch.open();
+    let credential = KeyDomain::Credential;
+    assert_key_unavailable(store.open_credential_id(&sealed, b"aad"), credential);
+    assert_key_unavailable(store.seal_credential_id(b"other", b"aad"), credential);
+    assert!(!scratch.key_path(KeyDomain::Credential).exists());
 }
 
 #[test]

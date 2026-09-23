@@ -173,7 +173,9 @@ pub trait CredentialStore {
     /// The result is a fresh random nonce, the ciphertext and the tag,
     /// [`SEALED_ID_OVERHEAD`] bytes longer than `plaintext`.  The key belongs
     /// with the credentials: [`Self::clear`] replaces it, so a reset ends
-    /// sealed credentials along with stored ones.
+    /// sealed credentials along with stored ones.  Afterwards
+    /// [`Self::pin_state`] is `Some`: the default PIN state is written if there
+    /// was none, which marks that data depends on the key.
     fn seal_credential_id(
         &mut self,
         plaintext: &[u8],

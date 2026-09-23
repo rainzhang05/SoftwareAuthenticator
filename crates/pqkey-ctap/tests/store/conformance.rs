@@ -717,8 +717,23 @@ fn sealed_credential_ids_open_only_with_their_associated_data<B: Backend>() {
             .seal_credential_id(&plaintext, b"example.com")
             .unwrap()
     );
-    // Sealing stores nothing.
+    // Sealing stores no credential, but leaves the default PIN state behind
+    // to mark that data depends on the credential key.
     assert_eq!(store.count().unwrap(), 0);
+    assert_eq!(store.pin_state().unwrap(), Some(PinStateRecord::default()));
+}
+
+fn sealing_keeps_an_existing_pin_state<B: Backend>() {
+    let mut fixture = fresh::<B>();
+    let store = &mut fixture.store;
+    let pin = PinStateRecord {
+        pin_hash: Some(random_bytes()),
+        pin_retries: 5,
+        ..PinStateRecord::default()
+    };
+    store.set_pin_state(&pin).unwrap();
+    store.seal_credential_id(b"secret", b"aad").unwrap();
+    assert_eq!(store.pin_state().unwrap(), Some(pin));
 }
 
 fn a_fresh_store_opens_no_credential_id<B: Backend>() {
@@ -773,6 +788,7 @@ conformance_suite!(
     clear_keeps_the_attestation_record,
     store_is_fully_usable_after_clear,
     sealed_credential_ids_open_only_with_their_associated_data,
+    sealing_keeps_an_existing_pin_state,
     a_fresh_store_opens_no_credential_id,
     clear_ends_sealed_credential_ids,
     clear_on_a_fresh_store,

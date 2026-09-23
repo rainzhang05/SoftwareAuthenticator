@@ -136,6 +136,8 @@ impl CredentialStore for MemoryStore {
             None => self.credential_key.insert(RootKey::generate()?).clone(),
         };
         let keys = CredentialKeys::derive(&root)?;
+        // As the file store does, so both behave alike.
+        self.pin_state.get_or_insert_with(PinStateRecord::default);
         envelope::seal_credential_id(&keys.id, plaintext, associated_data)
     }
 

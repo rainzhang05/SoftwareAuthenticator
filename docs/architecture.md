@@ -312,6 +312,10 @@ reads as corrupt, which the engine treats as a PIN set and blocked until the
 next reset. No step needs the old key, so a reset also recovers a store whose
 credential key is lost. The attestation record, under the device key, is kept.
 
+Sealing a credential ID writes the default PIN state if there is none, so that
+a lost credential key is reported even when only sealed credentials, which
+relying parties hold, depend on it.
+
 What this does and does not protect is in
 [SECURITY.md](../SECURITY.md#the-encrypted-credential-store).
 

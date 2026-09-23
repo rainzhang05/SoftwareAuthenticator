@@ -82,7 +82,9 @@ const ATTESTATION_FILE: &str = "attestation";
 ///
 /// A root key that is missing while data encrypted under it exists, or that
 /// exists but is malformed, is never regenerated: operations that need it
-/// fail with [`StoreError::KeyUnavailable`].  Only
+/// fail with [`StoreError::KeyUnavailable`].  Sealing a credential ID writes
+/// the default PIN state if there is none, so that sealed credentials, which
+/// only relying parties hold, count as such data.  Only
 /// [`clear`](CredentialStore::clear) replaces the credential key, which also
 /// makes it the way to recover from a lost one.
 ///
@@ -531,6 +533,13 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
     ) -> Result<Vec<u8>, StoreError> {
         let root = self.root_key_for_write(KeyDomain::Credential)?;
         let keys = CredentialKeys::derive(&root)?;
+        // Sealed IDs live at relying parties, where `has_data` cannot see
+        // them.  A PIN state, the default one if there is none yet, marks that
+        // something depends on the credential key, so a lost key is reported
+        // rather than replaced as if nothing did.
+        if !exists(&self.root.join(PIN_STATE_FILE))? {
+            self.write_pin_state(&keys, &PinStateRecord::default())?;
+        }
         envelope::seal_credential_id(&keys.id, plaintext, associated_data)
     }
 
