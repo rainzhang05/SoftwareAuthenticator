@@ -595,6 +595,32 @@ mod raw {
         pub u: uhid_event_union,
     }
 
+    // The layout of include/uapi/linux/uhid.h, checked at compile time.
+    //
+    // On 64-bit systems the kernel's `struct uhid_event` is 4380 bytes: its
+    // union is padded to the 8-byte alignment of `struct uhid_start_req`, the
+    // one member that is not packed. Every member here is packed, so the event
+    // is 4376 bytes, as on 32-bit x86. Nothing lives in the padding, and the
+    // kernel takes the shorter event as it is: a read returns min(count, size)
+    // bytes of an event, and a write zero-fills whatever it is not given.
+    const _: () = {
+        use core::mem::offset_of;
+        assert!(size_of::<uhid_event>() == 4376);
+        assert!(offset_of!(uhid_event, u) == 4);
+        assert!(size_of::<uhid_create2_req>() == 4372);
+        assert!(offset_of!(uhid_create2_req, rd_size) == 256);
+        assert!(offset_of!(uhid_create2_req, vendor) == 260);
+        assert!(offset_of!(uhid_create2_req, rd_data) == 276);
+        assert!(offset_of!(uhid_input2_req, data) == 2);
+        assert!(offset_of!(uhid_output_req, size) == 4096);
+        assert!(offset_of!(uhid_output_req, rtype) == 4098);
+        assert!(offset_of!(uhid_get_report_req, rtype) == 5);
+        assert!(offset_of!(uhid_get_report_reply_req, data) == 8);
+        assert!(offset_of!(uhid_set_report_req, size) == 6);
+        assert!(offset_of!(uhid_set_report_req, data) == 8);
+        assert!(size_of::<uhid_set_report_reply_req>() == 6);
+    };
+
     impl uhid_event {
         /// An all-zero event of type `type_`, whose union fields the caller
         /// fills in. Zeroing the whole union, not only the field in use, keeps
