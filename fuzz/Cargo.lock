@@ -1146,7 +1146,6 @@ dependencies = [
  "chacha20poly1305",
  "ciborium",
  "getrandom",
- "hkdf",
  "hmac",
  "log",
  "p256",

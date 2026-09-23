@@ -15,7 +15,7 @@ use ciborium::ser::into_writer;
 use ciborium::value::{Integer, Value};
 use core::fmt;
 use getrandom::SysRng;
-use hkdf::Hkdf;
+use hmac::{Hmac, KeyInit, Mac, digest::InvalidLength};
 use p256::Sec1Point;
 use p256::ecdsa::{
     Signature as P256EcdsaSignature, SigningKey as P256SigningKey, signature::Signer,
@@ -195,6 +195,30 @@ pub fn derive_classic_pin_uv_session_keys(
         .expect("HKDF expand cannot fail for a fixed 32-byte output")
 }
 
+/// HKDF-SHA-256 (RFC 5869) with no salt and a single 32-byte output block,
+/// the only form this crate uses: `HMAC(HMAC(0³², ikm), info || 0x01)`.
+///
+/// Written out rather than taken from the `hkdf` crate, which drops the
+/// pseudorandom key it extracts, as secret as `ikm`, without wiping it.  Here
+/// that key and the output block are wiped, and the HMAC states wipe
+/// themselves.
+pub(crate) fn hkdf_sha256(
+    ikm: &[u8],
+    info: &[u8],
+    okm: &mut [u8; 32],
+) -> Result<(), InvalidLength> {
+    // RFC 5869 §2.2: a missing salt is HashLen zero bytes.
+    let mut extract = <Hmac<Sha256> as KeyInit>::new_from_slice(&[0u8; 32])?;
+    extract.update(ikm);
+    let prk = Zeroizing::new(extract.finalize().into_bytes());
+    let mut expand = <Hmac<Sha256> as KeyInit>::new_from_slice(&prk)?;
+    expand.update(info);
+    expand.update(&[1]);
+    let block = Zeroizing::new(expand.finalize().into_bytes());
+    okm.copy_from_slice(&block);
+    Ok(())
+}
+
 /// Fallible form of [`derive_classic_pin_uv_session_keys`].
 ///
 /// Prefer this in new code.  It returns [`CryptoError::KeyDerivation`] instead
@@ -218,11 +242,10 @@ pub fn try_derive_classic_pin_uv_session_keys(
             keys.auth_key.copy_from_slice(&hash);
         }
         ClassicPinProtocol::V2 => {
-            // IKM is Z itself, NOT SHA-256(Z).  `None` salt == 32 zero bytes.
-            let hkdf = Hkdf::<Sha256>::new(None, shared_secret);
-            hkdf.expand(b"CTAP2 AES key", &mut keys.encryption_key)
+            // IKM is Z itself, NOT SHA-256(Z), and the salt 32 zero bytes.
+            hkdf_sha256(shared_secret, b"CTAP2 AES key", &mut keys.encryption_key)
                 .map_err(|_| CryptoError::KeyDerivation)?;
-            hkdf.expand(b"CTAP2 HMAC key", &mut keys.auth_key)
+            hkdf_sha256(shared_secret, b"CTAP2 HMAC key", &mut keys.auth_key)
                 .map_err(|_| CryptoError::KeyDerivation)?;
         }
     }
@@ -790,6 +813,19 @@ mod tests {
         );
     }
 
+    /// RFC 5869 test case 3 (A.3), SHA-256 with no salt and no info: the
+    /// first 32 bytes of its output keying material.
+    #[test]
+    fn hkdf_matches_rfc_5869() {
+        let mut okm = [0u8; 32];
+        hkdf_sha256(&[0x0b; 22], b"", &mut okm).unwrap();
+        let hex: String = okm.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(
+            hex,
+            "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d"
+        );
+    }
+
     /// Guards specifically against reintroducing the `IKM = SHA-256(Z)` bug.
     #[test]
     fn pin_protocol_two_kdf_does_not_pre_hash_z() {
@@ -798,11 +834,10 @@ mod tests {
 
         // What the buggy implementation produced: HKDF with IKM = SHA-256(Z).
         let hashed_z = Sha256::digest(TEST_Z);
-        let wrong = Hkdf::<Sha256>::new(None, &hashed_z);
         let mut wrong_aes = [0u8; 32];
         let mut wrong_hmac = [0u8; 32];
-        wrong.expand(b"CTAP2 AES key", &mut wrong_aes).unwrap();
-        wrong.expand(b"CTAP2 HMAC key", &mut wrong_hmac).unwrap();
+        hkdf_sha256(&hashed_z, b"CTAP2 AES key", &mut wrong_aes).unwrap();
+        hkdf_sha256(&hashed_z, b"CTAP2 HMAC key", &mut wrong_hmac).unwrap();
 
         assert_ne!(
             keys.encryption_key, wrong_aes,

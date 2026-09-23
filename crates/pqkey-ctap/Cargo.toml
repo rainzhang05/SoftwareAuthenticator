@@ -18,7 +18,6 @@ ciborium.workspace = true
 # `zeroize` wipes key schedules and HMAC/SHA-256 state on drop.
 aes = { version = "0.9", features = ["zeroize"] }
 cbc = { version = "0.2", features = ["alloc", "zeroize"] }
-hkdf = "0.13"
 sha2 = { workspace = true, features = ["zeroize"] }
 hmac = { version = "0.13", features = ["zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }

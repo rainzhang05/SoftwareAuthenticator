@@ -8,13 +8,12 @@
 
 use super::CtapApp;
 use super::pin::state::{PersistentPinState, PinState};
-use crate::CoseAlg;
 use crate::store::{
     AttestationRecord, CredentialRecord, CredentialStore, PinStateRecord, PrivateKeyMaterial,
     SEALED_ID_OVERHEAD, StoreError, validate_credential,
 };
+use crate::{CoseAlg, hkdf_sha256};
 
-use hkdf::Hkdf;
 use rand_core::Rng;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -268,13 +267,15 @@ fn private_key_bytes(private_key: &PrivateKeyMaterial) -> &[u8; 32] {
 /// every assertion (CTAP 2.3 §12.7).  HKDF keeps them independent of the key
 /// and of each other.
 pub(super) fn derive_sealed_cred_randoms(record: &mut CredentialRecord) -> Result<(), u8> {
-    let hkdf = Hkdf::<Sha256>::new(None, private_key_bytes(&record.private_key));
-    hkdf.expand(
+    let key = private_key_bytes(&record.private_key);
+    hkdf_sha256(
+        key,
         b"pqkey/v1/sealed-credential/cred-random-with-uv",
         &mut record.cred_random_with_uv,
     )
     .and_then(|()| {
-        hkdf.expand(
+        hkdf_sha256(
+            key,
             b"pqkey/v1/sealed-credential/cred-random-without-uv",
             &mut record.cred_random_without_uv,
         )

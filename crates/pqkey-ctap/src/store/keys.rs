@@ -22,7 +22,6 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use getrandom::SysRng;
-use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
 use rand_core::TryRng;
 use sha2::Sha256;
@@ -302,12 +301,12 @@ pub(crate) struct SubKey([u8; KEY_LEN]);
 impl SubKey {
     fn derive(root: &RootKey, domain: KeyDomain, info: &[u8]) -> Result<Self, StoreError> {
         let mut subkey = Self([0; KEY_LEN]);
-        Hkdf::<Sha256>::new(None, root.expose())
-            .expand(info, &mut subkey.0)
-            .map_err(|_| StoreError::KeyUnavailable {
+        crate::hkdf_sha256(root.expose(), info, &mut subkey.0).map_err(|_| {
+            StoreError::KeyUnavailable {
                 domain,
                 detail: "HKDF key derivation failed".into(),
-            })?;
+            }
+        })?;
         Ok(subkey)
     }
 
