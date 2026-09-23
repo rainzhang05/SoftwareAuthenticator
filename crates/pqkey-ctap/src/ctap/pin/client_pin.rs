@@ -2,7 +2,7 @@
 
 use super::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC, requested_pin_permissions};
 use super::protocol::{PinProtocol, decrypt, parse_required_pin_uv_auth_protocol, verify};
-use super::state::PinState;
+use super::state::{MAX_PIN_RETRIES, PersistentPinState, PinState};
 use crate::PinUvSessionKeys;
 use crate::ctap::CtapApp;
 use crate::ctap::cbor::{self, canonical_map};
@@ -202,9 +202,21 @@ impl CtapApp<'_> {
         let keys = self.decapsulate(protocol, key_agreement)?;
         verify(protocol, &keys.auth_key, new_pin_enc, pin_auth_param)?;
         let hash = Self::new_pin_hash(protocol, &keys, new_pin_enc)?;
-        self.pin_state.set_pin(hash);
-        self.save_persistent_pin_state()?;
+        self.store_new_pin(hash)?;
         Ok(vec![CTAP2_OK])
+    }
+
+    /// "stores LEFT(SHA-256(newPin), 16) internally as CurrentStoredPIN, sets
+    /// the pinRetries counter to maximum count" (CTAP 2.3 §6.5.5.5,
+    /// §6.5.5.6).  The new PIN is written first and only then used, so a
+    /// failed write leaves the old PIN in force, in memory as on disk.
+    fn store_new_pin(&mut self, hash: [u8; 16]) -> Result<(), u8> {
+        self.save_pin_state(&PersistentPinState {
+            pin_hash: Some(hash),
+            pin_retries: MAX_PIN_RETRIES,
+        })?;
+        self.pin_state.set_pin(hash);
+        Ok(())
     }
 
     /// changePIN (CTAP 2.3 §6.5.5.6).
@@ -229,8 +241,7 @@ impl CtapApp<'_> {
         self.verify_pin_hash_enc(protocol, &keys, pin_hash_enc)?;
 
         let hash = Self::new_pin_hash(protocol, &keys, new_pin_enc)?;
-        self.pin_state.set_pin(hash);
-        self.save_persistent_pin_state()?;
+        self.store_new_pin(hash)?;
         Ok(vec![CTAP2_OK])
     }
 

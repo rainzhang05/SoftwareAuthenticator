@@ -99,10 +99,16 @@ impl CtapApp<'_> {
     /// While the stored PIN state is unreadable nothing is written, so the
     /// fail-closed placeholder never replaces it.
     pub(super) fn save_persistent_pin_state(&mut self) -> Result<(), u8> {
+        let persistent = self.pin_state.persistent().clone();
+        self.save_pin_state(&persistent)
+    }
+
+    /// Persist `persistent`, which may be a PIN state the engine only adopts
+    /// once it is stored.  Otherwise as [`Self::save_persistent_pin_state`].
+    pub(super) fn save_pin_state(&mut self, persistent: &PersistentPinState) -> Result<(), u8> {
         if !self.pin_state_writable {
             return Ok(());
         }
-        let persistent = self.pin_state.persistent();
         let record = PinStateRecord {
             pin_hash: persistent.pin_hash,
             pin_retries: persistent.pin_retries,

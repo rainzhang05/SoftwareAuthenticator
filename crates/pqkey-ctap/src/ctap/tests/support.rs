@@ -242,6 +242,8 @@ pub(super) struct Faults {
     /// `pin_state` reports the record as corrupt.
     pub(super) pin_state: bool,
     pub(super) set_pin_state: bool,
+    /// Let this many more PIN state writes succeed, then fail every one.
+    pub(super) set_pin_state_after: Option<usize>,
     pub(super) attestation: bool,
     pub(super) clear: bool,
 }
@@ -362,8 +364,11 @@ impl CredentialStore for TestStore {
     }
 
     fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<(), StoreError> {
-        self.fail_if(|faults| faults.set_pin_state)?;
+        self.fail_if(|faults| faults.set_pin_state || faults.set_pin_state_after == Some(0))?;
         let mut locked = self.lock();
+        if let Some(remaining) = locked.faults.set_pin_state_after.as_mut() {
+            *remaining -= 1;
+        }
         locked.pin_state_writes.push(state.clone());
         locked.store.set_pin_state(state)
     }
@@ -663,6 +668,32 @@ pub(super) fn set_pin_padded(
     let session = PlatformPinSession::establish(app, protocol, 0x51);
     let new_pin_enc = session.encrypt(padded_new_pin);
     set_pin_encrypted(app, &session, new_pin_enc)
+}
+
+/// changePIN from `current` to `new` over `protocol`.
+pub(super) fn change_pin(
+    app: &mut TestApp,
+    protocol: ClassicPinProtocol,
+    current: &[u8],
+    new: &[u8],
+) -> Result<Vec<u8>, u8> {
+    let session = PlatformPinSession::establish(app, protocol, 0x52);
+    let new_pin_enc = session.encrypt(&padded_pin(new));
+    let pin_hash_enc = session.encrypt(&pin_hash(current));
+    let mut message = new_pin_enc.clone();
+    message.extend_from_slice(&pin_hash_enc);
+    let pin_uv_auth_param = classic_pin_auth(protocol, &session.keys, &message);
+    client_pin(
+        app,
+        vec![
+            (int(1), int(protocol.identifier().into())),
+            (int(2), int(0x04)),
+            (int(3), session.key_agreement.clone()),
+            (int(4), Value::Bytes(pin_uv_auth_param)),
+            (int(5), Value::Bytes(new_pin_enc)),
+            (int(6), Value::Bytes(pin_hash_enc)),
+        ],
+    )
 }
 
 /// setPIN with a newPinEnc exactly as given, authenticated correctly.

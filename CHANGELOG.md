@@ -128,6 +128,8 @@ Upgrading from `867a591` or earlier is not an in-place update:
 - PIN/UV auth protocol 2 derived its session keys from the wrong input;
   pinUvAuthParam, saltAuth and hmac-secret now follow the selected protocol.
 - PIN length is counted in Unicode code points, as CTAP requires, not bytes.
+- setPIN and changePIN store the new PIN before using it, so a failed write no
+  longer leaves the running daemon with a PIN that is not on disk.
 - pinUvAuthToken usage timer, permissions, RP binding and per-protocol key
   agreement keys follow CTAP 2.3.
 - CTAP status codes for invalid parameters, unsupported options, unimplemented

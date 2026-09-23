@@ -3,7 +3,7 @@
 //! fail-closed handling of an unreadable PIN state, and attestation.
 
 use super::support::{
-    NEVER_INTERRUPTED, TestApp, TestStore, app_with_store, credential, get_pin_retries,
+    NEVER_INTERRUPTED, TestApp, TestStore, app_with_store, change_pin, credential, get_pin_retries,
     get_pin_token, insert, padded_pin, pin_hash, set_pin_padded, stored, test_app,
 };
 use crate::ClassicPinProtocol;
@@ -350,6 +350,43 @@ fn a_pin_is_not_compared_unless_the_spent_retry_is_persisted() {
         Some(MAX_PIN_RETRIES)
     );
     get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+}
+
+/// A new PIN is used only once it is stored.  If writing it fails, setPIN
+/// and changePIN fail, and the PIN in force, in memory as on disk, is the one
+/// there was before.
+#[test]
+fn a_new_pin_that_cannot_be_stored_is_not_used() {
+    let store = TestStore::new();
+    let (mut app, _) = app_with_store(store.clone(), [0x6D; 16], [], &NEVER_INTERRUPTED);
+
+    store.faults(|faults| faults.set_pin_state = true);
+    assert_eq!(
+        set_pin_padded(&mut app, ClassicPinProtocol::V2, &padded_pin(PIN)),
+        Err(CTAP2_ERR_PROCESSING)
+    );
+    assert!(!app.pin_state.is_set(), "no PIN after a failed setPIN");
+    store.faults(|faults| faults.set_pin_state = false);
+    set_pin_padded(&mut app, ClassicPinProtocol::V2, &padded_pin(PIN)).expect("setPIN");
+
+    // changePIN writes the spent retry and, the current PIN being right, the
+    // restored retries; the third write, of the new PIN, fails.
+    store.faults(|faults| faults.set_pin_state_after = Some(2));
+    assert_eq!(
+        change_pin(&mut app, ClassicPinProtocol::V2, PIN, b"5678"),
+        Err(CTAP2_ERR_PROCESSING)
+    );
+    store.faults(|faults| faults.set_pin_state_after = None);
+    assert_eq!(
+        store.pin_state().unwrap().and_then(|state| state.pin_hash),
+        Some(pin_hash(PIN))
+    );
+    assert_eq!(get_pin_retries(&mut app), (MAX_PIN_RETRIES, None));
+    get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("the old PIN is still the PIN");
+    assert_eq!(
+        get_pin_token(&mut app, ClassicPinProtocol::V2, b"5678"),
+        Err(CTAP2_ERR_PIN_INVALID)
+    );
 }
 
 /// An unreadable PIN state fails closed: set, blocked, never overwritten,
