@@ -459,32 +459,24 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
         // 1. Delete every file in `credentials/`, then flush the directory.  A
         //    crash part-way leaves some credentials, still guarded by the
         //    unchanged PIN state.  Nothing is exposed.
-        // 2. Delete `pin-state`, then flush the state directory.  This happens
-        //    only once no credential file is left, so a PIN is never removed
-        //    while it still guards a credential.  A crash here leaves an empty
-        //    store without a PIN, which is what a reset produces, except that
-        //    the old key is still current, so old copies are not yet shredded.
-        // 3. Rotate the credential key: the new key is written to a flushed
+        // 2. Rotate the credential key: the new key is written to a flushed
         //    temporary file and renamed over the old one, the directory is
         //    flushed, and the old key's contents are then overwritten.  Before
         //    the rename is durable the old key is in effect, afterwards the new
-        //    one; either way no file is left for it to decrypt.  From here on
-        //    every copy of the old files is undecryptable.
-        // 4. Write the default PIN state under the new key, atomically.  A crash
-        //    before it completes leaves no `pin-state`, which reads as `None`,
-        //    the same as a fresh store.
+        //    one.  From then on every copy of the old files, and every sealed
+        //    credential ID, is undecryptable.
+        // 3. Write the default PIN state under the new key, atomically.
         //
-        // Deleting the PIN state in step 2 instead of only overwriting it in
-        // step 4 is what keeps a crash between 3 and 4 from leaving a
-        // `pin-state` sealed under a key that no longer exists, which would
-        // make `pin_state` fail until the next reset.  No step needs the old
-        // key, so `clear` also recovers a store whose credential key is lost
-        // or malformed.
+        // The PIN state is only replaced once the key is: sealed credentials
+        // die with the old key, not with their files, so removing the PIN
+        // before the rotation could leave them usable with no PIN.  A crash
+        // between 2 and 3 leaves `pin-state` sealed under a key that no longer
+        // exists.  It reads as corrupt, which the CTAP engine treats as a PIN
+        // that is set and blocked until a reset, and the next `clear`
+        // replaces it.  No step needs the old key, so `clear` also recovers a
+        // store whose credential key is lost or malformed.
         fsio::remove_all_files(&self.credentials_dir)?;
         fsio::ensure_private_dir(&self.credentials_dir)?;
-        if fsio::remove_file_if_present(&self.root.join(PIN_STATE_FILE))? {
-            fsio::sync_dir(&self.root)?;
-        }
         let root_key = self.keys.rotate(KeyDomain::Credential)?;
         let keys = CredentialKeys::derive(&root_key)?;
         self.write_pin_state(&keys, &PinStateRecord::default())

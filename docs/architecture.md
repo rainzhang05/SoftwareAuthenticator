@@ -298,16 +298,19 @@ that another reset completes:
 
 1. Delete every credential file and flush the directory. The PIN still guards
    whatever is left.
-2. Delete `pin-state` and flush. A PIN is never removed while a credential it
-   guards remains.
-3. Rotate the credential key: write the new key to a flushed temporary file,
+2. Rotate the credential key: write the new key to a flushed temporary file,
    rename it over `credential.key`, flush the directory, then overwrite the old
    key's contents with zeros through a handle opened beforehand. From here on
-   any copy of the old files is undecryptable.
-4. Write the default PIN state under the new key.
+   any copy of the old files, and every sealed credential ID, is
+   undecryptable.
+3. Write the default PIN state under the new key, atomically.
 
-No step needs the old key, so a reset also recovers a store whose credential
-key is lost. The attestation record, under the device key, is kept.
+The PIN state is replaced only after the rotation, because sealed credentials
+die with the key, not with any file: a PIN is never removed while a credential
+it guards remains. A crash between steps 2 and 3 leaves a `pin-state` that
+reads as corrupt, which the engine treats as a PIN set and blocked until the
+next reset. No step needs the old key, so a reset also recovers a store whose
+credential key is lost. The attestation record, under the device key, is kept.
 
 What this does and does not protect is in
 [SECURITY.md](../SECURITY.md#the-encrypted-credential-store).

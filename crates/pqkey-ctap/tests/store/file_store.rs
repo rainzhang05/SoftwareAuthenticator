@@ -843,34 +843,40 @@ fn interrupted_clear_leaves_consistent_states() {
     assert_eq!(store.count().unwrap(), 0);
     assert_eq!(store.pin_state().unwrap(), Some(PinStateRecord::default()));
 
-    // Crash after step 2: no credentials and no PIN state, old key.
+    // Crash after step 1: no credential files; the PIN, the key and so the
+    // sealed credentials are untouched, and the PIN still guards them.
     let scratch = Scratch::new();
-    {
+    let pin = pin_with_hash();
+    let sealed = {
         let mut store = scratch.open();
         store.put(&new_record(CoseAlg::ES256)).unwrap();
-        store.set_pin_state(&pin_with_hash()).unwrap();
-    }
+        store.set_pin_state(&pin).unwrap();
+        store.seal_credential_id(b"secret", b"aad").unwrap()
+    };
     for path in credential_files(&scratch) {
         fs::remove_file(path).unwrap();
     }
-    fs::remove_file(scratch.pin_state_path()).unwrap();
     let mut store = scratch.open();
     assert_eq!(store.count().unwrap(), 0);
-    assert_eq!(store.pin_state().unwrap(), None);
+    assert_eq!(store.pin_state().unwrap(), Some(pin.clone()));
+    assert!(store.open_credential_id(&sealed, b"aad").unwrap().is_some());
     store.clear().unwrap();
+    assert!(store.open_credential_id(&sealed, b"aad").unwrap().is_none());
     assert_eq!(store.pin_state().unwrap(), Some(PinStateRecord::default()));
 
-    // Crash after step 3: no credentials, no PIN state, new key.
+    // Crash after step 2: new key, and the PIN state still sealed under the old
+    // one.  It reads as corrupt, which the engine takes for a PIN set and
+    // blocked, and no credential, stored or sealed, is left to use.
     let scratch = Scratch::new();
-    {
+    let sealed = {
         let mut store = scratch.open();
         store.put(&new_record(CoseAlg::ES256)).unwrap();
         store.set_pin_state(&pin_with_hash()).unwrap();
-    }
+        store.seal_credential_id(b"secret", b"aad").unwrap()
+    };
     for path in credential_files(&scratch) {
         fs::remove_file(path).unwrap();
     }
-    fs::remove_file(scratch.pin_state_path()).unwrap();
     fs::write(
         scratch.key_path(KeyDomain::Credential),
         random_bytes::<32>(),
@@ -878,10 +884,12 @@ fn interrupted_clear_leaves_consistent_states() {
     .unwrap();
     let mut store = scratch.open();
     assert_eq!(store.count().unwrap(), 0);
-    assert_eq!(store.pin_state().unwrap(), None);
+    assert_corrupt(store.pin_state(), Corruption::Authentication);
+    assert!(store.open_credential_id(&sealed, b"aad").unwrap().is_none());
+    store.clear().unwrap();
+    assert_eq!(store.pin_state().unwrap(), Some(PinStateRecord::default()));
     let record = new_record(CoseAlg::MLDSA87);
     store.put(&record).unwrap();
-    store.set_pin_state(&PinStateRecord::default()).unwrap();
     assert!(store.get(&record.credential_id).unwrap().is_some());
 }
 
