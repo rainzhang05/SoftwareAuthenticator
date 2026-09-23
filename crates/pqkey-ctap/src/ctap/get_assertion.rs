@@ -47,7 +47,8 @@ impl PendingHmacSecret {
             let mut hmac =
                 HmacSha256::new_from_slice(cred_random).map_err(|_| CTAP2_ERR_PROCESSING)?;
             hmac.update(salt);
-            outputs.extend_from_slice(&hmac.finalize().into_bytes());
+            let output = Zeroizing::new(hmac.finalize().into_bytes());
+            outputs.extend_from_slice(&output[..]);
         }
         Ok(outputs)
     }

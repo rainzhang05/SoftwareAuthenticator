@@ -96,9 +96,9 @@ fn decode_new_pin(padded_new_pin: &[u8]) -> Result<Zeroizing<Vec<u8>>, u8> {
 }
 
 /// CurrentStoredPIN for `pin`: `LEFT(SHA-256(pin), 16)`.
-fn hash_pin(pin: &[u8]) -> [u8; 16] {
+fn hash_pin(pin: &[u8]) -> Zeroizing<[u8; 16]> {
     let digest = Zeroizing::new(Sha256::digest(pin));
-    let mut hash = [0u8; 16];
+    let mut hash = Zeroizing::new([0u8; 16]);
     hash.copy_from_slice(&digest[..16]);
     hash
 }
@@ -112,7 +112,7 @@ impl CtapApp<'_> {
         protocol: PinProtocol,
         keys: &PinUvSessionKeys,
         new_pin_enc: &[u8],
-    ) -> Result<[u8; 16], u8> {
+    ) -> Result<Zeroizing<[u8; 16]>, u8> {
         let padded_new_pin =
             decrypt(protocol, keys, new_pin_enc).ok_or(CTAP2_ERR_PIN_AUTH_INVALID)?;
         let new_pin = decode_new_pin(&padded_new_pin)?;
@@ -186,7 +186,7 @@ impl CtapApp<'_> {
         let keys = self.decapsulate(protocol, key_agreement)?;
         verify(protocol, &keys.auth_key, new_pin_enc, pin_auth_param)?;
         let hash = Self::new_pin_hash(protocol, &keys, new_pin_enc)?;
-        self.store_new_pin(hash)?;
+        self.store_new_pin(&hash)?;
         Ok(vec![CTAP2_OK])
     }
 
@@ -194,12 +194,12 @@ impl CtapApp<'_> {
     /// the pinRetries counter to maximum count" (CTAP 2.3 §6.5.5.5,
     /// §6.5.5.6).  The new PIN is written first and only then used, so a
     /// failed write leaves the old PIN in force, in memory as on disk.
-    fn store_new_pin(&mut self, hash: [u8; 16]) -> Result<(), u8> {
+    fn store_new_pin(&mut self, hash: &[u8; 16]) -> Result<(), u8> {
         self.save_pin_state(&PersistentPinState {
-            pin_hash: Some(hash),
+            pin_hash: Some(*hash),
             pin_retries: MAX_PIN_RETRIES,
         })?;
-        self.pin_state.set_pin(hash);
+        self.pin_state.set_pin(*hash);
         Ok(())
     }
 
@@ -225,7 +225,7 @@ impl CtapApp<'_> {
         self.verify_pin_hash_enc(protocol, &keys, pin_hash_enc)?;
 
         let hash = Self::new_pin_hash(protocol, &keys, new_pin_enc)?;
-        self.store_new_pin(hash)?;
+        self.store_new_pin(&hash)?;
         Ok(vec![CTAP2_OK])
     }
 
@@ -247,10 +247,10 @@ impl CtapApp<'_> {
         let keys = self.decapsulate(protocol, key_agreement)?;
         self.verify_pin_hash_enc(protocol, &keys, pin_hash_enc)?;
 
-        let token = self.random_array::<32>();
-        let encrypted = self.encrypt_for_platform(protocol, &keys, &token)?;
+        let token = Zeroizing::new(self.random_array::<32>());
+        let encrypted = self.encrypt_for_platform(protocol, &keys, &token[..])?;
         self.pin_state
-            .issue_pin_uv_auth_token(protocol, token, permissions, rp_id);
+            .issue_pin_uv_auth_token(protocol, *token, permissions, rp_id);
         // "The authenticator returns the encrypted pinUvAuthToken for the
         // specified pinUvAuthProtocol" (CTAP 2.3 §6.5.5.7.1, §6.5.5.7.2), and
         // nothing else.

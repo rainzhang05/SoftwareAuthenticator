@@ -204,29 +204,29 @@ pub fn try_derive_classic_pin_uv_session_keys(
     protocol: ClassicPinProtocol,
     shared_secret: &[u8],
 ) -> Result<PinUvSessionKeys, CryptoError> {
-    let mut encryption_key = [0u8; 32];
-    let mut auth_key = [0u8; 32];
+    // Derived in place, so no copy of either key outlives the struct that
+    // zeroizes them.
+    let mut keys = PinUvSessionKeys {
+        encryption_key: [0u8; 32],
+        auth_key: [0u8; 32],
+    };
     match protocol {
         ClassicPinProtocol::V1 => {
             // kdf(Z) = SHA-256(Z); both keys are that same 32-byte value.
-            let mut hash = Sha256::digest(shared_secret);
-            encryption_key.copy_from_slice(&hash);
-            auth_key.copy_from_slice(&hash);
-            hash.zeroize();
+            let hash = Zeroizing::new(Sha256::digest(shared_secret));
+            keys.encryption_key.copy_from_slice(&hash);
+            keys.auth_key.copy_from_slice(&hash);
         }
         ClassicPinProtocol::V2 => {
             // IKM is Z itself, NOT SHA-256(Z).  `None` salt == 32 zero bytes.
             let hkdf = Hkdf::<Sha256>::new(None, shared_secret);
-            hkdf.expand(b"CTAP2 AES key", &mut encryption_key)
+            hkdf.expand(b"CTAP2 AES key", &mut keys.encryption_key)
                 .map_err(|_| CryptoError::KeyDerivation)?;
-            hkdf.expand(b"CTAP2 HMAC key", &mut auth_key)
+            hkdf.expand(b"CTAP2 HMAC key", &mut keys.auth_key)
                 .map_err(|_| CryptoError::KeyDerivation)?;
         }
     }
-    Ok(PinUvSessionKeys {
-        encryption_key,
-        auth_key,
-    })
+    Ok(keys)
 }
 
 /// Encrypt a classic PIN block using AES-256-CBC.  Protocol 1 uses an all-zero
