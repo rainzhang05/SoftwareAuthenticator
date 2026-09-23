@@ -164,7 +164,10 @@ store. The engine's credential IDs are 33 bytes: a marker byte (0x01 for
 `rk` true, 0x00 for `rk` false) and 32 random bytes. Private keys are a P-256
 scalar or an ML-DSA seed. The store holds at most 1,000 credentials. A new
 discoverable credential for the same relying party and user ID replaces the
-old one. Extensions: `credProtect` (levels 1 to 3) and `hmac-secret`
+old one. Non-discoverable credentials count against the limit, and against
+`remainingDiscoverableCredentials`, but credential management does not list
+them, so short of a deleteCredential with an ID the platform already knows,
+only a reset frees their slots. Extensions: `credProtect` (levels 1 to 3) and `hmac-secret`
 (`CredRandom` with and without user verification).
 
 **Assertions.** Without an allowList the most recently created credential

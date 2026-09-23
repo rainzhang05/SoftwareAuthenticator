@@ -138,7 +138,9 @@ management, `hmac-secret` — works with any CTAP 2.1 client.
 The device speaks CTAPHID_CBOR only (no U2F/CTAPHID_MSG), reports versions
 `FIDO_2_3`, `FIDO_2_1` and `FIDO_2_0`, the `credProtect` and `hmac-secret`
 extensions, PIN/UV auth protocols 2 and 1, and stores up to 1,000 credentials.
-User verification is by PIN only. The full picture is in
+Non-discoverable credentials count too, and since credential management does
+not list them, only a reset frees the room they take. User verification is by
+PIN only. The full picture is in
 [docs/architecture.md](docs/architecture.md).
 
 ## Troubleshooting
