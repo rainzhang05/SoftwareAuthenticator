@@ -25,6 +25,7 @@ ciborium = { version = "0.2", default-features = false, features = ["std"] }
 getrandom = { version = "0.4", features = ["sys_rng"] }
 log = { version = "0.4", default-features = false }
 p256 = "0.14"
+pqkey-mldsa = { path = "crates/pqkey-mldsa" }
 rand_core = "0.10"
 sha2 = "0.11"
 zeroize = "1"

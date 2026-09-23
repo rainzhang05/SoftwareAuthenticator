@@ -38,4 +38,4 @@ subtle = "2"
 
 # Use our local wrapper for ML-DSA.  By enabling all parameter set features the
 # wrapper links to the underlying ML-DSA implementation for 44/65/87.
-pqkey-mldsa = { path = "../pqkey-mldsa", features = ["mldsa44", "mldsa65", "mldsa87"] }
+pqkey-mldsa = { workspace = true, features = ["mldsa44", "mldsa65", "mldsa87"] }

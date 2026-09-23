@@ -1192,6 +1192,7 @@ dependencies = [
  "nix",
  "p256",
  "pqkey-ctap",
+ "pqkey-mldsa",
  "rand_core",
  "rcgen",
  "sha2",

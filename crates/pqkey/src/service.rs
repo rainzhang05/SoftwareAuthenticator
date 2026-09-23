@@ -424,7 +424,11 @@ pub fn parse_aaguid(input: &str) -> Result<[u8; 16], String> {
 mod tests {
     use super::*;
     use crate::{test_support::TempDir, tests::socket_device, uhid};
+    use ciborium::value::{Integer, Value};
+    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+    use pqkey_ctap::CoseAlg;
     use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest};
+    use pqkey_mldsa::{ParamSet, PublicKey};
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,
@@ -443,6 +447,8 @@ mod tests {
     const ERR_CHANNEL_BUSY: u8 = 0x06;
     const STATUS_PROCESSING: u8 = 1;
     const STATUS_UPNEEDED: u8 = 2;
+    const CTAP_MAKE_CREDENTIAL: u8 = 0x01;
+    const CTAP_GET_ASSERTION: u8 = 0x02;
     const CTAP_GET_INFO: u8 = 0x04;
     const CTAP_RESET: u8 = 0x07;
     const CTAP2_OK: u8 = 0x00;
@@ -514,14 +520,28 @@ mod tests {
             Self { stream, events }
         }
 
-        /// Send a single-packet CTAPHID request.
+        /// Send a CTAPHID request: an initialization packet, then as many
+        /// continuation packets as the payload needs.
         fn send(&mut self, cid: u32, command: u8, payload: &[u8]) {
+            let (first, mut rest) = payload.split_at(payload.len().min(57));
             let mut frame = [0u8; CTAPHID_FRAME_LEN];
             frame[..4].copy_from_slice(&cid.to_be_bytes());
             frame[4] = command;
             frame[5..7].copy_from_slice(&(payload.len() as u16).to_be_bytes());
-            frame[7..7 + payload.len()].copy_from_slice(payload);
+            frame[7..7 + first.len()].copy_from_slice(first);
             self.stream.write_all(&uhid::output_event(&frame)).unwrap();
+            for sequence in 0u8.. {
+                if rest.is_empty() {
+                    break;
+                }
+                let (chunk, remaining) = rest.split_at(rest.len().min(59));
+                let mut frame = [0u8; CTAPHID_FRAME_LEN];
+                frame[..4].copy_from_slice(&cid.to_be_bytes());
+                frame[4] = sequence;
+                frame[5..5 + chunk.len()].copy_from_slice(chunk);
+                self.stream.write_all(&uhid::output_event(&frame)).unwrap();
+                rest = remaining;
+            }
         }
 
         fn next(&self, timeout: Duration) -> Option<Event> {
@@ -655,6 +675,155 @@ mod tests {
         // the store handed to the app works.
         host.send(cid, CTAPHID_CBOR, &[CTAP_RESET]);
         assert_eq!(host.receive(cid), (CTAPHID_CBOR, vec![CTAP2_OK]));
+
+        shut_down(&host, &shutdown, result);
+    }
+
+    fn int(value: i64) -> Value {
+        Value::Integer(Integer::from(value))
+    }
+
+    fn text(value: &str) -> Value {
+        Value::Text(value.into())
+    }
+
+    /// The value of `key` in the CBOR map `map`.
+    fn get(map: &Value, key: Value) -> Value {
+        let Value::Map(entries) = map else {
+            panic!("not a map: {map:?}");
+        };
+        entries
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("missing {key:?}"))
+    }
+
+    fn bytes(value: Value) -> Vec<u8> {
+        match value {
+            Value::Bytes(bytes) => bytes,
+            other => panic!("not bytes: {other:?}"),
+        }
+    }
+
+    /// Send the CTAP command `command` with `parameters` (in canonical order)
+    /// on `cid`, and return the parameters of its successful response.
+    fn ctap(host: &mut Host, cid: u32, command: u8, parameters: Vec<(Value, Value)>) -> Value {
+        let mut request = vec![command];
+        ciborium::into_writer(&Value::Map(parameters), &mut request).unwrap();
+        host.send(cid, CTAPHID_CBOR, &request);
+        let (response_command, response) = host.receive(cid);
+        assert_eq!(response_command, CTAPHID_CBOR);
+        assert_eq!(response[0], CTAP2_OK, "CTAP status {:#04x}", response[0]);
+        ciborium::from_reader(&response[1..]).unwrap()
+    }
+
+    /// Check that `signature` signs `auth_data || client_data_hash` with the
+    /// `alg` key `public_key`, a COSE key.
+    fn assert_signed(
+        alg: CoseAlg,
+        public_key: &Value,
+        auth_data: &[u8],
+        client_data_hash: &[u8],
+        signature: &[u8],
+    ) {
+        let message = [auth_data, client_data_hash].concat();
+        match alg {
+            CoseAlg::ES256 => {
+                let mut sec1 = vec![0x04];
+                sec1.extend(bytes(get(public_key, int(-2))));
+                sec1.extend(bytes(get(public_key, int(-3))));
+                let key = VerifyingKey::from_sec1_bytes(&sec1).unwrap();
+                let signature = Signature::from_der(signature).unwrap();
+                key.verify(&message, &signature).expect("ES256 signature");
+            }
+            CoseAlg::MLDSA87 => {
+                let key = PublicKey(bytes(get(public_key, int(-1))));
+                assert!(
+                    pqkey_mldsa::verify(ParamSet::MLDSA87, &key, &message, signature),
+                    "ML-DSA-87 signature"
+                );
+            }
+            other => panic!("no verifier for {other:?}"),
+        }
+    }
+
+    /// Registration and authentication through the whole stack: uhid events,
+    /// CTAPHID messages of several packets each way, the worker thread, the
+    /// engine and its file store. ML-DSA-87 has the longest responses there
+    /// are. Every signature must verify with the public key the registration
+    /// returned, and the assertion must name the credential it created.
+    #[test]
+    fn registers_and_authenticates_through_the_whole_stack() {
+        let dir = TempDir::new("full-stack");
+        let data = app_data(&dir);
+        let shutdown = ShutdownSignal::new();
+        let loop_shutdown = shutdown.clone();
+        let (mut host, result) =
+            start(move |device, on_ready| serve_ctap(device, data, loop_shutdown, on_ready));
+        let cid = host.init();
+
+        for alg in [CoseAlg::ES256, CoseAlg::MLDSA87] {
+            let client_data_hash = [0x11; 32];
+            let registration = ctap(
+                &mut host,
+                cid,
+                CTAP_MAKE_CREDENTIAL,
+                vec![
+                    (int(1), Value::Bytes(client_data_hash.to_vec())),
+                    (int(2), Value::Map(vec![(text("id"), text("example.com"))])),
+                    (
+                        int(3),
+                        Value::Map(vec![
+                            (text("id"), Value::Bytes(vec![0x42; 64])),
+                            (text("name"), text("alice@example.com")),
+                        ]),
+                    ),
+                    (
+                        int(4),
+                        Value::Array(vec![Value::Map(vec![
+                            (text("alg"), int(alg as i64)),
+                            (text("type"), text("public-key")),
+                        ])]),
+                    ),
+                    (int(7), Value::Map(vec![(text("rk"), Value::Bool(true))])),
+                ],
+            );
+            // Self attestation: the new credential signs its own registration.
+            assert_eq!(get(&registration, int(1)), text("packed"));
+            let auth_data = bytes(get(&registration, int(2)));
+            let statement = get(&registration, int(3));
+            assert_eq!(get(&statement, text("alg")), int(alg as i64));
+            // After the AAGUID: the credential ID's length, the ID, the key.
+            let id_length = usize::from(u16::from_be_bytes([auth_data[53], auth_data[54]]));
+            let credential_id = auth_data[55..55 + id_length].to_vec();
+            let public_key: Value = ciborium::from_reader(&auth_data[55 + id_length..]).unwrap();
+            let signature = bytes(get(&statement, text("sig")));
+            assert_signed(alg, &public_key, &auth_data, &client_data_hash, &signature);
+
+            let client_data_hash = [0x22; 32];
+            let assertion = ctap(
+                &mut host,
+                cid,
+                CTAP_GET_ASSERTION,
+                vec![
+                    (int(1), text("example.com")),
+                    (int(2), Value::Bytes(client_data_hash.to_vec())),
+                    (
+                        int(3),
+                        Value::Array(vec![Value::Map(vec![
+                            (text("id"), Value::Bytes(credential_id.clone())),
+                            (text("type"), text("public-key")),
+                        ])]),
+                    ),
+                ],
+            );
+            let credential = get(&assertion, int(1));
+            assert_eq!(bytes(get(&credential, text("id"))), credential_id);
+            let auth_data = bytes(get(&assertion, int(2)));
+            let signature = bytes(get(&assertion, int(3)));
+            assert_signed(alg, &public_key, &auth_data, &client_data_hash, &signature);
+        }
 
         shut_down(&host, &shutdown, result);
     }

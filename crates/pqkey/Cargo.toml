@@ -45,3 +45,5 @@ async-io = "2"
 ciborium.workspace = true
 # Reads the attestation certificate back independently of rcgen, which wrote it.
 x509-parser = "0.18"
+# Verifies the ML-DSA signatures of the full-stack test.
+pqkey-mldsa.workspace = true
