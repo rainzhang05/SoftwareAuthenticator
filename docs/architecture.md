@@ -47,8 +47,9 @@ contrib/            udev rules and systemd user unit
 - **`pqkey`** is the Linux program: it creates the uhid device, runs CTAPHID,
   runs the engine on a worker thread, asks for user presence over D-Bus, and
   provides the `attach`/`detach`/`status`/`reset`/`pin` commands. The only
-  `unsafe` code in the project is here, in the uhid device, and every block
-  carries a safety comment.
+  `unsafe` code in the project is here: the uhid device's kernel structures,
+  `setsid` in `pre_exec` when `attach` starts the daemon, and the signal
+  handlers of the PIN prompt. Every block carries a safety comment.
 
 ## The daemon
 
