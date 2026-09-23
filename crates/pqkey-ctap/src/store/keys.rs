@@ -6,7 +6,8 @@
 //!
 //! credential root key (32 random bytes, replaced by clear())
 //! ├── HKDF-SHA-256 "ftsa-store/v1/credential/record-encryption"  -> credential + PIN state key
-//! └── HKDF-SHA-256 "ftsa-store/v1/credential/index-hmac"         -> credential file name key
+//! ├── HKDF-SHA-256 "ftsa-store/v1/credential/index-hmac"         -> credential file name key
+//! └── HKDF-SHA-256 "ftsa-store/v1/credential/id-encryption"      -> sealed credential ID key
 //! ```
 //!
 //! HKDF uses no salt (RFC 5869's default of 32 zero bytes) and a 32-byte
@@ -40,6 +41,8 @@ pub(crate) const INFO_DEVICE_RECORD: &[u8] = b"ftsa-store/v1/device/record-encry
 pub(crate) const INFO_CREDENTIAL_RECORD: &[u8] = b"ftsa-store/v1/credential/record-encryption";
 /// HKDF info string for the key that names credential files.
 pub(crate) const INFO_CREDENTIAL_INDEX: &[u8] = b"ftsa-store/v1/credential/index-hmac";
+/// HKDF info string for the key that seals credential IDs.
+pub(crate) const INFO_CREDENTIAL_ID: &[u8] = b"ftsa-store/v1/credential/id-encryption";
 
 /// How often [`FileKeySource::create`] re-reads after losing a creation race
 /// before giving up.
@@ -332,6 +335,9 @@ pub(crate) struct CredentialKeys {
     pub(crate) record: SubKey,
     /// Keys the HMAC that names credential files.
     index: SubKey,
+    /// Seals the credential IDs that carry a credential instead of naming a
+    /// stored one.
+    pub(crate) id: SubKey,
 }
 
 impl CredentialKeys {
@@ -339,6 +345,7 @@ impl CredentialKeys {
         Ok(Self {
             record: SubKey::derive(root, KeyDomain::Credential, INFO_CREDENTIAL_RECORD)?,
             index: SubKey::derive(root, KeyDomain::Credential, INFO_CREDENTIAL_INDEX)?,
+            id: SubKey::derive(root, KeyDomain::Credential, INFO_CREDENTIAL_ID)?,
         })
     }
 
@@ -419,6 +426,10 @@ mod tests {
             credential.index.expose().as_slice(),
             unhex("1d634187fbd84715e4989c36021d72028133ce89e7cdd79d7694a9cbe6ac3b6f")
         );
+        assert_eq!(
+            credential.id.expose().as_slice(),
+            unhex("ab3e97036c40953bf0165c1d7c0aef882a84ee17e66971a0ace7d4362c7dae04")
+        );
         let credential_id: Vec<u8> = (0xa0..0xb0).collect();
         assert_eq!(
             credential.file_name(&credential_id).unwrap(),
@@ -436,6 +447,7 @@ mod tests {
             device.record.expose(),
             credential.record.expose(),
             credential.index.expose(),
+            credential.id.expose(),
         ];
         for (i, a) in keys.iter().enumerate() {
             for b in &keys[i + 1..] {

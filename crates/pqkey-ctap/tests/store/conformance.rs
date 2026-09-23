@@ -10,7 +10,7 @@
 use pqkey_ctap::CoseAlg;
 use pqkey_ctap::store::{
     AttestationRecord, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS, FileStore,
-    MemoryStore, PinStateRecord, PrivateKeyMaterial, StoreError,
+    MemoryStore, PinStateRecord, PrivateKeyMaterial, SEALED_ID_OVERHEAD, StoreError,
 };
 
 use crate::common::{
@@ -683,6 +683,67 @@ macro_rules! conformance_suite {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Sealed credential IDs
+// ---------------------------------------------------------------------------
+
+fn sealed_credential_ids_open_only_with_their_associated_data<B: Backend>() {
+    let mut fixture = fresh::<B>();
+    let store = &mut fixture.store;
+    let plaintext = random_bytes::<34>();
+    let sealed = store
+        .seal_credential_id(&plaintext, b"example.com")
+        .unwrap();
+    assert_eq!(sealed.len(), plaintext.len() + SEALED_ID_OVERHEAD);
+    let opened = store.open_credential_id(&sealed, b"example.com").unwrap();
+    assert_eq!(opened.as_deref().map(Vec::as_slice), Some(&plaintext[..]));
+    assert!(
+        store
+            .open_credential_id(&sealed, b"example.org")
+            .unwrap()
+            .is_none()
+    );
+    let mut altered = sealed.clone();
+    *altered.last_mut().unwrap() ^= 0x80;
+    assert!(
+        store
+            .open_credential_id(&altered, b"example.com")
+            .unwrap()
+            .is_none()
+    );
+    assert_ne!(
+        sealed,
+        store
+            .seal_credential_id(&plaintext, b"example.com")
+            .unwrap()
+    );
+    // Sealing stores nothing.
+    assert_eq!(store.count().unwrap(), 0);
+}
+
+fn a_fresh_store_opens_no_credential_id<B: Backend>() {
+    let fixture = fresh::<B>();
+    let junk = random_bytes::<75>();
+    assert!(
+        fixture
+            .store
+            .open_credential_id(&junk, b"example.com")
+            .unwrap()
+            .is_none()
+    );
+}
+
+fn clear_ends_sealed_credential_ids<B: Backend>() {
+    let mut fixture = fresh::<B>();
+    let store = &mut fixture.store;
+    let sealed = store.seal_credential_id(b"secret", b"aad").unwrap();
+    store.clear().unwrap();
+    assert!(store.open_credential_id(&sealed, b"aad").unwrap().is_none());
+    let resealed = store.seal_credential_id(b"secret", b"aad").unwrap();
+    let opened = store.open_credential_id(&resealed, b"aad").unwrap();
+    assert_eq!(opened.as_deref().map(Vec::as_slice), Some(&b"secret"[..]));
+}
+
 conformance_suite!(
     empty_store_holds_nothing,
     es256_credential_round_trips,
@@ -711,5 +772,8 @@ conformance_suite!(
     clear_removes_credentials_and_resets_pin_state,
     clear_keeps_the_attestation_record,
     store_is_fully_usable_after_clear,
+    sealed_credential_ids_open_only_with_their_associated_data,
+    a_fresh_store_opens_no_credential_id,
+    clear_ends_sealed_credential_ids,
     clear_on_a_fresh_store,
 );

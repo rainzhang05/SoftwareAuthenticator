@@ -4,6 +4,8 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use zeroize::Zeroizing;
+
 use super::codec;
 use super::envelope::{self, MAX_ENVELOPE_LEN, RecordType};
 use super::fsio;
@@ -63,7 +65,7 @@ const ATTESTATION_FILE: &str = "attestation";
 /// * the **device** key protects the attestation record and survives
 ///   [`clear`](CredentialStore::clear);
 /// * the **credential** key protects credential records, credential file
-///   names, and the PIN state, and is replaced by
+///   names, the PIN state, and sealed credential IDs, and is replaced by
 ///   [`clear`](CredentialStore::clear).
 ///
 /// Root keys are never used directly.  Subkeys are HKDF-SHA-256 (RFC 5869)
@@ -75,6 +77,7 @@ const ATTESTATION_FILE: &str = "attestation";
 /// device      ftsa-store/v1/device/record-encryption      encrypts the attestation record
 /// credential  ftsa-store/v1/credential/record-encryption  encrypts credentials and PIN state
 /// credential  ftsa-store/v1/credential/index-hmac         keys the credential file names
+/// credential  ftsa-store/v1/credential/id-encryption      seals credential IDs
 /// ```
 ///
 /// A root key that is missing while data encrypted under it exists, or that
@@ -527,6 +530,31 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
             ATTESTATION_FILE,
             &plaintext,
         )
+    }
+
+    fn seal_credential_id(
+        &mut self,
+        plaintext: &[u8],
+        associated_data: &[u8],
+    ) -> Result<Vec<u8>, StoreError> {
+        let root = self.root_key_for_write(KeyDomain::Credential)?;
+        let keys = CredentialKeys::derive(&root)?;
+        envelope::seal_credential_id(&keys.id, plaintext, associated_data)
+    }
+
+    fn open_credential_id(
+        &self,
+        sealed: &[u8],
+        associated_data: &[u8],
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, StoreError> {
+        let Some(keys) = self.credential_keys()? else {
+            return Ok(None);
+        };
+        Ok(envelope::open_credential_id(
+            &keys.id,
+            sealed,
+            associated_data,
+        ))
     }
 }
 

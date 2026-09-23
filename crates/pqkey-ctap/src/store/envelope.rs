@@ -20,6 +20,21 @@
 //! `attestation`, or `credentials/` followed by the 64-hex-digit file name.
 //! Copying one object over another therefore fails authentication even when
 //! both are encrypted under the same key.
+//!
+//! # Sealed credential IDs
+//!
+//! A credential ID that carries a credential, instead of naming a stored one,
+//! is sealed without the header, since the CTAP engine frames the ID itself:
+//!
+//! ```text
+//! offset  length  field
+//!      0      24  XChaCha20-Poly1305 nonce, freshly random for every seal
+//!     24       n  ciphertext of the n-byte plaintext
+//!   24+n      16  Poly1305 tag
+//! ```
+//!
+//! under the credential ID key and with the associated data the caller binds
+//! it to.
 
 use chacha20poly1305::{AeadInOut, Key, KeyInit, Tag, XChaCha20Poly1305, XNonce};
 use getrandom::SysRng;
@@ -45,6 +60,9 @@ pub(crate) const OVERHEAD: usize = HEADER_LEN + TAG_LEN;
 /// few hundred bytes to a few kilobytes; the bound keeps a junk file from
 /// exhausting memory.
 pub(crate) const MAX_ENVELOPE_LEN: usize = 1 << 20;
+
+/// Bytes a sealed credential ID adds to its plaintext: the nonce and the tag.
+pub const SEALED_ID_OVERHEAD: usize = NONCE_LEN + TAG_LEN;
 
 /// The record type byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +160,71 @@ pub(crate) fn open(
     Ok(buffer)
 }
 
+/// Seal `plaintext` into a credential ID's contents under a fresh random
+/// nonce, bound to `associated_data`.
+pub(crate) fn seal_credential_id(
+    key: &SubKey,
+    plaintext: &[u8],
+    associated_data: &[u8],
+) -> Result<Vec<u8>, StoreError> {
+    let mut nonce = [0u8; NONCE_LEN];
+    SysRng
+        .try_fill_bytes(&mut nonce)
+        .map_err(|_| StoreError::Random)?;
+    seal_credential_id_with_nonce(key, &nonce, plaintext, associated_data)
+}
+
+fn seal_credential_id_with_nonce(
+    key: &SubKey,
+    nonce: &[u8; NONCE_LEN],
+    plaintext: &[u8],
+    associated_data: &[u8],
+) -> Result<Vec<u8>, StoreError> {
+    // Sized exactly, so the plaintext is encrypted in place and never left
+    // behind in a reallocated buffer.
+    let mut sealed = Vec::with_capacity(SEALED_ID_OVERHEAD + plaintext.len());
+    sealed.extend_from_slice(nonce);
+    sealed.extend_from_slice(plaintext);
+    let cipher = XChaCha20Poly1305::new(<&Key>::from(key.expose()));
+    match cipher.encrypt_inout_detached(
+        <&XNonce>::from(nonce),
+        associated_data,
+        (&mut sealed[NONCE_LEN..]).into(),
+    ) {
+        Ok(tag) => {
+            sealed.extend_from_slice(&tag);
+            Ok(sealed)
+        }
+        Err(_) => {
+            sealed.zeroize();
+            Err(StoreError::InvalidRecord(
+                "credential ID could not be encrypted",
+            ))
+        }
+    }
+}
+
+/// The plaintext of a sealed credential ID, or `None` unless `sealed` was
+/// sealed under `key` with `associated_data`.
+pub(crate) fn open_credential_id(
+    key: &SubKey,
+    sealed: &[u8],
+    associated_data: &[u8],
+) -> Option<Zeroizing<Vec<u8>>> {
+    if sealed.len() < SEALED_ID_OVERHEAD {
+        return None;
+    }
+    let (nonce, rest) = sealed.split_at(NONCE_LEN);
+    let (ciphertext, tag) = rest.split_at(rest.len() - TAG_LEN);
+    let nonce = <&XNonce>::try_from(nonce).ok()?;
+    let tag = <&Tag>::try_from(tag).ok()?;
+    let mut buffer = Zeroizing::new(ciphertext.to_vec());
+    XChaCha20Poly1305::new(<&Key>::from(key.expose()))
+        .decrypt_inout_detached(nonce, associated_data, buffer.as_mut_slice().into(), tag)
+        .ok()?;
+    Some(buffer)
+}
+
 fn associated_data(record_type: RecordType, name: &str) -> Vec<u8> {
     let name = name.as_bytes();
     // Logical names are at most 76 bytes, so the length always fits.
@@ -217,6 +300,83 @@ mod tests {
         assert_eq!(sealed, expected);
         let opened = open(&key, RecordType::PinState, "pin-state", &expected).unwrap();
         assert_eq!(opened.as_slice(), plaintext.as_slice());
+    }
+
+    /// Pins the sealed credential ID format to the independent implementation
+    /// described for `envelope_matches_independent_implementation`, with
+    ///
+    /// ```text
+    /// key       = credential ID subkey of root key bytes(range(32))
+    /// nonce     = bytes(range(0x40, 0x58))
+    /// plaintext = bytes([0xf9, 0x02]) + bytes(range(0x80, 0xa0))
+    /// aad       = b"credential id aad"
+    /// sealed    = nonce + ciphertext + tag
+    /// ```
+    #[test]
+    fn sealed_credential_id_matches_independent_implementation() {
+        let mut root = [0u8; 32];
+        for (i, byte) in root.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        let key = CredentialKeys::derive(&RootKey::from_bytes(root))
+            .unwrap()
+            .id;
+        let mut nonce = [0u8; NONCE_LEN];
+        for (i, byte) in nonce.iter_mut().enumerate() {
+            *byte = 0x40 + i as u8;
+        }
+        let mut plaintext = vec![0xf9, 0x02];
+        plaintext.extend(0x80..0xa0u8);
+        let aad = b"credential id aad";
+        let expected = unhex(concat!(
+            "404142434445464748494a4b4c4d4e4f5051525354555657",
+            "9a26acd2ef80a957ad3a1553876e5bc822b9c5cfa96e70ac9a461fb1cdbeaf1bd454",
+            "39c3e4c82d5cae2d2caabc8942b05c8c"
+        ));
+
+        let sealed = seal_credential_id_with_nonce(&key, &nonce, &plaintext, aad).unwrap();
+        assert_eq!(sealed, expected);
+        let opened = open_credential_id(&key, &expected, aad).unwrap();
+        assert_eq!(opened.as_slice(), plaintext.as_slice());
+    }
+
+    #[test]
+    fn sealed_credential_ids_open_only_unchanged_with_their_key_and_data() {
+        let key = CredentialKeys::derive(&RootKey::generate().unwrap())
+            .unwrap()
+            .id;
+        let plaintext = [0xa5; 34];
+        let sealed = seal_credential_id(&key, &plaintext, b"rp one").unwrap();
+        assert_eq!(sealed.len(), SEALED_ID_OVERHEAD + plaintext.len());
+        assert!(!sealed.windows(8).any(|window| window == &plaintext[..8]));
+        assert_eq!(
+            open_credential_id(&key, &sealed, b"rp one")
+                .unwrap()
+                .as_slice(),
+            plaintext
+        );
+        assert_ne!(
+            sealed,
+            seal_credential_id(&key, &plaintext, b"rp one").unwrap(),
+            "a fresh nonce every time"
+        );
+
+        assert!(open_credential_id(&key, &sealed, b"rp two").is_none());
+        let other = CredentialKeys::derive(&RootKey::generate().unwrap())
+            .unwrap()
+            .id;
+        assert!(open_credential_id(&other, &sealed, b"rp one").is_none());
+        for index in 0..sealed.len() {
+            let mut tampered = sealed.clone();
+            tampered[index] ^= 0x01;
+            assert!(
+                open_credential_id(&key, &tampered, b"rp one").is_none(),
+                "byte {index}"
+            );
+        }
+        for length in 0..sealed.len() {
+            assert!(open_credential_id(&key, &sealed[..length], b"rp one").is_none());
+        }
     }
 
     #[test]

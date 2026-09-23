@@ -2,6 +2,10 @@
 
 use std::collections::BTreeMap;
 
+use zeroize::Zeroizing;
+
+use super::envelope;
+use super::keys::{CredentialKeys, RootKey};
 use super::{
     AttestationRecord, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS, PinStateRecord,
     StoreError, next_created_at, sort_newest_first, validate_attestation, validate_credential,
@@ -14,13 +18,16 @@ use super::{
 /// inserts but not to replacements, records are validated before they are
 /// accepted, and [`clear`](CredentialStore::clear) keeps the attestation record
 /// and leaves a default PIN state behind.  Nothing is ever corrupt, and there
-/// is no size limit on individual records.
+/// is no size limit on individual records.  Credential IDs are sealed as the
+/// file store seals them, under a random key made on first use and dropped by
+/// [`clear`](CredentialStore::clear).
 #[derive(Debug)]
 pub struct MemoryStore {
     credentials: BTreeMap<Vec<u8>, CredentialRecord>,
     pin_state: Option<PinStateRecord>,
     attestation: Option<AttestationRecord>,
     max_credentials: usize,
+    credential_key: Option<RootKey>,
 }
 
 impl MemoryStore {
@@ -32,6 +39,7 @@ impl MemoryStore {
             pin_state: None,
             attestation: None,
             max_credentials: DEFAULT_MAX_CREDENTIALS,
+            credential_key: None,
         }
     }
 
@@ -95,6 +103,7 @@ impl CredentialStore for MemoryStore {
     fn clear(&mut self) -> Result<(), StoreError> {
         self.credentials.clear();
         self.pin_state = Some(PinStateRecord::default());
+        self.credential_key = None;
         Ok(())
     }
 
@@ -115,5 +124,34 @@ impl CredentialStore for MemoryStore {
         validate_attestation(record)?;
         self.attestation = Some(record.clone());
         Ok(())
+    }
+
+    fn seal_credential_id(
+        &mut self,
+        plaintext: &[u8],
+        associated_data: &[u8],
+    ) -> Result<Vec<u8>, StoreError> {
+        let root = match &self.credential_key {
+            Some(root) => root.clone(),
+            None => self.credential_key.insert(RootKey::generate()?).clone(),
+        };
+        let keys = CredentialKeys::derive(&root)?;
+        envelope::seal_credential_id(&keys.id, plaintext, associated_data)
+    }
+
+    fn open_credential_id(
+        &self,
+        sealed: &[u8],
+        associated_data: &[u8],
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, StoreError> {
+        let Some(root) = &self.credential_key else {
+            return Ok(None);
+        };
+        let keys = CredentialKeys::derive(root)?;
+        Ok(envelope::open_credential_id(
+            &keys.id,
+            sealed,
+            associated_data,
+        ))
     }
 }

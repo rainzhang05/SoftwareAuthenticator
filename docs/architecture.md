@@ -247,7 +247,8 @@ directory listing reveals neither credential IDs nor relying parties.
 ```text
 device.key ─────HKDF "ftsa-store/v1/device/record-encryption"─────▶ attestation record key
 credential.key ─HKDF "ftsa-store/v1/credential/record-encryption"─▶ credential and PIN state key
-               └HKDF "ftsa-store/v1/credential/index-hmac"────────▶ credential file name key
+               ├HKDF "ftsa-store/v1/credential/index-hmac"────────▶ credential file name key
+               └HKDF "ftsa-store/v1/credential/id-encryption"─────▶ sealed credential ID key
 ```
 
 HKDF-SHA-256 (RFC 5869) with no salt, the root key as input keying material and
@@ -379,7 +380,7 @@ the stored record cannot be read, registrations fall back to self attestation.
 |-------|-------|------|
 | Unit tests | `#[cfg(test)]` modules in every crate | CTAPHID state machine, uhid event encoding over a socket pair, the worker thread and shutdown, ES256 and ML-DSA-87 registration and authentication through the whole daemon stack over that socket pair, presence prompts against a fake notification server, CLI parsing, PIN commands, state lock |
 | Engine tests | `crates/pqkey-ctap/src/ctap/tests/` | Every command and its CTAP 2.3 rules over `MemoryStore`, including PIN retries, token permissions, response sizes |
-| Store tests | `crates/pqkey-ctap/tests/store/`, `src/store/` | Conformance tests run against both stores; `FileStore` persistence, tampering, keys, permissions, interrupted reset; known-answer tests for the envelope, HKDF key hierarchy and record encoding |
+| Store tests | `crates/pqkey-ctap/tests/store/`, `src/store/` | Conformance tests run against both stores; `FileStore` persistence, tampering, keys, permissions, interrupted reset; known-answer tests for the envelope, sealed credential IDs, HKDF key hierarchy and record encoding |
 | Engine over files | `crates/pqkey-ctap/tests/ctap_file_store.rs` | CTAP requests over a real `FileStore`, rebuilding the engine between requests as a restart would |
 | ML-DSA KATs | `crates/pqkey-mldsa/tests/fips204_kat.rs` | NIST ACVP key generation, signing and verification vectors for all three parameter sets |
 | Attestation | `crates/pqkey/tests/packed_attestation.rs` | The provisioned certificate's AAGUID matches authenticatorData and the signature verifies |

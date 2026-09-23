@@ -228,6 +228,22 @@ fn data_persists_across_reopen() {
     assert_eq!(scratch.open().count().unwrap(), ALL_ALGS.len());
 }
 
+/// A sealed credential ID needs only the credential key: sealing creates that
+/// key and nothing else, and a later process opens the ID with it.
+#[test]
+fn sealed_credential_ids_survive_reopen() {
+    let scratch = Scratch::new();
+    let sealed = scratch
+        .open()
+        .seal_credential_id(b"secret", b"aad")
+        .unwrap();
+    assert!(scratch.key_path(KeyDomain::Credential).exists());
+    assert!(credential_files(&scratch).is_empty());
+    assert!(!scratch.pin_state_path().exists());
+    let opened = scratch.open().open_credential_id(&sealed, b"aad").unwrap();
+    assert_eq!(opened.as_deref().map(Vec::as_slice), Some(&b"secret"[..]));
+}
+
 #[test]
 fn layout_matches_the_documented_format() {
     let scratch = Scratch::new();

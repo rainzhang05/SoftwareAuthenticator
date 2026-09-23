@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 use crate::ctap::constants::*;
 
@@ -380,6 +381,28 @@ impl CredentialStore for TestStore {
 
     fn set_attestation(&mut self, record: &AttestationRecord) -> Result<(), StoreError> {
         self.lock().store.set_attestation(record)
+    }
+
+    fn seal_credential_id(
+        &mut self,
+        plaintext: &[u8],
+        associated_data: &[u8],
+    ) -> Result<Vec<u8>, StoreError> {
+        self.fail_if(|faults| faults.put)?;
+        self.lock()
+            .store
+            .seal_credential_id(plaintext, associated_data)
+    }
+
+    fn open_credential_id(
+        &self,
+        sealed: &[u8],
+        associated_data: &[u8],
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, StoreError> {
+        self.fail_if(|faults| faults.get)?;
+        self.lock()
+            .store
+            .open_credential_id(sealed, associated_data)
     }
 }
 

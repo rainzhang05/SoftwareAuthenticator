@@ -39,7 +39,8 @@
 //!   made since the last reset, which rolls back a signature counter or the PIN
 //!   retry counter.  Anyone holding the keys can of course forge records.
 //! * **Crypto-shredding on reset.**  [`CredentialStore::clear`] replaces the key
-//!   that protects credentials and PIN state.  Overwriting files does not
+//!   that protects credentials and PIN state, and the key that seals
+//!   credential IDs with it.  Overwriting files does not
 //!   reliably destroy data on SSDs or copy-on-write filesystems, but old
 //!   ciphertext left in free blocks, snapshots, or backups is useless once its
 //!   key is gone.  The old key file is overwritten before it is released, as a
@@ -76,6 +77,8 @@ use core::fmt;
 use std::io;
 use std::path::PathBuf;
 
+use zeroize::Zeroizing;
+
 mod codec;
 mod envelope;
 mod file;
@@ -86,6 +89,7 @@ mod record;
 #[cfg(test)]
 mod test_support;
 
+pub use envelope::SEALED_ID_OVERHEAD;
 pub use file::FileStore;
 pub use keys::{FileKeySource, KeyDomain, KeySource, RootKey};
 pub use memory::MemoryStore;
@@ -94,8 +98,8 @@ pub use record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKey
 /// The credential limit a store uses unless configured otherwise.
 pub const DEFAULT_MAX_CREDENTIALS: usize = 1000;
 
-/// Storage for discoverable credentials, the persistent PIN state, and the
-/// attestation key.
+/// Storage for credentials, the persistent PIN state, and the attestation key,
+/// and the key that seals credential IDs.
 ///
 /// Every implementation must behave identically; the conformance tests in
 /// `crates/pqkey-ctap/tests/store` run the same cases against each of them.
@@ -162,6 +166,29 @@ pub trait CredentialStore {
     /// Returns [`StoreError::InvalidRecord`] for an invalid P-256 scalar, an
     /// empty certificate chain, or an empty certificate.
     fn set_attestation(&mut self, record: &AttestationRecord) -> Result<(), StoreError>;
+
+    /// Encrypt and authenticate `plaintext` for a credential ID that carries a
+    /// credential instead of naming a stored one, bound to `associated_data`.
+    ///
+    /// The result is a fresh random nonce, the ciphertext and the tag,
+    /// [`SEALED_ID_OVERHEAD`] bytes longer than `plaintext`.  The key belongs
+    /// with the credentials: [`Self::clear`] replaces it, so a reset ends
+    /// sealed credentials along with stored ones.
+    fn seal_credential_id(
+        &mut self,
+        plaintext: &[u8],
+        associated_data: &[u8],
+    ) -> Result<Vec<u8>, StoreError>;
+
+    /// The plaintext [`Self::seal_credential_id`] sealed into `sealed` with
+    /// `associated_data`, or `None` if it was not sealed with that data under
+    /// the current key: altered, sealed for other data, sealed before the last
+    /// [`Self::clear`], or never sealed by this store.
+    fn open_credential_id(
+        &self,
+        sealed: &[u8],
+        associated_data: &[u8],
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, StoreError>;
 }
 
 /// Why a stored object was rejected.
