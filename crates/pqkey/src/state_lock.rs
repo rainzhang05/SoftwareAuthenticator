@@ -8,9 +8,10 @@
 //! releases the lock when the holder exits, however it exits.
 //!
 //! The lock is also what makes the pid file trustworthy: `status` and
-//! `detach` only use the pid while the lock is held, so a pid file left
-//! behind by a killed daemon never gets an unrelated process signalled after
-//! its pid has been reused.
+//! `detach` only use the pid while the lock is held, and whoever takes the
+//! lock first removes a pid file left behind by a killed daemon. So such a
+//! pid is not signalled after it has been reused by an unrelated process,
+//! unless a `detach` reads it in the moment between the two.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -112,10 +113,17 @@ pub fn daemon_state(state_dir: &Path) -> io::Result<DaemonState> {
     })
 }
 
-/// Read the pid file. Content that does not parse counts as no pid.
+/// Read the pid file. Content that does not parse counts as no pid, and so
+/// does a pid that no daemon can have: 0, 1 (init), or a negative number,
+/// which kill(2) would take for a process group or for every process.
 pub fn read_pid(state_dir: &Path) -> io::Result<Option<Pid>> {
     match fs::read_to_string(state_dir.join(PID_FILE)) {
-        Ok(contents) => Ok(contents.trim().parse::<i32>().ok().map(Pid::from_raw)),
+        Ok(contents) => Ok(contents
+            .trim()
+            .parse::<i32>()
+            .ok()
+            .filter(|&pid| pid > 1)
+            .map(Pid::from_raw)),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
     }
@@ -219,5 +227,18 @@ mod tests {
         fs::write(dir.path().join(PID_FILE), "not a pid\n").unwrap();
         assert_eq!(read_pid(dir.path()).unwrap(), None);
         assert!(dir.path().join(PID_FILE).exists());
+    }
+
+    #[test]
+    fn a_pid_no_daemon_can_have_counts_as_no_pid() {
+        let dir = TempDir::new("lock-no-daemon-pid");
+        // kill(2) takes 0 for its caller's process group, -1 for every process
+        // it may signal and other negative pids for process groups; 1 is init.
+        for pid in ["0", "1", "-1", "-4242"] {
+            fs::write(dir.path().join(PID_FILE), format!("{pid}\n")).unwrap();
+            assert_eq!(read_pid(dir.path()).unwrap(), None, "pid file {pid}");
+        }
+        fs::write(dir.path().join(PID_FILE), "4242\n").unwrap();
+        assert_eq!(read_pid(dir.path()).unwrap(), Some(Pid::from_raw(4242)));
     }
 }

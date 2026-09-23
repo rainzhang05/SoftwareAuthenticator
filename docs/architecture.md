@@ -346,8 +346,11 @@ the stored record cannot be read, registrations fall back to self attestation.
 
 - **Locking.** The daemon, `reset` and `pin set|change|remove` hold an
   exclusive `flock` on `authenticator.lock`. `status` and `detach` probe it
-  with a shared lock and trust the pid file only while the lock is held, so a
-  stale pid file never gets an unrelated process signalled.
+  with a shared lock and trust the pid file only while the lock is held, and
+  whoever takes the lock first removes a pid file a killed daemon left
+  behind. So its pid is not signalled once reused, unless a `detach` reads it
+  in the moment between the two. A pid file naming pid 0, 1 or a negative pid
+  is ignored.
 - **`detach`** sends SIGTERM and waits up to 10 seconds for the lock to be
   released.
 - **`pin status`** only reads, so it needs no lock.

@@ -152,6 +152,8 @@ Upgrading from `867a591` or earlier is not an in-place update:
 - The notification prompt gives up on a session bus that accepts the
   connection but never answers after 2 seconds, as it does on a D-Bus call,
   instead of holding the request and the daemon's shutdown forever.
+- `status` and `detach` ignore a pid file naming pid 0, 1 or a negative pid,
+  which `detach` would have signalled as a process group or as every process.
 - The udev hidraw rule never matched the uhid-created device.
 - Panics removed from fallible ML-DSA paths.
 
