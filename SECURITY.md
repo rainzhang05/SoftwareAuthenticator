@@ -40,10 +40,16 @@ designed to protect against and what it does not.
 
 ### Assets
 
+- The two root keys, `keys/device.key` and `keys/credential.key`, from which
+  every key protecting the store is derived.
 - Credential private keys (ES256 scalars and ML-DSA seeds, 32 bytes each).
 - The PIN, stored as `LEFT(SHA-256(PIN), 16)`, and the PIN retry counter.
 - The attestation private key, when `--attestation certificate` is used.
-- The per-credential `CredRandom` values behind the `hmac-secret` extension.
+- The per-credential `CredRandom` values behind the `hmac-secret` extension
+  (stored for discoverable credentials, derived from the private key for
+  non-discoverable ones).
+- While the daemon runs: pinUvAuthTokens and PIN/UV auth key agreement keys,
+  which are never stored.
 
 ### Who can talk to the key
 
@@ -53,6 +59,8 @@ The virtual key is a hidraw node. The shipped udev rules
 systemd's `uaccess` tag. Any process running as that user can open it and send
 CTAP requests: pqkey cannot tell a browser from any other program, and the
 relying party ID and user names in a request are whatever that process wrote.
+Without the rules the node's mode is up to the system; if every user can open
+it, the daemon logs a warning but still starts.
 
 `/dev/uhid` itself is opened by the daemon. The rules give the `plugdev` group
 access to it. Anyone who can open `/dev/uhid` can create any HID device,
@@ -64,7 +72,8 @@ group is a privilege in its own right.
 Each record is a separate file encrypted and authenticated with
 XChaCha20-Poly1305 under keys derived from two 32-byte root keys. By default
 the root keys are files in `keys/` inside the same state directory as the data.
-Non-discoverable credentials are not stored at all: each credential ID holds
+Non-discoverable credentials are not stored at all (except ones created
+before this scheme, whose IDs start with 0x00): each credential ID holds
 its private key, sealed the same way under a key derived from the credential
 root key and bound to its relying party. Credential IDs are not secret, since a
 relying party hands them to anyone who starts a sign-in, so those private keys
@@ -87,7 +96,9 @@ It does **not** protect against:
 - **Deleting a record, or replacing a file with an older copy of itself** made
   since the last reset. Integrity is per file, so rolling back `pin-state`
   restores PIN retries and rolling back a credential file restores its
-  signature counter.
+  signature counter. Deleting `pin-state` removes the PIN. (A `pin-state` that
+  exists but cannot be read fails closed: the PIN counts as set and blocked
+  until a reset.)
 - **Anyone holding the keys forging records.**
 - **Clones, as far as non-discoverable credentials go.** They report a
   signature count of 0, so a relying party cannot spot a copy of the
@@ -105,9 +116,10 @@ It does provide:
 - **Crypto-shredding on reset.** `pqkey reset` and authenticatorReset replace
   the key that protects credentials and PIN state. Ciphertext left behind in
   free blocks, snapshots or backups can no longer be decrypted, and neither can
-  the non-discoverable credential IDs relying parties hold. The old key
-  file is overwritten with zeros as a best effort, but on SSDs and
-  copy-on-write filesystems that 32-byte file may survive too.
+  the non-discoverable credential IDs relying parties hold. The attestation
+  key, under the device key, is kept. The old key file is overwritten with
+  zeros as a best effort, but on SSDs and copy-on-write filesystems that
+  32-byte file may survive too.
 - **No plaintext secrets in copies that leave out `keys/`**, such as a backup
   that deliberately excludes it.
 - **Credential file names that reveal nothing.** A file name is an HMAC of the
@@ -121,9 +133,10 @@ Service) would change the first point; the store has an interface for that
 ### User presence
 
 With `--presence notify`, the default, each registration, each sign-in that
-requests user presence, each reset and each authenticator selection shows a
-desktop notification through `org.freedesktop.Notifications` on the D-Bus
-session bus, with Approve and Deny buttons.
+requests user presence, each authenticatorReset from a client and each
+authenticator selection shows a desktop notification through
+`org.freedesktop.Notifications` on the D-Bus session bus, with Approve and Deny
+buttons.
 
 It protects against programs that silently use the key without the user
 noticing, as long as they cannot also interact with the desktop session.
@@ -131,8 +144,9 @@ noticing, as long as they cannot also interact with the desktop session.
 It fails closed. The request is **denied** if there is no session bus, no
 notification server, a server without the `actions` capability, or any error
 talking to it. Deny, dismissing the notification, or closing it any other way
-denies the request. If nobody answers within 30 seconds, or the server lets
-the notification expire, the request times out. If the client cancels the
+denies the request. If nobody answers within 30 seconds (the hidden
+`--presence-timeout` option changes this for tests), or the server lets the
+notification expire, the request times out. If the client cancels the
 request, the notification is withdrawn.
 
 Its limits:
@@ -144,17 +158,26 @@ Its limits:
   against it.
 - **The prompt shows what the client claims.** The relying party ID and user
   names come from the request, not from a verified origin. They are sanitised
-  before they are shown (control and invisible formatting characters removed,
-  long strings cut), which limits spoofing through odd characters but cannot
-  make a lying client honest. Browsers check the relying party ID against the
-  page's origin; other local programs need not.
+  before they are shown (invisible formatting characters removed, control
+  characters and runs of whitespace turned into single spaces, relying party
+  IDs cut to their last 80 characters and user names to 64, markup escaped
+  where the server interprets it), which limits spoofing through odd characters
+  but cannot make a lying client honest. Browsers check the relying party ID
+  against the page's origin; other local programs need not.
 - **Silent assertions.** As CTAP allows, a getAssertion request with the `up`
   option set to false is answered without a prompt, with the user-present flag
   cleared in the signed authenticator data. A relying party that requires user
   presence rejects such an assertion; one that does not check the flag accepts
-  it.
+  it. `hmac-secret` is refused without user presence, and so is a registration
+  with `up` false.
+- **Registration without the PIN.** getInfo reports `makeCredUvNotRqd`, so a
+  non-discoverable credential can be registered without the PIN even when one
+  is set, and credentials with credProtect level 1, or level 2 when the
+  relying party names them, can sign without it. Both still need user
+  presence.
 - **No prompt for PIN operations or credential management.** Those are
-  protected by the PIN instead.
+  protected by the PIN instead. On a key without a PIN, any program that can
+  open the device can set one.
 - **`--presence auto-approve`** approves everything without asking. It exists
   for tests and CI. Never use it on a key with credentials that matter.
 
@@ -162,10 +185,15 @@ Without a display, CTAP 2.3 §6.6 only accepts authenticatorReset within 10
 seconds of power-up. With `--presence notify` the notification serves as the
 display (it states that a reset deletes all passkeys and needs Approve), so
 pqkey accepts a reset at any time; with `auto-approve` the 10-second window
-applies.
+applies, unless the hidden `--allow-late-reset` option, meant for test rigs,
+lifts it. `pqkey reset` on the command line shows no notification: it asks
+for confirmation in the terminal (skipped by `--yes`) and needs the daemon
+stopped.
 
 Logs at info level and above name only the kind of presence request. Relying
-party IDs and user names appear only at debug level.
+party IDs and user names appear only at debug level. Without `RUST_LOG` the
+daemon logs warnings and errors; the systemd unit sets `info`. A background
+daemon logs to `authenticator.log` (mode 0600) in the state directory.
 
 ### PIN
 
@@ -181,7 +209,11 @@ The CLI never accepts PINs as command-line arguments.
   new credential's own key and carries no information about the authenticator.
 - `--attestation certificate`: every registration carries the same
   per-installation certificate, so relying parties that compare certificates
-  can link your credentials across sites (WebAuthn Level 3 §14.4.1). The
+  can link your credentials across sites (WebAuthn Level 3 §14.4.1). A reset
+  keeps the certificate, so credentials from before and after a reset stay
+  linkable. If the attestation record cannot be read, or the statement would
+  not fit in a CTAPHID message, the registration gets self attestation
+  instead; a client that asks only for "none" gets "none". The
   certificate is self-signed and not in any metadata service, so it does not
   prove to a relying party that the key is genuine.
 - `--attestation none`: no statement.
@@ -212,10 +244,12 @@ redistributed needs a product ID of its own.
   notification prompt against a fake notification server.
 - libFuzzer targets cover CTAPHID packet handling, single CTAP requests (raw and
   structure-aware), stateful request sequences, and parsing and signing with
-  arbitrary stored key bytes. The engine targets run over the in-memory store.
+  arbitrary stored key bytes. The engine targets run over the in-memory store,
+  which seals and opens non-discoverable credential IDs with the real code.
   Not fuzzed: the uhid device I/O, the D-Bus client, the CLI, and decoding of
   the on-disk envelope and record format (those have unit tests).
-- `cargo audit` and `cargo deny` check both lockfiles against the RustSec
-  advisory database on every push and weekly.
+- `cargo audit` and `cargo deny` (advisories, bans, licences and sources)
+  check both lockfiles on every push and pull request to `main` and weekly,
+  and tolerate no advisory.
 
 No independent security audit of pqkey has been published.
