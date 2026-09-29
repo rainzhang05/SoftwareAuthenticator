@@ -41,15 +41,21 @@ contrib/            udev rules and systemd user unit
 - **`pqkey-ctap`** answers CTAP requests: `CtapApp::call` takes a CTAP
   command byte and its CBOR parameters, the payload of a CTAPHID_CBOR message,
   and returns the response, and an `InterruptFlag` lets the transport cancel
-  it. Nothing in it knows about CTAPHID framing or I/O. Everything outside the
-  protocol is injected: a `CredentialStore`, a random number generator and a
-  `UserPresence` implementation. It forbids `unsafe` code.
+  it. It knows nothing about CTAPHID framing or the device, only the largest
+  message CTAPHID can carry. Everything outside the protocol is injected: a
+  `CredentialStore`, a random number generator for the values the engine
+  chooses (credential IDs, `CredRandom`, key agreement keys, tokens, IVs) and
+  a `UserPresence` implementation. Credential private keys and the store's
+  nonces come straight from the operating system's generator. The crate also
+  holds the credential store, including `FileStore`, which does the file I/O.
+  It forbids `unsafe` code, as does `pqkey-mldsa`.
 - **`pqkey`** is the Linux program: it creates the uhid device, runs CTAPHID,
   runs the engine on a worker thread, asks for user presence over D-Bus, and
   provides the `attach`/`detach`/`status`/`reset`/`pin` commands. The only
   `unsafe` code in the project is here: the uhid device's kernel structures,
   `setsid` in `pre_exec` when `attach` starts the daemon, and the signal
-  handlers of the PIN prompt. Every block carries a safety comment.
+  handlers of the PIN prompt (plus a `setsockopt` in a test helper). Every
+  block carries a safety comment.
 
 ## The daemon
 
@@ -60,7 +66,8 @@ opens the credential store, creates the uhid device, writes
 `authenticator.pid`, and then serves requests until it is told to stop.
 `pqkey attach` without `--foreground` runs the same binary again with
 `--foreground` in a new session, with its output appended to
-`authenticator.log`, and waits up to 10 seconds for the pid file.
+`authenticator.log`, and waits up to 10 seconds for the pid file. `start` and
+`stop` are aliases of `attach` and `detach`.
 
 ### Threads
 
@@ -92,21 +99,24 @@ request's own channel on CTAPHID_INIT, and passes CTAPHID_CANCEL on.
   descriptor, so the loop wakes up as soon as an answer is ready.
 - **Keepalives.** The engine reports through a callback whether it is waiting
   for the user; the transport sends CTAPHID_KEEPALIVE with status
-  UPNEEDED or PROCESSING accordingly.
+  UPNEEDED or PROCESSING accordingly, at once when the status changes and
+  every 50 ms otherwise.
 - **Cancel.** CTAPHID_CANCEL on the channel of a CBOR request in progress sets
   the interrupt flag. The presence implementation polls it (every 20 ms),
   withdraws its prompt and returns, and the engine answers
-  CTAP2_ERR_KEEPALIVE_CANCEL.
-- **Shutdown.** SIGINT and SIGTERM set a flag and nothing else. The transport
-  checks the flag on every pass and fails with a dedicated shutdown error. On
-  the way out it interrupts the request in progress, destroys the uhid device,
-  closes the request channel and joins the worker; the shutdown error then
-  becomes a successful exit. A presence prompt must honour cancellation for
-  this to finish. The notification prompt checks for it before showing its
-  notification and every 20 ms while it is shown; connecting to the session
-  bus and each D-Bus call are limited to 2 seconds, so a hung bus or
-  notification server delays shutdown by seconds, not forever. A panic in the
-  engine ends the loop with an error.
+  CTAP2_ERR_KEEPALIVE_CANCEL. A CANCEL that arrives before the worker has
+  taken the request is answered by the transport itself.
+- **Shutdown.** SIGINT and SIGTERM set a flag; a second one while shutdown is
+  under way terminates the process at once, in case the orderly path is stuck.
+  The transport checks the flag on every pass and fails with a dedicated
+  shutdown error. On the way out it interrupts the request in progress and
+  closes the request channel, destroys the uhid device, and joins the worker;
+  the shutdown error then becomes a successful exit. A presence prompt must
+  honour cancellation for this to finish. The notification prompt checks for it
+  before showing its notification and every 20 ms while it is shown; connecting
+  to the session bus and each D-Bus call are limited to 2 seconds, so a hung
+  bus or notification server delays shutdown by seconds, not forever. A panic
+  in the engine ends the loop with an error.
 
 ## CTAPHID
 
@@ -125,8 +135,8 @@ sends what it queues. `crates/pqkey/src/uhid.rs` reads and writes kernel
   straight into every hidraw reader's buffer, which holds only 64 reports
   (`HIDRAW_BUFFER_SIZE` in the kernel). Longer bursts lose packets, and an
   ML-DSA-87 assertion is 82 packets. The transport therefore waits **1 ms**
-  between the input reports of a message, which costs at most about 130 ms for
-  the largest message (129 packets).
+  between any two input reports it writes in a row, which costs at most about
+  130 ms for the largest message (129 packets).
 - **Transactions.** One transaction is served at a time (§11.2.5.1). Requests
   on other channels get ERR_CHANNEL_BUSY; CTAPHID_INIT on the transaction's
   channel aborts it; continuation packets must arrive within 550 ms of the
@@ -138,8 +148,10 @@ sends what it queues. `crates/pqkey/src/uhid.rs` reads and writes kernel
   broadcast channel, allocated or not, so a long-lived client whose channel
   was forgotten keeps working; only CTAPHID_INIT on such a channel is
   refused.
-- **Capabilities.** The INIT response reports CAPABILITY_CBOR and
-  CAPABILITY_NMSG (no CTAPHID_MSG, so no U2F).
+- **Commands and capabilities.** PING, INIT, CBOR and CANCEL are handled;
+  MSG, WINK, LOCK and anything else get ERR_INVALID_CMD. The INIT response
+  reports device version 2.1.0, CAPABILITY_CBOR and CAPABILITY_NMSG (no
+  CTAPHID_MSG, so no U2F).
 
 ## The CTAP engine
 
@@ -158,9 +170,18 @@ sends what it queues. `crates/pqkey/src/uhid.rs` reads and writes kernel
 
 authenticatorBioEnrollment (0x09 and 0x40) is answered with
 CTAP1_ERR_INVALID_COMMAND. Request parameters must be canonical CBOR.
-authenticatorGetInfo reports the versions `FIDO_2_3`, `FIDO_2_1` and
-`FIDO_2_0`, the `credProtect` and `hmac-secret` extensions, and PIN/UV auth
-protocols 2 and 1. It has no `uv` option: user verification is by PIN only.
+authenticatorGetInfo reports:
+
+- versions `FIDO_2_3`, `FIDO_2_1` and `FIDO_2_0`;
+- extensions `credProtect` and `hmac-secret`;
+- options `rk`, `up`, `credMgmt`, `pinUvAuthToken` and `makeCredUvNotRqd`
+  true, and `clientPin` true or false as a PIN is or is not set. There is no
+  `uv` option: user verification is by PIN only;
+- maxMsgSize 2048, PIN/UV auth protocols 2 and 1, maxCredentialCountInList 8,
+  maxCredentialIdLength 128, transports `usb`, minPINLength 4;
+- algorithms ES256 (-7), ML-DSA-44 (-48), ML-DSA-65 (-49) and ML-DSA-87 (-50);
+- remainingDiscoverableCredentials, the free slots of the store;
+- attestationFormats `packed`, left out with `--attestation none`.
 
 **Credentials.** A discoverable credential (`rk` true) is a record in the
 store with a 33-byte ID, the marker 0x01 and 32 random bytes. The store holds
@@ -172,7 +193,9 @@ root key and bound to the SHA-256 hash of the relying party ID. It works only
 for that relying party and only until a reset replaces the key, reports a
 signature count of 0, and derives its hmac-secret `CredRandom` values from its
 key with HKDF. Non-discoverable credentials stored before they were sealed
-(IDs starting with 0x00) keep working until a reset. Private keys are a P-256
+(IDs starting with 0x00) keep working until a reset and count towards the
+limit; stored IDs without a marker, from before non-discoverable credentials
+existed, are discoverable. Private keys are a P-256
 scalar or an ML-DSA seed. Extensions: `credProtect` (levels 1 to 3) and
 `hmac-secret` (`CredRandom` with and without user verification).
 
@@ -209,9 +232,10 @@ pqkey never grants.
 
 **Reset.** authenticatorReset asks for user presence and calls
 `CredentialStore::clear`. Without a display CTAP only accepts it within 10
-seconds of power-up (§6.6). The daemon applies that window with
-`--presence auto-approve`, and lifts it with `--presence notify`, whose
-notification states what a reset deletes.
+seconds of power-up (§6.6). The daemon lifts that window with
+`--presence notify`, whose notification states what a reset deletes, and
+applies it with `--presence auto-approve` and `unanswered`, which show
+nothing. The hidden `--allow-late-reset` lifts it for test rigs.
 
 **Attestation formats.** A request whose attestationFormatsPreference is only
 "none" gets "none". A statement that would make the response longer than a
@@ -243,10 +267,11 @@ shared conformance tests: `MemoryStore` for engine tests and fuzzing, and
 ```
 
 The daemon and CLI add `authenticator.lock`, `authenticator.pid` and, for a
-background daemon, `authenticator.log`. Writes briefly create
-`.tmp-<16 hex digits>` files. A credential's file name is the lowercase hex
-HMAC-SHA-256 of its credential ID under the credential index key, so a
-directory listing reveals neither credential IDs nor relying parties.
+background daemon, `authenticator.log`, all mode 0600. Writes briefly create
+`.tmp-<16 hex digits>` files, and the pid file `authenticator.pid.<pid>.tmp`. A
+credential's file name is the lowercase hex HMAC-SHA-256 of its credential ID
+under the credential index key, so a directory listing reveals neither
+credential IDs nor relying parties.
 
 ### Key hierarchy
 
@@ -258,7 +283,9 @@ credential.key ─HKDF "ftsa-store/v1/credential/record-encryption"─▶ creden
 ```
 
 HKDF-SHA-256 (RFC 5869) with no salt, the root key as input keying material and
-a 32-byte output. Root keys are never used directly. The device key survives a
+a 32-byte output. The crate implements this one form itself (`hkdf_sha256`)
+rather than using the `hkdf` crate, so that the extracted pseudorandom key is
+wiped after use. Root keys are never used directly. The device key survives a
 reset; the credential key does not. A root key that is missing while data
 encrypted under it exists, or that is malformed (not 32 bytes, or all zeros),
 is never silently regenerated: operations that need it fail, and a reset is the
@@ -334,28 +361,37 @@ ID, user names, timeout) and asks its `UserPresence` implementation, which
 answers Approved, Denied, TimedOut or Cancelled. The default timeout is 30
 seconds.
 
-The daemon's implementations (`crates/pqkey/src/presence/`):
+The implementations the daemon chooses from with `--presence`:
 
-- **`NotificationPresence`** (`--presence notify`). For each request it
-  connects to the session bus anew, calls `GetCapabilities` and requires
-  `actions`, subscribes to `ActionInvoked` and `NotificationClosed` from the
-  server's unique bus name, and calls `Notify` with Approve and Deny actions
-  and critical urgency. Approve approves; Deny or closing the notification
-  denies; expiry or the request timeout times out; cancellation withdraws the
-  notification with `CloseNotification`. Any failure to show the notification
-  denies the request. Strings from the request are sanitised and shortened, and
-  markup-escaped if the server interprets markup. A connection per request
-  means the daemon can start before the desktop and survive logging out and in.
-- **`AutoApprove`** (`--presence auto-approve`) approves at once.
-- **`Unanswered`** (hidden `--presence unanswered`) never answers; the E2E
-  tests use it to watch the transport while a prompt is open.
+- **`NotificationPresence`** (`--presence notify`, in
+  `crates/pqkey/src/presence/`). For each request it connects to the session
+  bus anew, calls `GetCapabilities` and requires `actions`, subscribes to
+  `ActionInvoked` and `NotificationClosed` from the server's unique bus name,
+  and calls `Notify` with Approve and Deny actions and critical urgency.
+  Approve approves; Deny or closing the notification denies; expiry or the
+  request timeout times out; cancellation withdraws the notification. Whatever
+  the answer, a notification the server has not closed itself is withdrawn with
+  `CloseNotification`. Any failure to show the notification denies the request.
+  Strings from the request are sanitised and shortened, and markup-escaped if
+  the server interprets markup. A connection per request means the daemon can
+  start before the desktop and survive logging out and in.
+- **`AutoApprove`** (`--presence auto-approve`, in `pqkey-ctap`) approves at
+  once.
+- **`Unanswered`** (hidden `--presence unanswered`, in
+  `crates/pqkey/src/presence/`) never answers; the E2E tests use it to watch
+  the transport while a prompt is open.
+
+The hidden `--presence-timeout` (1 to 600 seconds) replaces the 30-second
+default; the E2E tests shorten it.
 
 ## Attestation
 
 `--attestation self` (default) produces a `packed` statement signed with the
 new credential's key. `--attestation none` produces none.
-`--attestation certificate` makes the daemon provision an attestation record on
-start if the store has none, or if the stored certificate's AAGUID extension
+`--attestation certificate`, which requires `--manufacturer` (the subject's O)
+and `--country` (an ISO 3166-1 alpha-2 code, the subject's C) and takes
+`--product` (the CN, by default the HID product name), makes the daemon
+provision an attestation record on start if the store has none, or if the stored certificate's AAGUID extension
 does not match `--aaguid`: a new P-256 key and a self-signed X.509 v3
 certificate generated with `rcgen` and signed with `p256`, meeting WebAuthn
 Level 3 §8.2.1 (subject C, O, OU "Authenticator Attestation", CN; the
@@ -376,16 +412,23 @@ the stored record cannot be read, registrations fall back to self attestation.
   is ignored.
 - **`detach`** sends SIGTERM and waits up to 10 seconds for the lock to be
   released.
+- **`reset`** asks for confirmation unless `--yes` is given, and also deletes
+  the state files from before the storage rework, saying which it removed.
 - **`pin status`** only reads, so it needs no lock.
 - **PIN input** is read with terminal echo off (a new PIN twice), or one line
   per PIN from a non-terminal standard input. PINs are zeroized on drop and
   never accepted as arguments.
 - **State directory** defaults to `$XDG_DATA_HOME/pqkey` or
-  `~/.local/share/pqkey`, and is created with mode `0700` or tightened to it.
-  A shared directory with the sticky bit set, such as `/tmp`, is refused
-  rather than made private. If the state directory does not exist yet but the
+  `~/.local/share/pqkey`, and is created with mode `0700` or tightened to it. A
+  shared directory with the sticky bit set, such as `/tmp`, is refused rather
+  than made private. If the default state directory does not exist yet but the
   pre-rename default `feitian-mldsa-authenticator` does, the CLI prints a note
   that the old directory is unused.
+- **Device identity.** `--name` sets the HID product name, `--vendor-id` and
+  `--product-id` the USB IDs (default `1209:0001`), `attach --version` the
+  version in the HID descriptor, and `--aaguid` the AAGUID (default
+  `5931e805-a166-4eb7-845a-7f6aa93d9cd8`). The legacy options `--serial`,
+  `--vid`, `--pid` and `--backend` are hidden, accepted and ignored.
 
 ## Testing
 
@@ -397,7 +440,7 @@ the stored record cannot be read, registrations fall back to self attestation.
 | Engine over files | `crates/pqkey-ctap/tests/ctap_file_store.rs` | CTAP requests over a real `FileStore`, rebuilding the engine between requests as a restart would |
 | ML-DSA KATs | `crates/pqkey-mldsa/tests/fips204_kat.rs` | NIST ACVP key generation, signing and verification vectors for all three parameter sets |
 | Attestation | `crates/pqkey/tests/packed_attestation.rs` | The provisioned certificate's AAGUID matches authenticatorData and the signature verifies |
-| End to end | `tests/e2e/`, `.github/workflows/e2e.yml` | The release daemon on a GitHub Actions Ubuntu runner, driven through its hidraw node by libfido2's tools and python-fido2: getInfo, ES256 and ML-DSA credentials, PINs, hmac-secret and credential management with both PIN/UV auth protocols, CTAPHID edge cases, certificate attestation, notification presence on a private session bus, and the CLI's `attach`, `status`, `detach`, `pin` and `reset` commands |
+| End to end | `tests/e2e/`, `.github/workflows/e2e.yml` | The release daemon on a GitHub Actions Ubuntu runner, driven through its hidraw node by libfido2's tools and python-fido2: getInfo, ES256 and ML-DSA credentials, PINs, hmac-secret and credential management with both PIN/UV auth protocols, CTAPHID edge cases, certificate attestation, notification presence on a private session bus, the transport while a prompt stays unanswered, an independent check of the test suite's ML-DSA verifier, and the CLI's `attach`, `status`, `detach`, `pin` and `reset` commands |
 | Fuzzing | `fuzz/`, `.github/workflows/fuzz.yml` | libFuzzer targets `ctaphid_packets`, `ctap_request`, `ctap_request_structured`, `ctap_sequence`, `credential_key` |
 
 How to run each of these is in [development-notes.md](development-notes.md).
