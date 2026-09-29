@@ -19,11 +19,13 @@ Upgrading from `867a591` or earlier is not an in-place update:
 - **Stored state is not migrated.** Credentials and the PIN from the old
   format are lost; there is nothing to convert them with. The daemon deletes
   the old files (`master.seed`, `internal.lfs2`, `external.lfs2`,
-  `volatile.lfs2`) when it starts, and so does `pqkey reset`.
+  `volatile.lfs2`) from the state directory it uses when it starts, and so
+  does `pqkey reset`.
 - **The state directory moved** from `$XDG_DATA_HOME/feitian-mldsa-authenticator`
   (`~/.local/share/feitian-mldsa-authenticator`) to `$XDG_DATA_HOME/pqkey`
-  (`~/.local/share/pqkey`). The CLI prints a note while the old directory
-  exists; delete it yourself.
+  (`~/.local/share/pqkey`). Nothing touches the old directory: the CLI
+  notes that it is unused as long as the new default directory does not exist
+  yet, and deleting it is up to you.
 - **Renamed:** the project to pqkey; the binary `pc-hid-runner` to `pqkey`; the
   crates `pc-hid-runner`, `authenticator` and `trussed-mldsa` to `pqkey`,
   `pqkey-ctap` and `pqkey-mldsa`, now under `crates/`; the udev rules
@@ -55,6 +57,7 @@ Upgrading from `867a591` or earlier is not an in-place update:
   `--serial`, `--vid`, `--pid` and `--backend` are still accepted but
   ignored.
 - **Build requirements:** Rust 1.89 or later (was 1.85), edition 2024.
+- **Licence:** MIT only (was Apache-2.0 OR MIT).
 
 ### Added
 
@@ -140,6 +143,10 @@ Upgrading from `867a591` or earlier is not an in-place update:
   encrypted pinUvAuthToken, without pinRetries.
 - pinUvAuthToken usage timer, permissions, RP binding and per-protocol key
   agreement keys follow CTAP 2.3.
+- Response maps are sorted as CTAP2 canonical CBOR requires, by major type
+  first.
+- Platform key agreement keys that are not EC2 keys on P-256 are refused, and
+  stored ES256 keys that are not exactly 32 bytes are rejected.
 - CTAP status codes for invalid parameters, wrongly typed parameters
   (CTAP2_ERR_CBOR_UNEXPECTED_TYPE), unsupported options, unimplemented
   clientPIN subcommands and bio enrollment.
@@ -184,7 +191,11 @@ Upgrading from `867a591` or earlier is not an in-place update:
 
 - PINs are no longer accepted as command-line arguments, where other local
   users could read them and shells saved them to history. The terminal prompt
-  turns echo off, and PINs are zeroized after use.
+  turns echo off, and PINs are zeroized after use, as are pinUvAuthTokens, PIN
+  hashes, PIN/UV auth session keys and hmac-secret outputs.
+- HKDF is implemented locally over `hmac` instead of taken from the `hkdf`
+  crate, so the pseudorandom key it extracts from a root key or shared secret
+  is wiped after use.
 - A spent PIN retry is written to disk before the PIN is compared, in the
   engine and in the CLI, so interrupting a check gives no free guess. The
   3-mismatch lockout stays volatile, as CTAP intends.
@@ -195,8 +206,8 @@ Upgrading from `867a591` or earlier is not an in-place update:
 - User presence is no longer approved without asking by default.
 - Self attestation by default avoids linking a user's credentials across sites
   through a shared attestation certificate.
-- Supply-chain checks (cargo-audit, cargo-deny) run on every push and weekly,
-  and tolerate no advisory.
+- Supply-chain checks (cargo-audit, cargo-deny) run on every push and pull
+  request to `main` and weekly, and tolerate no advisory.
 - pinUvAuthTokens, the authenticatorGetNextAssertion state and the reset
   window after start-up run on CLOCK_BOOTTIME, so time the system spends
   suspended counts and a token no longer outlives a suspend.
