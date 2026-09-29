@@ -69,19 +69,21 @@ pqkey pin set | change | remove
 pqkey reset [--yes]          # delete every credential and the PIN
 ```
 
-Every registration and sign-in asks for your approval with a desktop
-notification. PINs are read from the terminal with echo off, or one per line
-from standard input. `pin set|change|remove` and `reset` need the daemon
-stopped. The state lives in `~/.local/share/pqkey` (`--state-dir` changes it),
-and `pqkey attach --help` lists the other options.
+Every registration, sign-in and reset from a browser asks for your approval
+with a desktop notification. PINs are read from the terminal with echo off, or
+one per line from standard input. `pin set|change|remove` and `reset` need the
+daemon stopped. The state lives in `~/.local/share/pqkey` (`--state-dir`
+changes it), and `pqkey attach --help` lists the other options.
 
 ## ML-DSA in clients
 
 A client can only create an ML-DSA credential if it passes the relying party's
-ML-DSA algorithms on to the key. As of September 2026, **python-fido2** does,
-and **Chromium 155** understands ML-DSA public keys; Firefox and libfido2 drop
-them. ES256 credentials, PINs, credential management and `hmac-secret` work
-with any CTAP 2.1 client.
+ML-DSA algorithms on to the key. As of September 2026, **python-fido2** (2.2.1,
+which the end-to-end tests use) does, and **Chromium 155** understands ML-DSA
+public keys. Firefox drops algorithms it does not know, and libfido2 has no
+ML-DSA credential type (`fido2-token -I` lists the algorithms as unknown).
+ES256 credentials, PINs, credential management and `hmac-secret` work with any
+CTAP 2.1 client.
 
 ## More
 
