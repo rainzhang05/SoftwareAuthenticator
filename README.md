@@ -6,7 +6,7 @@ browsers and other FIDO clients see an ordinary USB security key. Besides
 ES256 it creates post-quantum **ML-DSA-44, ML-DSA-65 and ML-DSA-87**
 credentials (FIPS 204). Written in Rust, with pure-Rust cryptography.
 
-> **A test project (0.1.0), not for production use.** A software key is not a
+> **A test project, not for production use.** A software key is not a
 > hardware key: its private keys are files in your home directory, which
 > anything running as your user, or as root, can read and use. User presence
 > is a desktop notification, not a touch. See [SECURITY.md](SECURITY.md) for
