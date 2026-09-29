@@ -118,17 +118,19 @@ cannot run in unit tests, which is why the floor is below 100%.
 
 ### Lints in the code
 
-The workspace lints in the root `Cargo.toml` apply to every crate.
-`pqkey-ctap` forbids `unsafe` code and requires documentation on its public
-API. In `pqkey`, every `unsafe` block needs a `// SAFETY:` comment. A lint
-that is deliberately allowed carries an `#[allow]` with a comment saying why.
+The workspace lints in the root `Cargo.toml` apply to every crate. `pqkey-ctap`
+and `pqkey-mldsa` forbid `unsafe` code and require documentation on their
+public API. In `pqkey`, every `unsafe` block needs a `// SAFETY:` comment. A
+lint that is deliberately allowed carries an `#[allow]` with a comment saying
+why.
 
 ## End-to-end tests
 
 [`.github/workflows/e2e.yml`](../.github/workflows/e2e.yml) runs the release
 daemon on an Ubuntu runner and tests it through its hidraw node with libfido2's
-command-line tools and python-fido2. The tests reset the authenticator before
-each test: never point them at a pqkey whose credentials matter. They use their
+command-line tools and python-fido2. Most Python tests reset the
+authenticator before they start, and the libfido2 script creates credentials:
+never point them at a pqkey whose credentials matter. They use their
 own state directories. The CLI tests
 ([`tests/e2e/test_cli.py`](../tests/e2e/test_cli.py)) also start and stop a
 daemon of their own, as product ID `0005` on a temporary state directory: it
@@ -223,6 +225,7 @@ nightly and [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (CI uses
 ```bash
 cd fuzz
 cargo +nightly fuzz list
+mkdir -p corpus/ctap_sequence
 cargo +nightly fuzz run -O -a ctap_sequence corpus/ctap_sequence seeds/ctap_sequence -- \
   -max_total_time=300 -rss_limit_mb=2048 -timeout=30
 ```
@@ -231,12 +234,16 @@ cargo +nightly fuzz run -O -a ctap_sequence corpus/ctap_sequence seeds/ctap_sequ
 musl-built cargo-fuzz, add `--target x86_64-unknown-linux-gnu`, as CI does.
 Reproduce a crash with `cargo +nightly fuzz run -O -a <target> <artifact file>`.
 The seed corpora in `fuzz/seeds/` are written by
-`cargo run --release --manifest-path fuzz/Cargo.toml --example seeds`; add the
-input of every fixed crash to them.
+`cargo run --release --manifest-path fuzz/Cargo.toml --example seeds`, which
+replaces them entirely: add the input of every fixed crash to
+[`fuzz/examples/seeds.rs`](../fuzz/examples/seeds.rs), not to `fuzz/seeds/`
+by hand, and commit the regenerated seeds.
 
 CI builds every target and runs each for 30 seconds on pushes to `main` that
-touch the crates or the fuzz crate, and fuzzes each target for 30 minutes every
-Sunday.
+touch the crates, the root `Cargo.lock` or the fuzz crate, and on pull requests
+that change the fuzz crate's `Cargo.toml` or `Cargo.lock`. It fuzzes each
+target for 30 minutes every Sunday, and for as long as asked when the workflow
+is started by hand.
 
 If you change a dependency of a main-workspace crate, update
 `fuzz/Cargo.lock` as well (`cargo metadata --manifest-path fuzz/Cargo.toml`
