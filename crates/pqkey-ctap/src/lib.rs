@@ -177,8 +177,8 @@ impl ClassicPinProtocol {
 /// `SHA-256(Z)` to HKDF produces keys that no conforming platform (Chrome,
 /// libfido2, ...) will agree with.
 ///
-/// `Hkdf::new(None, ikm)` uses an all-zero salt of the hash output length,
-/// which for SHA-256 is exactly the 32 zero bytes the specification requires.
+/// `hkdf_sha256` uses an all-zero salt of the hash output length, which for
+/// SHA-256 is exactly the 32 zero bytes the specification requires.
 ///
 /// This function cannot fail; it is kept infallible because HKDF-Expand is only
 /// defined to fail when `L > 255 * HashLen`, and both outputs here are a fixed

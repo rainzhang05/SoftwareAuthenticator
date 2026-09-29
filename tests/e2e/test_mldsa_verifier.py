@@ -1,10 +1,10 @@
 """Self-check of the ML-DSA verifier the credential tests rely on.
 
-While registering ML-DSA credentials fails (bug 1), nothing else exercises
-ctap.verify_signature for ML-DSA. This runs it against signatures made by
+The credential tests check the authenticator's ML-DSA signatures with
+ctap.verify_signature. This runs that verifier against signatures made by
 pyca/cryptography's OpenSSL-backed ML-DSA, independent of the authenticator,
-so a missing backend or a broken verifier shows up now rather than when the
-bug is fixed.
+so a missing backend or a broken verifier cannot make those tests pass or fail
+for the wrong reason.
 """
 
 import os
