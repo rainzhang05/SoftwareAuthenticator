@@ -193,6 +193,9 @@ pub struct UhidTransport<'interrupt> {
     waiting: WaitingForUser,
     epoch: Instant,
     shutdown: ShutdownSignal,
+    /// Whether the hidraw node's permissions have been checked, which
+    /// happens once a client first opens the device.
+    node_checked: bool,
 }
 
 impl UhidTransport<'_> {
@@ -225,6 +228,12 @@ impl UhidTransport<'_> {
             let now = self.now();
             self.host.handle_frame(&frame, now);
             did_work = true;
+        }
+        if !self.node_checked && self.device.take_opened() {
+            self.node_checked = true;
+            if let Ok(nodes) = permissions::hidraw_nodes_for_descriptor(self.device.descriptor()) {
+                permissions::warn_if_world_accessible(&nodes);
+            }
         }
         // Before anything new goes to the app: an interrupt is only meant for
         // the request the app has now.
@@ -278,23 +287,13 @@ pub fn serve(transport: &mut UhidTransport<'_>) -> io::Result<()> {
     }
 }
 
-/// Create the uhid device, warning if its hidraw node is accessible to every
-/// user.
+/// Create the uhid device.
+///
+/// Its hidraw node appears asynchronously, and udev sets its mode after that,
+/// so whether every user can open it is checked later, once a client first
+/// opens the device (see [`UhidTransport::poll`]).
 pub fn create_device(descriptor: HidDeviceDescriptor) -> io::Result<UhidDevice> {
-    let device = UhidDevice::new(descriptor.clone())?;
-    if let Ok(nodes) = permissions::hidraw_nodes_for_descriptor(&descriptor) {
-        for node in nodes {
-            let mode = node.mode & 0o777;
-            if mode & 0o007 != 0 {
-                log::warn!(
-                    "{} is world-accessible (mode {:o}); install the bundled udev rule or tighten permissions",
-                    node.path.display(),
-                    mode
-                );
-            }
-        }
-    }
-    Ok(device)
+    UhidDevice::new(descriptor)
 }
 
 /// Serve CTAPHID on `device` with `app` until the device or the app fails or
@@ -350,6 +349,7 @@ where
             },
             waiting: waiting.clone(),
             epoch: Instant::now(),
+            node_checked: false,
             shutdown,
         };
 

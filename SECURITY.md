@@ -60,7 +60,8 @@ systemd's `uaccess` tag. Any process running as that user can open it and send
 CTAP requests: pqkey cannot tell a browser from any other program, and the
 relying party ID and user names in a request are whatever that process wrote.
 Without the rules the node's mode is up to the system; if every user can open
-it, the daemon logs a warning but still starts.
+it, the daemon logs a warning once a client first opens the key (by then udev
+has set the node's mode), and keeps serving it.
 
 `/dev/uhid` itself is opened by the daemon. The rules give the `plugdev` group
 access to it. Anyone who can open `/dev/uhid` can create any HID device,

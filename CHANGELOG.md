@@ -218,6 +218,9 @@ also break an existing installation of that commit:
   shell's banner queue for its whole lifetime (seen with Chromium starting a
   request from an unfocused window): an unanswered prompt is nudged every 2
   seconds with an empty, transient notification that is withdrawn at once.
+- The warning about a world-accessible hidraw node can fire: the node's mode
+  is checked once a client first opens the key, after udev has set it. Before,
+  it was checked before the node existed or before udev had run.
 - A daemon killed while it showed a prompt no longer leaves the prompt on
   screen for good: the next daemon withdraws it, if the same notification
   server still runs (`authenticator.prompt` in the state directory).

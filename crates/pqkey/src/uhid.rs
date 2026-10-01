@@ -5,6 +5,7 @@ use nix::unistd::{read, write};
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -127,6 +128,9 @@ fn report_data(data: &[u8; raw::UHID_DATA_MAX], size: u16) -> Option<&[u8]> {
 pub struct UhidDevice {
     inner: UhidInner,
     descriptor: HidDeviceDescriptor,
+    /// Set by a UHID_OPEN event, which the kernel sends once something
+    /// opens the device, and cleared by [`Self::take_opened`].
+    opened: AtomicBool,
 }
 
 impl UhidDevice {
@@ -152,6 +156,7 @@ impl UhidDevice {
                 fd: OwnedFd::from(file),
             },
             descriptor,
+            opened: AtomicBool::new(false),
         })
     }
 
@@ -161,7 +166,19 @@ impl UhidDevice {
         Self {
             inner: UhidInner { fd },
             descriptor,
+            opened: AtomicBool::new(false),
         }
+    }
+
+    /// Whether a client opened the device since the last call: by then udev
+    /// has long applied its rules to the hidraw node, so its mode is final.
+    pub fn take_opened(&self) -> bool {
+        self.opened.swap(false, Ordering::Relaxed)
+    }
+
+    /// The descriptor the device was created with.
+    pub fn descriptor(&self) -> &HidDeviceDescriptor {
+        &self.descriptor
     }
 
     pub fn try_read_frame(&self) -> io::Result<Option<CtapHidFrame>> {
@@ -229,9 +246,9 @@ impl UhidDevice {
                         self.inner
                             .send_get_report_reply(id, 0, &self.descriptor.feature_report)?;
                     }
+                    raw::UHID_EVENT_TYPE_OPEN => self.opened.store(true, Ordering::Relaxed),
                     raw::UHID_EVENT_TYPE_START
                     | raw::UHID_EVENT_TYPE_STOP
-                    | raw::UHID_EVENT_TYPE_OPEN
                     | raw::UHID_EVENT_TYPE_CLOSE => {}
                     _ => {}
                 },
@@ -831,6 +848,24 @@ mod tests {
             Some(CtapHidFrame::new(frame))
         );
         assert_eq!(read_set_report_reply(&mut kernel), (9, 0));
+    }
+
+    /// UHID_OPEN, which the kernel sends once a client opens the device, is
+    /// reported once through `take_opened`.
+    #[test]
+    fn an_open_event_is_reported_once() {
+        use std::io::Write;
+        let (device, mut kernel) = crate::tests::socket_device();
+        assert!(!device.take_opened());
+        let open = raw::uhid_event::new(raw::UHID_EVENT_TYPE_OPEN);
+        kernel.write_all(event_as_bytes(&open)).unwrap();
+        kernel.write_all(&output_event(&init_frame())).unwrap();
+        assert_eq!(
+            device.try_read_frame().unwrap(),
+            Some(CtapHidFrame::new(init_frame()))
+        );
+        assert!(device.take_opened());
+        assert!(!device.take_opened());
     }
 
     // NOTE: previous versions of this file contained tests for an in-place

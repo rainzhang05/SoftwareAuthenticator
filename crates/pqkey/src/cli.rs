@@ -19,7 +19,7 @@ use nix::{
 };
 
 use crate::{
-    HidDeviceDescriptor, attestation, permissions,
+    attestation, permissions,
     pin_input::PinReader,
     presence::PresenceMode,
     service,
@@ -421,7 +421,7 @@ fn read_log_from(path: &Path, offset: u64) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-fn warn_device_permissions(descriptor: &HidDeviceDescriptor) {
+fn warn_uhid_access() {
     let euid = unistd::geteuid();
     if euid.is_root() {
         return;
@@ -438,19 +438,6 @@ fn warn_device_permissions(descriptor: &HidDeviceDescriptor) {
             );
         }
         Err(_) => {}
-    }
-
-    if let Ok(nodes) = permissions::hidraw_nodes_for_descriptor(descriptor) {
-        for node in nodes {
-            let mode = node.mode & 0o777;
-            if mode & 0o007 != 0 {
-                eprintln!(
-                    "warning: {} is world-accessible (mode {:o}). Install contrib/udev/70-pqkey.rules or tighten permissions.",
-                    node.path.display(),
-                    mode
-                );
-            }
-        }
     }
 }
 
@@ -500,7 +487,7 @@ fn start(cmd: StartCommand) -> io::Result<()> {
         // Taken before anything touches the stored state and held until the
         // daemon exits; this is what makes a second daemon refuse to start.
         let lock = cmd.state.lock()?;
-        warn_device_permissions(&config.descriptor);
+        warn_uhid_access();
         run_foreground(lock, &cmd.state, config)
     } else {
         // Only a quick check for a friendlier message: the daemon started
@@ -508,7 +495,7 @@ fn start(cmd: StartCommand) -> io::Result<()> {
         if state_lock::daemon_state(&cmd.state.state_dir)? != DaemonState::Stopped {
             return Err(cmd.state.in_use_error());
         }
-        warn_device_permissions(&config.descriptor);
+        warn_uhid_access();
         spawn_daemon(&cmd.state)
     }
 }
