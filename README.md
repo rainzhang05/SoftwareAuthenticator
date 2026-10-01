@@ -14,36 +14,44 @@ credentials (FIPS 204). Written in Rust, with pure-Rust cryptography.
 
 ## Requirements
 
-- Linux with the `uhid` kernel module.
+- Linux with the `uhid` kernel module (Ubuntu, Debian and Fedora have it), and
+  systemd.
 - A desktop notification server that shows action buttons (GNOME Shell, KDE
   Plasma, dunst). Without one, every request that needs your approval is
   denied.
-- Rust 1.89 or later to build.
+- Rust 1.89 or later and a C linker to build.
 
 ## Install
 
+On a fresh Ubuntu or Debian desktop:
+
 ```bash
+sudo apt install build-essential curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+. "$HOME/.cargo/env"
 cargo install --locked --git https://github.com/rainzhang05/SoftwareAuthenticator pqkey
 pqkey setup
 ```
 
-Cargo installs `pqkey` in `~/.cargo/bin`, which rustup's installer adds to
-your PATH (from your next login). `pqkey setup` installs a systemd user
-service that starts the key with your session. The steps that need root it writes to a short script, shows it to
-you, and asks you to run it with `sudo sh`, then `pqkey setup` again:
+The first three lines install Rust; skip them if you have it. In a clone of
+this repository, `cargo install --locked --path crates/pqkey` builds the same.
+
+`pqkey setup` shows the steps that need root and runs them with `sudo` once you
+agree:
 
 - udev rules ([`contrib/udev/70-pqkey.rules`](contrib/udev/70-pqkey.rules))
   that give `/dev/uhid` to the `plugdev` group, and the key's device to the
   active session's user and to the Firefox and Chromium snaps (Ubuntu's
   browsers);
 - loading the `uhid` module at boot;
-- adding you to `plugdev`, if you are not in it yet (on Ubuntu you are), after
-  which you log in again.
+- adding you to `plugdev`, if you are not in it yet (on Ubuntu you are).
 
-It ends by offering to set a PIN, which Chromium needs before it uses
-passkeys. `pqkey status` shows anything that is still missing, and how to fix
-it. `pqkey setup --uninstall` removes the service and prints what undoes the
-root part; your passkeys stay in `~/.local/share/pqkey`.
+Then it installs and starts a systemd user service, which starts the key with
+your session, and offers to set a PIN, which Chromium needs before it uses
+passkeys. If it had to add you to `plugdev`, log out and in again instead: the
+key then starts by itself. `pqkey status` shows anything still missing, and
+how to fix it. `pqkey setup --uninstall` removes the service and shows what
+undoes the root part; your passkeys stay in `~/.local/share/pqkey`.
 
 > **Warning.** Anyone who can open `/dev/uhid` can create any HID device,
 > keyboards included, and so type into the active session. Only add users you
