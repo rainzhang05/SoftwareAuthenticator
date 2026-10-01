@@ -24,7 +24,7 @@ use signal_hook::{consts::SIGINT, flag};
 
 use super::checks::{self, Problem, System};
 use super::daemon::{self, Running};
-use super::output::{errln, outln};
+use super::output::{self, errln, outln};
 use crate::client::ctap2::{Authenticator, ClientError, Passkey, PinRetries, Token};
 use crate::client::ctaphid::{ReportLink, STATUS_UPNEEDED};
 use crate::client::hidraw::{self, Hidraw};
@@ -177,11 +177,7 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
     problems.extend(service_problems(state_dir, running));
     if !problems.is_empty() {
         outln!()?;
-        outln!("Problems:")?;
-        for problem in &problems {
-            outln!("- {}", problem.what)?;
-            outln!("  Fix: {}", problem.fix)?;
-        }
+        output::problems(&problems)?;
     }
     Ok(())
 }

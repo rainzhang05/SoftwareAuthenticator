@@ -9,9 +9,10 @@
 //! report them.
 
 use std::{
+    env,
     error::Error,
     fmt,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
 };
 
 /// Writing standard output failed.
@@ -36,6 +37,39 @@ pub fn line(args: fmt::Arguments<'_>) -> io::Result<()> {
     writeln!(out, "{args}")
         .and_then(|()| out.flush())
         .map_err(|err| io::Error::new(err.kind(), OutputError(err)))
+}
+
+/// Whether standard output gets colour: it is a terminal, and `NO_COLOR` is
+/// not set (<https://no-color.org>).
+fn colour() -> bool {
+    io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+}
+
+/// `text` in the ANSI colour `code` when standard output has colour.
+fn paint(code: &str, text: &str) -> String {
+    if colour() {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text.to_owned()
+    }
+}
+
+/// A step that is done, as a line of its own: `  ✓ text`.
+pub fn done(text: impl fmt::Display) -> io::Result<()> {
+    line(format_args!("  {} {text}", paint("1;32", "✓")))
+}
+
+/// Something left to fix, and under it how: `  ! what` and `    Fix: fix`.
+pub fn problem(what: impl fmt::Display, fix: impl fmt::Display) -> io::Result<()> {
+    line(format_args!("  {} {what}", paint("1;33", "!")))?;
+    line(format_args!("    Fix: {fix}"))
+}
+
+/// [`problem`] lines for each of `problems`.
+pub fn problems(problems: &[super::checks::Problem]) -> io::Result<()> {
+    problems
+        .iter()
+        .try_for_each(|found| problem(&found.what, &found.fix))
 }
 
 /// Whether `err` is standard output having been closed by its reader: it

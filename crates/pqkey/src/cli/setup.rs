@@ -23,7 +23,7 @@ use super::checks::{
 };
 use super::daemon::{self, Running, UNIT};
 use super::key;
-use super::output::outln;
+use super::output::{self, outln};
 use crate::state::default_state_dir;
 
 /// The systemd user unit this version ships, with `ExecStart` for
@@ -206,14 +206,6 @@ fn shown_script(script: &str) -> Vec<String> {
     shown
 }
 
-fn print_problems(problems: &[checks::Problem]) -> io::Result<()> {
-    for problem in problems {
-        outln!("- {}", problem.what)?;
-        outln!("  Fix: {}", problem.fix)?;
-    }
-    Ok(())
-}
-
 /// Refuse what setup does not do: run as root, or for another state
 /// directory than the one the systemd unit uses.
 fn check_caller(state_dir: &Path) -> io::Result<()> {
@@ -280,7 +272,7 @@ pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
     let problems = checks::start_problems(&system, &membership);
     if !problems.is_empty() {
         outln!("The key cannot start yet:")?;
-        print_problems(&problems)?;
+        output::problems(&problems)?;
         outln!("Then run `pqkey setup` again.")?;
         return Ok(());
     }
@@ -317,7 +309,7 @@ pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
     if !problems.is_empty() {
         outln!()?;
         outln!("Still to fix:")?;
-        print_problems(&problems)?;
+        output::problems(&problems)?;
     }
     key::offer_pin(running, interactive)
 }
