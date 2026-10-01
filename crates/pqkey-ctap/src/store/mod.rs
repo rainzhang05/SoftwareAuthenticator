@@ -143,8 +143,9 @@ pub trait CredentialStore {
     /// The most credentials this store will hold.
     fn max_credentials(&self) -> usize;
 
-    /// Factory reset: delete every credential and reset the PIN state to
-    /// [`PinStateRecord::default`].  The attestation record is kept.
+    /// Factory reset: delete every credential, reset the PIN state to
+    /// [`PinStateRecord::default`] and the global signature counter to 0.  The
+    /// attestation record is kept.
     ///
     /// Afterwards [`Self::pin_state`] returns the default state, not `None`.
     /// [`FileStore`] also replaces the key protecting credentials and PIN
@@ -157,6 +158,14 @@ pub trait CredentialStore {
 
     /// Atomically replace the persistent PIN state.
     fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<(), StoreError>;
+
+    /// The global signature counter: the signature count of the credentials
+    /// that keep none of their own, the non-discoverable ones sealed into
+    /// their credential IDs.  0 if it has never been written.
+    fn signature_counter(&self) -> Result<u32, StoreError>;
+
+    /// Atomically replace the global signature counter.
+    fn set_signature_counter(&mut self, value: u32) -> Result<(), StoreError>;
 
     /// The attestation record, or `None` if none has been provisioned.
     fn attestation(&self) -> Result<Option<AttestationRecord>, StoreError>;

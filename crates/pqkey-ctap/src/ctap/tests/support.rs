@@ -250,6 +250,9 @@ pub(super) struct Faults {
     pub(super) set_pin_state_after: Option<usize>,
     pub(super) attestation: bool,
     pub(super) clear: bool,
+    /// `signature_counter` reports the record as corrupt.
+    pub(super) signature_counter: bool,
+    pub(super) set_signature_counter: bool,
 }
 
 #[derive(Default)]
@@ -375,6 +378,21 @@ impl CredentialStore for TestStore {
         }
         locked.pin_state_writes.push(state.clone());
         locked.store.set_pin_state(state)
+    }
+
+    fn signature_counter(&self) -> Result<u32, StoreError> {
+        if self.lock().faults.signature_counter {
+            return Err(StoreError::Corrupt {
+                object: "signature-counter".into(),
+                reason: Corruption::Authentication,
+            });
+        }
+        self.lock().store.signature_counter()
+    }
+
+    fn set_signature_counter(&mut self, value: u32) -> Result<(), StoreError> {
+        self.fail_if(|faults| faults.set_signature_counter)?;
+        self.lock().store.set_signature_counter(value)
     }
 
     fn attestation(&self) -> Result<Option<AttestationRecord>, StoreError> {

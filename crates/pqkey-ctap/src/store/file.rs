@@ -22,6 +22,7 @@ use super::{
 const CREDENTIALS_DIR: &str = "credentials";
 const KEYS_DIR: &str = "keys";
 const PIN_STATE_FILE: &str = "pin-state";
+const SIGNATURE_COUNTER_FILE: &str = "signature-counter";
 const ATTESTATION_FILE: &str = "attestation";
 
 /// The production [`CredentialStore`]: authenticated, encrypted files in a
@@ -49,6 +50,7 @@ const ATTESTATION_FILE: &str = "attestation";
 /// ├── credentials/            0700
 /// │   └── <64 hex digits>     0600  one envelope per credential, record type 1
 /// ├── pin-state               0600  envelope, record type 2
+/// ├── signature-counter       0600  envelope, record type 4
 /// └── attestation             0600  envelope, record type 3
 /// ```
 ///
@@ -252,6 +254,7 @@ impl<K: KeySource> FileStore<K> {
         match domain {
             KeyDomain::Device => exists(&self.root.join(ATTESTATION_FILE)),
             KeyDomain::Credential => Ok(exists(&self.root.join(PIN_STATE_FILE))?
+                || exists(&self.root.join(SIGNATURE_COUNTER_FILE))?
                 || !self.credential_file_names()?.is_empty()),
         }
     }
@@ -458,9 +461,10 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
         // leaves a state that is safe to use and that a repeated `clear`
         // completes.
         //
-        // 1. Delete every file in `credentials/`, then flush the directory.  A
-        //    crash part-way leaves some credentials, still guarded by the
-        //    unchanged PIN state.  Nothing is exposed.
+        // 1. Delete every file in `credentials/`, then flush the directory, and
+        //    delete the global signature counter.  A crash part-way leaves
+        //    some credentials, still guarded by the unchanged PIN state.
+        //    Nothing is exposed.
         // 2. Rotate the credential key: the new key is written to a flushed
         //    temporary file and renamed over the old one, the directory is
         //    flushed, and the old key's contents are then overwritten.  Before
@@ -479,6 +483,9 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
         // store whose credential key is lost or malformed.
         fsio::remove_all_files(&self.credentials_dir)?;
         fsio::ensure_private_dir(&self.credentials_dir)?;
+        if fsio::remove_file_if_present(&self.root.join(SIGNATURE_COUNTER_FILE))? {
+            fsio::sync_dir(&self.root)?;
+        }
         let root_key = self.keys.rotate(KeyDomain::Credential)?;
         let keys = CredentialKeys::derive(&root_key)?;
         self.write_pin_state(&keys, &PinStateRecord::default())
@@ -499,6 +506,31 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
     fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<(), StoreError> {
         let keys = CredentialKeys::derive(&self.root_key_for_write(KeyDomain::Credential)?)?;
         self.write_pin_state(&keys, state)
+    }
+
+    fn signature_counter(&self) -> Result<u32, StoreError> {
+        let Some(keys) = self.credential_keys()? else {
+            return Ok(0);
+        };
+        Ok(self
+            .read_object(
+                &keys.record,
+                RecordType::SignatureCounter,
+                SIGNATURE_COUNTER_FILE,
+                codec::decode_signature_counter,
+            )?
+            .unwrap_or(0))
+    }
+
+    fn set_signature_counter(&mut self, value: u32) -> Result<(), StoreError> {
+        let keys = CredentialKeys::derive(&self.root_key_for_write(KeyDomain::Credential)?)?;
+        let plaintext = codec::encode_signature_counter(value)?;
+        self.write_object(
+            &keys.record,
+            RecordType::SignatureCounter,
+            SIGNATURE_COUNTER_FILE,
+            &plaintext,
+        )
     }
 
     fn attestation(&self) -> Result<Option<AttestationRecord>, StoreError> {

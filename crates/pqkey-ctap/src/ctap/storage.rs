@@ -361,8 +361,8 @@ fn sealed_credential(
 ///   [`SEALED_ID_LENGTH`] bytes: [`SEALED_MARKER`], then its algorithm,
 ///   credProtect level, private key and the random seed of its hmac-secret
 ///   CredRandom values, sealed by the store under a key that a reset replaces
-///   and bound to the relying party.  It has no signature counter of its own
-///   (it reports 0).
+///   and bound to the relying party.  It has no signature counter of its
+///   own, and counts on the global one instead.
 /// * Non-discoverable credentials made before they were sealed are stored
 ///   records whose ID is [`NON_DISCOVERABLE_MARKER`] and 32 random bytes.
 /// * Any other stored ID, such as the 32 random bytes of credentials created

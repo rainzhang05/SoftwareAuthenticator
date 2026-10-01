@@ -25,6 +25,7 @@ use super::{
 pub struct MemoryStore {
     credentials: BTreeMap<Vec<u8>, CredentialRecord>,
     pin_state: Option<PinStateRecord>,
+    signature_counter: u32,
     attestation: Option<AttestationRecord>,
     max_credentials: usize,
     credential_key: Option<RootKey>,
@@ -37,6 +38,7 @@ impl MemoryStore {
         Self {
             credentials: BTreeMap::new(),
             pin_state: None,
+            signature_counter: 0,
             attestation: None,
             max_credentials: DEFAULT_MAX_CREDENTIALS,
             credential_key: None,
@@ -103,6 +105,7 @@ impl CredentialStore for MemoryStore {
     fn clear(&mut self) -> Result<(), StoreError> {
         self.credentials.clear();
         self.pin_state = Some(PinStateRecord::default());
+        self.signature_counter = 0;
         self.credential_key = None;
         Ok(())
     }
@@ -113,6 +116,15 @@ impl CredentialStore for MemoryStore {
 
     fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<(), StoreError> {
         self.pin_state = Some(state.clone());
+        Ok(())
+    }
+
+    fn signature_counter(&self) -> Result<u32, StoreError> {
+        Ok(self.signature_counter)
+    }
+
+    fn set_signature_counter(&mut self, value: u32) -> Result<(), StoreError> {
+        self.signature_counter = value;
         Ok(())
     }
 

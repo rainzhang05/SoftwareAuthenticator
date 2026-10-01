@@ -191,8 +191,10 @@ replaces the old one. A non-discoverable credential is not stored: its
 private key and a random 32-byte seed, sealed with XChaCha20-Poly1305 under a
 key derived from the credential root key and bound to the SHA-256 hash of the
 relying party ID. It works only for that relying party and only until a reset
-replaces the key, reports a signature count of 0, and derives its
-hmac-secret `CredRandom` values from the seed with HKDF, never from its key.
+replaces the key, counts its signatures on the authenticator's global
+signature counter, which every sealed credential shares as on hardware keys,
+and derives its hmac-secret `CredRandom` values from the seed with HKDF,
+never from its key.
 75-byte sealed IDs of the earlier format, which derived them from the key,
 are no longer recognised. Non-discoverable credentials stored before they were sealed
 (IDs starting with 0x00) keep working until a reset and count towards the
@@ -265,6 +267,7 @@ shared conformance tests: `MemoryStore` for engine tests and fuzzing, and
 ├── credentials/            0700
 │   └── <64 hex digits>     0600  one envelope per credential, record type 1
 ├── pin-state               0600  envelope, record type 2
+├── signature-counter       0600  envelope, record type 4, the global counter
 └── attestation             0600  envelope, record type 3
 ```
 
@@ -302,7 +305,8 @@ The `ftsa` prefix is historical and part of the format.
 offset  length  field
      0       4  magic, ASCII "FTSA"
      4       1  format version, 1
-     5       1  record type: 1 credential, 2 PIN state, 3 attestation
+     5       1  record type: 1 credential, 2 PIN state, 3 attestation,
+                4 global signature counter
      6      24  XChaCha20-Poly1305 nonce, random for every write
     30       n  ciphertext of the n-byte record encoding
   30+n      16  Poly1305 tag
@@ -310,7 +314,8 @@ offset  length  field
 
 The associated data is `"FTSA" || version || record type || u16 big-endian
 length of name || name`, where `name` is the path relative to the state
-directory (`pin-state`, `attestation` or `credentials/<64 hex digits>`).
+directory (`pin-state`, `signature-counter`, `attestation` or
+`credentials/<64 hex digits>`).
 Copying one file over another therefore fails authentication. Envelopes are at
 most 1 MiB. Records are canonical CBOR maps with unsigned integer keys; the
 field list is in the `FileStore` documentation.
@@ -331,8 +336,8 @@ are recomputed from the records.
 `clear` runs these steps, and a crash after any of them leaves a usable state
 that another reset completes:
 
-1. Delete every credential file and flush the directory. The PIN still guards
-   whatever is left.
+1. Delete every credential file and the global signature counter, and flush
+   the directories. The PIN still guards whatever is left.
 2. Rotate the credential key: write the new key to a flushed temporary file,
    rename it over `credential.key`, flush the directory, then overwrite the old
    key's contents with zeros through a handle opened beforehand. From here on

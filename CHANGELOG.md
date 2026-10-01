@@ -87,8 +87,9 @@ also break an existing installation of that commit:
 - Non-discoverable credentials for `rk` false. They are not stored: each
   credential ID holds its credential and a random seed for its `hmac-secret`
   values, sealed with XChaCha20-Poly1305 under a key that a reset replaces and
-  bound to the relying party, so they take no room in the store and report a
-  signature count of 0.
+  bound to the relying party, so they take no room in the store. They count
+  their signatures on one global signature counter, stored as a record of its
+  own, as hardware security keys do.
 - `FIDO_2_3` in getInfo versions, plus `maxCredentialCountInList`,
   `remainingDiscoverableCredentials`, `attestationFormats` and the
   `makeCredUvNotRqd` option. `clientPin` is reported as false until a PIN is

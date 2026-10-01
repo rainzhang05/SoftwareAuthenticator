@@ -661,6 +661,41 @@ fn clear_on_a_fresh_store<B: Backend>() {
     assert_eq!(fixture.store.attestation().unwrap(), None);
 }
 
+// ---------------------------------------------------------------------------
+// The global signature counter
+// ---------------------------------------------------------------------------
+
+fn signature_counter_starts_at_zero_and_round_trips<B: Backend>() {
+    let mut fixture = fresh::<B>();
+    assert_eq!(fixture.store.signature_counter().unwrap(), 0);
+    for value in [1, 70_000, u32::MAX] {
+        fixture.store.set_signature_counter(value).unwrap();
+        assert_eq!(fixture.store.signature_counter().unwrap(), value);
+    }
+}
+
+fn signature_counter_is_independent_of_credentials_and_pin_state<B: Backend>() {
+    let mut fixture = fresh::<B>();
+    fixture.store.set_signature_counter(7).unwrap();
+    let record = new_record(CoseAlg::ES256);
+    insert(&mut fixture.store, &record);
+    fixture
+        .store
+        .set_pin_state(&PinStateRecord::default())
+        .unwrap();
+    fixture.store.delete(&record.credential_id).unwrap();
+    assert_eq!(fixture.store.signature_counter().unwrap(), 7);
+}
+
+fn clear_resets_the_signature_counter<B: Backend>() {
+    let mut fixture = fresh::<B>();
+    fixture.store.set_signature_counter(41).unwrap();
+    fixture.store.clear().unwrap();
+    assert_eq!(fixture.store.signature_counter().unwrap(), 0);
+    fixture.store.set_signature_counter(1).unwrap();
+    assert_eq!(fixture.store.signature_counter().unwrap(), 1);
+}
+
 macro_rules! conformance_suite {
     ($($case:ident),+ $(,)?) => {
         mod memory {
@@ -792,4 +827,7 @@ conformance_suite!(
     a_fresh_store_opens_no_credential_id,
     clear_ends_sealed_credential_ids,
     clear_on_a_fresh_store,
+    signature_counter_starts_at_zero_and_round_trips,
+    signature_counter_is_independent_of_credentials_and_pin_state,
+    clear_resets_the_signature_counter,
 );

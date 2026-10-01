@@ -101,9 +101,11 @@ It does **not** protect against:
   exists but cannot be read fails closed: the PIN counts as set and blocked
   until a reset.)
 - **Anyone holding the keys forging records.**
-- **Clones, as far as non-discoverable credentials go.** They report a
-  signature count of 0, so a relying party cannot spot a copy of the
-  authenticator through the counter.
+- **Clones, reliably.** Every credential counts its signatures, discoverable
+  ones each on their own counter and non-discoverable ones on one global
+  counter, so a relying party that checks counters may notice a copy of the
+  state directory used alongside the original. A copy used only after the
+  original stops cannot be told apart.
 - **Reading the daemon's memory.** Secrets are zeroized when they are dropped,
   but the daemon does not lock its memory or disable core dumps, and a process
   that can debug it (subject to the kernel's ptrace restrictions) can read
@@ -218,6 +220,12 @@ The CLI never accepts PINs as command-line arguments.
   certificate is self-signed and not in any metadata service, so it does not
   prove to a relying party that the key is genuine.
 - `--attestation none`: no statement.
+
+Non-discoverable credentials share one global signature counter, as on most
+hardware security keys, so a relying party that compares the counts it sees
+learns how many sign-ins with non-discoverable credentials happened elsewhere
+in between. WebAuthn Level 3 §6.1.1 calls a global counter "less
+privacy-friendly"; discoverable credentials count on their own.
 
 The default AAGUID `5931e805-a166-4eb7-845a-7f6aa93d9cd8` is the same for every
 pqkey installation. It tells a relying party that the key is pqkey, not which

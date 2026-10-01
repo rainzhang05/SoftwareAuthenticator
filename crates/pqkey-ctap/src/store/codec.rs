@@ -28,6 +28,9 @@
 //! attestation record (record type 3)
 //!    1  private_key             byte string, 32 bytes
 //!    2  certificate_chain       array of byte strings, at least one, none empty
+//!
+//! signature counter record (record type 4)
+//!    1  signature_counter       unsigned integer, 32 bits
 //! ```
 //!
 //! Decoding is strict.  Trailing bytes, a non-map, keys that are not unsigned
@@ -142,6 +145,19 @@ pub(crate) fn decode_pin_state(bytes: &[u8]) -> Result<PinStateRecord, Corruptio
     };
     fields.finish()?;
     Ok(state)
+}
+
+/// Encode a signature counter record.
+pub(crate) fn encode_signature_counter(value: u32) -> Result<Zeroizing<Vec<u8>>, StoreError> {
+    encode_map(vec![(1, Value::Integer(Integer::from(value)))])
+}
+
+/// Decode a signature counter record.
+pub(crate) fn decode_signature_counter(bytes: &[u8]) -> Result<u32, Corruption> {
+    let mut fields = Fields::parse(bytes)?;
+    let value = fields.uint(1)?;
+    fields.finish()?;
+    Ok(value)
 }
 
 /// Encode an attestation record.
@@ -464,6 +480,15 @@ mod tests {
         assert_eq!(
             pin.as_slice(),
             unhex("a4015000112233445566778899aabbccddeeff0205030204f5").as_slice()
+        );
+
+        let counter = encode_signature_counter(70_000).unwrap();
+        assert_eq!(counter.as_slice(), unhex("a1011a00011170").as_slice());
+        assert_eq!(decode_signature_counter(&counter), Ok(70_000));
+        assert_eq!(
+            decode_signature_counter(&unhex("a1011b0000000100000000")),
+            Err(Corruption::Encoding),
+            "more than 32 bits"
         );
 
         let attestation = encode_attestation(&attestation()).unwrap();

@@ -293,17 +293,54 @@ fn a_sealed_credential_opens_only_for_its_relying_party_unaltered_and_until_a_re
     );
 }
 
-/// A sealed credential has no state to count in, so every assertion reports
-/// a signature count of 0, and nothing is written.
+/// A sealed credential keeps no state of its own, so its signatures are
+/// counted on the authenticator's one global signature counter, as hardware
+/// keys count them: "Authenticators may implement a global signature counter,
+/// i.e., on a per-authenticator basis" (WebAuthn Level 3 §6.1.1).  Every
+/// sealed assertion increments it, whichever credential signs, and a
+/// discoverable credential keeps counting on its own.
 #[test]
-fn a_sealed_credential_counts_no_signatures() {
-    let store = TestStore::new();
-    let (mut app, _) = app_with_store(store.clone(), [0x68; 16], [], &NEVER_INTERRUPTED);
-    let credential_id = register(&mut app, &[0x01], None);
-    store.faults(|faults| faults.put = true);
-    for _ in 0..2 {
-        let response = assertion_with_allow_list(&mut app, &credential_id).expect("allowList");
-        assert_eq!(response_auth_data(&response)[33..37], [0, 0, 0, 0]);
+fn sealed_credentials_count_on_one_global_signature_counter() {
+    let mut app = test_app([0x68; 16]);
+    let first = register(&mut app, &[0x01], None);
+    let second = register(&mut app, &[0x02], None);
+    let discoverable = register(&mut app, &[0x03], rk(true));
+    let count = |response: &[u8]| {
+        u32::from_be_bytes(response_auth_data(response)[33..37].try_into().unwrap())
+    };
+    let mut counts = Vec::new();
+    for id in [&first, &second, &discoverable, &first] {
+        let response = assertion_with_allow_list(&mut app, id).expect("allowList");
+        counts.push(count(&response));
+    }
+    assert_eq!(counts, [1, 2, 1, 3]);
+    assert_eq!(app.store.signature_counter().expect("read"), 3);
+
+    // A reset ends the sealed credentials and starts the counter again.
+    app.store.clear().expect("reset");
+    let after = register(&mut app, &[0x01], None);
+    let response = assertion_with_allow_list(&mut app, &after).expect("allowList");
+    assert_eq!(count(&response), 1);
+}
+
+/// The counter is saved before the signature is made: a sealed assertion
+/// whose count cannot be saved, or read, is not signed, so the count a
+/// relying party sees never goes backwards (WebAuthn Level 3 §6.1.1).
+#[test]
+fn a_sealed_assertion_is_signed_only_once_its_count_is_saved() {
+    for read_fails in [false, true] {
+        let store = TestStore::new();
+        let (mut app, _) = app_with_store(store.clone(), [0x6C; 16], [], &NEVER_INTERRUPTED);
+        let credential_id = register(&mut app, &[0x01], None);
+        store.faults(|faults| {
+            faults.set_signature_counter = !read_fails;
+            faults.signature_counter = read_fails;
+        });
+        assert_eq!(
+            assertion_with_allow_list(&mut app, &credential_id),
+            Err(CTAP2_ERR_PROCESSING),
+            "read fails {read_fails}"
+        );
     }
 }
 

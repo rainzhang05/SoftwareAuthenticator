@@ -284,19 +284,20 @@ fn every_algorithm_registers_and_authenticates_across_restarts() {
 }
 
 /// A non-discoverable credential is sealed into its ID: nothing is stored,
-/// yet it works across restarts, with a signature count of 0, until a reset
-/// replaces the key that sealed it.
+/// yet it works across restarts, counting its signatures on the global
+/// signature counter, which survives restarts too, until a reset replaces the
+/// key that sealed it.
 #[test]
 fn a_sealed_credential_works_across_restarts_until_a_reset() {
     for alg in ALL_ALGS {
         let dir = TempDir::new();
         let registration = register_rk(&mut open_app(&dir.state()), &[0x01], alg, false);
         assert_eq!(FileStore::open(dir.state()).unwrap().count().unwrap(), 0);
-        assert_eq!(authenticate(&mut open_app(&dir.state()), &registration), 0);
+        assert_eq!(authenticate(&mut open_app(&dir.state()), &registration), 1);
         assert_eq!(
             authenticate(&mut open_app(&dir.state()), &registration),
-            0,
-            "{alg:?}"
+            2,
+            "{alg:?}: the global signature counter survives a restart"
         );
 
         FileStore::open(dir.state()).unwrap().clear().unwrap();

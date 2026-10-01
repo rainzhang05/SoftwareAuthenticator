@@ -71,6 +71,7 @@ pub(crate) enum RecordType {
     Credential = 1,
     PinState = 2,
     Attestation = 3,
+    SignatureCounter = 4,
 }
 
 /// Encrypt `plaintext` into a new envelope under a fresh random nonce.

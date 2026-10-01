@@ -27,6 +27,7 @@ const VERSION: u8 = 1;
 const TYPE_CREDENTIAL: u8 = 1;
 const TYPE_PIN_STATE: u8 = 2;
 const TYPE_ATTESTATION: u8 = 3;
+const TYPE_SIGNATURE_COUNTER: u8 = 4;
 const NONCE_START: usize = 6;
 const HEADER_LEN: usize = 30;
 const TAG_LEN: usize = 16;
@@ -61,6 +62,10 @@ impl Scratch {
 
     fn pin_state_path(&self) -> PathBuf {
         self.state().join("pin-state")
+    }
+
+    fn signature_counter_path(&self) -> PathBuf {
+        self.state().join("signature-counter")
     }
 
     fn attestation_path(&self) -> PathBuf {
@@ -200,6 +205,7 @@ fn data_persists_across_reopen() {
             store.put(&new_record(alg)).unwrap();
         }
         store.set_pin_state(&pin).unwrap();
+        store.set_signature_counter(70_000).unwrap();
         store.set_attestation(&attestation).unwrap();
         store.list().unwrap()
     };
@@ -212,6 +218,7 @@ fn data_persists_across_reopen() {
         assert_signature_verifies(&stored);
     }
     assert_eq!(store.pin_state().unwrap(), Some(pin));
+    assert_eq!(store.signature_counter().unwrap(), 70_000);
     assert_eq!(store.attestation().unwrap(), Some(attestation));
 
     // Creation order carries on from the stored records after reopening.
@@ -277,6 +284,7 @@ fn layout_matches_the_documented_format() {
     let record = new_record(CoseAlg::MLDSA44);
     let credential_path = put_and_locate(&scratch, &mut store, &record);
     store.set_pin_state(&PinStateRecord::default()).unwrap();
+    store.set_signature_counter(1).unwrap();
     store.set_attestation(&attestation_record(&[100])).unwrap();
 
     let credential_name = credential_path
@@ -294,6 +302,7 @@ fn layout_matches_the_documented_format() {
             "keys/credential.key".into(),
             "keys/device.key".into(),
             "pin-state".into(),
+            "signature-counter".into(),
         ],
         "no temporary files may be left behind"
     );
@@ -305,6 +314,7 @@ fn layout_matches_the_documented_format() {
         (credential_path, TYPE_CREDENTIAL),
         (scratch.pin_state_path(), TYPE_PIN_STATE),
         (scratch.attestation_path(), TYPE_ATTESTATION),
+        (scratch.signature_counter_path(), TYPE_SIGNATURE_COUNTER),
     ] {
         let envelope = fs::read(&path).unwrap();
         assert_eq!(&envelope[..4], MAGIC, "{}", path.display());
@@ -516,6 +526,36 @@ fn corrupt_pin_state_and_attestation_are_reported_and_replaceable() {
     let attestation = attestation_record(&[32]);
     store.set_attestation(&attestation).unwrap();
     assert_eq!(store.attestation().unwrap(), Some(attestation));
+}
+
+/// A signature counter that fails authentication is reported, never read as
+/// 0, so the engine can refuse to sign rather than count from 0 again.
+#[test]
+fn a_corrupt_signature_counter_is_reported_and_replaceable() {
+    let scratch = Scratch::new();
+    let mut store = scratch.open();
+    store.set_signature_counter(9).unwrap();
+    edit_file(&scratch.signature_counter_path(), |envelope| {
+        envelope[HEADER_LEN] ^= 1
+    });
+    assert_corrupt(store.signature_counter(), Corruption::Authentication);
+    store.set_signature_counter(10).unwrap();
+    assert_eq!(store.signature_counter().unwrap(), 10);
+}
+
+/// The counter is under the credential key, so a reset deletes it and a copy
+/// put back afterwards no longer authenticates.
+#[test]
+fn clear_deletes_the_signature_counter() {
+    let scratch = Scratch::new();
+    let mut store = scratch.open();
+    store.set_signature_counter(5).unwrap();
+    let old_counter = fs::read(scratch.signature_counter_path()).unwrap();
+    store.clear().unwrap();
+    assert!(!scratch.signature_counter_path().exists());
+    assert_eq!(store.signature_counter().unwrap(), 0);
+    fs::write(scratch.signature_counter_path(), &old_counter).unwrap();
+    assert_corrupt(store.signature_counter(), Corruption::Authentication);
 }
 
 #[test]

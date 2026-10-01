@@ -465,9 +465,17 @@ impl CtapApp<'_> {
         assertion_response(&credential, auth_data, signature, user_verified, None)
     }
 
-    /// Increment a stored `credential`'s signature counter, persist it, and
-    /// sign `authData || clientDataHash` with the new count.  A sealed
-    /// credential signs with a count of 0.
+    /// Increment the signature counter `credential` counts on, persist it,
+    /// and sign `authData || clientDataHash` with the new count.  A stored
+    /// credential has a counter of its own.  A sealed credential, which keeps
+    /// no state, counts on the authenticator's global signature counter
+    /// ("Authenticators may implement a global signature counter, i.e., on a
+    /// per-authenticator basis", WebAuthn Level 3 §6.1.1), shared by every
+    /// sealed credential, as hardware security keys count.  Either counter
+    /// stops at `u32::MAX`, the largest count authenticator data can hold,
+    /// rather than wrap to a count a relying party would take for a clone.
+    /// Every assertion counts, silent ones (`up` false) included: CTAP and
+    /// WebAuthn only ask that the counter be incremented for each signature.
     ///
     /// The counter is written before the signature is made, and a failed
     /// write fails the command: a signature is never returned for a counter
@@ -489,10 +497,17 @@ impl CtapApp<'_> {
             log::error!("cannot use a credential's key: {err}");
             CTAP2_ERR_PROCESSING
         })?;
-        // A sealed credential has no state to keep a counter in, so its
-        // signature counter stays 0, which WebAuthn Level 3 §6.1.1 reads as
-        // "no counter".
-        if !is_sealed(&credential.credential_id) {
+        if is_sealed(&credential.credential_id) {
+            let count = self
+                .store
+                .signature_counter()
+                .map_err(|err| store_status("read the global signature counter", err))?
+                .saturating_add(1);
+            self.store
+                .set_signature_counter(count)
+                .map_err(|err| store_status("save the global signature counter", err))?;
+            credential.sign_count = count;
+        } else {
             credential.sign_count = credential.sign_count.saturating_add(1);
             self.store
                 .put(&credential)
