@@ -14,7 +14,9 @@ publish = false
 workspace = true
 
 [dependencies]
-nix = { version = "0.31", default-features = false, features = ["fs", "poll", "signal", "term", "time", "user"] }
+# pthread: only the tests use it, to interrupt one of their threads with a
+# signal; a dev-dependency of its own would declare nix twice.
+nix = { version = "0.31", default-features = false, features = ["fs", "poll", "pthread", "signal", "term", "time", "user"] }
 signal-hook = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive", "env"] }
 clap-num = "1.0"
@@ -43,8 +45,6 @@ futures-lite = { version = "2", default-features = false, features = ["std"] }
 async-io = "2"
 
 [dev-dependencies]
-# pthread_kill, to interrupt one of the tests' own threads with a signal.
-nix = { version = "0.31", default-features = false, features = ["pthread", "signal"] }
 # CBOR requests and responses in the CTAP-level tests.
 # Reads the attestation certificate back independently of rcgen, which wrote it.
 x509-parser = "0.18"
