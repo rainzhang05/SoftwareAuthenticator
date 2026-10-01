@@ -139,7 +139,13 @@ sends what it queues. `crates/pqkey/src/uhid.rs` reads and writes kernel
   (`HIDRAW_BUFFER_SIZE` in the kernel). Longer bursts lose packets, and an
   ML-DSA-87 assertion is 82 packets. The transport therefore waits **1 ms**
   between any two input reports it writes in a row, which costs at most about
-  130 ms for the largest message (129 packets).
+  130 ms for the largest message (129 packets), and reads what the host has
+  written in each pause.
+- **Requests.** In the other direction the kernel queues the host's output
+  reports in a ring of 32 uhid events and drops what does not fit, and
+  platforms write a request's packets back to back. getInfo's maxMsgSize is
+  therefore 1,768 bytes, the most 30 packets carry, so a request a platform
+  sizes by it always arrives whole. Larger requests are still accepted.
 - **Transactions.** One transaction is served at a time (§11.2.5.1). Requests
   on other channels get ERR_CHANNEL_BUSY; CTAPHID_INIT on the transaction's
   channel aborts it; continuation packets must arrive within 550 ms of the
@@ -180,7 +186,7 @@ authenticatorGetInfo reports:
 - options `rk`, `up`, `credMgmt`, `pinUvAuthToken` and `makeCredUvNotRqd`
   true, and `clientPin` true or false as a PIN is or is not set. There is no
   `uv` option: user verification is by PIN only;
-- maxMsgSize 2048, PIN/UV auth protocols 2 and 1, maxCredentialCountInList 8,
+- maxMsgSize 1768, PIN/UV auth protocols 2 and 1, maxCredentialCountInList 8,
   maxCredentialIdLength 128, transports `usb`, minPINLength 4;
 - algorithms ES256 (-7), ML-DSA-44 (-48), ML-DSA-65 (-49) and ML-DSA-87 (-50);
 - remainingDiscoverableCredentials, the free slots of the store;

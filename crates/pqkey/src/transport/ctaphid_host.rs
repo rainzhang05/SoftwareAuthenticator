@@ -629,10 +629,10 @@ impl<R: CryptoRng> CtaphidHost<R> {
     ///
     /// A message holds at most [`MAX_MESSAGE_SIZE`] bytes: its length must
     /// fit the two-byte BCNT of the initialization packet, and its
-    /// continuation packets the sequence numbers 0 to 0x7f, "the sequence
-    /// number of each continuation packet [...] incremented for each
-    /// continuation packet" with the high bit reserved for initialization
-    /// packets (CTAP 2.3 §11.2.4).  A longer payload, which only the app can
+    /// continuation packets the sequence numbers 0 to 0x7f: "A larger message
+    /// is then divided into one or more continuation packets, starting with
+    /// sequence number 0, which then increments by one to a maximum of 127."
+    /// (CTAP 2.3 §11.2.4)  A longer payload, which only the app can
     /// produce, is not sent: the channel gets ERR_OTHER instead.
     fn enqueue_message(&mut self, channel: u32, command: Command, payload: &[u8]) {
         debug!(

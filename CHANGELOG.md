@@ -218,6 +218,10 @@ also break an existing installation of that commit:
   shell's banner queue for its whole lifetime (seen with Chromium starting a
   request from an unfocused window): an unanswered prompt is nudged every 2
   seconds with an empty, transient notification that is withdrawn at once.
+- getInfo's maxMsgSize is 1,768 bytes instead of 2,048: a request a platform
+  sizes by it now fits the kernel's 32-event uhid output queue, which drops
+  packets it has no room for. While a long answer is paced out, the daemon
+  also reads what the host writes instead of leaving it queued.
 - `--vendor-id` and `--product-id` refuse values above 0xFFFF, which used to
   reach clients truncated, and a `--presence-timeout` under the 10 seconds
   CTAP 2.3 §5 requires is logged as non-conforming.

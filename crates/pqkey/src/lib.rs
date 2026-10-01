@@ -203,11 +203,29 @@ impl UhidTransport<'_> {
         self.epoch.elapsed().as_millis() as u64
     }
 
+    /// Hand every packet that has arrived to the CTAPHID state machine.
+    /// Returns whether there was any.
+    fn read_frames(&mut self) -> io::Result<bool> {
+        let mut read = false;
+        while let Some(frame) = self.device.try_read_frame()? {
+            let now = self.now();
+            self.host.handle_frame(&frame, now);
+            read = true;
+        }
+        Ok(read)
+    }
+
+    /// Write every queued packet, [`INPUT_REPORT_INTERVAL`] apart.  In those
+    /// pauses the packets the host writes are read: uhid queues them in a
+    /// ring of only 32 events and drops what does not fit, and a long answer
+    /// takes up to 130 ms to go out.
     fn flush_pending(&mut self) -> io::Result<bool> {
         let mut wrote = false;
         while let Some(frame) = self.host.next_outgoing_frame() {
             if wrote {
-                thread::sleep(INPUT_REPORT_INTERVAL);
+                let resume = Instant::now() + INPUT_REPORT_INTERVAL;
+                self.read_frames()?;
+                thread::sleep(resume.saturating_duration_since(Instant::now()));
             }
             self.device.write_frame(&frame)?;
             wrote = true;
@@ -223,12 +241,7 @@ impl UhidTransport<'_> {
     /// requested, which is how [`serve`] gets out of its loop.
     pub fn poll(&mut self) -> io::Result<bool> {
         self.shutdown.check()?;
-        let mut did_work = false;
-        while let Some(frame) = self.device.try_read_frame()? {
-            let now = self.now();
-            self.host.handle_frame(&frame, now);
-            did_work = true;
-        }
+        let mut did_work = self.read_frames()?;
         if !self.node_checked && self.device.take_opened() {
             self.node_checked = true;
             if let Ok(nodes) = permissions::hidraw_nodes_for_descriptor(self.device.descriptor()) {
@@ -505,5 +518,97 @@ pub(crate) mod tests {
         assert!(!waiting.get());
         thread::spawn(move || app_side.set(true)).join().unwrap();
         assert!(waiting.get());
+    }
+
+    /// The CTAPHID packets of a message on `channel`.
+    fn message_frames(
+        channel: u32,
+        command: Command,
+        payload: &[u8],
+    ) -> Vec<[u8; CTAPHID_FRAME_LEN]> {
+        let mut frames = Vec::new();
+        let mut frame = [0u8; CTAPHID_FRAME_LEN];
+        frame[..4].copy_from_slice(&channel.to_be_bytes());
+        frame[4] = command.into_u8() | 0x80;
+        frame[5..7].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        let first = payload.len().min(CTAPHID_FRAME_LEN - 7);
+        frame[7..7 + first].copy_from_slice(&payload[..first]);
+        frames.push(frame);
+        for (seq, chunk) in payload[first..].chunks(CTAPHID_FRAME_LEN - 5).enumerate() {
+            let mut frame = [0u8; CTAPHID_FRAME_LEN];
+            frame[..4].copy_from_slice(&channel.to_be_bytes());
+            frame[4] = seq as u8;
+            frame[5..5 + chunk.len()].copy_from_slice(chunk);
+            frames.push(frame);
+        }
+        frames
+    }
+
+    /// While a long answer is paced out, one input report a millisecond,
+    /// the transport keeps reading what the host writes, so the kernel's
+    /// small output queue does not fill up behind it: a request that arrives
+    /// during the answer is read, and answered, before the answer ends.
+    #[test]
+    fn packets_arriving_while_an_answer_is_paced_out_are_read() {
+        let (device, mut kernel) = socket_device();
+        kernel
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let payload: Vec<u8> = (0..1000u32).map(|byte| byte as u8).collect();
+        for frame in message_frames(0x0102_0304, Command::Ping, &payload) {
+            kernel.write_all(&uhid::output_event(&frame)).unwrap();
+        }
+
+        let interrupt = InterruptFlag::new();
+        let (requests, _app_requests) = mpsc::channel();
+        let (_app_responses, responses) = mpsc::channel();
+        let (wake, _worker_wake) = UnixStream::pair().unwrap();
+        wake.set_nonblocking(true).unwrap();
+        let mut transport = UhidTransport {
+            device,
+            host: CtaphidHost::new(),
+            app: AppWorker {
+                requests: Some(requests),
+                responses,
+                wake,
+                interrupt: &interrupt,
+            },
+            waiting: WaitingForUser::new(),
+            epoch: Instant::now(),
+            shutdown: ShutdownSignal::new(),
+            node_checked: false,
+        };
+
+        let host = thread::spawn(move || {
+            let mut reports = Vec::new();
+            let mut event = vec![0u8; uhid::UHID_EVENT_SIZE];
+            while reports.len() < 18 {
+                kernel.read_exact(&mut event).unwrap();
+                if let Some(report) = uhid::input_report(&event) {
+                    if reports.is_empty() {
+                        // A second client pings while the answer goes out.
+                        let ping = message_frames(0x0A0B_0C0D, Command::Ping, b"second");
+                        kernel.write_all(&uhid::output_event(&ping[0])).unwrap();
+                    }
+                    reports.push(report);
+                }
+            }
+            reports
+        });
+        assert!(transport.poll().unwrap());
+        assert_eq!(
+            transport.device.try_read_frame().unwrap(),
+            None,
+            "the ping was left unread"
+        );
+        let reports = host.join().unwrap();
+        // 17 packets echo the first ping; the 18th answers the second one.
+        assert!(
+            reports[..17]
+                .iter()
+                .all(|report| report[..4] == 0x0102_0304u32.to_be_bytes())
+        );
+        assert_eq!(reports[17][..4], 0x0A0B_0C0Du32.to_be_bytes());
+        assert_eq!(&reports[17][7..13], b"second");
     }
 }

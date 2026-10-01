@@ -67,7 +67,7 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         (uint(2), extensions),
         (uint(3), Value::Bytes(aaguid.to_vec())),
         (uint(4), options),
-        (uint(5), uint(2048)),
+        (uint(5), uint(1768)),
         (
             uint(6),
             Value::Array(vec![

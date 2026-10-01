@@ -17,14 +17,25 @@ use crate::ctap::constants::*;
 /// to keep a list of maxCredentialIdLength IDs within maxMsgSize.
 pub(super) const MAX_CREDENTIAL_COUNT_IN_LIST: u64 = 8;
 
-/// maxCredentialIdLength.  The engine's own credential IDs are at most 75
+/// maxCredentialIdLength.  The engine's own credential IDs are at most 107
 /// bytes; longer IDs in a list can never name one of its credentials.
 pub(super) const MAX_CREDENTIAL_ID_LENGTH: u64 = 128;
 
-/// maxMsgSize: the largest request platforms should send.  It is advertised,
-/// not enforced: the engine takes any request the transport delivers, and
-/// CTAPHID carries up to 7,609 bytes.
-pub(super) const MAX_MSG_SIZE: u64 = 2048;
+/// maxMsgSize: the largest request platforms should send.  "By default,
+/// authenticators MUST support messages of at least 1024 bytes." (CTAP 2.3
+/// §8)  It is advertised, not enforced: the engine takes
+/// any request the transport delivers, and CTAPHID carries up to 7,609
+/// bytes.
+///
+/// The value is what the daemon's transport is sure to deliver whole.  A
+/// platform writes a request's packets as fast as it can, and a uhid device
+/// has no flow control: the Linux kernel queues the output reports in a ring
+/// of 32 events (UHID_BUFSIZE, one always free) and drops what does not fit
+/// ("Output queue is full"), so a request of more packets than that can lose
+/// some while the daemon is busy.  30 reports, keeping one slot spare for
+/// another event, carry 57 + 29 × 59 = 1,768 bytes, room for an allowList of
+/// maxCredentialCountInList IDs of maxCredentialIdLength bytes.
+pub(super) const MAX_MSG_SIZE: u64 = 57 + 29 * 59;
 
 fn text(value: &str) -> Value {
     Value::Text(value.into())
