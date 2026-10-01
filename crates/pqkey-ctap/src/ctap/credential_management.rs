@@ -330,15 +330,26 @@ impl CtapApp<'_> {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
 
-        // Kept to the same bounds as makeCredential stores.
+        // "Replace the matching credential's PublicKeyCredentialUserEntity's
+        // name, displayName with the passed-in user details. If a field is not
+        // present in the passed user details, or it is present and empty,
+        // remove it from the matching credential's
+        // PublicKeyCredentialUserEntity." (CTAP 2.3 §6.8.6)  A field of
+        // another type is malformed (§8) and must not erase anything, so both
+        // are checked before the credential changes.  Kept to the same bounds
+        // as makeCredential stores.
         let non_empty_text = |key: &str| match cbor::map_get(user_map, Value::Text(key.into())) {
-            Some(Value::Text(text)) if !text.is_empty() => {
-                Some(truncate_utf8(text, request::MAX_USER_STRING_LENGTH))
+            None => Ok(None),
+            Some(Value::Text(text)) if text.is_empty() => Ok(None),
+            Some(Value::Text(text)) => {
+                Ok(Some(truncate_utf8(text, request::MAX_USER_STRING_LENGTH)))
             }
-            _ => None,
+            Some(_) => Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
         };
-        credential.user_name = non_empty_text("name");
-        credential.user_display_name = non_empty_text("displayName");
+        let user_name = non_empty_text("name")?;
+        let user_display_name = non_empty_text("displayName")?;
+        credential.user_name = user_name;
+        credential.user_display_name = user_display_name;
 
         self.store
             .put(&credential)

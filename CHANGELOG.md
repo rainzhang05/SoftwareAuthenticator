@@ -162,6 +162,9 @@ Upgrading from `867a591` or earlier is not an in-place update:
   enumerations without pinUvAuthParam, reports totalCredentials only in the
   enumerateCredentialsBegin response, and reports missing parameters before
   it checks pinUvAuthProtocol and pinUvAuthParam.
+- updateUserInformation refuses a `name` or `displayName` that is not a text
+  string with CTAP2_ERR_CBOR_UNEXPECTED_TYPE. It used to erase the stored
+  value.
 - The notification prompt gives up on a session bus that accepts the
   connection but never answers after 2 seconds, as it does on a D-Bus call,
   instead of holding the request and the daemon's shutdown forever.

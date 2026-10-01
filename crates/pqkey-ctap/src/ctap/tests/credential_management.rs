@@ -1,7 +1,7 @@
 //! authenticatorCredentialManagement tests.
 
 use super::support::new_app;
-use super::support::{TestApp, credential, insert, insert_owned, stored};
+use super::support::{TestApp, credential, insert, insert_owned, stored, stored_by_id};
 use super::support::{
     TestStore, encode, es256_credential, get_pin_uv_auth_token, install_pin_uv_auth_token, int,
     pin_hash, token_pin_auth,
@@ -809,5 +809,40 @@ fn wrongly_typed_subcommand_parameters_are_unexpected_types() {
             Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
             "subcommand {subcommand:#04x}, {params:?}"
         );
+    }
+}
+
+/// updateUserInformation with a `name` or `displayName` that is not a text
+/// string is a malformed request (CTAP 2.3 §8: "the values of those members
+/// have the wrong type"), so it fails with CTAP2_ERR_CBOR_UNEXPECTED_TYPE and
+/// leaves the stored names alone, rather than erasing them as an absent or
+/// empty member does (§6.8.6).
+#[test]
+fn a_wrongly_typed_name_is_refused_and_keeps_the_stored_names() {
+    let text = |value: &str| Value::Text(value.into());
+    for (key, wrong) in [
+        ("name", int(1)),
+        ("name", Value::Bytes(b"bob".to_vec())),
+        ("displayName", Value::Bool(false)),
+        ("displayName", Value::Null),
+    ] {
+        let (mut app, _, token) = app_with_cm_token(0x3D);
+        let mut record = es256_credential("example.com", &[0xA1]);
+        record.user_name = Some("alice".into());
+        record.user_display_name = Some("Alice".into());
+        insert_owned(&mut app, record);
+
+        let mut user = vec![(text("id"), Value::Bytes(vec![0x01])), (text(key), wrong)];
+        let other = if key == "name" { "displayName" } else { "name" };
+        user.push((text(other), text("Robert")));
+        let params = credential_id_params(&[0xA1], Some(canonical_map(user)));
+        assert_eq!(
+            credential_management(&mut app, &token, 0x07, Some(params)),
+            Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            "{key}"
+        );
+        let kept = stored_by_id(&app, &[0xA1]);
+        assert_eq!(kept.user_name.as_deref(), Some("alice"), "{key}");
+        assert_eq!(kept.user_display_name.as_deref(), Some("Alice"), "{key}");
     }
 }
