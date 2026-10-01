@@ -166,12 +166,20 @@ fn root_script(system: &System, membership: &Membership) -> Option<RootSteps> {
     })
 }
 
-/// The steps that undo [`root_script`]'s, except the group membership.
-fn root_undo_script() -> String {
-    format!(
+/// Where install.sh installs pqkey, on every shell's PATH.
+const INSTALLED_BINARY: &str = "/usr/local/bin/pqkey";
+
+/// The steps that undo [`root_script`]'s, except the group membership, and
+/// remove `binary` if install.sh installed it.
+fn root_undo_script(binary: &Path) -> String {
+    let mut script = format!(
         "#!/bin/sh\n# Undoes the steps of `pqkey setup` that needed root.\nset -eu\n\n\
          rm -f {UDEV_RULES_PATH} {MODULES_LOAD_PATH}\nudevadm control --reload-rules\n"
-    )
+    );
+    if binary == Path::new(INSTALLED_BINARY) {
+        script.push_str(&format!("rm -f {INSTALLED_BINARY}\n"));
+    }
+    script
 }
 
 /// Where the scripts for root go: the user's runtime directory, which only
@@ -429,7 +437,7 @@ fn is_executable(path: &Path) -> bool {
 pub fn uninstall(state_dir: &Path) -> io::Result<()> {
     check_caller(state_dir)?;
     if daemon::unplug(state_dir)?.is_some() {
-        outln!("Key stopped")?;
+        output::done("Key stopped")?;
     }
     let path = unit_dir().join(UNIT);
     if path.exists() {
@@ -438,11 +446,17 @@ pub fn uninstall(state_dir: &Path) -> io::Result<()> {
         let _ = systemctl(&["disable", UNIT]);
         fs::remove_file(&path)?;
         systemctl(&["daemon-reload"])?;
-        outln!("Removed {}", path.display())?;
+        output::done(format_args!("Removed {}", path.display()))?;
     }
-    let script = root_undo_script();
+    let binary = env::current_exe()?.canonicalize()?;
+    let script = root_undo_script(&binary);
     let script_path = hand_over(&runtime_dir(), &script, "pqkey-uninstall.sh")?;
-    outln!("To remove the udev rules and the uhid module setting too, run:")?;
+    outln!()?;
+    if binary == Path::new(INSTALLED_BINARY) {
+        outln!("To remove pqkey itself, its udev rules and the uhid setting too, run:")?;
+    } else {
+        outln!("To remove the udev rules and the uhid setting too, run:")?;
+    }
     outln!()?;
     outln!("    sudo sh {}", script_path.display())?;
     outln!()?;
@@ -649,11 +663,17 @@ mod tests {
 
     #[test]
     fn uninstalling_removes_what_setup_installed_as_root() {
-        let script = root_undo_script();
+        let script = root_undo_script(Path::new("/home/a/.cargo/bin/pqkey"));
         assert!(
             script.contains(
                 "rm -f /etc/udev/rules.d/70-pqkey.rules /etc/modules-load.d/pqkey.conf\n"
             )
+        );
+        assert!(!script.contains("/usr/local/bin"), "{script}");
+        let script = root_undo_script(Path::new("/usr/local/bin/pqkey"));
+        assert!(
+            script.ends_with("\nrm -f /usr/local/bin/pqkey\n"),
+            "{script}"
         );
     }
 
