@@ -244,6 +244,16 @@ They are not unique to pqkey, so other test devices may use them too. pqkey is
 a test project that is not released, so it keeps this test ID; a build that is
 redistributed needs a product ID of its own.
 
+### Randomness and FIPS 204
+
+Credential private keys, ML-DSA key generation seeds (`ξ`), the randomness of
+hedged ML-DSA signing (`rnd`) and the store's nonces come from the operating
+system's generator, getrandom(2) on Linux. It is a cryptographically secure
+generator, but not a random bit generator approved under NIST SP 800-90A,
+which FIPS 204 §3.6.1 asks a validated module to use. pqkey makes no FIPS 140
+claim, and its ML-DSA implementation (RustCrypto's `ml-dsa`) is not a
+validated module either.
+
 ### Testing and its scope
 
 - Unit and integration tests cover the CTAP engine, the CTAPHID state machine,
