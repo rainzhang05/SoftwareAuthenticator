@@ -24,7 +24,7 @@ use nix::{
 };
 
 use super::DaemonArgs;
-use super::output::outln;
+use super::output::{errln, outln};
 use crate::{
     permissions, service,
     shutdown::ShutdownSignal,
@@ -255,7 +255,10 @@ fn spawn_daemon(state_dir: &Path, args: &DaemonArgs) -> io::Result<Pid> {
     let deadline = Instant::now() + WAIT;
     loop {
         if let Some(status) = child.try_wait()? {
-            eprint!("{}", read_log_from(&log_path, log_offset));
+            let log = read_log_from(&log_path, log_offset);
+            if !log.trim().is_empty() {
+                errln!("{}", log.trim_end());
+            }
             return Err(io::Error::other(format!(
                 "the key failed to start ({status}); see {}",
                 log_path.display()
@@ -337,7 +340,7 @@ fn warn_uhid_access() {
         Ok(_) => {}
         Err(err) if err.kind() == io::ErrorKind::PermissionDenied => warn_group_membership(),
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            eprintln!("warning: /dev/uhid is not available; run `pqkey setup`");
+            errln!("warning: /dev/uhid is not available; run `pqkey setup`");
         }
         Err(_) => {}
     }
@@ -355,11 +358,11 @@ fn warn_group_membership() {
     let groups: Vec<nix::unistd::Gid> = Vec::new();
     let in_group = plugdev_gid.is_some_and(|gid| groups.contains(&gid) || unistd::getegid() == gid);
     if in_group {
-        eprintln!(
+        errln!(
             "warning: cannot open /dev/uhid although you are in '{GROUP_NAME}'; run `pqkey setup`"
         );
     } else {
-        eprintln!(
+        errln!(
             "warning: cannot open /dev/uhid: you are not in '{GROUP_NAME}' yet, or have not \
              logged in again since you joined it; run `pqkey setup`"
         );

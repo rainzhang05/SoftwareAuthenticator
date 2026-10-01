@@ -23,7 +23,7 @@ use pqkey_ctap::ctap::constants::{
 use signal_hook::{consts::SIGINT, flag};
 
 use super::daemon::{self, Running};
-use super::output::outln;
+use super::output::{errln, outln};
 use crate::client::ctap2::{Authenticator, ClientError, Passkey, PinRetries, Token};
 use crate::client::ctaphid::{ReportLink, STATUS_UPNEEDED};
 use crate::client::hidraw::{self, Hidraw};
@@ -347,7 +347,7 @@ pub fn delete_passkey(state_dir: &Path, query: &str, yes: bool) -> io::Result<()
         site(passkey)
     );
     if !yes && !confirm(&question)? {
-        eprintln!("Nothing was deleted.");
+        errln!("Nothing was deleted.");
         return Ok(());
     }
     key.delete(&token, &passkey.credential_id)
@@ -492,7 +492,7 @@ pub fn reset(state_dir: &Path, yes: bool) -> io::Result<()> {
              those passkeys stops working. This cannot be undone.",
         )?
     {
-        eprintln!("Nothing was reset.");
+        errln!("Nothing was reset.");
         return Ok(());
     }
     let running = daemon::replug(state_dir)?;
@@ -520,7 +520,7 @@ fn reset_key<L: ReportLink>(key: Authenticator<L>) -> io::Result<()> {
     key.reset(&mut |status| {
         if status == STATUS_UPNEEDED && !asked {
             asked = true;
-            eprintln!("Approve the reset in the notification on your desktop (Ctrl-C cancels).");
+            errln!("Approve the reset in the notification on your desktop (Ctrl-C cancels).");
         }
     })
     .map_err(reset_error)

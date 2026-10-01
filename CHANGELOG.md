@@ -283,6 +283,9 @@ also break an existing installation of that commit:
   private after it is created, and a shared directory with the sticky bit set,
   such as `/tmp`, is refused instead of having its permissions changed.
 - The udev hidraw rule never matched the uhid-created device.
+- The CLI panicked when standard output was a closed pipe (`pqkey status |
+  head -1`) or a full device. A closed output now ends it quietly with status
+  0; other write errors are reported with status 1.
 - Panics removed from fallible ML-DSA paths.
 
 ### Removed
