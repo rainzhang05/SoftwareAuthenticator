@@ -31,7 +31,8 @@ crates/pqkey-mldsa  ML-DSA-44/65/87 wrapper around RustCrypto's ml-dsa
 
 fuzz/               libFuzzer targets (separate workspace, nightly)
 tests/e2e/          end-to-end tests against a running daemon (Linux)
-contrib/            udev rules and systemd user unit
+tests/browser/      local relying party for manual tests in real browsers
+contrib/            udev rules, systemd user unit, trace tools (debug/)
 ```
 
 - **`pqkey-mldsa`** exposes key generation, signing and verification for the

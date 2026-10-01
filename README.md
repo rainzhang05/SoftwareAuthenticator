@@ -106,6 +106,8 @@ that does not appear on GNOME, and Chromium's error sheet after Deny.
   it supports of CTAP 2.3.
 - [docs/development-notes.md](docs/development-notes.md): building, testing,
   fuzzing and troubleshooting.
+- [tests/browser/](tests/browser/README.md): a local relying party that checks
+  everything the key returns, for testing in real browsers.
 - [CHANGELOG.md](CHANGELOG.md): what changed.
 
 MIT licensed; see [LICENSE](LICENSE).

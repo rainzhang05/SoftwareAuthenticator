@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pqkey test RP</title>
+<style>
+  :root { --bg:#fbfbf9; --fg:#1d1d1b; --muted:#6b6b66; --line:#d9d8d2; --card:#fff; --pass:#1a7f37; --fail:#c62828; --warn:#9a6700; --accent:#2856c4; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ececea; --muted:#a3a39d; --line:#3a3a37; --card:#1f1f1e; --pass:#4ac26b; --fail:#ff7b72; --warn:#d29922; --accent:#7aa2f7; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, sans-serif; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; }
+  header .ua { color:var(--muted); font-size:12px; }
+  main { display:grid; grid-template-columns: minmax(320px, 430px) 1fr; gap:16px; padding:16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:16px; }
+  h2 { font-size:14px; margin:0 0 8px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  label { display:block; margin:6px 0 2px; font-size:12px; color:var(--muted); }
+  input[type=text], select { width:100%; padding:5px 6px; border:1px solid var(--line); border-radius:5px; background:var(--bg); color:var(--fg); font:inherit; }
+  .row { display:flex; gap:8px; } .row > * { flex:1; }
+  .cb { display:flex; gap:6px; align-items:center; margin:4px 0; font-size:13px; color:var(--fg); }
+  button { font:inherit; padding:6px 10px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .presets { display:grid; grid-template-columns: 1fr; gap:4px; max-height: 360px; overflow:auto; }
+  .presets button { text-align:left; font-size:12.5px; padding:4px 8px; }
+  .presets b { display:inline-block; min-width:34px; }
+  pre { white-space:pre-wrap; word-break:break-all; font:12px/1.4 ui-monospace, monospace; margin:0; max-height:520px; overflow:auto; }
+  .PASS { color:var(--pass); font-weight:600; } .FAIL { color:var(--fail); font-weight:600; } .ERR { color:var(--warn); font-weight:600; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  td, th { border-bottom:1px solid var(--line); padding:4px 6px; text-align:left; vertical-align:top; }
+  td.mono { font-family: ui-monospace, monospace; font-size:11.5px; }
+  #status { font-weight:600; }
+  .log div { border-bottom:1px solid var(--line); padding:3px 0; font-size:12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>pqkey test RP</h1>
+  <span>RP ID <code>localhost</code></span>
+  <span id="status">idle</span>
+  <label class="cb" style="margin:0"><input type="checkbox" id="remote" checked><span>remote control (tester queues tests)</span></label>
+  <span class="ua" id="ua"></span>
+</header>
+<main>
+<div>
+  <section>
+    <h2>Presets (click = load + run)</h2>
+    <div class="presets" id="presets"></div>
+  </section>
+  <section>
+    <h2>Ceremony</h2>
+    <label>Test label</label><input type="text" id="label">
+    <div class="row">
+      <div><label>Username</label><input type="text" id="username" value="alice"></div>
+      <div><label>Algorithms (RP order, COSE IDs)</label><input type="text" id="algs" value="-7"></div>
+    </div>
+    <div class="row">
+      <div><label>residentKey</label><select id="rk"><option>discouraged</option><option>preferred</option><option>required</option></select></div>
+      <div><label>userVerification</label><select id="uv"><option>discouraged</option><option>preferred</option><option>required</option></select></div>
+    </div>
+    <div class="row">
+      <div><label>attestation</label><select id="att"><option value="">(default)</option><option>none</option><option>indirect</option><option>direct</option><option>enterprise</option></select></div>
+      <div><label>attachment</label><select id="attach"><option>cross-platform</option><option value="">(none)</option><option>platform</option></select></div>
+    </div>
+    <div class="row">
+      <div><label>hints</label><input type="text" id="hints" value="security-key"></div>
+      <div><label>timeout ms</label><input type="text" id="timeout" value="60000"></div>
+    </div>
+    <div class="cb"><input type="checkbox" id="credProps" checked><span>credProps</span></div>
+    <div class="cb"><input type="checkbox" id="prf"><span>PRF at registration</span></div>
+    <div class="row">
+      <div><label>PRF salt 1 (text, hashed)</label><input type="text" id="prfSalt1"></div>
+      <div><label>PRF salt 2</label><input type="text" id="prfSalt2"></div>
+    </div>
+    <div class="row">
+      <div><label>credentialProtectionPolicy</label><select id="credProtect"><option value="">(none)</option><option>userVerificationOptional</option><option>userVerificationOptionalWithCredentialIDList</option><option>userVerificationRequired</option></select></div>
+      <div><label>&nbsp;</label><div class="cb"><input type="checkbox" id="enforce"><span>enforce</span></div></div>
+    </div>
+    <div class="cb"><input type="checkbox" id="exclude"><span>excludeCredentials = this user's credentials</span></div>
+    <label>Sign-in allowCredentials</label>
+    <select id="allow"><option value="user">all of this user's credentials</option><option value="empty">empty (discoverable / account picker)</option></select>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" id="btnReg">Register</button>
+      <button class="primary" id="btnLogin">Sign in</button>
+      <button id="btnAbort" disabled>Abort (AbortController)</button>
+    </div>
+  </section>
+</div>
+<div>
+  <section>
+    <h2>Last result</h2>
+    <pre id="result">—</pre>
+  </section>
+  <section>
+    <h2>Credentials at this RP</h2>
+    <div id="creds"></div>
+  </section>
+  <section>
+    <h2>Recent results (server log)</h2>
+    <div class="log" id="log"></div>
+  </section>
+</div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+$('ua').textContent = navigator.userAgent;
+const NAMES = {'-7':'ES256','-48':'ML-DSA-44','-49':'ML-DSA-65','-50':'ML-DSA-87'};
+
+const PRESETS = [
+  // registrations
+  {id:'R1', kind:'reg', label:'ES256 non-discoverable, UV discouraged', username:'alice', algs:'-7', rk:'discouraged', uv:'discouraged'},
+  {id:'R2', kind:'reg', label:'ES256 discoverable, UV discouraged', username:'alice', algs:'-7', rk:'required', uv:'discouraged'},
+  {id:'R3', kind:'reg', label:'ML-DSA-44 alone, non-discoverable', username:'alice', algs:'-48', rk:'discouraged'},
+  {id:'R4', kind:'reg', label:'ML-DSA-65 alone, non-discoverable', username:'alice', algs:'-49', rk:'discouraged'},
+  {id:'R5', kind:'reg', label:'ML-DSA-87 alone, non-discoverable', username:'alice', algs:'-50', rk:'discouraged'},
+  {id:'R6', kind:'reg', label:'ML-DSA-44 alone, discoverable', username:'mldsa44', algs:'-48', rk:'required'},
+  {id:'R7', kind:'reg', label:'ML-DSA-65 alone, discoverable', username:'mldsa65', algs:'-49', rk:'required'},
+  {id:'R8', kind:'reg', label:'ML-DSA-87 alone, discoverable (largest sign-in)', username:'mldsa87', algs:'-50', rk:'required'},
+  {id:'R9', kind:'reg', label:'Mixed [ML-DSA-44, ES256]: which does the key pick?', username:'mixed', algs:'-48,-7', rk:'discouraged'},
+  {id:'R10', kind:'reg', label:'Mixed [ES256, ML-DSA-87]', username:'mixed', algs:'-7,-50', rk:'discouraged'},
+  {id:'R11', kind:'reg', label:'Mixed [-50,-49,-48,-7]', username:'mixed', algs:'-50,-49,-48,-7', rk:'discouraged'},
+  {id:'R12', kind:'reg', label:'Second user bob, ES256 discoverable', username:'bob', algs:'-7', rk:'required'},
+  {id:'R13', kind:'reg', label:'Re-register alice discoverable (should replace old)', username:'alice', algs:'-7', rk:'required'},
+  {id:'R14', kind:'reg', label:'excludeCredentials = alice\'s creds (expect InvalidStateError)', username:'alice', algs:'-7', rk:'discouraged', exclude:true},
+  {id:'R15', kind:'reg', label:'ES256 discoverable, UV required (PIN)', username:'carol', algs:'-7', rk:'required', uv:'required'},
+  {id:'R16', kind:'reg', label:'PRF enabled at registration, discoverable', username:'prfuser', algs:'-7', rk:'required', prf:true},
+  {id:'R17', kind:'reg', label:'credProtect 1 (UVOptional), enforce', username:'cp1', algs:'-7', rk:'required', credProtect:'userVerificationOptional', enforce:true},
+  {id:'R18', kind:'reg', label:'credProtect 2 (WithCredentialIDList), enforce', username:'cp2', algs:'-7', rk:'required', credProtect:'userVerificationOptionalWithCredentialIDList', enforce:true},
+  {id:'R19', kind:'reg', label:'credProtect 3 (UVRequired), enforce', username:'cp3', algs:'-7', rk:'required', credProtect:'userVerificationRequired', enforce:true},
+  {id:'R20', kind:'reg', label:'attestation "direct", ES256 non-discoverable', username:'att', algs:'-7', rk:'discouraged', att:'direct'},
+  // sign-ins
+  {id:'L1', kind:'login', label:'alice: allowCredentials = all hers, UV discouraged', username:'alice', allow:'user', uv:'discouraged'},
+  {id:'L2', kind:'login', label:'Discoverable: empty allowCredentials (account picker)', username:'', allow:'empty', uv:'discouraged'},
+  {id:'L3', kind:'login', label:'alice, UV required', username:'alice', allow:'user', uv:'required'},
+  {id:'L4', kind:'login', label:'PRF salt A, UV discouraged', username:'prfuser', allow:'user', uv:'discouraged', prfSalt1:'A'},
+  {id:'L5', kind:'login', label:'PRF salt B, UV discouraged', username:'prfuser', allow:'user', uv:'discouraged', prfSalt1:'B'},
+  {id:'L6', kind:'login', label:'PRF salts A + B, UV discouraged', username:'prfuser', allow:'user', uv:'discouraged', prfSalt1:'A', prfSalt2:'B'},
+  {id:'L7', kind:'login', label:'PRF salt A, UV required', username:'prfuser', allow:'user', uv:'required', prfSalt1:'A'},
+];
+
+function setForm(p) {
+  $('label').value = `${p.id} ${p.label}`;
+  $('username').value = p.username ?? 'alice';
+  $('algs').value = p.algs ?? '-7';
+  $('rk').value = p.rk ?? 'discouraged';
+  $('uv').value = p.uv ?? 'discouraged';
+  $('att').value = p.att ?? '';
+  $('attach').value = p.attach ?? 'cross-platform';
+  $('hints').value = p.hints ?? 'security-key';
+  $('credProps').checked = p.credProps ?? true;
+  $('prf').checked = !!p.prf;
+  $('prfSalt1').value = p.prfSalt1 ?? '';
+  $('prfSalt2').value = p.prfSalt2 ?? '';
+  $('credProtect').value = p.credProtect ?? '';
+  $('enforce').checked = !!p.enforce;
+  $('exclude').checked = !!p.exclude;
+  $('allow').value = p.allow ?? 'user';
+}
+function readForm() {
+  const hints = $('hints').value.split(',').map(s => s.trim()).filter(Boolean);
+  return {
+    label: $('label').value, username: $('username').value,
+    algs: $('algs').value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
+    residentKey: $('rk').value, userVerification: $('uv').value, attestation: $('att').value,
+    attachment: $('attach').value, hints, timeout: $('timeout').value,
+    credProps: $('credProps').checked, prf: $('prf').checked,
+    prfSalt1: $('prfSalt1').value, prfSalt2: $('prfSalt2').value,
+    credProtect: $('credProtect').value, enforceCredProtect: $('enforce').checked,
+    excludeExisting: $('exclude').checked, allow: $('allow').value,
+  };
+}
+
+const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf instanceof ArrayBuffer ? buf : buf.buffer))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+const unb64u = (s) => Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/') + '==='.slice((s.length + 3) % 4)), c => c.charCodeAt(0)).buffer;
+function extToJSON(x) {
+  if (x instanceof ArrayBuffer || ArrayBuffer.isView(x)) return b64u(x);
+  if (Array.isArray(x)) return x.map(extToJSON);
+  if (x && typeof x === 'object') { const o = {}; for (const k in x) o[k] = extToJSON(x[k]); return o; }
+  return x;
+}
+function decodePrf(ext) {
+  if (ext && ext.prf && ext.prf.eval) { for (const k of ['first','second']) if (ext.prf.eval[k]) ext.prf.eval[k] = unb64u(ext.prf.eval[k]); }
+}
+function decodeCreation(pk) {
+  pk.challenge = unb64u(pk.challenge); pk.user.id = unb64u(pk.user.id);
+  for (const c of pk.excludeCredentials || []) c.id = unb64u(c.id);
+  decodePrf(pk.extensions); return pk;
+}
+function decodeRequest(pk) {
+  pk.challenge = unb64u(pk.challenge);
+  for (const c of pk.allowCredentials || []) c.id = unb64u(c.id);
+  decodePrf(pk.extensions); return pk;
+}
+function credToJSON(c) {
+  const r = c.response;
+  const out = {id: c.id, rawId: b64u(c.rawId), type: c.type, authenticatorAttachment: c.authenticatorAttachment,
+               clientExtensionResults: extToJSON(c.getClientExtensionResults()), response: {clientDataJSON: b64u(r.clientDataJSON)}};
+  if (r.attestationObject) {
+    out.response.attestationObject = b64u(r.attestationObject);
+    out.transports = r.getTransports ? r.getTransports() : null;
+    const cs = {};
+    try { cs.getPublicKeyAlgorithm = r.getPublicKeyAlgorithm ? r.getPublicKeyAlgorithm() : 'not implemented'; } catch (e) { cs.getPublicKeyAlgorithm = `${e.name}: ${e.message}`; }
+    try { const pk = r.getPublicKey ? r.getPublicKey() : undefined; cs.getPublicKey = pk === undefined ? 'not implemented' : pk === null ? null : `${pk.byteLength} bytes SPKI`; } catch (e) { cs.getPublicKey = `${e.name}: ${e.message}`; }
+    try { const j = c.toJSON ? c.toJSON() : null; cs.toJSON_publicKey = j ? (j.response.publicKey === undefined ? 'absent' : j.response.publicKey === null ? null : `${j.response.publicKey.length} b64u chars`) : 'no toJSON'; } catch (e) { cs.toJSON_publicKey = `${e.name}: ${e.message}`; }
+    out.clientSide = cs;
+  } else {
+    out.response.authenticatorData = b64u(r.authenticatorData);
+    out.response.signature = b64u(r.signature);
+    out.response.userHandle = r.userHandle ? b64u(r.userHandle) : null;
+  }
+  return out;
+}
+async function post(path, body) {
+  const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+let abortCtl = null;
+function busy(on, text) {
+  $('status').textContent = text; abortCtl = on ? new AbortController() : null;
+  $('btnAbort').disabled = !on; $('btnReg').disabled = on; $('btnLogin').disabled = on;
+}
+function show(res) {
+  const cls = res.outcome === 'PASS' ? 'PASS' : res.outcome === 'FAIL' ? 'FAIL' : 'ERR';
+  $('result').innerHTML = `<span class="${cls}">${res.outcome}</span>  ${escapeHtml(res.label || '')}\n${escapeHtml(res.summary || '')}\n\n` + escapeHtml(JSON.stringify(res.checks || res, null, 1));
+  refresh();
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function ceremony(kind, cfg) {
+  const t0 = performance.now();
+  busy(true, `${kind}: waiting for the key…`);
+  let opt;
+  try {
+    opt = await post(kind === 'reg' ? '/api/register/options' : '/api/login/options', cfg);
+    const cred = kind === 'reg'
+      ? await navigator.credentials.create({publicKey: decodeCreation(opt.publicKey), signal: abortCtl.signal})
+      : await navigator.credentials.get({publicKey: decodeRequest(opt.publicKey), signal: abortCtl.signal});
+    const elapsed = Math.round(performance.now() - t0);
+    busy(true, `${kind}: verifying…`);
+    const res = await post(kind === 'reg' ? '/api/register/verify' : '/api/login/verify',
+                           {ceremonyId: opt.ceremonyId, credential: credToJSON(cred), ua: navigator.userAgent, elapsed_ms: elapsed});
+    show(res);
+  } catch (e) {
+    const elapsed = Math.round(performance.now() - t0);
+    try {
+      show(await post('/api/client-error', {ceremonyId: opt && opt.ceremonyId, kind: kind === 'reg' ? 'register' : 'login',
+           label: cfg.label, name: e.name, message: e.message, elapsed_ms: elapsed, ua: navigator.userAgent}));
+    } catch (e2) { $('result').textContent = `${e.name}: ${e.message}\n(server: ${e2})`; }
+  } finally { busy(false, 'idle'); }
+}
+
+async function refresh() {
+  const db = await (await fetch('/api/db')).json();
+  let html = '<table><tr><th>user</th><th>alg</th><th>kind</th><th>signCount</th><th>made</th><th></th></tr>';
+  for (const [name, u] of Object.entries(db.users)) {
+    for (const c of u.credentials) {
+      html += `<tr><td>${escapeHtml(name)}</td><td>${NAMES[c.alg] || c.alg}</td><td>${c.disc ? 'discoverable' : 'non-disc'}${c.credProtect ? ' cp' + c.credProtect : ''}</td>` +
+              `<td>${c.signCount}</td><td title="${escapeHtml(c.browser || '')}">${c.created}<br><span class="ua">${escapeHtml(c.label || '')}</span></td>` +
+              `<td><button data-id="${escapeHtml(c.id)}" data-u="${escapeHtml(name)}" data-uv="discouraged" class="si">Sign in</button> ` +
+              `<button data-id="${escapeHtml(c.id)}" data-u="${escapeHtml(name)}" data-uv="required" class="si">Sign in + UV</button> ` +
+              `<button data-id="${escapeHtml(c.id)}" class="fg">Forget</button></td></tr>`;
+    }
+  }
+  $('creds').innerHTML = html + '</table>';
+  for (const b of document.querySelectorAll('button.si')) b.onclick = () => {
+    const cfg = {...readForm(), username: b.dataset.u, allow: 'cred:' + b.dataset.id, userVerification: b.dataset.uv,
+                 label: `sign in ${b.dataset.u} ${b.closest('tr').children[1].textContent} ${b.closest('tr').children[2].textContent} UV ${b.dataset.uv}`};
+    ceremony('login', cfg);
+  };
+  for (const b of document.querySelectorAll('button.fg')) b.onclick = async () => { await post('/api/forget', {id: b.dataset.id, label: 'forget ' + b.dataset.id.slice(0, 10)}); refresh(); };
+  const log = await (await fetch('/api/results')).json();
+  $('log').innerHTML = log.map(e => `<div><span class="${e.outcome === 'PASS' ? 'PASS' : e.outcome === 'FAIL' ? 'FAIL' : 'ERR'}">${escapeHtml(e.outcome)}</span> ` +
+    `${escapeHtml(e.time.slice(11, 19))} ${escapeHtml(e.label || '')} — ${escapeHtml(e.summary || '')}</div>`).join('');
+}
+
+for (const p of PRESETS) {
+  const b = document.createElement('button');
+  b.innerHTML = `<b>${p.id}</b> ${escapeHtml(p.label)}`;
+  b.onclick = () => { setForm(p); ceremony(p.kind, readForm()); };
+  $('presets').appendChild(b);
+}
+$('btnReg').onclick = () => ceremony('reg', readForm());
+$('btnLogin').onclick = () => ceremony('login', readForm());
+$('btnAbort').onclick = () => abortCtl && abortCtl.abort();
+refresh();
+
+// Remote control: the tester queues presets or full configs on the server; this page runs them one at a time.
+const FAMILY = /firefox/i.test(navigator.userAgent) ? 'firefox' : 'chrome';
+let running = false;
+async function poll() {
+  if (!$('remote').checked || running || abortCtl) return;
+  let item;
+  try { item = (await (await fetch('/api/next?' + FAMILY)).json()).item; } catch (e) { return; }
+  if (!item) return;
+  running = true;
+  try {
+    if (item.wait_ms) { $('status').textContent = item.note || `waiting ${item.wait_ms} ms`; await new Promise(r => setTimeout(r, item.wait_ms)); }
+    else if (item.abort_after_ms) {
+      const p = PRESETS.find(x => x.id === item.preset); setForm(p); if (item.label) $('label').value = item.label;
+      const run = ceremony(p.kind, readForm());
+      setTimeout(() => abortCtl && abortCtl.abort(), item.abort_after_ms);
+      await run;
+    }
+    else if (item.preset) { const p = PRESETS.find(x => x.id === item.preset); setForm(p); if (item.label) $('label').value = item.label; await ceremony(p.kind, readForm()); }
+    else if (item.kind) { await ceremony(item.kind, {...readForm(), ...item.cfg}); }
+  } finally { running = false; }
+}
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

@@ -212,6 +212,14 @@ Behaviour that is broken today is marked with `bugs.known_bug(...)` in the
 Python tests: a strict expected failure that also fails the run once the bug is
 fixed, so the marker goes away with the fix.
 
+### In a browser
+
+[`tests/browser/`](../tests/browser/README.md) is a local relying party for
+manual tests in real browsers: presets for every algorithm and option, a
+double check of each response, and a queue a script can fill while a person
+approves the prompts. [`contrib/debug/`](../contrib/debug) decodes and verifies
+an `strace` of the daemon. Neither runs in CI.
+
 ## Fuzzing
 
 The fuzz crate in [`fuzz/`](../fuzz/) is a workspace of its own and needs

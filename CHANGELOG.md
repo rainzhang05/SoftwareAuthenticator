@@ -145,6 +145,10 @@ also break an existing installation of that commit:
   store's envelope, key hierarchy and record encoding.
 - End-to-end tests of the real virtual device with libfido2 and python-fido2 on
   GitHub Actions, including the notification prompt.
+- A browser test kit (`tests/browser/`): a local relying party that verifies
+  every registration and sign-in twice, with presets and a remote-control
+  queue; and `contrib/debug/` tools that decode and verify an `strace` of the
+  daemon.
 - libFuzzer targets for CTAPHID framing, CTAP requests and request sequences,
   and stored key material, run weekly and smoke-tested on pushes to `main`.
 - CI: clippy and rustdoc with warnings denied, MSRV check, feature powerset,
