@@ -6,6 +6,30 @@
 //! implementation.  [`CtapApp::with_file_store`] builds the combination the
 //! daemon runs.
 //!
+//! A request is a CTAPHID_CBOR payload: the command byte, then its CBOR
+//! parameters.  The response is a status byte, then CBOR on success:
+//!
+//! ```
+//! use ciborium::value::Value;
+//! use pqkey_ctap::ctap::presence::AutoApprove;
+//! use pqkey_ctap::ctap::{CtapApp, InterruptFlag};
+//! use pqkey_ctap::store::MemoryStore;
+//!
+//! static INTERRUPT: InterruptFlag = InterruptFlag::new();
+//! let rng = rand_core::UnwrapErr(getrandom::SysRng);
+//! let mut app = CtapApp::new(MemoryStore::new(), rng, AutoApprove, &INTERRUPT, [0; 16]);
+//!
+//! // authenticatorGetInfo (0x04) has no parameters.
+//! let response = app.call(&[0x04]);
+//! assert_eq!(response[0], 0x00); // CTAP2_OK
+//! let info: Value = ciborium::de::from_reader(&response[1..]).unwrap();
+//! let versions = info.as_map().unwrap()[0].1.as_array().unwrap(); // key 0x01
+//! assert!(versions.contains(&Value::Text("FIDO_2_3".into())));
+//!
+//! // authenticatorClientPIN (0x06) without its required parameters.
+//! assert_eq!(app.call(&[0x06, 0xa0]), [0x14]); // CTAP2_ERR_MISSING_PARAMETER
+//! ```
+//!
 //! # Why trait objects
 //!
 //! The three collaborators are boxed trait objects rather than type

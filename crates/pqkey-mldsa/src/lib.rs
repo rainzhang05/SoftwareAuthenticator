@@ -18,6 +18,20 @@
 //! [`try_sign_from_seed`] work from a stored seed directly; key generation
 //! draws the seed from the operating system's random number generator.
 //!
+//! ```
+//! use pqkey_mldsa::{ParamSet, try_public_key_from_seed, try_sign_from_seed, verify};
+//!
+//! // A stored seed. A new one comes from the operating system's generator.
+//! let seed = [0x42; 32];
+//! let public_key = try_public_key_from_seed(ParamSet::MLDSA65, &seed)?;
+//! let message = b"authenticatorData || clientDataHash";
+//! let signature = try_sign_from_seed(ParamSet::MLDSA65, &seed, message)?;
+//! assert_eq!((public_key.len(), signature.len()), (1952, 3309));
+//! assert!(verify(ParamSet::MLDSA65, &public_key, message, &signature));
+//! assert!(!verify(ParamSet::MLDSA65, &public_key, b"another message", &signature));
+//! # Ok::<(), pqkey_mldsa::MlDsaError>(())
+//! ```
+//!
 //! The [`SecretKey`]-based entry points take the *expanded* FIPS 204 secret key
 //! encoding (`skEncode`, 2,560–4,896 bytes) for compatibility and for NIST's
 //! known-answer vectors, which only carry expanded keys.  `ml-dsa` deprecates
