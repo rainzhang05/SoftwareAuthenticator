@@ -71,8 +71,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Install pqkey for this user: check the system, install and start the
-    /// user service, and print the one command that needs root
+    /// Install pqkey for this user: set up what needs root (with sudo),
+    /// install and start the user service, and offer to set a PIN
     Setup {
         /// Remove the user service again, and print what undoes the root part
         #[clap(long)]
