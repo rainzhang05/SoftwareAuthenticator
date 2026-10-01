@@ -523,6 +523,23 @@ fn a_client_data_hash_must_be_32_bytes() {
     assert!(app.handle_make_credential(&request(vec![])).is_ok());
 }
 
+/// A registration whose key cannot be generated, because the operating
+/// system's random number generator failed, fails with CTAP1_ERR_OTHER and
+/// stores nothing, rather than taking the daemon down with a panic.
+#[test]
+fn a_failed_key_generation_fails_the_registration() {
+    for rk in [false, true] {
+        let (mut app, _) = app(vec![]);
+        app.set_key_generator(|_| Err(crate::CryptoError::Randomness));
+        assert_eq!(
+            app.handle_make_credential(&request(vec![options(&[("rk", rk)])])),
+            Err(CTAP1_ERR_OTHER),
+            "rk {rk}"
+        );
+        assert!(stored(&app).is_empty());
+    }
+}
+
 /// The probe of step 1 is a makeCredential request like any other: without
 /// its mandatory parameters it gets CTAP2_ERR_MISSING_PARAMETER and no prompt.
 #[test]

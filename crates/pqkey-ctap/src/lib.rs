@@ -24,7 +24,7 @@ use p256::elliptic_curve::Generate;
 use pqkey_mldsa::{
     MlDsaError, ParamSet, PublicKey, SEED_LEN, try_public_key_from_seed, try_sign_from_seed,
 };
-use rand_core::{Rng, UnwrapErr};
+use rand_core::{TryRng, UnwrapErr};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -83,6 +83,8 @@ pub enum CryptoError {
     InvalidPinBlock,
     /// The underlying ML-DSA implementation reported an error.
     MlDsa(MlDsaError),
+    /// The operating system's random number generator failed.
+    Randomness,
 }
 
 impl From<MlDsaError> for CryptoError {
@@ -105,6 +107,7 @@ impl fmt::Display for CryptoError {
             CryptoError::SigningFailed => f.write_str("signature generation failed"),
             CryptoError::InvalidPinBlock => f.write_str("malformed PIN/UV auth protocol block"),
             CryptoError::MlDsa(err) => write!(f, "ML-DSA error: {err:?}"),
+            CryptoError::Randomness => f.write_str("the random number generator failed"),
         }
     }
 }
@@ -534,14 +537,16 @@ pub fn try_credential_secret_from_bytes(
 ///
 /// Returns the CBOR COSE_Key for the new public key plus the secret key
 /// wrapper, for ML-DSA the seed.  Errors instead of panicking when `alg` names
-/// no supported
-/// algorithm ([`CryptoError::UnsupportedAlgorithm`]), when ML-DSA key
-/// generation fails ([`CryptoError::MlDsa`]), or when the generated P-256
-/// point cannot be encoded ([`CryptoError::InvalidPublicKey`]).
+/// no supported algorithm ([`CryptoError::UnsupportedAlgorithm`]), when the
+/// operating system's random number generator fails
+/// ([`CryptoError::Randomness`]), when ML-DSA key generation fails
+/// ([`CryptoError::MlDsa`]), or when the generated P-256 point cannot be
+/// encoded ([`CryptoError::InvalidPublicKey`]).
 pub fn try_create_credential(alg: CoseAlg) -> Result<(Vec<u8>, CredentialSecretKey), CryptoError> {
     match alg {
         CoseAlg::ES256 => {
-            let signing_key = P256SigningKey::generate_from_rng(&mut os_rng());
+            let signing_key = P256SigningKey::try_generate_from_rng(&mut SysRng)
+                .map_err(|_| CryptoError::Randomness)?;
             let public_key = signing_key.verifying_key().to_sec1_point(false);
             let cose = try_cose_es256_public_key(&public_key)?;
             Ok((cose, CredentialSecretKey::Es256(signing_key)))
@@ -549,7 +554,9 @@ pub fn try_create_credential(alg: CoseAlg) -> Result<(Vec<u8>, CredentialSecretK
         _ => {
             let ps = mldsa_paramset_from_alg(alg).ok_or(CryptoError::UnsupportedAlgorithm)?;
             let mut seed = [0u8; SEED_LEN];
-            os_rng().fill_bytes(&mut seed);
+            SysRng
+                .try_fill_bytes(&mut seed)
+                .map_err(|_| CryptoError::Randomness)?;
             let key = MlDsaSeed::new(seed);
             seed.zeroize();
             let pk = try_public_key_from_seed(ps, key.as_bytes())?;

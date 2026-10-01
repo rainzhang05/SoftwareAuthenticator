@@ -7,7 +7,7 @@ use super::presence::{PresenceOperation, PresenceRequest};
 use super::request;
 use super::storage::{is_discoverable, store_status};
 use super::{AttestationMode, CtapApp};
-use crate::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial, StoreError};
+use crate::store::{AttestationRecord, CredentialRecord, StoreError};
 use crate::try_sign_challenge;
 
 use ciborium::{
@@ -308,7 +308,13 @@ impl CtapApp<'_> {
 
         // ML-DSA keys are kept as their 32-byte seed (RFC 9964 §4).  A
         // discoverable credential is stored; a non-discoverable one is sealed
-        // into its credential ID (see is_discoverable).
+        // into its credential ID (see is_discoverable).  A generator failure
+        // fails the request, "CTAP1_ERR_OTHER: Other unspecified error" (CTAP
+        // 2.3 §8.2), not the authenticator.
+        let private_key = (self.generate_key)(alg).map_err(|err| {
+            log::error!("cannot generate a {alg:?} key: {err}");
+            CTAP1_ERR_OTHER
+        })?;
         let mut record = CredentialRecord {
             credential_id: Vec::new(),
             rp_id,
@@ -316,7 +322,7 @@ impl CtapApp<'_> {
             user_name,
             user_display_name,
             alg,
-            private_key: PrivateKeyMaterial::generate(alg),
+            private_key,
             cred_random_with_uv: [0; 32],
             cred_random_without_uv: [0; 32],
             cred_protect: cred_protect_value,

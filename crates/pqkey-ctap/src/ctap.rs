@@ -43,7 +43,8 @@ use self::credential_management::CredentialManagementState;
 use self::get_assertion::PendingAssertion;
 use self::pin::state::PinState;
 use self::presence::{DEFAULT_PRESENCE_TIMEOUT, UserPresence};
-use crate::store::{CredentialStore, FileStore};
+use crate::store::{CredentialStore, FileStore, PrivateKeyMaterial};
+use crate::{CoseAlg, CryptoError};
 
 use ciborium::{de::from_reader, value::Value};
 use core::fmt;
@@ -123,6 +124,11 @@ pub struct CtapApp<'interrupt> {
     /// How long after power-up authenticatorReset is accepted, if limited.
     reset_window: Option<Duration>,
     keepalive: Box<dyn FnMut(bool) + Send>,
+    /// Generates credential private keys: [`PrivateKeyMaterial::try_generate`],
+    /// replaced by tests that make it fail.
+    ///
+    /// [`PrivateKeyMaterial::try_generate`]: crate::store::PrivateKeyMaterial::try_generate
+    generate_key: fn(CoseAlg) -> Result<PrivateKeyMaterial, CryptoError>,
 }
 
 impl<'interrupt> CtapApp<'interrupt> {
@@ -134,16 +140,18 @@ impl<'interrupt> CtapApp<'interrupt> {
     /// * `rng` provides every random value the engine chooses: discoverable
     ///   credentials' IDs and `CredRandom`, key-agreement keys,
     ///   pinUvAuthTokens and IVs.  (Credential private keys come from
-    ///   [`PrivateKeyMaterial::generate`], which uses the operating system's
-    ///   generator, and so do the nonces of the store sealing
-    ///   non-discoverable credentials into their IDs.)
+    ///   [`PrivateKeyMaterial::try_generate`], which uses the operating
+    ///   system's generator, and so do the nonces of the store sealing
+    ///   non-discoverable credentials into their IDs.)  `rng` is infallible:
+    ///   if it panics, the request fails with it, as the daemon's worker
+    ///   thread does.
     /// * `presence` is asked whenever an operation needs evidence of user
     ///   interaction.
     /// * `interrupt` is the flag through which the transport cancels the
     ///   request being processed; it is what [`interrupt`](Self::interrupt)
     ///   returns.
     ///
-    /// [`PrivateKeyMaterial::generate`]: crate::store::PrivateKeyMaterial::generate
+    /// [`PrivateKeyMaterial::try_generate`]: crate::store::PrivateKeyMaterial::try_generate
     pub fn new(
         store: impl CredentialStore + Send + 'static,
         rng: impl CryptoRng + Send + 'static,
@@ -167,7 +175,17 @@ impl<'interrupt> CtapApp<'interrupt> {
             presence_timeout: DEFAULT_PRESENCE_TIMEOUT,
             reset_window: Some(RESET_WINDOW_AFTER_POWER_UP),
             keepalive: Box::new(|_| {}),
+            generate_key: PrivateKeyMaterial::try_generate,
         }
+    }
+
+    /// Replace the credential key generator, for tests.
+    #[cfg(test)]
+    pub(crate) fn set_key_generator(
+        &mut self,
+        generate_key: fn(CoseAlg) -> Result<PrivateKeyMaterial, CryptoError>,
+    ) {
+        self.generate_key = generate_key;
     }
 
     /// The engine the daemon runs: `store`, randomness from the operating

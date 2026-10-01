@@ -205,6 +205,9 @@ also break an existing installation of that commit:
 - The relying party's `rp.name` reaches the registration prompt, cut to 64
   bytes, as WebAuthn Level 3 §6.3.2 step 6 recommends
   (`PresenceRequest::rp_name`).
+- A random number generator failure while generating a credential key fails
+  that registration with CTAP1_ERR_OTHER instead of panicking the daemon
+  (`PrivateKeyMaterial::try_generate`, `CryptoError::Randomness`).
 - The notification prompt gives up on a session bus that accepts the
   connection but never answers after 2 seconds, as it does on a D-Bus call,
   instead of holding the request and the daemon's shutdown forever.

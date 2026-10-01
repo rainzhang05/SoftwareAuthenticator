@@ -14,7 +14,7 @@ use core::fmt;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use p256::elliptic_curve::Generate;
 use pqkey_mldsa::{SEED_LEN, try_public_key_from_seed};
-use rand_core::Rng;
+use rand_core::TryCryptoRng;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -54,22 +54,32 @@ pub enum PrivateKeyMaterial {
 
 impl PrivateKeyMaterial {
     /// Generate fresh key material for `alg` from the operating system's
-    /// random number generator.
+    /// random number generator, getrandom(2) on Linux.
     ///
-    /// For ML-DSA this draws only the 32-byte seed; the expensive expansion
-    /// happens when the key is first used.
+    /// For ML-DSA this draws only the 32-byte seed `ξ`; the expensive
+    /// expansion happens when the key is first used.  getrandom(2) is a
+    /// cryptographically secure generator, but not a random bit generator
+    /// approved under NIST SP 800-90A, which FIPS 204 §3.6.1 asks a validated
+    /// implementation to use for `ξ` and for hedged signing's `rnd`; that
+    /// only matters for a FIPS 140 claim, which pqkey does not make.
     ///
-    /// # Panics
-    ///
-    /// Panics if the operating system's random number generator fails, exactly
-    /// like [`crate::try_create_credential`] does for ES256.
-    #[must_use]
-    pub fn generate(alg: CoseAlg) -> Self {
-        match alg {
+    /// Fails with [`CryptoError::Randomness`] if the generator fails, so a
+    /// registration fails instead of the process.
+    pub fn try_generate(alg: CoseAlg) -> Result<Self, CryptoError> {
+        Self::try_generate_from_rng(alg, &mut getrandom::SysRng)
+            .map_err(|_| CryptoError::Randomness)
+    }
+
+    /// [`Self::try_generate`] with `rng` as the random number generator.
+    pub fn try_generate_from_rng<R: TryCryptoRng + ?Sized>(
+        alg: CoseAlg,
+        rng: &mut R,
+    ) -> Result<Self, R::Error> {
+        Ok(match alg {
             CoseAlg::ES256 => {
-                // `SecretKey::generate_from_rng` only yields scalars in [1, n), so the
+                // `SecretKey` generation only yields scalars in [1, n), so the
                 // material is valid by construction.
-                let secret = p256::SecretKey::generate_from_rng(&mut crate::os_rng());
+                let secret = p256::SecretKey::try_generate_from_rng(rng)?;
                 let mut encoded = secret.to_bytes();
                 let mut scalar = [0u8; 32];
                 scalar.copy_from_slice(&encoded);
@@ -78,10 +88,21 @@ impl PrivateKeyMaterial {
             }
             CoseAlg::MLDSA44 | CoseAlg::MLDSA65 | CoseAlg::MLDSA87 => {
                 let mut seed = [0u8; SEED_LEN];
-                crate::os_rng().fill_bytes(&mut seed);
+                rng.try_fill_bytes(&mut seed)?;
                 PrivateKeyMaterial::MlDsa { seed }
             }
-        }
+        })
+    }
+
+    /// [`Self::try_generate`] for tests and tools that cannot go on without a
+    /// key.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operating system's random number generator fails.
+    #[must_use]
+    pub fn generate(alg: CoseAlg) -> Self {
+        Self::try_generate(alg).expect("the operating system's random number generator failed")
     }
 
     /// Whether this material is the right kind of key for `alg`.
@@ -439,6 +460,47 @@ mod tests {
         CoseAlg::MLDSA65,
         CoseAlg::MLDSA87,
     ];
+
+    /// A random number generator that always fails.
+    struct FailingRng;
+
+    #[derive(Debug)]
+    struct NoRandomness;
+
+    impl fmt::Display for NoRandomness {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("no randomness")
+        }
+    }
+
+    impl core::error::Error for NoRandomness {}
+
+    impl rand_core::TryRng for FailingRng {
+        type Error = NoRandomness;
+        fn try_next_u32(&mut self) -> Result<u32, NoRandomness> {
+            Err(NoRandomness)
+        }
+        fn try_next_u64(&mut self) -> Result<u64, NoRandomness> {
+            Err(NoRandomness)
+        }
+        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), NoRandomness> {
+            Err(NoRandomness)
+        }
+    }
+
+    impl TryCryptoRng for FailingRng {}
+
+    /// A failing generator is reported, never a panic or a key of zeros.
+    #[test]
+    fn key_generation_reports_a_failing_generator() {
+        for alg in ALL_ALGS {
+            assert!(
+                PrivateKeyMaterial::try_generate_from_rng(alg, &mut FailingRng).is_err(),
+                "{alg:?}"
+            );
+            assert!(PrivateKeyMaterial::try_generate(alg).is_ok(), "{alg:?}");
+        }
+    }
 
     fn record(alg: CoseAlg) -> CredentialRecord {
         CredentialRecord {
