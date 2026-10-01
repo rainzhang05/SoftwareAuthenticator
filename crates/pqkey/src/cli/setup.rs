@@ -219,16 +219,17 @@ fn check_caller(state_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// `pqkey setup`.
 /// `pqkey setup`; `yes` runs the steps that need root without asking.
 pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
     check_caller(state_dir)?;
     let binary = env::current_exe()?.canonicalize()?;
     if binary.components().any(|part| part.as_os_str() == "target") {
-        outln!(
-            "Note: {} looks like a build directory, which `cargo clean` empties. Install pqkey \
-             with `cargo install --locked --path crates/pqkey` and run its `pqkey setup` instead.",
-            binary.display()
+        output::problem(
+            format!(
+                "{} is in a build directory, which `cargo clean` empties",
+                binary.display()
+            ),
+            "install pqkey with ./install.sh, which runs setup itself",
         )?;
     }
     let system = System::real();
@@ -262,18 +263,16 @@ pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
         // The key starts by itself once the new session has the group.
         install_unit(&binary)?;
         systemctl(&["enable", UNIT])?;
-        outln!(
-            "Log out and in again: this session started before you joined '{}'. The key then \
-             starts by itself; `pqkey pin` sets its PIN, which Chromium asks for.",
-            UHID_GROUP
-        )?;
-        return Ok(());
+        return output::problem(
+            format!("this session started before you joined '{UHID_GROUP}'"),
+            "log out and in again: the key then starts by itself, and `pqkey pin` sets its PIN",
+        );
     }
     let problems = checks::start_problems(&system, &membership);
     if !problems.is_empty() {
-        outln!("The key cannot start yet:")?;
         output::problems(&problems)?;
-        outln!("Then run `pqkey setup` again.")?;
+        outln!()?;
+        outln!("The key cannot start yet: fix the above, then run `pqkey setup` again.")?;
         return Ok(());
     }
 
@@ -282,36 +281,60 @@ pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
     // A unit that failed to start too often refuses to start until this.
     let _ = systemctl(&["reset-failed", UNIT]);
     let running = match daemon::running(state_dir)? {
-        Some(Running::Daemon(pid)) => {
+        // The service runs it from now on.
+        Some(Running::Daemon(_)) => {
             daemon::unplug(state_dir)?;
-            outln!(
-                "Stopped the key started by hand (pid {pid}); the service runs it from now on."
-            )?;
             None
         }
         running => running,
     };
-    let running = match running {
+    let (running, how) = match running {
         // A new unit, or a new binary in place of the one the service runs.
         Some(Running::Service(pid)) if changed || runs_another_binary(pid, &binary) => {
-            daemon::replug(state_dir)?
+            (daemon::replug(state_dir)?, "restarted")
         }
-        Some(running) => running,
-        None => daemon::plug_in(state_dir, &super::DaemonArgs::default())?,
+        Some(running) => (running, "running"),
+        None => (
+            daemon::plug_in(state_dir, &super::DaemonArgs::default())?,
+            "started",
+        ),
     };
-    outln!(
-        "The key runs (pid {}), and starts with your session: systemd user service {UNIT}.",
-        running.pid()
-    )?;
+    output::done(format_args!("Key {how}; it starts with your session"))?;
 
     let mut problems = key::running_problems(&system, running, Duration::from_secs(5));
     problems.extend(path_problem(&binary, env::var_os("PATH").as_deref()));
-    if !problems.is_empty() {
-        outln!()?;
-        outln!("Still to fix:")?;
-        output::problems(&problems)?;
+    output::problems(&problems)?;
+    let has_pin = match key::ensure_pin(running, interactive) {
+        Ok(has_pin) => has_pin,
+        Err(err) => {
+            output::problem(format!("the PIN is not set: {err}"), "run `pqkey pin`")?;
+            false
+        }
+    };
+    finish(problems.is_empty() && has_pin)
+}
+
+/// The last words of setup: whether the key is ready, and the commands to
+/// use it with.
+fn finish(ready: bool) -> io::Result<()> {
+    outln!()?;
+    if ready {
+        outln!(
+            "pqkey is ready. Use it on any site that supports passkeys or security keys, and \
+             approve the desktop notification that appears."
+        )?;
+    } else {
+        outln!("pqkey is almost ready: fix what is marked with ! above.")?;
     }
-    key::ensure_pin(running, interactive)
+    outln!()?;
+    for (command, what) in [
+        ("pqkey", "the key's status"),
+        ("pqkey passkeys", "your passkeys"),
+        ("pqkey --help", "every command"),
+    ] {
+        outln!("  {command:<16} {what}")?;
+    }
+    Ok(())
 }
 
 /// Whether the process `pid` runs another file than `binary`: `cargo
@@ -360,7 +383,6 @@ fn install_unit(binary: &Path) -> io::Result<bool> {
         .write_all(unit.as_bytes())?;
     fs::rename(&temporary, &path)?;
     systemctl(&["daemon-reload"])?;
-    outln!("Installed {}", path.display())?;
     Ok(true)
 }
 

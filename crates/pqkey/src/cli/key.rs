@@ -290,24 +290,30 @@ const PIN_ATTEMPTS: usize = 3;
 
 /// The last step of `pqkey setup`: a PIN on the key `running`, which
 /// browsers ask for before they use passkeys. Asked for on a terminal, and
-/// again if it was mistyped.
-pub fn ensure_pin(running: Running, interactive: bool) -> io::Result<()> {
+/// again if it was mistyped. Returns whether the key has a PIN now.
+pub fn ensure_pin(running: Running, interactive: bool) -> io::Result<bool> {
     let Ok((_, mut key)) = connect_to(running, DEVICE_WAIT) else {
-        return output::problem(
+        output::problem(
             "the key could not be reached to set its PIN",
             "run `pqkey pin`",
-        );
+        )?;
+        return Ok(false);
     };
     match key.info().map_err(client_error)?.pin_set {
-        Some(true) => return output::done("PIN is set"),
+        Some(true) => {
+            output::done("PIN is set")?;
+            return Ok(true);
+        }
         Some(false) => {}
-        None => return Ok(()),
+        // A key without PINs, which pqkey is not.
+        None => return Ok(true),
     }
     if !interactive {
-        return output::problem(
+        output::problem(
             "the key has no PIN, which browsers ask for before they use passkeys",
             "run `pqkey pin`",
-        );
+        )?;
+        return Ok(false);
     }
     outln!()?;
     outln!(
@@ -315,7 +321,8 @@ pub fn ensure_pin(running: Running, interactive: bool) -> io::Result<()> {
          before they use passkeys."
     )?;
     set_first_pin(&mut key, &mut PinReader::from_stdin())?;
-    output::done("PIN set")
+    output::done("PIN set")?;
+    Ok(true)
 }
 
 /// Set a PIN on `key`, which has none, asking `pins` again for one that was
