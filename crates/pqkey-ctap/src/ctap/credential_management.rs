@@ -435,13 +435,20 @@ impl CtapApp<'_> {
                 )?
                 .ok_or(CTAP2_ERR_PUAT_REQUIRED)?;
 
-                // "verify(pinUvAuthToken, enumerateCredentialsBegin (0x04) ||
-                // subCommandParams, pinUvAuthParam)": subCommandParams as the
-                // platform encoded them, not as this engine would re-encode
-                // them.
+                // getCredsMetadata and enumerateRPsBegin authenticate the
+                // subcommand alone, "verify(pinUvAuthToken, getCredsMetadata
+                // (0x01), pinUvAuthParam)" and "verify(pinUvAuthToken,
+                // enumerateRPsBegin (0x02), pinUvAuthParam)" (CTAP 2.3 §6.8.2,
+                // §6.8.3), whatever else the request carries.  The others add
+                // their parameters, "verify(pinUvAuthToken,
+                // enumerateCredentialsBegin (0x04) || subCommandParams,
+                // pinUvAuthParam)" (§6.8.4, and likewise §6.8.5, §6.8.6):
+                // subCommandParams as the platform encoded them, not as this
+                // engine would re-encode them.
                 let mut message = vec![subcommand];
-                if let Some(raw_params) =
-                    cbor::raw_map_value(payload, 2).map_err(|()| CTAP2_ERR_INVALID_CBOR)?
+                if !matches!(subcommand, GET_CREDS_METADATA | ENUMERATE_RPS_BEGIN)
+                    && let Some(raw_params) =
+                        cbor::raw_map_value(payload, 2).map_err(|()| CTAP2_ERR_INVALID_CBOR)?
                 {
                     message.extend_from_slice(raw_params);
                 }

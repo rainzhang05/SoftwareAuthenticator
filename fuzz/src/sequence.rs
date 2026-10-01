@@ -638,8 +638,11 @@ impl Platform {
                 } else {
                     None
                 };
+                // getCredsMetadata and enumerateRPsBegin authenticate the
+                // subcommand alone (CTAP 2.3 §6.8.2, §6.8.3), the others
+                // `subCommand || subCommandParams`.
                 let mut message = vec![subcommand];
-                if let Some(params) = &params {
+                if let Some(params) = params.as_ref().filter(|_| !matches!(subcommand, 1 | 2)) {
                     message.extend(cbor::encode(params));
                 }
                 let (param, protocol) = self.pin_uv_auth(auth, &message);

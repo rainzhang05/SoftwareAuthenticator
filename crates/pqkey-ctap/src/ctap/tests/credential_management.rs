@@ -23,11 +23,13 @@ use ciborium::{
 
 use crate::ctap::constants::*;
 
-/// `authenticate(pinUvAuthToken, subCommand || subCommandParams)` over
-/// protocol two, the protocol these tests declare (CTAP 2.3 §6.8).
+/// The pinUvAuthParam of a subcommand over protocol two, the protocol these
+/// tests declare: `authenticate(pinUvAuthToken, subCommand ||
+/// subCommandParams)`, or of the subcommand alone for getCredsMetadata and
+/// enumerateRPsBegin (CTAP 2.3 §6.8.2 to §6.8.6).
 fn cm_pin_param(token: &[u8; 32], subcommand: u8, params: Option<Value>) -> Vec<u8> {
     let mut message = vec![subcommand];
-    if let Some(value) = params {
+    if let Some(value) = params.filter(|_| !matches!(subcommand, 0x01 | 0x02)) {
         let mut encoded = Vec::new();
         into_writer(&value, &mut encoded).expect("encode params");
         message.extend_from_slice(&encoded);
@@ -941,4 +943,42 @@ fn malformed_descriptors_and_users_are_unexpected_types() {
         ),
         Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE)
     );
+}
+
+/// getCredsMetadata and enumerateRPsBegin authenticate the subcommand byte
+/// alone: "verify(pinUvAuthToken, getCredsMetadata (0x01), pinUvAuthParam)"
+/// and "verify(pinUvAuthToken, enumerateRPsBegin (0x02), pinUvAuthParam)"
+/// (CTAP 2.3 §6.8.2, §6.8.3), even if the platform sends subCommandParams.
+/// Only enumerateCredentialsBegin, deleteCredential and updateUserInformation
+/// add `|| subCommandParams` (§6.8.4 to §6.8.6).
+#[test]
+fn metadata_and_rp_enumeration_authenticate_the_subcommand_alone() {
+    let empty_params = canonical_map(vec![]);
+    for subcommand in [0x01, 0x02] {
+        for (message_with_params, expected) in
+            [(false, Ok(())), (true, Err(CTAP2_ERR_PIN_AUTH_INVALID))]
+        {
+            let (mut app, _, token) = app_with_cm_token(0x4A);
+            insert_owned(&mut app, es256_credential("example.com", &[0xA1]));
+            let mut message = vec![subcommand];
+            if message_with_params {
+                message.extend(encode(&empty_params));
+            }
+            let request = canonical_map(vec![
+                (int(1), int(subcommand.into())),
+                (int(2), empty_params.clone()),
+                (int(3), int(2)),
+                (
+                    int(4),
+                    Value::Bytes(token_pin_auth(ClassicPinProtocol::V2, &token, &message)),
+                ),
+            ]);
+            let result = app.handle_credential_management(&encode(&request));
+            assert_eq!(
+                result.map(|response| assert_eq!(response[0], CTAP2_OK)),
+                expected,
+                "subcommand {subcommand:#04x}, params in the message {message_with_params}"
+            );
+        }
+    }
 }

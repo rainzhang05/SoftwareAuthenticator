@@ -179,6 +179,10 @@ Upgrading from `867a591` or earlier is not an in-place update:
   Any length used to be signed. Their required parameters are now checked
   before anything else, so a malformed request, including the zero-length
   pinUvAuthParam probe, no longer shows a prompt.
+- getCredsMetadata and enumerateRPsBegin verify their pinUvAuthParam over the
+  subcommand byte alone, as CTAP 2.3 §6.8.2 and §6.8.3 define, even when the
+  request carries subCommandParams. Such a request used to need a MAC over
+  the parameters too.
 - The notification prompt gives up on a session bus that accepts the
   connection but never answers after 2 seconds, as it does on a D-Bus call,
   instead of holding the request and the daemon's shutdown forever.
