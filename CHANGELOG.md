@@ -128,6 +128,9 @@ also break an existing installation of that commit:
   passkeys` lists the passkeys on the key and `pqkey passkeys delete` deletes
   one, with the PIN, through credential management (CTAP 2.3 §6.8). Ctrl-C
   cancels a request that waits for approval with CTAPHID_CANCEL.
+- `install.sh`: in a fresh clone, one command installs what building needs
+  (a C linker and curl, and Rust with rustup), builds and installs pqkey, and
+  runs `pqkey setup`; run again after `git pull`, it updates the key.
 - `pqkey setup [--uninstall]`: shows the steps that need root (udev rules,
   `uhid` at boot, joining `plugdev`) and runs them with `sudo` once you agree,
   then installs and starts the systemd user service and offers to set a PIN.
