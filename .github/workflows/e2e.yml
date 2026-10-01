@@ -112,8 +112,9 @@ jobs:
           echo "DBUS_SESSION_BUS_ADDRESS=$address" >> "$GITHUB_ENV"
 
       # Asks for presence with desktop notifications on that bus. A short
-      # presence timeout keeps the test of an unanswered prompt quick. No
-      # --allow-late-reset: with notifications a reset is accepted at any time.
+      # presence timeout keeps the test of an unanswered prompt quick.
+      # --allow-late-reset lets the tests reset it long after it started,
+      # which CTAP 2.3 §6.6 does not allow a key without a display.
       - name: Attach the notify key
         run: |
           node=$(tests/e2e/daemon.sh start notify 0003 --presence notify --presence-timeout 3 --allow-late-reset)
