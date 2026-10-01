@@ -122,6 +122,38 @@ mod tests {
     use crate::test_support::{TempDir, logs};
     use log::Level;
 
+    /// The shipped rule for the key's hidraw node, its continuation lines
+    /// joined.
+    fn hidraw_rule() -> String {
+        include_str!("../../../contrib/udev/70-pqkey.rules")
+            .replace("\\\n", "")
+            .lines()
+            .find(|line| line.starts_with(r#"SUBSYSTEM=="hidraw""#))
+            .expect("a hidraw rule")
+            .to_owned()
+    }
+
+    /// Snap browsers (Ubuntu's Firefox and Chromium) only open devices udev
+    /// tags for them, which snapd does by USB IDs a uhid device lacks.
+    #[test]
+    fn the_udev_rules_let_snap_browsers_open_the_key() {
+        let rule = hidraw_rule();
+        for tag in ["uaccess", "snap_firefox_firefox", "snap_chromium_chromium"] {
+            assert!(rule.contains(&format!(r#"TAG+="{tag}""#)), "{tag}: {rule}");
+        }
+        assert!(rule.contains(r#"MODE="0600""#), "{rule}");
+        // udev reads rules files in the order of their names: snapd acts on
+        // its tags in 70-snap.*.rules, systemd on uaccess in
+        // 73-seat-late.rules.
+        for later in [
+            "70-snap.firefox.rules",
+            "70-snap.chromium.rules",
+            "73-seat-late.rules",
+        ] {
+            assert!("70-pqkey.rules" < later, "{later}");
+        }
+    }
+
     /// A fake sysfs `class/hidraw` and `/dev` with one node per
     /// `(name, HID_ID, mode)`.
     fn fake_nodes(dir: &TempDir, nodes: &[(&str, &str, u32)]) -> (PathBuf, PathBuf) {

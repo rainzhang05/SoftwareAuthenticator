@@ -9,7 +9,8 @@
 #   echo uhid | sudo tee /etc/modules-load.d/uhid.conf
 #
 # The file name must sort before 73-seat-late.rules, which is where systemd
-# acts on the "uaccess" tag set below.
+# acts on the "uaccess" tag set below, and before the 70-snap.*.rules that
+# snapd writes, which act on the snap tags.
 
 ACTION=="remove", GOTO="pqkey_end"
 
@@ -37,13 +38,23 @@ SUBSYSTEM=="misc", KERNEL=="uhid", GROUP="plugdev", MODE="0660"
 # systemd 244 and later already recognise any hidraw device with a FIDO
 # report descriptor, this one included (60-fido-id.rules, 70-uaccess.rules),
 # and give the user of the active local session access to it. This rule does
-# the same where that is missing, and keeps the node closed to everyone else:
-# whoever can open the node can send the authenticator any request. By default
-# (--presence notify) each request that needs user presence shows a desktop
-# notification the user has to approve, but with --presence auto-approve every
-# such request is approved by itself, so whoever can open the node can use the
-# credentials behind it without the user noticing.
+# the same where that is missing, and gives the node mode 0600, so no other
+# user can open it through its mode: whoever can open the node can send the
+# authenticator any request. Each request that needs user presence shows a
+# desktop notification the user has to approve. Other rules may still grant
+# access through an ACL as they do for hardware keys: on Ubuntu, sssd's
+# 90-sssd-token-access.rules gives the sssd user every security token's node,
+# this one included.
+#
+# Browsers packaged as snaps (Firefox and Chromium on Ubuntu) can only open
+# devices that udev tags for them: snapd's device cgroup admits a node tagged
+# snap_<snap>_<app>. Its u2f-devices interface tags hardware keys by their USB
+# vendor and product IDs, which a uhid device does not have, so this rule
+# tags the node for the Firefox and Chromium snaps itself. The tags give a
+# snap no more than the node's mode and ACL do. For another browser snap, add
+# TAG+="snap_<snap>_<app>" with the names in its /etc/udev/rules.d/70-snap.*
+# file.
 SUBSYSTEM=="hidraw", KERNEL=="hidraw*", DEVPATH=="/devices/virtual/misc/uhid/0003:1209:0001.*", \
-  MODE="0600", TAG+="uaccess"
+  MODE="0600", TAG+="uaccess", TAG+="snap_firefox_firefox", TAG+="snap_chromium_chromium"
 
 LABEL="pqkey_end"

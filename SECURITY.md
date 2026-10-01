@@ -60,6 +60,11 @@ The virtual key is a hidraw node. The shipped udev rules
 systemd's `uaccess` tag. Any process running as that user can open it and send
 CTAP requests: pqkey cannot tell a browser from any other program, and the
 relying party ID and user names in a request are whatever that process wrote.
+Other udev rules can grant access too, as they do for hardware keys: on
+Ubuntu, sssd's `90-sssd-token-access.rules` gives the `sssd` user an ACL on
+every security token's node, pqkey's included. The rules also tag the node for
+the Firefox and Chromium snaps, whose sandbox otherwise refuses it; that lets
+those snaps open it as far as its mode and ACL allow, no further.
 Without the rules the node's mode is up to the system; if every user can open
 it, the daemon logs a warning once a client first opens the key (by then udev
 has set the node's mode), and keeps serving it.

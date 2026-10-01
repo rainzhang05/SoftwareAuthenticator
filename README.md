@@ -30,7 +30,8 @@ install -D -m 755 target/release/pqkey ~/.local/bin/pqkey
 ```
 
 Give the `plugdev` group access to `/dev/uhid` with the shipped udev rules,
-which also give the key's hidraw node to the active session's user only.
+which also give the key's hidraw node to the active session's user and let
+the Firefox and Chromium snaps (Ubuntu's browsers) open it.
 `plugdev` exists on Debian and Ubuntu; the comments in
 [`contrib/udev/70-pqkey.rules`](contrib/udev/70-pqkey.rules) cover other
 systems.

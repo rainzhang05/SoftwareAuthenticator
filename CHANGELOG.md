@@ -283,6 +283,10 @@ also break an existing installation of that commit:
   private after it is created, and a shared directory with the sticky bit set,
   such as `/tmp`, is refused instead of having its permissions changed.
 - The udev hidraw rule never matched the uhid-created device.
+- Browsers packaged as snaps, Ubuntu's Firefox and Chromium among them, could
+  not open the key: snapd only admits devices tagged for the snap, and tags
+  security keys by USB IDs, which a uhid device lacks. The udev rule now tags
+  the hidraw node for both snaps.
 - The CLI panicked when standard output was a closed pipe (`pqkey status |
   head -1`) or a full device. A closed output now ends it quietly with status
   0; other write errors are reported with status 1.
