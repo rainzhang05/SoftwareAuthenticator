@@ -582,6 +582,7 @@ mod tests {
         for (path, text) in [
             (UDEV_RULES_PATH, UDEV_RULES),
             ("/etc/modules-load.d/uhid.conf", "uhid\n"),
+            ("/sys/class/misc/uhid/dev", "10:239\n"),
             ("/dev/uhid", ""),
         ] {
             let path = system.path(path);
@@ -596,6 +597,23 @@ mod tests {
             "{script}"
         );
         assert!(script.contains("usermod -aG plugdev"), "{script}");
+    }
+
+    #[test]
+    fn a_device_node_without_the_module_gets_the_module_loaded() {
+        let dir = TempDir::new("setup-static-node");
+        let system = System::under(dir.path().to_owned());
+        for (path, text) in [
+            (UDEV_RULES_PATH, UDEV_RULES),
+            ("/etc/modules-load.d/uhid.conf", "uhid\n"),
+            ("/dev/uhid", ""),
+        ] {
+            let path = system.path(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        let script = root_script(&system, &membership(true, true)).unwrap();
+        assert!(script.contains("\nmodprobe uhid\n"), "{script}");
     }
 
     #[test]

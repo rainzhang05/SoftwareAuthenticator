@@ -163,9 +163,11 @@ impl System {
         .is_ok_and(|text| text.lines().any(|line| line.ends_with("/uhid.ko")))
     }
 
-    /// Whether the uhid module is loaded, or built in.
+    /// Whether the uhid module is loaded, or built in: its misc device is
+    /// registered. `/dev/uhid` alone says nothing, as kmod creates it at boot
+    /// for the module to be loaded on first open, which only root may do.
     pub fn uhid_loaded(&self) -> bool {
-        self.path("/sys/module/uhid").exists() || self.path("/dev/uhid").exists()
+        self.path("/sys/class/misc/uhid").exists() || self.path("/sys/module/uhid").exists()
     }
 
     /// Open `/dev/uhid` as the daemon does.
@@ -380,6 +382,12 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
+    /// The uhid module loaded: its misc device and its node.
+    fn load_uhid(system: &System) {
+        write(system, "/sys/class/misc/uhid/dev", "10:239\n");
+        write(system, "/dev/uhid", "");
+    }
+
     fn member() -> Membership {
         Membership {
             user: "alice".into(),
@@ -418,9 +426,20 @@ mod tests {
         let system = System::under(dir.path().to_owned());
         write(&system, UDEV_RULES_PATH, UDEV_RULES);
         write(&system, MODULES_LOAD_PATH, "uhid\n");
-        write(&system, "/dev/uhid", "");
+        load_uhid(&system);
         assert_eq!(system.rules(), Rules::Current);
         assert_eq!(start_problems(&system, &member()), []);
+    }
+
+    #[test]
+    fn a_device_node_without_the_module_is_not_loaded() {
+        // kmod creates /dev/uhid at boot, root's, before uhid is loaded.
+        let dir = TempDir::new("checks-static-node");
+        let system = System::under(dir.path().to_owned());
+        write(&system, "/dev/uhid", "");
+        assert!(!system.uhid_loaded());
+        load_uhid(&system);
+        assert!(system.uhid_loaded());
     }
 
     #[test]
@@ -476,7 +495,7 @@ mod tests {
             let system = System::under(dir.path().to_owned());
             write(&system, UDEV_RULES_PATH, UDEV_RULES);
             write(&system, MODULES_LOAD_PATH, "uhid\n");
-            write(&system, "/dev/uhid", "");
+            load_uhid(&system);
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(system.path("/dev/uhid"), fs::Permissions::from_mode(0o000))
                 .unwrap();
@@ -513,7 +532,7 @@ mod tests {
         let system = System::under(dir.path().to_owned());
         write(&system, UDEV_RULES_PATH, UDEV_RULES);
         write(&system, MODULES_LOAD_PATH, "uhid\n");
-        write(&system, "/dev/uhid", "");
+        load_uhid(&system);
         fs::set_permissions(system.path("/dev/uhid"), fs::Permissions::from_mode(0o000)).unwrap();
         let joined = Membership {
             in_session: false,
