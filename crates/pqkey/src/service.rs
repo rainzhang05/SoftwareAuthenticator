@@ -361,6 +361,7 @@ pub fn serve_ctap_with_presence(
     ctap.set_clock(BootTimeClock::new()?);
     ctap.set_attestation_mode(data.attestation);
     if let Some(timeout) = data.presence_timeout {
+        warn_if_presence_timeout_too_short(timeout);
         ctap.set_presence_timeout(timeout);
     }
     let window = reset_window(data.allow_late_reset);
@@ -373,6 +374,22 @@ pub fn serve_ctap_with_presence(
     let app_waiting = waiting.clone();
     ctap.set_keepalive_callback(move |waiting| app_waiting.set(waiting));
     exec(device, &mut ctap, &waiting, shutdown, on_ready)
+}
+
+/// The shortest user action timeout CTAP allows: "This timeout MUST be at
+/// least 10 seconds" (CTAP 2.3 §5).
+const MIN_USER_ACTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Log that a presence timeout under [`MIN_USER_ACTION_TIMEOUT`], which test
+/// rigs use to keep their runs short, does not conform to CTAP.
+fn warn_if_presence_timeout_too_short(timeout: Duration) {
+    if timeout < MIN_USER_ACTION_TIMEOUT {
+        log::warn!(
+            "a presence timeout of {} s does not conform to CTAP 2.3 section 5, which says the user \
+             action timeout MUST be at least 10 seconds; use it for test rigs only",
+            timeout.as_secs()
+        );
+    }
 }
 
 /// How long after start-up authenticatorReset is accepted, if limited.
@@ -645,6 +662,25 @@ mod tests {
                 event => panic!("unexpected {event:?}"),
             }
         }
+    }
+
+    /// A presence timeout under the 10 seconds CTAP 2.3 §5 requires is
+    /// allowed for test rigs, and logged as non-conforming.
+    #[test]
+    fn a_presence_timeout_under_10_seconds_is_reported() {
+        use crate::test_support::logs;
+        logs::install();
+        warn_if_presence_timeout_too_short(Duration::from_secs(10));
+        assert!(logs::containing("presence timeout of 10 s").is_empty());
+        warn_if_presence_timeout_too_short(Duration::from_secs(3));
+        let warned = logs::containing("presence timeout of 3 s");
+        assert!(
+            warned
+                .iter()
+                .any(|(level, message)| *level == log::Level::Warn
+                    && message.contains("MUST be at least 10 seconds")),
+            "{warned:?}"
+        );
     }
 
     /// The notification is no display of the authenticator, so a reset is

@@ -218,6 +218,9 @@ also break an existing installation of that commit:
   shell's banner queue for its whole lifetime (seen with Chromium starting a
   request from an unfocused window): an unanswered prompt is nudged every 2
   seconds with an empty, transient notification that is withdrawn at once.
+- `--vendor-id` and `--product-id` refuse values above 0xFFFF, which used to
+  reach clients truncated, and a `--presence-timeout` under the 10 seconds
+  CTAP 2.3 §5 requires is logged as non-conforming.
 - Feature reports, which the report descriptor does not declare, are refused
   (the kernel reports EIO, as a USB key stalls) instead of being read as
   CTAPHID packets (SET_REPORT) or answered with 64 zero bytes (GET_REPORT).

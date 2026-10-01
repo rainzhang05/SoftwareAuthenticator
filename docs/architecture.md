@@ -401,7 +401,8 @@ The implementations the daemon chooses from with `--presence`:
   the transport while a prompt is open.
 
 The hidden `--presence-timeout` (1 to 600 seconds) replaces the 30-second
-default; the E2E tests shorten it.
+default; the E2E tests shorten it. CTAP 2.3 §5 says the user action timeout
+MUST be at least 10 seconds, so the daemon logs a warning below that.
 
 ## Attestation
 

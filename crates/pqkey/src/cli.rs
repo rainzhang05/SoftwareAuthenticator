@@ -136,8 +136,9 @@ pub struct PresenceArgs {
     /// How the user approves registrations, sign-ins and resets
     #[clap(long, value_enum, default_value_t = PresenceArg::Notify)]
     pub presence: PresenceArg,
-    /// Seconds a presence request waits for the user (default 30). For test
-    /// rigs; CTAP 2.3 section 5 asks for at least 10.
+    /// Seconds a presence request waits for the user (default 30). CTAP 2.3
+    /// section 5 says the user action timeout MUST be at least 10 seconds:
+    /// shorter values do not conform and are for test rigs only.
     #[clap(long, hide = true, value_parser = clap::value_parser!(u64).range(1..=600))]
     pub presence_timeout: Option<u64>,
 }
@@ -204,12 +205,12 @@ pub struct DeviceArgs {
     pub serial: Option<String>,
     /// USB vendor ID for the virtual HID device (default: pid.codes' open
     /// source vendor ID)
-    #[clap(long, value_parser = maybe_hex::<u32>, default_value = "0x1209")]
-    pub vendor_id: u32,
+    #[clap(long, value_parser = maybe_hex::<u16>, default_value = "0x1209")]
+    pub vendor_id: u16,
     /// USB product ID for the virtual HID device (default: a pid.codes test
     /// product ID, which is not unique to pqkey)
-    #[clap(long, value_parser = maybe_hex::<u32>, default_value = "0x0001")]
-    pub product_id: u32,
+    #[clap(long, value_parser = maybe_hex::<u16>, default_value = "0x0001")]
+    pub product_id: u16,
     /// Version reported by the HID descriptor
     #[clap(long, value_parser = maybe_hex::<u32>, default_value_t = 0x0001)]
     pub version: u32,
@@ -292,8 +293,8 @@ impl StartCommand {
         let aaguid = service::parse_aaguid(&self.device.aaguid)?;
         let descriptor = service::descriptor(
             self.device.name.clone(),
-            self.device.vendor_id,
-            self.device.product_id,
+            self.device.vendor_id.into(),
+            self.device.product_id.into(),
             self.device.version,
         );
         let attestation = match self.device.attestation {
@@ -788,6 +789,13 @@ mod tests {
         .unwrap();
         assert_eq!(config.descriptor.vendor_id, 0x1234);
         assert_eq!(config.descriptor.product_id, 0x5678);
+
+        // USB vendor and product IDs are 16 bits; larger values are refused
+        // instead of reaching clients truncated.
+        for option in ["--vendor-id", "--product-id"] {
+            let err = parse(&["attach", option, "0x10000"]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ValueValidation, "{option}: {err}");
+        }
         assert_eq!(config.aaguid[..4], [0x00, 0x11, 0x22, 0x33]);
         // The ignored legacy flags still parse.
         assert!(attach_config(&["--vid", "0x1998", "-p", "0x0616"]).is_ok());
