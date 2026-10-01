@@ -261,6 +261,7 @@ impl CtapApp<'_> {
             rp_name: rp_name.as_deref(),
             user_name: user_name.as_deref(),
             user_display_name: user_display_name.as_deref(),
+            discoverable: rk,
             ..PresenceRequest::new(PresenceOperation::Register, timeout)
         };
 

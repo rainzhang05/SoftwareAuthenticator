@@ -44,6 +44,7 @@ pub(super) struct SeenRequest {
     pub(super) rp_name: Option<String>,
     pub(super) user_name: Option<String>,
     pub(super) user_display_name: Option<String>,
+    pub(super) discoverable: bool,
     pub(super) timeout: Duration,
 }
 
@@ -57,6 +58,7 @@ impl SeenRequest {
             rp_name: None,
             user_name: None,
             user_display_name: None,
+            discoverable: false,
             timeout: crate::ctap::presence::DEFAULT_PRESENCE_TIMEOUT,
         }
     }
@@ -110,6 +112,7 @@ impl UserPresence for ScriptedPresence {
             rp_name: request.rp_name.map(str::to_owned),
             user_name: request.user_name.map(str::to_owned),
             user_display_name: request.user_display_name.map(str::to_owned),
+            discoverable: request.discoverable,
             timeout: request.timeout,
         }));
         self.outcomes

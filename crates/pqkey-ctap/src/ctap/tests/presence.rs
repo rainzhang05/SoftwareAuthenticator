@@ -28,6 +28,12 @@ use crate::ctap::constants::*;
 const RP_ID: &str = "example.com";
 
 fn make_credential_payload() -> Vec<u8> {
+    registration_payload(true)
+}
+
+/// A makeCredential request for alice at [`RP_ID`], for a discoverable
+/// credential or a non-discoverable one.
+fn registration_payload(discoverable: bool) -> Vec<u8> {
     let rp = canonical_map(vec![
         (Value::Text("id".into()), Value::Text(RP_ID.into())),
         (
@@ -50,7 +56,7 @@ fn make_credential_payload() -> Vec<u8> {
             Value::Integer(Integer::from(CoseAlg::ES256 as i32)),
         ),
     ])]);
-    let request = canonical_map(vec![
+    let mut entries = vec![
         (
             Value::Integer(Integer::from(1)),
             Value::Bytes(vec![0x20; 32]),
@@ -58,12 +64,15 @@ fn make_credential_payload() -> Vec<u8> {
         (Value::Integer(Integer::from(2)), rp),
         (Value::Integer(Integer::from(3)), user),
         (Value::Integer(Integer::from(4)), params),
-        // Discoverable, so getAssertion finds it without an allowList.
-        (
+    ];
+    if discoverable {
+        // So getAssertion finds it without an allowList.
+        entries.push((
             Value::Integer(Integer::from(7)),
             canonical_map(vec![(Value::Text("rk".into()), Value::Bool(true))]),
-        ),
-    ]);
+        ));
+    }
+    let request = canonical_map(entries);
     let mut payload = Vec::new();
     into_writer(&request, &mut payload).expect("serialize makeCredential request");
     payload
@@ -113,6 +122,7 @@ fn register_request() -> SeenRequest {
         rp_name: Some("Example Corp".into()),
         user_name: Some("alice".into()),
         user_display_name: Some("Alice".into()),
+        discoverable: true,
         ..SeenRequest::new(PresenceOperation::Register, Some(RP_ID))
     }
 }
@@ -141,6 +151,19 @@ fn make_credential_asks_the_user_to_register() {
 
     assert_eq!(log.take(), asked(register_request()));
     assert_eq!(auth_data_flags(&response) & 0x01, 0x01, "UP flag");
+}
+
+#[test]
+fn a_registration_says_whether_it_creates_a_passkey() {
+    let (mut app, log) = scripted_app([0x25; 16], [PresenceOutcome::Approved]);
+    app.handle_make_credential(&registration_payload(false))
+        .expect("makeCredential succeeds");
+    let request = SeenRequest {
+        discoverable: false,
+        ..register_request()
+    };
+    assert_eq!(log.take(), asked(request));
+    assert!(stored(&app).is_empty());
 }
 
 #[test]

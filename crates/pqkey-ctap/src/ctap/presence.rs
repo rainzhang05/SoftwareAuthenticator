@@ -77,6 +77,11 @@ pub struct PresenceRequest<'a> {
     /// `user.displayName` of the same account as
     /// [`user_name`](Self::user_name), under the same rules.
     pub user_display_name: Option<&'a str>,
+    /// Whether a registration creates a discoverable credential, a passkey
+    /// the authenticator stores, rather than one it keeps nothing of and
+    /// the relying party holds ("rk", CTAP 2.3 §6.1.2).  False for every
+    /// other operation.
+    pub discoverable: bool,
     /// How long to wait for the user before answering
     /// [`PresenceOutcome::TimedOut`].
     pub timeout: Duration,
@@ -92,6 +97,7 @@ impl PresenceRequest<'_> {
             rp_name: None,
             user_name: None,
             user_display_name: None,
+            discoverable: false,
             timeout,
         }
     }
