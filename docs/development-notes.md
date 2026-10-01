@@ -280,6 +280,13 @@ Actions updates (which `GITHUB_TOKEN` may not merge), waits for a person.
 
 ## Troubleshooting
 
+**The browser waits, but no prompt appears.** On GNOME the prompt can be
+stuck in the shell's banner queue, for example behind Chromium's "is ready"
+banner when Chromium asked from an unfocused window; pqkey nudges the queue
+every 2 seconds, so it should appear within that. It is also in the
+notification list (click the clock). While you are idle, GNOME keeps a
+normal banner up until you move the mouse, and everything waits behind it.
+
 **Every registration or sign-in fails immediately.** No notification could be
 shown, so presence was denied. The log says why: `journalctl --user -u pqkey`,
 `<state dir>/authenticator.log`, or the terminal with `--foreground`. Run the

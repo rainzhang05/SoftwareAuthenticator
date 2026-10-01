@@ -384,7 +384,11 @@ The implementations the daemon chooses from with `--presence`:
   `CloseNotification`. Any failure to show the notification denies the request.
   Strings from the request are sanitised and shortened, and markup-escaped if
   the server interprets markup. A connection per request means the daemon can
-  start before the desktop and survive logging out and in.
+  start before the desktop and survive logging out and in. On GNOME Shell
+  (`GetServerInformation`), whose banner queue can leave a critical
+  notification queued and unseen, an unanswered prompt is nudged every 2
+  seconds: an empty, transient notification of normal urgency is posted and
+  withdrawn at once, which shows a stuck prompt and changes nothing otherwise.
 - **`AutoApprove`** (`--presence auto-approve`, in `pqkey-ctap`) approves at
   once.
 - **`Unanswered`** (hidden `--presence unanswered`, in

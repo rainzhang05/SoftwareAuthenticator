@@ -194,3 +194,26 @@ def test_cancel_withdraws_the_notification(notify_hidraw_path, notifications):
         assert (message.cid, message.cmd, message.payload) == (cid, ctaphid.PING, payload), str(message)
     finally:
         hid.close()
+
+
+def test_on_gnome_an_unanswered_prompt_is_nudged(notify_ctap, notifications):
+    """GNOME Shell 50 can leave a critical notification queued and never shown
+    until another notification arrives. While a prompt waits, the key posts a
+    normal-urgency, transient notification without buttons and withdraws it at
+    once, every 2 seconds, which shows a stuck prompt; the prompt itself is
+    left as it is until the request ends."""
+    notifications.server_name = "gnome-shell"
+    notifications.answer = None
+    with pytest.raises(CtapError) as excinfo:
+        client.make_credential(notify_ctap, RP_ID, client.user_entity("nina"), [client.ES256], os.urandom(32))
+    assert excinfo.value.code == CtapError.ERR.OPERATION_DENIED
+    prompt, *nudges = notifications.shown
+    assert prompt.actions == ACTIONS
+    assert nudges, "the prompt was never nudged"
+    for nudge in nudges:
+        assert nudge.actions == []
+        assert nudge.hints.get("urgency") == ("y", 1)
+        assert nudge.hints.get("transient") == ("b", True)
+        assert nudge.id in notifications.close_requests
+    assert notifications.close_requests.count(prompt.id) == 1
+    assert notifications.close_requests[-1] == prompt.id

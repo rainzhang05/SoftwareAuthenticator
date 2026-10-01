@@ -214,6 +214,10 @@ also break an existing installation of that commit:
 - The relying party's `rp.name` reaches the registration prompt, cut to 64
   bytes, as WebAuthn Level 3 §6.3.2 step 6 recommends
   (`PresenceRequest::rp_name`).
+- On GNOME Shell the presence prompt no longer stays invisible behind the
+  shell's banner queue for its whole lifetime (seen with Chromium starting a
+  request from an unfocused window): an unanswered prompt is nudged every 2
+  seconds with an empty, transient notification that is withdrawn at once.
 - A notification server without the `body` capability gets no prompt and the
   request is denied, as without `actions`: the prompt's question is in the
   body. The prompt sanitiser removes every Unicode 16.0 default-ignorable and

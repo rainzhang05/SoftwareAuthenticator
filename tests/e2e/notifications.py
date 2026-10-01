@@ -50,6 +50,8 @@ class Shown:
 class FakeNotificationServer:
     def __init__(self) -> None:
         self.capabilities = ["actions", "body"]
+        # What GetServerInformation names: "gnome-shell" makes the daemon nudge.
+        self.server_name = "fake"
         # "approve", "deny", "dismiss", or None to leave notifications unanswered.
         self.answer: str | None = "approve"
         self.shown: list[Shown] = []
@@ -105,7 +107,7 @@ class FakeNotificationServer:
         elif member == "GetCapabilities":
             self._conn.send(new_method_return(message, "as", (list(self.capabilities),)))
         elif member == "GetServerInformation":
-            self._conn.send(new_method_return(message, "ssss", ("fake", "e2e", "1", "1.2")))
+            self._conn.send(new_method_return(message, "ssss", (self.server_name, "e2e", "1", "1.2")))
         elif member == "Notify":
             app_name, _replaces, _icon, summary, body, actions, hints, expire_timeout = message.body
             notification_id = self._next_id
@@ -113,7 +115,8 @@ class FakeNotificationServer:
             self._open.add(notification_id)
             self.shown.append(Shown(notification_id, app_name, summary, body, list(actions), dict(hints), expire_timeout))
             self._conn.send(new_method_return(message, "u", (notification_id,)))
-            if self.answer is not None:
+            # Nothing to answer on a notification without buttons.
+            if self.answer is not None and actions:
                 self._pending.append((time.monotonic() + ANSWER_DELAY_S, notification_id, self.answer))
         elif member == "CloseNotification":
             (notification_id,) = message.body

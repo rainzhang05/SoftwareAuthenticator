@@ -32,6 +32,25 @@ pub const APPROVE_ACTION: &str = "approve";
 /// The action key of the Deny button.
 pub const DENY_ACTION: &str = "deny";
 
+/// How often an unanswered prompt is nudged on GNOME Shell.
+///
+/// GNOME Shell 50 can leave a critical notification queued and never shown:
+/// when the banner in front of it is removed by its own source (Chromium's
+/// "is ready" banner when its window gets focus), `MessageTray._updateState`
+/// hides it from inside `_updateState` itself, and the re-entrancy guard
+/// swallows the call that would show the next one.  The prompt then waits,
+/// invisible, until some other notification arrives.  Any new notification
+/// that requests a banner runs the queue again and shows the prompt, which
+/// is critical and so first in line; one of low urgency requests no banner
+/// and does not.  So while a prompt waits, a normal-urgency notification
+/// is posted and withdrawn at once every few seconds: it changes nothing
+/// when the prompt is already shown, and shows it within this interval when
+/// it is stuck, as a hardware key keeps blinking until it is touched.
+pub const NUDGE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// `GetServerInformation`'s name of the server whose queue needs nudging.
+const GNOME_SHELL: &str = "gnome-shell";
+
 /// `NotificationClosed` reason 1: the notification expired.
 const CLOSED_EXPIRED: u32 = 1;
 
@@ -63,6 +82,16 @@ pub enum NotificationEvent {
     Closed { id: u32, reason: u32 },
 }
 
+/// What [`NotificationServer::connect`] learnt about the server.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServerInfo {
+    /// `GetCapabilities`.
+    pub capabilities: Vec<String>,
+    /// The product name from `GetServerInformation`, if the server answered
+    /// it, such as "gnome-shell".
+    pub name: Option<String>,
+}
+
 /// Why no notification server could be reached.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectError {
@@ -78,8 +107,8 @@ pub enum ConnectError {
 pub trait NotificationServer {
     /// Connect to the server for one request, and subscribe to its signals
     /// before anything is shown, so no answer can be missed. Returns the
-    /// server's capabilities (`GetCapabilities`).
-    fn connect(&mut self) -> Result<Vec<String>, ConnectError>;
+    /// server's capabilities and name.
+    fn connect(&mut self) -> Result<ServerInfo, ConnectError>;
     /// Show `notification` with an Approve and a Deny button (`Notify`), and
     /// return its ID.
     fn notify(&mut self, notification: &Notification) -> Result<u32, String>;
@@ -88,6 +117,10 @@ pub trait NotificationServer {
     fn next_event(&mut self, wait: Duration) -> Result<Option<NotificationEvent>, String>;
     /// Withdraw notification `id` (`CloseNotification`).
     fn close(&mut self, id: u32) -> Result<(), String>;
+    /// Post an empty, silent, transient notification of normal urgency and
+    /// withdraw it at once, which makes GNOME Shell show a prompt stuck in
+    /// its queue (see [`NUDGE_INTERVAL`]). Returns its ID.
+    fn nudge(&mut self) -> Result<u32, String>;
     /// End what [`connect`](Self::connect) started.
     fn disconnect(&mut self);
 }
@@ -104,14 +137,27 @@ pub trait NotificationServer {
 /// * If there is no session bus or notification server, the server cannot
 ///   show buttons, or talking to it fails, the request is denied and the
 ///   reason logged.
+/// * On GNOME Shell an unanswered prompt is nudged every [`NUDGE_INTERVAL`]
+///   so that a prompt stuck in its queue is shown.
 #[derive(Debug)]
 pub struct NotificationPresence<S> {
     server: S,
+    nudge_interval: Duration,
 }
 
 impl<S: NotificationServer> NotificationPresence<S> {
     pub fn new(server: S) -> Self {
-        Self { server }
+        Self {
+            server,
+            nudge_interval: NUDGE_INTERVAL,
+        }
+    }
+
+    /// Nudge every `interval` instead of [`NUDGE_INTERVAL`], for tests.
+    #[cfg(test)]
+    fn with_nudge_interval(mut self, interval: Duration) -> Self {
+        self.nudge_interval = interval;
+        self
     }
 
     fn ask(
@@ -120,8 +166,8 @@ impl<S: NotificationServer> NotificationPresence<S> {
         cancellation: Cancellation<'_>,
     ) -> PresenceOutcome {
         let deadline = Instant::now() + request.timeout;
-        let capabilities = match self.server.connect() {
-            Ok(capabilities) => capabilities,
+        let ServerInfo { capabilities, name } = match self.server.connect() {
+            Ok(info) => info,
             Err(err) => {
                 log::error!("{}", Unavailable::Connect(err).message(request));
                 return PresenceOutcome::Denied;
@@ -156,18 +202,31 @@ impl<S: NotificationServer> NotificationPresence<S> {
             notification.summary
         );
 
+        let mut nudging = name.as_deref() == Some(GNOME_SHELL);
+        let mut next_nudge = Instant::now() + self.nudge_interval;
         let outcome = loop {
             if cancellation.is_cancelled() {
                 break PresenceOutcome::Cancelled;
             }
-            let now = Instant::now();
+            let mut now = Instant::now();
             if now >= deadline {
                 break PresenceOutcome::TimedOut;
             }
-            match self
-                .server
-                .next_event(CANCELLATION_POLL.min(deadline - now))
-            {
+            if nudging && now >= next_nudge {
+                // Events about the nudge, whose ID is not the prompt's, are
+                // ignored like any other notification's below.
+                if let Err(err) = self.server.nudge() {
+                    log::debug!("could not nudge the notification queue: {err}");
+                    nudging = false;
+                }
+                now = Instant::now();
+                next_nudge = now + self.nudge_interval;
+            }
+            let mut wait = CANCELLATION_POLL.min(deadline.saturating_duration_since(now));
+            if nudging {
+                wait = wait.min(next_nudge.saturating_duration_since(now));
+            }
+            match self.server.next_event(wait) {
                 Ok(Some(NotificationEvent::ActionInvoked { id: event_id, key }))
                     if event_id == id =>
                 {
@@ -467,13 +526,16 @@ mod tests {
         Connect,
         Notify(Notification),
         Close(u32),
+        Nudge,
         Disconnect,
     }
 
     #[derive(Default)]
     struct Script {
-        connect: Option<Result<Vec<String>, ConnectError>>,
+        connect: Option<Result<ServerInfo, ConnectError>>,
         notify: Option<Result<u32, String>>,
+        /// What a nudge fails with; it succeeds otherwise.
+        nudge_error: Option<String>,
         /// Events delivered in order, each once `next_event` has been called
         /// the given number of times since the previous one.
         events: VecDeque<Result<NotificationEvent, String>>,
@@ -487,10 +549,28 @@ mod tests {
     impl FakeServer {
         fn with_capabilities(capabilities: &[&str]) -> Self {
             let server = Self::default();
-            server.script().connect =
-                Some(Ok(capabilities.iter().map(|c| c.to_string()).collect()));
+            server.script().connect = Some(Ok(ServerInfo {
+                capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+                name: None,
+            }));
             server.script().notify = Some(Ok(7));
             server
+        }
+
+        /// A working server that answers GetServerInformation with `name`.
+        fn named(name: &str) -> Self {
+            let server = Self::working();
+            if let Some(Ok(info)) = server.script().connect.as_mut() {
+                info.name = Some(name.to_owned());
+            }
+            server
+        }
+
+        fn nudges(&self) -> usize {
+            self.calls()
+                .iter()
+                .filter(|call| **call == Call::Nudge)
+                .count()
         }
 
         fn working() -> Self {
@@ -512,7 +592,7 @@ mod tests {
     }
 
     impl NotificationServer for FakeServer {
-        fn connect(&mut self) -> Result<Vec<String>, ConnectError> {
+        fn connect(&mut self) -> Result<ServerInfo, ConnectError> {
             let mut script = self.script();
             script.calls.push(Call::Connect);
             script.connect.clone().expect("connect not scripted")
@@ -522,6 +602,15 @@ mod tests {
             let mut script = self.script();
             script.calls.push(Call::Notify(notification.clone()));
             script.notify.clone().expect("notify not scripted")
+        }
+
+        fn nudge(&mut self) -> Result<u32, String> {
+            let mut script = self.script();
+            script.calls.push(Call::Nudge);
+            match &script.nudge_error {
+                Some(err) => Err(err.clone()),
+                None => Ok(1000 + script.calls.len() as u32),
+            }
         }
 
         fn next_event(&mut self, wait: Duration) -> Result<Option<NotificationEvent>, String> {
@@ -972,5 +1061,102 @@ mod tests {
         );
         confirm(&server, &request);
         assert_eq!(notified(&server), escaped);
+    }
+
+    /// The interval tests nudge at.
+    const TEST_NUDGE: Duration = Duration::from_millis(30);
+
+    fn confirm_nudging(server: &FakeServer, request: &PresenceRequest<'_>) -> PresenceOutcome {
+        let flag = working_flag();
+        NotificationPresence::new(server.clone())
+            .with_nudge_interval(TEST_NUDGE)
+            .confirm(request, Cancellation::new(&flag))
+    }
+
+    fn short(operation: PresenceOperation, timeout_ms: u64) -> PresenceRequest<'static> {
+        PresenceRequest {
+            rp_id: Some("example.com"),
+            ..PresenceRequest::new(operation, Duration::from_millis(timeout_ms))
+        }
+    }
+
+    /// On GNOME Shell a prompt that waits is nudged every interval, between
+    /// showing it and withdrawing it, and the request still times out when
+    /// its own timeout says.
+    #[test]
+    fn an_unanswered_prompt_is_nudged_on_gnome() {
+        let server = FakeServer::named("gnome-shell");
+        let started = Instant::now();
+        assert_eq!(
+            confirm_nudging(&server, &short(PresenceOperation::Register, 200)),
+            PresenceOutcome::TimedOut
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(200) && elapsed < Duration::from_millis(400),
+            "the deadline moved: {elapsed:?}"
+        );
+        let calls = server.calls();
+        assert!(matches!(calls[1], Call::Notify(_)), "{calls:?}");
+        assert!(server.nudges() >= 3, "{calls:?}");
+        assert!(
+            calls[2..calls.len() - 2]
+                .iter()
+                .all(|call| *call == Call::Nudge),
+            "{calls:?}"
+        );
+        assert_eq!(calls[calls.len() - 2..], [Call::Close(7), Call::Disconnect]);
+    }
+
+    /// Other servers have no such queue, and are left alone.
+    #[test]
+    fn prompts_are_not_nudged_elsewhere() {
+        for server in [FakeServer::working(), FakeServer::named("Plasma")] {
+            assert_eq!(
+                confirm_nudging(&server, &short(PresenceOperation::Authenticate, 120)),
+                PresenceOutcome::TimedOut
+            );
+            assert_eq!(server.nudges(), 0);
+        }
+    }
+
+    /// Nothing is nudged once the user has answered or the request was
+    /// cancelled.
+    #[test]
+    fn an_answered_or_cancelled_prompt_is_not_nudged() {
+        let server = FakeServer::named("gnome-shell").event(NotificationEvent::ActionInvoked {
+            id: 7,
+            key: APPROVE_ACTION.into(),
+        });
+        assert_eq!(
+            confirm_nudging(&server, &short(PresenceOperation::Register, 5_000)),
+            PresenceOutcome::Approved
+        );
+        assert_eq!(server.nudges(), 0);
+
+        let server = FakeServer::named("gnome-shell");
+        let flag = working_flag();
+        flag.interrupt();
+        let outcome = NotificationPresence::new(server.clone())
+            .with_nudge_interval(TEST_NUDGE)
+            .confirm(
+                &short(PresenceOperation::Register, 5_000),
+                Cancellation::new(&flag),
+            );
+        assert_eq!(outcome, PresenceOutcome::Cancelled);
+        assert_eq!(server.nudges(), 0);
+    }
+
+    /// A nudge that fails is only logged: the prompt still waits for its
+    /// answer, and is not nudged again.
+    #[test]
+    fn a_failing_nudge_denies_nothing() {
+        let server = FakeServer::named("gnome-shell");
+        server.script().nudge_error = Some("org.freedesktop.DBus.Error.NoReply".into());
+        assert_eq!(
+            confirm_nudging(&server, &short(PresenceOperation::Register, 200)),
+            PresenceOutcome::TimedOut
+        );
+        assert_eq!(server.nudges(), 1);
     }
 }

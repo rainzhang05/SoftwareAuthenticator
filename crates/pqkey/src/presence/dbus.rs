@@ -33,6 +33,7 @@ use zbus::{
 
 use super::notification::{
     APPROVE_ACTION, ConnectError, DENY_ACTION, Notification, NotificationEvent, NotificationServer,
+    ServerInfo,
 };
 
 const NOTIFICATIONS_NAME: &str = "org.freedesktop.Notifications";
@@ -54,6 +55,9 @@ const APP_ICON: &str = "security-high";
 /// The `urgency` hint for critical notifications, which servers keep on
 /// screen until they are answered.
 const URGENCY_CRITICAL: u8 = 2;
+/// The `urgency` hint of a nudge: GNOME Shell requests no banner for a
+/// low-urgency notification, and so would not run its queue.
+const URGENCY_NORMAL: u8 = 1;
 
 /// Notifications through org.freedesktop.Notifications on the session bus.
 #[derive(Default)]
@@ -81,7 +85,7 @@ impl SessionBus {
 }
 
 impl NotificationServer for SessionBus {
-    fn connect(&mut self) -> Result<Vec<String>, ConnectError> {
+    fn connect(&mut self) -> Result<ServerInfo, ConnectError> {
         self.disconnect();
         // Uses DBUS_SESSION_BUS_ADDRESS, or $XDG_RUNTIME_DIR/bus without it.
         let builder = connection::Builder::session()
@@ -99,6 +103,24 @@ impl NotificationServer for SessionBus {
             )
             .and_then(|reply| reply.body().deserialize())
             .map_err(|err| ConnectError::NoServer(err.to_string()))?;
+        // (name, vendor, version, spec_version).  Only the name is used, to
+        // nudge GNOME Shell's queue; a server that does not answer is not
+        // nudged.
+        let name = connection
+            .call_method(
+                Some(NOTIFICATIONS_NAME),
+                NOTIFICATIONS_PATH,
+                Some(NOTIFICATIONS_INTERFACE),
+                "GetServerInformation",
+                &(),
+            )
+            .and_then(|reply| {
+                reply
+                    .body()
+                    .deserialize::<(String, String, String, String)>()
+            })
+            .map(|(name, ..)| name)
+            .ok();
 
         // Only signals from the process that owns the name count: any client
         // on the bus can emit a signal claiming to be ActionInvoked.
@@ -123,7 +145,7 @@ impl NotificationServer for SessionBus {
             connection,
             signals,
         });
-        Ok(capabilities)
+        Ok(ServerInfo { capabilities, name })
     }
 
     fn notify(&mut self, notification: &Notification) -> Result<u32, String> {
@@ -193,6 +215,37 @@ impl NotificationServer for SessionBus {
             )
             .map(drop)
             .map_err(|err| format!("CloseNotification failed: {err}"))
+    }
+
+    fn nudge(&mut self) -> Result<u32, String> {
+        let session = self.session()?;
+        let hints = HashMap::from([
+            ("urgency", Value::U8(URGENCY_NORMAL)),
+            ("transient", Value::Bool(true)),
+            ("suppress-sound", Value::Bool(true)),
+        ]);
+        let id = session
+            .connection
+            .call_method(
+                Some(NOTIFICATIONS_NAME),
+                NOTIFICATIONS_PATH,
+                Some(NOTIFICATIONS_INTERFACE),
+                "Notify",
+                &(
+                    APP_NAME,
+                    0u32,
+                    "",
+                    APP_NAME,
+                    "",
+                    &[] as &[&str],
+                    hints,
+                    1_000i32,
+                ),
+            )
+            .and_then(|reply| reply.body().deserialize::<u32>())
+            .map_err(|err| format!("Notify failed: {err}"))?;
+        self.close(id)?;
+        Ok(id)
     }
 
     fn disconnect(&mut self) {
