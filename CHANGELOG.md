@@ -218,6 +218,9 @@ also break an existing installation of that commit:
   shell's banner queue for its whole lifetime (seen with Chromium starting a
   request from an unfocused window): an unanswered prompt is nudged every 2
   seconds with an empty, transient notification that is withdrawn at once.
+- A daemon killed while it showed a prompt no longer leaves the prompt on
+  screen for good: the next daemon withdraws it, if the same notification
+  server still runs (`authenticator.prompt` in the state directory).
 - A notification server without the `body` capability gets no prompt and the
   request is denied, as without `actions`: the prompt's question is in the
   body. The prompt sanitiser removes every Unicode 16.0 default-ignorable and

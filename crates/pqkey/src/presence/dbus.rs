@@ -124,12 +124,15 @@ impl NotificationServer for SessionBus {
 
         // Only signals from the process that owns the name count: any client
         // on the bus can emit a signal claiming to be ActionInvoked.
-        let owner = DBusProxy::new(&connection)
-            .and_then(|bus| {
-                let name = BusName::try_from(NOTIFICATIONS_NAME)?;
-                Ok(bus.get_name_owner(name)?)
-            })
+        let bus =
+            DBusProxy::new(&connection).map_err(|err| ConnectError::NoServer(err.to_string()))?;
+        let owner = BusName::try_from(NOTIFICATIONS_NAME)
+            .map_err(zbus::Error::from)
+            .and_then(|name| Ok(bus.get_name_owner(name)?))
             .map_err(|err: zbus::Error| ConnectError::NoServer(err.to_string()))?;
+        // Names this bus, so a recorded prompt is only ever withdrawn from the
+        // server instance that showed it.
+        let bus_id = bus.get_id().ok().map(|id| id.to_string());
         let rule = MatchRule::builder()
             .msg_type(Type::Signal)
             .sender(owner.as_str())
@@ -145,7 +148,12 @@ impl NotificationServer for SessionBus {
             connection,
             signals,
         });
-        Ok(ServerInfo { capabilities, name })
+        Ok(ServerInfo {
+            capabilities,
+            name,
+            owner: Some(owner.to_string()),
+            bus_id,
+        })
     }
 
     fn notify(&mut self, notification: &Notification) -> Result<u32, String> {

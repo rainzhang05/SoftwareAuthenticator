@@ -17,7 +17,10 @@
 //! nothing has verified the user yet, so they are logged at debug level only.
 
 use std::{
-    fmt,
+    fmt, fs,
+    io::{self, Write},
+    os::unix::fs::OpenOptionsExt,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -90,7 +93,19 @@ pub struct ServerInfo {
     /// The product name from `GetServerInformation`, if the server answered
     /// it, such as "gnome-shell".
     pub name: Option<String>,
+    /// The unique bus name of the server's connection, such as ":1.42".
+    pub owner: Option<String>,
+    /// The ID of the bus (`org.freedesktop.DBus.GetId`).  With `owner` it
+    /// names one server process on one bus: unique names are never reused
+    /// while a bus runs.
+    pub bus_id: Option<String>,
 }
+
+/// The file in the state directory that records the prompt on screen, so
+/// that a daemon killed while it showed one (and so never withdrew it) can
+/// withdraw it when it starts again; see
+/// [`NotificationPresence::with_prompt_record`].
+pub const PROMPT_FILE: &str = "authenticator.prompt";
 
 /// Why no notification server could be reached.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,10 +154,13 @@ pub trait NotificationServer {
 ///   reason logged.
 /// * On GNOME Shell an unanswered prompt is nudged every [`NUDGE_INTERVAL`]
 ///   so that a prompt stuck in its queue is shown.
+/// * A prompt left on screen by a daemon that was killed is withdrawn by the
+///   next one, if it has a prompt record (see [`Self::with_prompt_record`]).
 #[derive(Debug)]
 pub struct NotificationPresence<S> {
     server: S,
     nudge_interval: Duration,
+    record: Option<PathBuf>,
 }
 
 impl<S: NotificationServer> NotificationPresence<S> {
@@ -150,6 +168,84 @@ impl<S: NotificationServer> NotificationPresence<S> {
         Self {
             server,
             nudge_interval: NUDGE_INTERVAL,
+            record: None,
+        }
+    }
+
+    /// Record each prompt while it is on screen in the file `path` (mode
+    /// 0600), and withdraw a prompt recorded there earlier, by a daemon that
+    /// was killed before it could, at the next request or through
+    /// [`Self::withdraw_stale_prompt`].  The record names the bus, the server's
+    /// connection and the notification, so a prompt is only withdrawn from
+    /// the server instance that showed it: after a restart of the server its
+    /// IDs start again and could name another program's notification.
+    pub fn with_prompt_record(mut self, path: PathBuf) -> Self {
+        self.record = Some(path);
+        self
+    }
+
+    /// Withdraw the prompt a previous daemon recorded and left on screen, if
+    /// any, then forget it.  Best effort: without a session bus or server it
+    /// waits for the next request.
+    pub fn withdraw_stale_prompt(&mut self) {
+        if !self.record.as_ref().is_some_and(|path| path.exists()) {
+            return;
+        }
+        if let Ok(info) = self.server.connect() {
+            self.close_stale_prompt(&info);
+        }
+        self.server.disconnect();
+    }
+
+    /// The recorded prompt, if `info` names the server that showed it, is
+    /// withdrawn; the record goes either way.
+    fn close_stale_prompt(&mut self, info: &ServerInfo) {
+        let Some(path) = self.record.clone() else {
+            return;
+        };
+        let Ok(recorded) = fs::read_to_string(&path) else {
+            return;
+        };
+        let mut lines = recorded.lines();
+        let (bus_id, owner, id) = (lines.next(), lines.next(), lines.next());
+        if let Some(id) = id.and_then(|id| id.parse::<u32>().ok())
+            && bus_id.is_some()
+            && bus_id == info.bus_id.as_deref()
+            && owner.is_some()
+            && owner == info.owner.as_deref()
+        {
+            log::info!("withdrawing a prompt a previous daemon left on screen");
+            if let Err(err) = self.server.close(id) {
+                log::debug!("could not withdraw notification {id}: {err}");
+            }
+        }
+        self.forget_prompt();
+    }
+
+    /// Record prompt `id` of the server `info` describes.
+    fn record_prompt(&self, info: &ServerInfo, id: u32) {
+        let (Some(path), Some(bus_id), Some(owner)) = (&self.record, &info.bus_id, &info.owner)
+        else {
+            return;
+        };
+        let written = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .and_then(|mut file| writeln!(file, "{bus_id}\n{owner}\n{id}"));
+        if let Err(err) = written {
+            log::debug!("could not record the prompt in {}: {err}", path.display());
+        }
+    }
+
+    fn forget_prompt(&self) {
+        if let Some(path) = &self.record
+            && let Err(err) = fs::remove_file(path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            log::debug!("could not remove {}: {err}", path.display());
         }
     }
 
@@ -166,13 +262,15 @@ impl<S: NotificationServer> NotificationPresence<S> {
         cancellation: Cancellation<'_>,
     ) -> PresenceOutcome {
         let deadline = Instant::now() + request.timeout;
-        let ServerInfo { capabilities, name } = match self.server.connect() {
+        let info = match self.server.connect() {
             Ok(info) => info,
             Err(err) => {
                 log::error!("{}", Unavailable::Connect(err).message(request));
                 return PresenceOutcome::Denied;
             }
         };
+        self.close_stale_prompt(&info);
+        let capabilities = &info.capabilities;
         if !capabilities.iter().any(|c| c == "actions") {
             log::error!("{}", Unavailable::NoActions.message(request));
             return PresenceOutcome::Denied;
@@ -197,12 +295,13 @@ impl<S: NotificationServer> NotificationPresence<S> {
                 return PresenceOutcome::Denied;
             }
         };
+        self.record_prompt(&info, id);
         log::info!(
             "asking the user with a desktop notification: {}",
             notification.summary
         );
 
-        let mut nudging = name.as_deref() == Some(GNOME_SHELL);
+        let mut nudging = info.name.as_deref() == Some(GNOME_SHELL);
         let mut next_nudge = Instant::now() + self.nudge_interval;
         let outcome = loop {
             if cancellation.is_cancelled() {
@@ -270,6 +369,8 @@ impl<S: NotificationServer> UserPresence for NotificationPresence<S> {
         cancellation: Cancellation<'_>,
     ) -> PresenceOutcome {
         let outcome = self.ask(request, cancellation);
+        // Whatever the answer, the prompt is gone from the screen by now.
+        self.forget_prompt();
         self.server.disconnect();
         log::info!("presence request {:?}: {outcome:?}", request.operation);
         outcome
@@ -536,6 +637,9 @@ mod tests {
         notify: Option<Result<u32, String>>,
         /// What a nudge fails with; it succeeds otherwise.
         nudge_error: Option<String>,
+        /// A prompt record to read, with its mode, at every `next_event`.
+        record_to_observe: Option<PathBuf>,
+        observed_records: Vec<Option<String>>,
         /// Events delivered in order, each once `next_event` has been called
         /// the given number of times since the previous one.
         events: VecDeque<Result<NotificationEvent, String>>,
@@ -552,6 +656,8 @@ mod tests {
             server.script().connect = Some(Ok(ServerInfo {
                 capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
                 name: None,
+                owner: Some(":1.42".into()),
+                bus_id: Some("0123456789abcdef0123456789abcdef".into()),
             }));
             server.script().notify = Some(Ok(7));
             server
@@ -614,6 +720,15 @@ mod tests {
         }
 
         fn next_event(&mut self, wait: Duration) -> Result<Option<NotificationEvent>, String> {
+            let observe = self.script().record_to_observe.clone();
+            if let Some(path) = observe {
+                use std::os::unix::fs::PermissionsExt;
+                let record = fs::metadata(&path).ok().map(|meta| {
+                    assert_eq!(meta.permissions().mode() & 0o777, 0o600, "record mode");
+                    fs::read_to_string(&path).unwrap()
+                });
+                self.script().observed_records.push(record);
+            }
             assert!(
                 wait <= CANCELLATION_POLL,
                 "waited {wait:?} without looking at cancellation"
@@ -1158,5 +1273,91 @@ mod tests {
             PresenceOutcome::TimedOut
         );
         assert_eq!(server.nudges(), 1);
+    }
+
+    /// While a prompt is shown its server, bus and ID are recorded, and the
+    /// record goes once the request ends, whatever the answer.
+    #[test]
+    fn a_shown_prompt_is_recorded_until_the_request_ends() {
+        let dir = crate::test_support::TempDir::new("prompt-record");
+        let path = dir.path().join(PROMPT_FILE);
+        let server = FakeServer::working();
+        server.script().record_to_observe = Some(path.clone());
+        let flag = working_flag();
+        let outcome = NotificationPresence::new(server.clone())
+            .with_prompt_record(path.clone())
+            .confirm(
+                &short(PresenceOperation::Register, 100),
+                Cancellation::new(&flag),
+            );
+        assert_eq!(outcome, PresenceOutcome::TimedOut);
+        assert_eq!(
+            server
+                .script()
+                .observed_records
+                .first()
+                .cloned()
+                .flatten()
+                .as_deref(),
+            Some("0123456789abcdef0123456789abcdef\n:1.42\n7\n")
+        );
+        assert!(!path.exists(), "the record outlived the request");
+    }
+
+    /// A prompt a killed daemon left on screen is withdrawn at start-up when
+    /// the same server instance still runs, and only then.
+    #[test]
+    fn a_prompt_left_by_a_killed_daemon_is_withdrawn_at_start() {
+        let dir = crate::test_support::TempDir::new("stale-prompt");
+        let path = dir.path().join(PROMPT_FILE);
+        for (recorded, withdrawn) in [
+            ("0123456789abcdef0123456789abcdef\n:1.42\n41\n", true),
+            // The server restarted, or another bus: its IDs mean other things.
+            ("0123456789abcdef0123456789abcdef\n:1.99\n41\n", false),
+            ("ffffffffffffffffffffffffffffffff\n:1.42\n41\n", false),
+            ("garbage", false),
+        ] {
+            fs::write(&path, recorded).unwrap();
+            let server = FakeServer::working();
+            NotificationPresence::new(server.clone())
+                .with_prompt_record(path.clone())
+                .withdraw_stale_prompt();
+            let expected = if withdrawn {
+                vec![Call::Connect, Call::Close(41), Call::Disconnect]
+            } else {
+                vec![Call::Connect, Call::Disconnect]
+            };
+            assert_eq!(server.calls(), expected, "{recorded:?}");
+            assert!(!path.exists(), "{recorded:?}: the record was kept");
+        }
+
+        // Without a record nothing connects at all.
+        let server = FakeServer::working();
+        NotificationPresence::new(server.clone())
+            .with_prompt_record(path.clone())
+            .withdraw_stale_prompt();
+        assert_eq!(server.calls(), []);
+    }
+
+    /// If start-up could not reach the server, the next request withdraws
+    /// the stale prompt before it shows its own.
+    #[test]
+    fn the_next_request_withdraws_a_stale_prompt_first() {
+        let dir = crate::test_support::TempDir::new("stale-prompt-request");
+        let path = dir.path().join(PROMPT_FILE);
+        fs::write(&path, "0123456789abcdef0123456789abcdef\n:1.42\n41\n").unwrap();
+        let server = FakeServer::working().event(NotificationEvent::ActionInvoked {
+            id: 7,
+            key: APPROVE_ACTION.into(),
+        });
+        let flag = working_flag();
+        let outcome = NotificationPresence::new(server.clone())
+            .with_prompt_record(path.clone())
+            .confirm(&register(), Cancellation::new(&flag));
+        assert_eq!(outcome, PresenceOutcome::Approved);
+        let calls = server.calls();
+        assert_eq!(calls[..2], [Call::Connect, Call::Close(41)]);
+        assert!(matches!(calls[2], Call::Notify(_)), "{calls:?}");
+        assert!(!path.exists());
     }
 }

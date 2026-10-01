@@ -274,8 +274,10 @@ shared conformance tests: `MemoryStore` for engine tests and fuzzing, and
 └── attestation             0600  envelope, record type 3
 ```
 
-The daemon and CLI add `authenticator.lock`, `authenticator.pid` and, for a
-background daemon, `authenticator.log`, all mode 0600. Writes briefly create
+The daemon and CLI add `authenticator.lock`, `authenticator.pid`, for a
+background daemon `authenticator.log`, and while a presence prompt is on
+screen `authenticator.prompt` (the bus ID, the notification server's unique
+name and the notification ID), all mode 0600. Writes briefly create
 `.tmp-<16 hex digits>` files, and the pid file `authenticator.pid.<pid>.tmp`. A
 credential's file name is the lowercase hex HMAC-SHA-256 of its credential ID
 under the credential index key, so a directory listing reveals neither
@@ -389,6 +391,9 @@ The implementations the daemon chooses from with `--presence`:
   notification queued and unseen, an unanswered prompt is nudged every 2
   seconds: an empty, transient notification of normal urgency is posted and
   withdrawn at once, which shows a stuck prompt and changes nothing otherwise.
+  A prompt a killed daemon left on screen is withdrawn when the daemon starts
+  again (or at its first request if no bus was reachable then), but only from
+  the server instance that showed it: `authenticator.prompt` records it.
 - **`AutoApprove`** (`--presence auto-approve`, in `pqkey-ctap`) approves at
   once.
 - **`Unanswered`** (hidden `--presence unanswered`, in

@@ -15,7 +15,11 @@ use crate::{
     attestation::{IdentityConfig, certificate_aaguid, generate_attestation_certificate},
     clock::BootTimeClock,
     create_device, exec,
-    presence::{PresenceMode, Unanswered, dbus::SessionBus, notification::NotificationPresence},
+    presence::{
+        PresenceMode, Unanswered,
+        dbus::SessionBus,
+        notification::{NotificationPresence, PROMPT_FILE},
+    },
     shutdown::{ShutdownSignal, is_shutdown, ok_if_shutdown},
     state::remove_and_log_legacy_state,
     uhid::UhidDevice,
@@ -68,6 +72,8 @@ pub struct RunnerConfig {
 pub struct AppData {
     /// The credential store in the state directory.
     pub store: FileStore,
+    /// The state directory, for the daemon's own files in it.
+    pub state_dir: PathBuf,
     pub aaguid: [u8; 16],
     /// How the user is asked for presence.
     pub presence: PresenceMode,
@@ -283,6 +289,7 @@ pub fn run(
     };
     let data = AppData {
         store,
+        state_dir: state_dir.clone(),
         aaguid,
         presence,
         presence_timeout,
@@ -311,7 +318,9 @@ pub fn serve_ctap(
     match data.presence {
         PresenceMode::Notify => {
             log::info!("asking for user presence with desktop notifications");
-            let presence = NotificationPresence::new(SessionBus::new());
+            let mut presence = NotificationPresence::new(SessionBus::new())
+                .with_prompt_record(data.state_dir.join(PROMPT_FILE));
+            presence.withdraw_stale_prompt();
             serve_ctap_with_presence(device, data, presence, shutdown, on_ready)
         }
         PresenceMode::AutoApprove => {
@@ -579,6 +588,7 @@ mod tests {
     fn app_data(dir: &TempDir) -> AppData {
         AppData {
             store: FileStore::open(dir.path()).expect("open credential store"),
+            state_dir: dir.path().to_owned(),
             aaguid: [0; 16],
             presence: PresenceMode::AutoApprove,
             presence_timeout: None,
