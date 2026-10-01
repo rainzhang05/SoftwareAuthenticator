@@ -33,7 +33,7 @@ use std::{
 use pqkey_ctap::ctap::{CtapApp, InterruptFlag};
 use shutdown::ShutdownSignal;
 use transport::ctaphid_host::{CtaphidHost, MAX_MESSAGE_SIZE, Version};
-use uhid::{CTAPHID_FRAME_LEN, HidDeviceDescriptor, UhidDevice};
+use uhid::{HidDeviceDescriptor, UhidDevice};
 
 // CTAPHID capability flags (CTAP spec section 11.2.9.1.3)
 pub const CAPABILITY_CBOR: u8 = 0x04; // Implements CTAPHID_CBOR
@@ -369,6 +369,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::shutdown::is_shutdown;
     use crate::transport::ctaphid_host::Command;
+    use crate::uhid::CTAPHID_FRAME_LEN;
     use std::os::fd::{AsRawFd, OwnedFd};
 
     /// A uhid device whose descriptor is one end of a socket pair; the other

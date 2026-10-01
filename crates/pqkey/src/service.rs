@@ -11,7 +11,7 @@ use pqkey_ctap::ctap::{
 use pqkey_ctap::store::{AttestationRecord, CredentialStore, FileStore};
 
 use crate::{
-    CTAPHID_FRAME_LEN, HidDeviceDescriptor, WaitingForUser,
+    HidDeviceDescriptor, WaitingForUser,
     attestation::{IdentityConfig, certificate_aaguid, generate_attestation_certificate},
     clock::BootTimeClock,
     create_device, exec,
@@ -402,7 +402,6 @@ pub fn descriptor(
         product_id,
         version,
         country: 0,
-        feature_report: vec![0; CTAPHID_FRAME_LEN],
     }
 }
 
@@ -424,7 +423,7 @@ pub fn parse_aaguid(input: &str) -> Result<[u8; 16], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_support::TempDir, tests::socket_device, uhid};
+    use crate::{test_support::TempDir, tests::socket_device, uhid, uhid::CTAPHID_FRAME_LEN};
     use ciborium::value::{Integer, Value};
     use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
     use pqkey_ctap::CoseAlg;

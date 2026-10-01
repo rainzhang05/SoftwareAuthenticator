@@ -53,7 +53,6 @@ pub struct HidDeviceDescriptor {
     pub product_id: u32,
     pub version: u32,
     pub country: u32,
-    pub feature_report: Vec<u8>,
 }
 
 impl Default for HidDeviceDescriptor {
@@ -64,7 +63,6 @@ impl Default for HidDeviceDescriptor {
             product_id: DEFAULT_PRODUCT_ID,
             version: 0x0001,
             country: 0,
-            feature_report: vec![0; CTAPHID_FRAME_LEN],
         }
     }
 }
@@ -191,10 +189,8 @@ impl UhidDevice {
                         // for any bytes; the type says which one is meant.
                         let output = unsafe { event.u.output };
                         let (size, rtype) = (output.size, output.rtype);
-                        if !matches!(
-                            ReportType::from_raw(rtype),
-                            Some(ReportType::Output) | Some(ReportType::Feature)
-                        ) {
+                        // The descriptor declares output reports only.
+                        if ReportType::from_raw(rtype) != Some(ReportType::Output) {
                             continue;
                         }
                         let Some(report) = report_data(&output.data, size) else {
@@ -216,14 +212,12 @@ impl UhidDevice {
                             );
                         }
                         // The kernel holds the writer until a reply comes or
-                        // its timeout runs out, so a malformed request is
-                        // answered with an error rather than ignored.
-                        let report = report.filter(|_| {
-                            matches!(
-                                ReportType::from_raw(rtype),
-                                Some(ReportType::Output) | Some(ReportType::Feature)
-                            )
-                        });
+                        // its timeout runs out, so a malformed request, or
+                        // one for a feature report the descriptor does not
+                        // declare, is answered with an error rather than
+                        // ignored.
+                        let report = report
+                            .filter(|_| ReportType::from_raw(rtype) == Some(ReportType::Output));
                         let status = if report.is_some() {
                             0
                         } else {
@@ -237,14 +231,13 @@ impl UhidDevice {
                     raw::UHID_EVENT_TYPE_GET_REPORT => {
                         // SAFETY: as for the output event above.
                         let get_report = unsafe { event.u.get_report };
-                        let (id, rtype) = (get_report.id, get_report.rtype);
-                        if ReportType::from_raw(rtype) != Some(ReportType::Feature) {
-                            self.inner
-                                .send_get_report_reply(id, Errno::EINVAL as u16, &[])?;
-                            continue;
-                        }
+                        // No feature report is declared, and input reports
+                        // are only sent, never fetched: refuse every request,
+                        // which the kernel reports as EIO, as a USB key
+                        // stalls on a request it does not support.
+                        let id = get_report.id;
                         self.inner
-                            .send_get_report_reply(id, 0, &self.descriptor.feature_report)?;
+                            .send_get_report_reply(id, Errno::EINVAL as u16, &[])?;
                     }
                     raw::UHID_EVENT_TYPE_OPEN => self.opened.store(true, Ordering::Relaxed),
                     raw::UHID_EVENT_TYPE_START
@@ -848,6 +841,49 @@ mod tests {
             Some(CtapHidFrame::new(frame))
         );
         assert_eq!(read_set_report_reply(&mut kernel), (9, 0));
+    }
+
+    /// The report descriptor declares 64-byte input and output reports and no
+    /// feature report, so a feature report is no CTAPHID packet: a SET_REPORT
+    /// or GET_REPORT of one is refused (the kernel turns the error into EIO,
+    /// as a USB key stalls), and an output event of that type is ignored.
+    #[test]
+    fn feature_reports_are_refused() {
+        use std::io::{Read, Write};
+        let (device, mut kernel) = crate::tests::socket_device();
+        let frame = init_frame();
+        let event = set_report_event(3, raw::UHID_REPORT_TYPE_FEATURE, &frame, 64);
+        kernel.write_all(&event).unwrap();
+        assert_eq!(device.try_read_frame().unwrap(), None);
+        assert_eq!(
+            read_set_report_reply(&mut kernel),
+            (3, Errno::EINVAL as u16)
+        );
+
+        let mut event = raw::uhid_event::new(raw::UHID_EVENT_TYPE_GET_REPORT);
+        // SAFETY: every union member is plain integers, valid for any bytes.
+        let get_report = unsafe { &mut event.u.get_report };
+        get_report.id = 4;
+        get_report.rtype = raw::UHID_REPORT_TYPE_FEATURE;
+        kernel.write_all(event_as_bytes(&event)).unwrap();
+        assert_eq!(device.try_read_frame().unwrap(), None);
+        let mut bytes = [0u8; UHID_EVENT_SIZE];
+        kernel.read_exact(&mut bytes).unwrap();
+        let reply = raw::event_from_bytes(&bytes);
+        assert_eq!({ reply.type_ }, raw::UHID_EVENT_TYPE_GET_REPORT_REPLY);
+        // SAFETY: as above.
+        let reply = unsafe { reply.u.get_report_reply };
+        assert_eq!(
+            (reply.id, reply.err, reply.size),
+            (4, Errno::EINVAL as u16, 0)
+        );
+
+        let mut output = output_event(&frame);
+        // The rtype byte of uhid_output_req follows its data and size.
+        let rtype_offset = 4 + raw::UHID_DATA_MAX + 2;
+        output[rtype_offset] = raw::UHID_REPORT_TYPE_FEATURE;
+        kernel.write_all(&output).unwrap();
+        assert_eq!(device.try_read_frame().unwrap(), None);
     }
 
     /// UHID_OPEN, which the kernel sends once a client opens the device, is
