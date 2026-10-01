@@ -2,9 +2,9 @@
 //!
 //! The user's part (the systemd user unit, starting the key, a PIN) is done
 //! here. What needs root (the udev rules, loading uhid at boot, the group
-//! that may open `/dev/uhid`) is written to a short script, printed in full,
-//! and left for the user to run with `sudo sh`: pqkey itself never runs as
-//! root.
+//! that may open `/dev/uhid`) is written to a short script, summarised a line
+//! a step, and run with `sudo sh` once the user agrees: pqkey itself never
+//! runs as root.
 
 use std::{
     env,
@@ -81,10 +81,21 @@ fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
-/// The steps that need root, as a shell script, or `None` if none are left.
-fn root_script(system: &System, membership: &Membership) -> Option<String> {
+/// The steps of setup that need root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RootSteps {
+    /// The shell script that takes them.
+    script: String,
+    /// What they set up, a line each, to show the user.
+    summary: Vec<String>,
+}
+
+/// The steps that need root, or `None` if none are left.
+fn root_script(system: &System, membership: &Membership) -> Option<RootSteps> {
     let mut steps = Vec::new();
+    let mut summary = Vec::new();
     if system.rules() != Rules::Current {
+        summary.push("udev rules for /dev/uhid and the key's device".to_owned());
         steps.push(format!(
             "# The udev rules: /dev/uhid for the {UHID_GROUP} group, and the key's device for\n\
              # the active session's user and the Firefox and Chromium snaps.\n\
@@ -94,15 +105,29 @@ fn root_script(system: &System, membership: &Membership) -> Option<String> {
              udevadm control --reload-rules"
         ));
     }
-    if !system.uhid_at_boot() {
+    let (at_boot, loaded) = (system.uhid_at_boot(), system.uhid_loaded());
+    if !at_boot {
         steps.push(format!(
             "# Load the uhid module at every boot.\necho uhid > {MODULES_LOAD_PATH}"
         ));
     }
-    if !system.uhid_loaded() {
+    if !loaded {
         steps.push("# Load it now.\nmodprobe uhid".into());
     }
+    summary.extend(
+        match (at_boot, loaded) {
+            (false, false) => Some("uhid module, loaded now and at every boot"),
+            (false, true) => Some("uhid module, loaded at every boot"),
+            (true, false) => Some("uhid module, loaded now"),
+            (true, true) => None,
+        }
+        .map(str::to_owned),
+    );
     if !membership.member {
+        summary.push(format!(
+            "'{UHID_GROUP}' group for {}, which may open /dev/uhid",
+            membership.user
+        ));
         let mut step = format!("# Let {} open /dev/uhid.\n", membership.user);
         if !membership.group_exists {
             step.push_str(&format!("groupadd --system {UHID_GROUP}\n"));
@@ -132,10 +157,13 @@ fn root_script(system: &System, membership: &Membership) -> Option<String> {
             user = shell_quote(&membership.user)
         ));
     }
-    Some(format!(
-        "#!/bin/sh\n# The steps of `pqkey setup` that need root.\nset -eu\n\n{}\n",
-        steps.join("\n\n")
-    ))
+    Some(RootSteps {
+        script: format!(
+            "#!/bin/sh\n# The steps of `pqkey setup` that need root.\nset -eu\n\n{}\n",
+            steps.join("\n\n")
+        ),
+        summary,
+    })
 }
 
 /// The steps that undo [`root_script`]'s, except the group membership.
@@ -170,40 +198,6 @@ fn hand_over(dir: &Path, script: &str, name: &str) -> io::Result<PathBuf> {
         .open(&path)?
         .write_all(script.as_bytes())?;
     Ok(path)
-}
-
-fn print_script(script: &str) -> io::Result<()> {
-    for line in shown_script(script) {
-        if line.is_empty() {
-            outln!()?;
-        } else {
-            outln!("    {line}")?;
-        }
-    }
-    Ok(())
-}
-
-/// The lines of `script` to show: the udev rules it installs, a file of
-/// mostly comments, are named rather than shown, so the steps stand out.
-fn shown_script(script: &str) -> Vec<String> {
-    let mut shown = Vec::new();
-    let mut in_rules = false;
-    for line in script.lines() {
-        if in_rules {
-            if line == "PQKEY_UDEV_RULES" {
-                in_rules = false;
-                shown.push(format!(
-                    "  (the {} lines of contrib/udev/70-pqkey.rules)",
-                    UDEV_RULES.lines().count()
-                ));
-                shown.push(line.to_owned());
-            }
-            continue;
-        }
-        in_rules = line.ends_with("<<'PQKEY_UDEV_RULES'");
-        shown.push(line.to_owned());
-    }
-    shown
 }
 
 /// Refuse what setup does not do: run as root, or for another state
@@ -241,20 +235,26 @@ pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
     let membership = checks::membership();
 
     let interactive = io::stdin().is_terminal();
-    if let Some(script) = root_script(&system, &membership) {
-        let path = hand_over(&runtime_dir(), &script, "pqkey-setup.sh")?;
-        outln!("These steps need root, once:")?;
-        outln!()?;
-        print_script(&script)?;
-        outln!()?;
-        if !yes && (!interactive || !key::ask("Run them now with sudo?", true)?) {
-            outln!("Run them, then `pqkey setup` again:")?;
-            outln!()?;
-            outln!("    sudo sh {}", path.display())?;
-            return Ok(());
+    if let Some(root) = root_script(&system, &membership) {
+        let path = hand_over(&runtime_dir(), &root.script, "pqkey-setup.sh")?;
+        if !yes {
+            outln!("Setup needs root (sudo) once, for:")?;
+            for step in &root.summary {
+                outln!("  - {step}")?;
+            }
+            if !interactive || !key::ask("Set these up with sudo?", true)? {
+                outln!()?;
+                outln!("Run this script, then `pqkey setup` again:")?;
+                outln!()?;
+                outln!("    sudo sh {}", path.display())?;
+                return Ok(());
+            }
         }
         run_as_root("sudo", &path)?;
         let _ = fs::remove_file(&path);
+        for step in &root.summary {
+            output::done(step)?;
+        }
     }
     // The script may have added this user to the group.
     let membership = checks::membership();
@@ -420,9 +420,7 @@ pub fn uninstall(state_dir: &Path) -> io::Result<()> {
     }
     let script = root_undo_script();
     let script_path = hand_over(&runtime_dir(), &script, "pqkey-uninstall.sh")?;
-    outln!("These steps undo the part that needed root:")?;
-    outln!()?;
-    print_script(&script)?;
+    outln!("To remove the udev rules and the uhid module setting too, run:")?;
     outln!()?;
     outln!("    sudo sh {}", script_path.display())?;
     outln!()?;
@@ -530,7 +528,9 @@ mod tests {
     fn a_fresh_system_gets_one_root_script_with_every_step() {
         let dir = TempDir::new("setup-fresh");
         let system = System::under(dir.path().to_owned());
-        let script = root_script(&system, &membership(false, false)).unwrap();
+        let script = root_script(&system, &membership(false, false))
+            .unwrap()
+            .script;
         assert!(script.starts_with("#!/bin/sh\n"), "{script}");
         for step in [
             "cat > /etc/udev/rules.d/70-pqkey.rules <<'PQKEY_UDEV_RULES'\n",
@@ -552,28 +552,23 @@ mod tests {
     }
 
     #[test]
-    fn the_rules_are_named_rather_than_shown() {
-        let dir = TempDir::new("setup-shown");
+    fn the_user_sees_what_root_sets_up_a_line_each() {
+        let dir = TempDir::new("setup-summary");
         let system = System::under(dir.path().to_owned());
-        let script = root_script(&system, &membership(true, true)).unwrap();
-        let shown = shown_script(&script);
-        let rules = shown
-            .iter()
-            .position(|line| line.ends_with("<<'PQKEY_UDEV_RULES'"))
-            .unwrap();
-        assert!(
-            shown[rules + 1].contains("lines of contrib/udev/70-pqkey.rules"),
-            "{shown:?}"
+        let root = root_script(&system, &membership(false, true)).unwrap();
+        assert_eq!(
+            root.summary,
+            [
+                "udev rules for /dev/uhid and the key's device",
+                "uhid module, loaded now and at every boot",
+                "'plugdev' group for o'brien, which may open /dev/uhid",
+            ]
         );
-        assert_eq!(shown[rules + 2], "PQKEY_UDEV_RULES");
-        assert!(
-            shown.iter().any(|line| line.starts_with("echo uhid >")),
-            "{shown:?}"
-        );
-        assert!(shown.len() < 30, "{shown:?}");
-        assert!(
-            !shown.iter().any(|line| line.contains("SUBSYSTEM==")),
-            "{shown:?}"
+        fs::create_dir_all(system.path("/sys/class/misc/uhid")).unwrap();
+        let root = root_script(&system, &membership(true, true)).unwrap();
+        assert_eq!(
+            root.summary[1..],
+            ["uhid module, loaded at every boot".to_owned()]
         );
     }
 
@@ -593,7 +588,9 @@ mod tests {
         }
         assert_eq!(root_script(&system, &membership(true, true)), None);
         // Only what is missing: the group, on Ubuntu where it exists.
-        let script = root_script(&system, &membership(false, true)).unwrap();
+        let script = root_script(&system, &membership(false, true))
+            .unwrap()
+            .script;
         assert!(
             !script.contains("groupadd") && !script.contains("udev.rules"),
             "{script}"
@@ -605,7 +602,8 @@ mod tests {
             &System::under(dir.path().join("none")),
             &membership(true, true),
         )
-        .unwrap();
+        .unwrap()
+        .script;
         assert!(!script.contains("setfacl"), "{script}");
     }
 
@@ -622,8 +620,9 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
         }
-        let script = root_script(&system, &membership(true, true)).unwrap();
-        assert!(script.contains("\nmodprobe uhid\n"), "{script}");
+        let root = root_script(&system, &membership(true, true)).unwrap();
+        assert!(root.script.contains("\nmodprobe uhid\n"), "{root:?}");
+        assert_eq!(root.summary, ["uhid module, loaded now"]);
     }
 
     #[test]
