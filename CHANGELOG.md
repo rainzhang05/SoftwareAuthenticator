@@ -165,6 +165,15 @@ Upgrading from `867a591` or earlier is not an in-place update:
 - updateUserInformation refuses a `name` or `displayName` that is not a text
   string with CTAP2_ERR_CBOR_UNEXPECTED_TYPE. It used to erase the stored
   value.
+- A PublicKeyCredentialRpEntity, PublicKeyCredentialUserEntity or
+  PublicKeyCredentialDescriptor that lacks a required member, or has a member
+  of the wrong type (including `rp.name`), gets
+  CTAP2_ERR_CBOR_UNEXPECTED_TYPE, as CTAP 2.3 §8 asks, in makeCredential,
+  getAssertion and credential management, whether or not the pinUvAuthToken
+  is bound to an RP. These were CTAP2_ERR_MISSING_PARAMETER or
+  CTAP2_ERR_INVALID_CBOR, and credential management never checked a
+  descriptor's `type`. Only a pubKeyCredParams element keeps
+  CTAP2_ERR_INVALID_CBOR (§6.1.2 step 3.1.1).
 - The notification prompt gives up on a session bus that accepts the
   connection but never answers after 2 seconds, as it does on a D-Bus call,
   instead of holding the request and the daemon's shutdown forever.

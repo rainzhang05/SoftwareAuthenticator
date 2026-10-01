@@ -114,32 +114,26 @@ impl CtapApp<'_> {
             Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
             None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let rp_id = match cbor::map_get(rp, Value::Text("id".into())) {
-            Some(Value::Text(text)) => text.clone(),
-            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
-            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
+        // rp and user are PublicKeyCredentialRpEntity and
+        // PublicKeyCredentialUserEntity: a missing or wrongly typed member is
+        // CTAP2_ERR_CBOR_UNEXPECTED_TYPE (CTAP 2.3 §8).
+        let rp_id = cbor::structure_text(rp, "id")?.to_owned();
+        cbor::optional_structure_text(rp, "name")?;
 
         let user = match parameter(3) {
             Some(Value::Map(user)) => user,
             Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
             None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let user_id = match cbor::map_get(user, Value::Text("id".into())) {
-            Some(Value::Bytes(bytes)) if bytes.len() <= request::MAX_USER_ID_LENGTH => {
-                bytes.clone()
-            }
-            Some(Value::Bytes(_)) => return Err(CTAP1_ERR_INVALID_LENGTH),
-            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
-            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
-        let user_string = |name: &str| match cbor::map_get(user, Value::Text(name.into())) {
-            None => Ok(None),
-            Some(Value::Text(text)) => Ok(Some(request::truncate_utf8(
-                text,
-                request::MAX_USER_STRING_LENGTH,
-            ))),
-            Some(_) => Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+        let user_id = cbor::structure_bytes(user, "id")?;
+        if user_id.len() > request::MAX_USER_ID_LENGTH {
+            return Err(CTAP1_ERR_INVALID_LENGTH);
+        }
+        let user_id = user_id.to_vec();
+        let user_string = |name: &str| {
+            cbor::optional_structure_text(user, name).map(|text| {
+                text.map(|text| request::truncate_utf8(text, request::MAX_USER_STRING_LENGTH))
+            })
         };
         let user_name = user_string("name")?;
         let user_display_name = user_string("displayName")?;

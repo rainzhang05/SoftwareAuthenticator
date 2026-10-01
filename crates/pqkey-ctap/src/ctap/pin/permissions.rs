@@ -1,9 +1,10 @@
 //! pinUvAuthToken permission bits and the checks that bind a token to an RP.
 
 use crate::ctap::CtapApp;
-use crate::ctap::cbor;
+use crate::ctap::cbor::{required_bytes, required_map};
+use crate::ctap::request;
 
-use ciborium::value::{Integer, Value};
+use ciborium::value::Value;
 
 use crate::ctap::constants::*;
 
@@ -72,27 +73,20 @@ impl CtapApp<'_> {
         };
         match subcommand {
             0x01 | 0x02 => Err(CTAP2_ERR_PIN_AUTH_INVALID),
+            // The same parsing, and so the same status codes, as the
+            // subcommands themselves use once a token without an RP ID passes.
             0x04 => {
-                let params = params.ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
-                let rp_hash = match cbor::map_get(params, Value::Integer(Integer::from(1))) {
-                    Some(Value::Bytes(bytes)) => bytes,
-                    _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-                };
-                if Self::cm_hash_rp_id(&binding) == *rp_hash {
+                let rp_hash = required_bytes(params.ok_or(CTAP2_ERR_MISSING_PARAMETER)?, 1)?;
+                if Self::cm_hash_rp_id(&binding) == rp_hash {
                     Ok(())
                 } else {
                     Err(CTAP2_ERR_PIN_AUTH_INVALID)
                 }
             }
             0x06 | 0x07 => {
-                let params = params.ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
-                let descriptor = match cbor::map_get(params, Value::Integer(Integer::from(2))) {
-                    Some(Value::Map(map)) => map,
-                    _ => return Err(CTAP2_ERR_MISSING_PARAMETER),
-                };
-                let Some(Value::Bytes(id)) = cbor::map_get(descriptor, Value::Text("id".into()))
-                else {
-                    return Err(CTAP2_ERR_MISSING_PARAMETER);
+                let descriptor = required_map(params.ok_or(CTAP2_ERR_MISSING_PARAMETER)?, 2)?;
+                let Some(id) = request::public_key_credential_id(descriptor)? else {
+                    return Err(CTAP2_ERR_NO_CREDENTIALS);
                 };
                 let Some(credential) = self.stored_credential(id)? else {
                     return Err(CTAP2_ERR_NO_CREDENTIALS);

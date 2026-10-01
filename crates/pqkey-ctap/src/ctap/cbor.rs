@@ -65,6 +65,55 @@ pub(super) fn required_map(
     }
 }
 
+/// A required member of a structure from the host, such as
+/// PublicKeyCredentialRpEntity, PublicKeyCredentialUserEntity or
+/// PublicKeyCredentialDescriptor: "If structures in messages from the host are
+/// missing required members, or the values of those members have the wrong
+/// type, then the authenticator SHOULD return CTAP2_ERR_CBOR_UNEXPECTED_TYPE."
+/// (CTAP 2.3 §8)  A missing top-level parameter of a command is
+/// CTAP2_ERR_MISSING_PARAMETER instead, see [`required`].
+pub(super) fn structure_member<'a>(
+    structure: &'a [(Value, Value)],
+    name: &str,
+) -> Result<&'a Value, u8> {
+    map_get(structure, Value::Text(name.into())).ok_or(CTAP2_ERR_CBOR_UNEXPECTED_TYPE)
+}
+
+/// A required text member of a structure, as [`structure_member`].
+pub(super) fn structure_text<'a>(
+    structure: &'a [(Value, Value)],
+    name: &str,
+) -> Result<&'a str, u8> {
+    match structure_member(structure, name)? {
+        Value::Text(text) => Ok(text),
+        _ => Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+    }
+}
+
+/// A required byte string member of a structure, as [`structure_member`].
+pub(super) fn structure_bytes<'a>(
+    structure: &'a [(Value, Value)],
+    name: &str,
+) -> Result<&'a [u8], u8> {
+    match structure_member(structure, name)? {
+        Value::Bytes(bytes) => Ok(bytes),
+        _ => Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+    }
+}
+
+/// An optional text member of a structure: `None` when absent, and
+/// CTAP2_ERR_CBOR_UNEXPECTED_TYPE when present with another type (§8).
+pub(super) fn optional_structure_text<'a>(
+    structure: &'a [(Value, Value)],
+    name: &str,
+) -> Result<Option<&'a str>, u8> {
+    match map_get(structure, Value::Text(name.into())) {
+        None => Ok(None),
+        Some(Value::Text(text)) => Ok(Some(text)),
+        Some(_) => Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+    }
+}
+
 /// How deeply [`raw_map_value`] and [`request_parameters`] follow nested
 /// arrays, maps and tags before giving up.  CTAP requests nest a handful of
 /// levels.

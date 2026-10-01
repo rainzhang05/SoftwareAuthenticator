@@ -401,3 +401,81 @@ fn user_names_are_truncated_to_64_bytes() {
         Some(&display_name[..64])
     );
 }
+
+/// The rp, user and excludeList structures follow CTAP 2.3 §8: "If
+/// structures in messages from the host are missing required members, or the
+/// values of those members have the wrong type, then the authenticator SHOULD
+/// return CTAP2_ERR_CBOR_UNEXPECTED_TYPE."  Only a pubKeyCredParams element
+/// has a rule of its own, step 3.1.1, which keeps CTAP2_ERR_INVALID_CBOR.
+#[test]
+fn malformed_entities_and_descriptors_are_unexpected_types() {
+    let descriptor =
+        |entries: Vec<(Value, Value)>| (int(5), Value::Array(vec![canonical_map(entries)]));
+    let cases = [
+        (
+            "rp without id",
+            (int(2), canonical_map(vec![(text("name"), text("Example"))])),
+        ),
+        (
+            "rp.id not text",
+            (int(2), canonical_map(vec![(text("id"), int(1))])),
+        ),
+        (
+            "rp.name not text",
+            (
+                int(2),
+                canonical_map(vec![(text("id"), text(RP_ID)), (text("name"), int(1))]),
+            ),
+        ),
+        (
+            "user without id",
+            (int(3), canonical_map(vec![(text("name"), text("alice"))])),
+        ),
+        (
+            "user.id not bytes",
+            (int(3), canonical_map(vec![(text("id"), text("alice"))])),
+        ),
+        (
+            "descriptor without id",
+            descriptor(vec![(text("type"), text("public-key"))]),
+        ),
+        (
+            "descriptor without type",
+            descriptor(vec![(text("id"), Value::Bytes(vec![0x01]))]),
+        ),
+        (
+            "descriptor type not text",
+            descriptor(vec![
+                (text("type"), int(1)),
+                (text("id"), Value::Bytes(vec![0x01])),
+            ]),
+        ),
+    ];
+    for (case, (key, value)) in cases {
+        let (mut app, log) = app(vec![]);
+        let mut entries = vec![
+            (int(1), Value::Bytes(CLIENT_DATA_HASH.to_vec())),
+            (int(2), canonical_map(vec![(text("id"), text(RP_ID))])),
+            (
+                int(3),
+                canonical_map(vec![(text("id"), Value::Bytes(vec![0x01]))]),
+            ),
+            (
+                int(4),
+                Value::Array(vec![canonical_map(vec![
+                    (text("type"), text("public-key")),
+                    (text("alg"), int(CoseAlg::ES256 as i64)),
+                ])]),
+            ),
+        ];
+        entries.retain(|(existing, _)| *existing != key);
+        entries.push((key, value));
+        assert_eq!(
+            app.handle_make_credential(&encode(&canonical_map(entries))),
+            Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            "{case}"
+        );
+        assert!(log.take().is_empty(), "{case}: no prompt");
+        assert!(stored(&app).is_empty(), "{case}: nothing stored");
+    }
+}

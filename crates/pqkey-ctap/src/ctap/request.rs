@@ -14,13 +14,15 @@ use crate::ctap::constants::*;
 /// (WebAuthn Level 3 §5.8.2).
 const PUBLIC_KEY: &str = "public-key";
 
-/// A required member of a PublicKeyCredentialParameters or
-/// PublicKeyCredentialDescriptor: CTAP2_ERR_INVALID_CBOR if missing ("If the
-/// element is missing required members [...] return an error, for example
-/// CTAP2_ERR_INVALID_CBOR"), and a present member of the wrong type is left
-/// to the caller to reject with CTAP2_ERR_CBOR_UNEXPECTED_TYPE ("If the
-/// values of any known members have the wrong type then return an error, for
-/// example CTAP2_ERR_CBOR_UNEXPECTED_TYPE"), CTAP 2.3 §6.1.2 step 3.
+/// A required member of a PublicKeyCredentialParameters element of
+/// pubKeyCredParams: "If the element is missing required members, including
+/// members that are mandatory only for the specific type, then return an
+/// error, for example CTAP2_ERR_INVALID_CBOR." (CTAP 2.3 §6.1.2 step 3.1.1)
+/// A present member of the wrong type is left to the caller to reject with
+/// CTAP2_ERR_CBOR_UNEXPECTED_TYPE ("If the values of any known members have
+/// the wrong type then return an error, for example
+/// CTAP2_ERR_CBOR_UNEXPECTED_TYPE.", step 3.1.2).  Other structures from the
+/// host fall under §8 instead, see [`cbor::structure_member`].
 fn member<'a>(entries: &'a [(Value, Value)], name: &str) -> Result<&'a Value, u8> {
     cbor::map_get(entries, Value::Text(name.into())).ok_or(CTAP2_ERR_INVALID_CBOR)
 }
@@ -71,9 +73,9 @@ pub(super) fn chosen_algorithm(pub_key_cred_params: &[Value]) -> Result<CoseAlg,
 }
 
 /// The credential IDs of an excludeList or allowList, an array of
-/// PublicKeyCredentialDescriptor.  Every descriptor needs a text "type" and a
-/// byte string "id"; descriptors of a type other than "public-key" cannot
-/// denote a credential of this authenticator and are left out.
+/// PublicKeyCredentialDescriptor.  Descriptors of a type other than
+/// "public-key" cannot denote a credential of this authenticator and are left
+/// out.
 pub(super) fn credential_ids(list: &Value) -> Result<Vec<Vec<u8>>, u8> {
     let Value::Array(descriptors) = list else {
         return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
@@ -83,15 +85,22 @@ pub(super) fn credential_ids(list: &Value) -> Result<Vec<Vec<u8>>, u8> {
         let Value::Map(entries) = descriptor else {
             return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
         };
-        let credential_type = text_member(entries, "type")?;
-        let Value::Bytes(id) = member(entries, "id")? else {
-            return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
-        };
-        if credential_type == PUBLIC_KEY {
-            ids.push(id.clone());
+        if let Some(id) = public_key_credential_id(entries)? {
+            ids.push(id.to_vec());
         }
     }
     Ok(ids)
+}
+
+/// The id of a PublicKeyCredentialDescriptor, `None` if its type is not
+/// "public-key".  Both members are required, a text "type" and a byte string
+/// "id", and a descriptor without them, or with members of other types, is
+/// CTAP2_ERR_CBOR_UNEXPECTED_TYPE (CTAP 2.3 §8, see
+/// [`cbor::structure_member`]).
+pub(super) fn public_key_credential_id(descriptor: &[(Value, Value)]) -> Result<Option<&[u8]>, u8> {
+    let credential_type = cbor::structure_text(descriptor, "type")?;
+    let id = cbor::structure_bytes(descriptor, "id")?;
+    Ok((credential_type == PUBLIC_KEY).then_some(id))
 }
 
 /// The option keys of authenticatorMakeCredential and

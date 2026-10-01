@@ -305,7 +305,9 @@ impl CtapApp<'_> {
     }
 
     fn cm_delete_credential(&mut self, params: &[(Value, Value)]) -> Result<(), u8> {
-        let id = required_bytes(required_map(params, 2)?, "id")?;
+        let Some(id) = request::public_key_credential_id(required_map(params, 2)?)? else {
+            return Err(CTAP2_ERR_NO_CREDENTIALS);
+        };
         let deleted = self
             .store
             .delete(id)
@@ -319,9 +321,11 @@ impl CtapApp<'_> {
     }
 
     fn cm_update_user_information(&mut self, params: &[(Value, Value)]) -> Result<(), u8> {
-        let id = required_bytes(required_map(params, 2)?, "id")?;
+        let Some(id) = request::public_key_credential_id(required_map(params, 2)?)? else {
+            return Err(CTAP2_ERR_NO_CREDENTIALS);
+        };
         let user_map = required_map(params, 3)?;
-        let user_id = required_bytes(user_map, "id")?;
+        let user_id = cbor::structure_bytes(user_map, "id")?;
 
         let Some(mut credential) = self.stored_credential(id)? else {
             return Err(CTAP2_ERR_NO_CREDENTIALS);

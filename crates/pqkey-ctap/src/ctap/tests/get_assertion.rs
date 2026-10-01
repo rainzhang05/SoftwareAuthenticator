@@ -785,3 +785,42 @@ fn get_assertion_allow_list_ignores_other_credential_types() {
     );
     assert!(app.handle_get_assertion(&request("public-key")).is_ok());
 }
+
+/// An allowList descriptor without its "type" or "id", or with either of the
+/// wrong type, is CTAP2_ERR_CBOR_UNEXPECTED_TYPE (CTAP 2.3 §8).
+#[test]
+fn malformed_allow_list_descriptors_are_unexpected_types() {
+    let text = |value: &str| Value::Text(value.into());
+    for (case, descriptor) in [
+        ("no id", vec![(text("type"), text("public-key"))]),
+        ("no type", vec![(text("id"), Value::Bytes(vec![0xC1]))]),
+        (
+            "id not bytes",
+            vec![(text("type"), text("public-key")), (text("id"), text("C1"))],
+        ),
+    ] {
+        let mut app = new_app(TestStore::new(), [0x76; 16]);
+        insert(
+            &mut app,
+            &credential("example.com", &[0x01], &[0xC1], CoseAlg::ES256),
+        );
+        let request = canonical_map(vec![
+            (Value::Integer(Integer::from(1)), text("example.com")),
+            (
+                Value::Integer(Integer::from(2)),
+                Value::Bytes(vec![0x76; 32]),
+            ),
+            (
+                Value::Integer(Integer::from(3)),
+                Value::Array(vec![canonical_map(descriptor)]),
+            ),
+        ]);
+        let mut payload = Vec::new();
+        into_writer(&request, &mut payload).expect("serialize getAssertion");
+        assert_eq!(
+            app.handle_get_assertion(&payload),
+            Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            "{case}"
+        );
+    }
+}

@@ -846,3 +846,99 @@ fn a_wrongly_typed_name_is_refused_and_keeps_the_stored_names() {
         assert_eq!(kept.user_display_name.as_deref(), Some("Alice"), "{key}");
     }
 }
+
+/// The credentialId descriptor and the user entity of deleteCredential and
+/// updateUserInformation follow CTAP 2.3 §8 as well: a missing member is
+/// CTAP2_ERR_CBOR_UNEXPECTED_TYPE, with a token bound to an RP as without one.
+/// A descriptor of another type cannot denote a credential of this
+/// authenticator.
+#[test]
+fn malformed_descriptors_and_users_are_unexpected_types() {
+    let text = |value: &str| Value::Text(value.into());
+    let with_descriptor = |descriptor: Vec<(Value, Value)>, user: bool| {
+        let mut entries = vec![(int(2), canonical_map(descriptor))];
+        if user {
+            entries.push((
+                int(3),
+                canonical_map(vec![(text("id"), Value::Bytes(vec![0x01]))]),
+            ));
+        }
+        canonical_map(entries)
+    };
+    let id = || (text("id"), Value::Bytes(vec![0xA1]));
+    let public_key = || (text("type"), text("public-key"));
+    let cases = [
+        (
+            0x06,
+            with_descriptor(vec![public_key()], false),
+            CTAP2_ERR_CBOR_UNEXPECTED_TYPE,
+        ),
+        (
+            0x06,
+            with_descriptor(vec![id()], false),
+            CTAP2_ERR_CBOR_UNEXPECTED_TYPE,
+        ),
+        (
+            0x06,
+            with_descriptor(vec![id(), (text("type"), int(1))], false),
+            CTAP2_ERR_CBOR_UNEXPECTED_TYPE,
+        ),
+        (
+            0x06,
+            with_descriptor(vec![id(), (text("type"), text("other"))], false),
+            CTAP2_ERR_NO_CREDENTIALS,
+        ),
+        (
+            0x07,
+            with_descriptor(vec![public_key()], true),
+            CTAP2_ERR_CBOR_UNEXPECTED_TYPE,
+        ),
+        (
+            0x07,
+            canonical_map(vec![
+                (int(2), canonical_map(vec![id(), public_key()])),
+                (int(3), canonical_map(vec![(text("name"), text("x"))])),
+            ]),
+            CTAP2_ERR_CBOR_UNEXPECTED_TYPE,
+        ),
+    ];
+    for bound in [None, Some("example.com")] {
+        for (subcommand, params, expected) in &cases {
+            let mut app = new_app(TestStore::new(), [0x3E; 16]);
+            app.pin_state.set_pin(pin_hash(b"1234"));
+            let token = [0x3E; 32];
+            install_pin_uv_auth_token(
+                &mut app,
+                ClassicPinProtocol::V2,
+                token,
+                PIN_PERMISSION_CM,
+                bound,
+            );
+            insert_owned(&mut app, es256_credential("example.com", &[0xA1]));
+            assert_eq!(
+                credential_management(&mut app, &token, *subcommand, Some(params.clone())),
+                Err(*expected),
+                "{subcommand:#04x} {params:?}, bound to {bound:?}"
+            );
+        }
+    }
+    // A wrongly typed rpIDHash, also with a token bound to an RP.
+    let (mut app, _, _) = app_with_cm_token(0x3F);
+    let token = [0x3F; 32];
+    install_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        token,
+        PIN_PERMISSION_CM,
+        Some("example.com"),
+    );
+    assert_eq!(
+        credential_management(
+            &mut app,
+            &token,
+            0x04,
+            Some(canonical_map(vec![(int(1), text("not a hash"))]))
+        ),
+        Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE)
+    );
+}
