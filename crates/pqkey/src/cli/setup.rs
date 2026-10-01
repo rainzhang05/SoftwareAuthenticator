@@ -290,7 +290,10 @@ pub fn setup(state_dir: &Path) -> io::Result<()> {
         running => running,
     };
     let running = match running {
-        Some(Running::Service(_)) if changed => daemon::replug(state_dir)?,
+        // A new unit, or a new binary in place of the one the service runs.
+        Some(Running::Service(pid)) if changed || runs_another_binary(pid, &binary) => {
+            daemon::replug(state_dir)?
+        }
         Some(running) => running,
         None => daemon::plug_in(state_dir, &super::DaemonArgs::default())?,
     };
@@ -307,6 +310,12 @@ pub fn setup(state_dir: &Path) -> io::Result<()> {
         print_problems(&problems)?;
     }
     key::offer_pin(running, interactive)
+}
+
+/// Whether the process `pid` runs another file than `binary`: `cargo
+/// install` replaced it, and `/proc` names the old file as deleted.
+fn runs_another_binary(pid: unistd::Pid, binary: &Path) -> bool {
+    fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|exe| exe != binary)
 }
 
 /// Run `script` as root with `sudo` (or, in tests, another program), which
@@ -478,6 +487,14 @@ mod tests {
         );
         let err = run_as_root("/nonexistent/sudo", script).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+    }
+
+    #[test]
+    fn a_service_running_a_replaced_binary_is_restarted() {
+        let me = unistd::Pid::this();
+        let exe = env::current_exe().unwrap().canonicalize().unwrap();
+        assert!(!runs_another_binary(me, &exe));
+        assert!(runs_another_binary(me, Path::new("/usr/bin/pqkey")));
     }
 
     #[test]
