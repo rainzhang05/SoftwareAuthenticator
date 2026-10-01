@@ -193,6 +193,15 @@ authenticatorGetInfo reports:
 - remainingDiscoverableCredentials, the free slots of the store;
 - attestationFormats `packed`, left out with `--attestation none`.
 
+The algorithm of a new credential is the first one in the relying party's
+`pubKeyCredParams` that pqkey supports (CTAP 2.3 §6.1.2 step 3).
+draft-vitap-ml-dsa-webauthn-00, an Internet-Draft, also asks authenticators to
+prefer ML-DSA when it is offered, to keep their keys under AES-256-GCM in
+secure hardware, and to fall back to RS256; pqkey does none of these. The
+relying party's order is CTAP's rule, a software key has no secure hardware
+(its store uses XChaCha20-Poly1305, see below), and RS256 is not supported.
+Zeroization, which the draft also asks for, is as SECURITY.md describes.
+
 **Credentials.** A discoverable credential (`rk` true) is a record in the
 store with a 33-byte ID, the marker 0x01 and 32 random bytes. The store holds
 at most 1,000 of them, and a new one for the same relying party and user ID
@@ -205,6 +214,11 @@ replaces the key, counts its signatures on the authenticator's global
 signature counter, which every sealed credential shares as on hardware keys,
 and derives its hmac-secret `CredRandom` values from the seed with HKDF,
 never from its key.
+Signature counters only grow, which is all relying parties may assume
+(WebAuthn Level 3 §6.1.1): a discoverable credential's counter also counts
+assertions without user presence, which Firefox and python-fido2 send before
+a sign-in to find the credential, so one sign-in can add 2. The counters
+saturate at 2³²−1 rather than wrap.
 75-byte sealed IDs of the earlier format, which derived them from the key,
 are no longer recognised. Non-discoverable credentials stored before they were sealed
 (IDs starting with 0x00) keep working until a reset and count towards the
@@ -426,6 +440,11 @@ Level 3 §8.2.1 (subject C, O, OU "Authenticator Attestation", CN; the
 `id-fido-gen-ce-aaguid` extension; basic constraints CA false; a random 20-byte
 serial). The record is encrypted under the device key and survives resets. If
 the stored record cannot be read, registrations fall back to self attestation.
+The attestation key is P-256 for every credential, ML-DSA ones included, as a
+hardware key signs all its attestations with one key: a `packed` statement
+names the attestation key's algorithm (ES256) independently of the
+credential's. Certificate attestation is meant for testing relying parties
+(see SECURITY.md on linkability).
 
 ## Command-line interface and state directory
 

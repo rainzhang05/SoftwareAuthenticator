@@ -72,7 +72,8 @@ has set the node's mode), and keeps serving it.
 `/dev/uhid` itself is opened by the daemon. The rules give the `plugdev` group
 access to it. Anyone who can open `/dev/uhid` can create any HID device,
 including a keyboard that types into the active session, so membership in that
-group is a privilege in its own right.
+group is a privilege in its own right. On Ubuntu the user created at
+installation is a member already, so installing the rules grants it to them.
 
 ### The encrypted credential store
 
@@ -220,7 +221,9 @@ daemon logs to `authenticator.log` (mode 0600) in the state directory.
 The PIN retry counter is persisted before a PIN is compared, so interrupting a
 check never gives a free guess. 8 wrong PINs block the PIN until a reset.
 After 3 wrong PINs in a row the daemon refuses PIN checks until it restarts
-(the CTAP "power cycle"). The CLI never opens the store: `pqkey pin` and
+(the CTAP "power cycle"). Restarting it, by hand or by systemd after a crash,
+is that power cycle: it resets only this volatile count, never the persistent
+8-retry limit. The CLI never opens the store: `pqkey pin` and
 `pqkey passkeys` send PINs to the running key over CTAP (PIN/UV auth protocol
 2), so the key's own checks and counters apply to them. The CLI never accepts
 PINs as command-line arguments.

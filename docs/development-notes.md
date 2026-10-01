@@ -299,15 +299,47 @@ comments in
 [`contrib/systemd/user/pqkey.service`](../contrib/systemd/user/pqkey.service)
 cover desktops that start their own bus.
 
-**`insufficient permissions to access /dev/uhid`.** The udev rules are not
-installed, you are not in `plugdev`, or you have not logged in again since
-joining it. `ls -l /dev/uhid` should show group `plugdev` and mode
-`crw-rw----`. If the file is missing, run `sudo modprobe uhid`.
+**`warning: cannot open /dev/uhid`.** The udev rules are not installed, you
+are not in `plugdev`, or you have not logged in again since joining it.
+`pqkey status` says which, and `pqkey setup` fixes it. `ls -l /dev/uhid`
+should show group `plugdev` and mode `crw-rw----`.
 
 **The key does not show up in the browser.** Check `pqkey status`, then
-`fido2-token -L`. If the daemon runs but nothing is listed, the hidraw node is
+`fido2-token -L`. If the key runs but nothing is listed, the hidraw node is
 not accessible to you: check the hidraw rule, and its `DEVPATH` pattern if you
 changed the USB IDs with `--vendor-id` or `--product-id`.
+
+**Firefox or Chromium from the snap store never asks for the key.** A snap
+can only open devices udev tags for it, and snapd tags security keys by USB
+IDs, which a virtual key does not have, so pqkey's udev rules tag its device
+for the Firefox and Chromium snaps. Rules from before that, or a device
+created before the rules were installed, lack the tags: `pqkey status` says
+so, `pqkey setup` updates the rules, and `pqkey stop && pqkey start` creates
+the device again. For another browser snap, add its tag to the rule (see the
+comment there).
+
+**Chromium says "Your device can't be used with this site".** Chromium only
+uses a security key for passkeys (sign-in without a user name) or for a
+request that requires user verification if the key has a PIN. Set one with
+`pqkey pin`.
+
+**Firefox's account chooser shows "Unknown account".** Without user
+verification the key leaves user names out of its answer, as CTAP 2.3 §6.2.2
+requires, so Firefox has nothing to show. With a PIN set, Firefox asks for it
+and shows the names.
+
+**Chromium shows "Something went wrong" after Deny, or after 30 seconds.** The
+key answered that the request was denied: you clicked Deny, or nobody
+approved it within 30 seconds (the user action timeout CTAP 2.3 §5 calls
+reasonable). Firefox reports it at once; Chromium keeps its sheet open until
+you click Cancel.
+
+**`fido2-token` fails with `FIDO_ERR_RX` while a browser waits.** While one
+program's request waits for approval, the key answers every other program,
+also one opening a channel, with ERR_CHANNEL_BUSY (CTAP 2.3 §11.2.5.1: such a
+request "will immediately fail with a busy-error message"). The client "SHOULD
+retry the request after a short delay"; python-fido2 does, libfido2 1.16 gives
+up. Answer or cancel the pending request first.
 
 **The service and the CLI use different state.** If you set `XDG_DATA_HOME` in
 your shell, set it for the systemd user manager too (`environment.d(5)`).

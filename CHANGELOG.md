@@ -152,7 +152,11 @@ also break an existing installation of that commit:
   lockfiles, and formatting and lints of the fuzz crate.
 - Dependabot with automatic merging of semver-compatible Cargo updates once CI,
   Security and E2E (and Fuzz, for the fuzz crate) pass.
-- `LICENSE` (MIT); README, SECURITY.md and docs/.
+- `LICENSE` (MIT); README, SECURITY.md and docs/, with a dated table of what
+  Chromium, Firefox, python-fido2 and libfido2 do with the key, and
+  troubleshooting for snap browsers, Chromium's PIN requirement and error
+  sheet, Firefox's "Unknown account", GNOME's banner queue and libfido2's
+  missing retry on a busy key.
 
 ### Changed
 
