@@ -123,6 +123,15 @@ fn root_script(system: &System, membership: &Membership) -> Option<String> {
          udevadm settle"
             .into(),
     );
+    if !membership.member {
+        // The group applies from the next login on; until then an ACL lets
+        // this user, and so the user service, open /dev/uhid right away.
+        steps.push(format!(
+            "# Until the group applies, at the next login, let the user open /dev/uhid.\n\
+             if command -v setfacl >/dev/null; then setfacl -m u:{user}:rw /dev/uhid; fi",
+            user = shell_quote(&membership.user)
+        ));
+    }
     Some(format!(
         "#!/bin/sh\n# The steps of `pqkey setup` that need root.\nset -eu\n\n{}\n",
         steps.join("\n\n")
@@ -540,6 +549,7 @@ mod tests {
             "groupadd --system plugdev\n",
             "usermod -aG plugdev 'o'\\''brien'\n",
             "udevadm trigger --action=change --subsystem-match=hidraw\n",
+            "then setfacl -m u:'o'\\''brien':rw /dev/uhid; fi\n",
         ] {
             assert!(script.contains(step), "{step}\n{script}");
         }
@@ -597,6 +607,14 @@ mod tests {
             "{script}"
         );
         assert!(script.contains("usermod -aG plugdev"), "{script}");
+        assert!(script.contains("setfacl -m u:"), "{script}");
+        // A member opens it through the group already.
+        let script = root_script(
+            &System::under(dir.path().join("none")),
+            &membership(true, true),
+        )
+        .unwrap();
+        assert!(!script.contains("setfacl"), "{script}");
     }
 
     #[test]
