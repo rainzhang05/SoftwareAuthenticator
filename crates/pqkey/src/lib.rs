@@ -555,9 +555,14 @@ pub(crate) mod tests {
         kernel
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
-        let payload: Vec<u8> = (0..1000u32).map(|byte| byte as u8).collect();
-        for frame in message_frames(0x0102_0304, Command::Ping, &payload) {
-            kernel.write_all(&uhid::output_event(&frame)).unwrap();
+        // Long enough that pacing it out takes tens of milliseconds, so the
+        // second ping arrives while it goes out however slowly the host
+        // thread is scheduled.
+        let payload: Vec<u8> = (0..3000u32).map(|byte| byte as u8).collect();
+        let frames = message_frames(0x0102_0304, Command::Ping, &payload);
+        let echo = frames.len();
+        for frame in &frames {
+            kernel.write_all(&uhid::output_event(frame)).unwrap();
         }
 
         let interrupt = InterruptFlag::new();
@@ -583,7 +588,7 @@ pub(crate) mod tests {
         let host = thread::spawn(move || {
             let mut reports = Vec::new();
             let mut event = vec![0u8; uhid::UHID_EVENT_SIZE];
-            while reports.len() < 18 {
+            while reports.len() < echo + 1 {
                 kernel.read_exact(&mut event).unwrap();
                 if let Some(report) = uhid::input_report(&event) {
                     if reports.is_empty() {
@@ -594,22 +599,24 @@ pub(crate) mod tests {
                     reports.push(report);
                 }
             }
-            reports
+            // Handed back so the device's end stays open until the checks
+            // below are done; closed, it would read as end of file.
+            (reports, kernel)
         });
         assert!(transport.poll().unwrap());
+        let (reports, _kernel) = host.join().unwrap();
         assert_eq!(
             transport.device.try_read_frame().unwrap(),
             None,
             "the ping was left unread"
         );
-        let reports = host.join().unwrap();
-        // 17 packets echo the first ping; the 18th answers the second one.
+        // The echo of the first ping, then the answer to the second.
         assert!(
-            reports[..17]
+            reports[..echo]
                 .iter()
                 .all(|report| report[..4] == 0x0102_0304u32.to_be_bytes())
         );
-        assert_eq!(reports[17][..4], 0x0A0B_0C0Du32.to_be_bytes());
-        assert_eq!(&reports[17][7..13], b"second");
+        assert_eq!(reports[echo][..4], 0x0A0B_0C0Du32.to_be_bytes());
+        assert_eq!(&reports[echo][7..13], b"second");
     }
 }
