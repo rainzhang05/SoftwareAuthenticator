@@ -85,7 +85,7 @@ Tested on 2026-09-30 on Ubuntu 26.04.1 (aarch64, GNOME 50.1):
 | Chromium 153 (snap) | yes | yes | `getPublicKey()` returns null for ML-DSA and `toJSON()` leaves the key out, so relying parties read it from the attestation object; `getPublicKeyAlgorithm()` returns -48, -49 or -50. Passkeys and requests that require user verification need a PIN on the key. |
 | Firefox 154 (snap) | yes | no | Drops algorithms it does not know: an ML-DSA-only request reaches the key with none (`NotAllowedError`), a mixed one as ES256 only. Without a PIN its account chooser shows "Unknown account". |
 | python-fido2 2.2.1 | yes | yes | Used by the end-to-end tests. |
-| libfido2 1.16 | yes | no | No ML-DSA credential type; `fido2-token -I` lists the algorithms as unknown. PINs, credential management and `hmac-secret` work. |
+| libfido2 1.16 | yes | no | No ML-DSA credential type; `fido2-token -I` lists the algorithms as unknown, and `fido2-token -L -k` cannot list ML-DSA passkeys (`FIDO_ERR_RX_INVALID_CBOR`, or `FIDO_ERR_RX` for ML-DSA-65 and -87); `pqkey passkeys` can. PINs, credential management and `hmac-secret` work. |
 
 Chromium 155 and later are said to return ML-DSA public keys from
 `getPublicKey()`; that is not tested yet. Any CTAP 2.1 client can use ES256
