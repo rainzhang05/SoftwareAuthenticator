@@ -131,8 +131,9 @@ also break an existing installation of that commit:
 - The CTAP engine runs on a worker thread, so the transport keeps sending
   keepalives, answering other channels and passing on CTAPHID_CANCEL while a
   request waits for the user.
-- A CTAP reset is accepted at any time when the notification asks for it; with
-  `--presence auto-approve` only within 10 seconds of start-up (CTAP 2.3 §6.6).
+- A CTAP reset is accepted only within 10 seconds of start-up, in every
+  presence mode (CTAP 2.3 §6.6); the hidden `--allow-late-reset` lifts that
+  for test rigs.
 - `pqkey attach` starts the background daemon by running itself again in a new
   session instead of daemonizing, and reports start-up failures.
 - SIGINT and SIGTERM stop the daemon cleanly and remove the virtual device.
