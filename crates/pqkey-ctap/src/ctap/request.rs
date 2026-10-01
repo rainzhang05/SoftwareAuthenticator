@@ -169,12 +169,13 @@ pub(super) fn is_zero_length(pin_uv_auth_param: Option<&Value>) -> bool {
 /// maximum size of 64 bytes" (WebAuthn Level 3 §5.4.3).
 pub(super) const MAX_USER_ID_LENGTH: usize = 64;
 
-/// How many bytes of user.name and user.displayName are kept: "When storing a
-/// name member's value, the value MAY be truncated as described in § 6.4.1
-/// String Truncation using a size limit greater than or equal to 64 bytes."
-/// (WebAuthn Level 3 §5.4.1, and likewise for displayName in §5.4.3)  Bounding them
-/// bounds every response that returns them.
-pub(super) const MAX_USER_STRING_LENGTH: usize = 64;
+/// How many bytes of rp.name, user.name and user.displayName are kept: "When
+/// storing a name member's value, the value MAY be truncated as described in
+/// § 6.4.1 String Truncation using a size limit greater than or equal to 64
+/// bytes." (WebAuthn Level 3 §5.4.1, PublicKeyCredentialEntity, and likewise
+/// for displayName in §5.4.3)  Bounding them bounds every response and prompt
+/// that shows them.
+pub(super) const MAX_NAME_LENGTH: usize = 64;
 
 /// `text` cut to at most `max` bytes at a character boundary.
 pub(super) fn truncate_utf8(text: &str, max: usize) -> String {

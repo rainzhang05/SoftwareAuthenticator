@@ -41,6 +41,7 @@ pub(super) static NEVER_INTERRUPTED: InterruptFlag = InterruptFlag::new();
 pub(super) struct SeenRequest {
     pub(super) operation: PresenceOperation,
     pub(super) rp_id: Option<String>,
+    pub(super) rp_name: Option<String>,
     pub(super) user_name: Option<String>,
     pub(super) user_display_name: Option<String>,
     pub(super) timeout: Duration,
@@ -53,6 +54,7 @@ impl SeenRequest {
         Self {
             operation,
             rp_id: rp_id.map(str::to_owned),
+            rp_name: None,
             user_name: None,
             user_display_name: None,
             timeout: crate::ctap::presence::DEFAULT_PRESENCE_TIMEOUT,
@@ -105,6 +107,7 @@ impl UserPresence for ScriptedPresence {
         self.log.push(PresenceEvent::Asked(SeenRequest {
             operation: request.operation,
             rp_id: request.rp_id.map(str::to_owned),
+            rp_name: request.rp_name.map(str::to_owned),
             user_name: request.user_name.map(str::to_owned),
             user_display_name: request.user_display_name.map(str::to_owned),
             timeout: request.timeout,

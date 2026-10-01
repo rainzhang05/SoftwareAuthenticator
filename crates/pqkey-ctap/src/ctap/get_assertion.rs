@@ -589,12 +589,8 @@ fn assertion_response(
             Value::Bytes(credential.user_id.clone()),
         )];
         if user_verified {
-            let bounded = |text: &str| {
-                Value::Text(request::truncate_utf8(
-                    text,
-                    request::MAX_USER_STRING_LENGTH,
-                ))
-            };
+            let bounded =
+                |text: &str| Value::Text(request::truncate_utf8(text, request::MAX_NAME_LENGTH));
             if let Some(name) = &credential.user_name {
                 user_entries.push((Value::Text("name".into()), bounded(name)));
             }

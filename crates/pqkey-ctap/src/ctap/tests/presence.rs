@@ -28,7 +28,13 @@ use crate::ctap::constants::*;
 const RP_ID: &str = "example.com";
 
 fn make_credential_payload() -> Vec<u8> {
-    let rp = canonical_map(vec![(Value::Text("id".into()), Value::Text(RP_ID.into()))]);
+    let rp = canonical_map(vec![
+        (Value::Text("id".into()), Value::Text(RP_ID.into())),
+        (
+            Value::Text("name".into()),
+            Value::Text("Example Corp".into()),
+        ),
+    ]);
     let user = canonical_map(vec![
         (Value::Text("id".into()), Value::Bytes(vec![0x01])),
         (Value::Text("name".into()), Value::Text("alice".into())),
@@ -104,6 +110,7 @@ fn asked(request: SeenRequest) -> Vec<PresenceEvent> {
 
 fn register_request() -> SeenRequest {
     SeenRequest {
+        rp_name: Some("Example Corp".into()),
         user_name: Some("alice".into()),
         user_display_name: Some("Alice".into()),
         ..SeenRequest::new(PresenceOperation::Register, Some(RP_ID))
@@ -440,5 +447,38 @@ fn the_interrupt_flag_only_cancels_a_request_in_progress() {
     assert!(
         !flag.is_interrupted(),
         "the next request starts uncancelled"
+    );
+}
+
+/// "The prompt SHOULD display rpEntity.id, rpEntity.name, userEntity.name and
+/// userEntity.displayName, if possible." (WebAuthn Level 3 §6.3.2 step 6)
+/// rp.name reaches the prompt cut to 64 bytes at a character boundary, like
+/// the user names.
+#[test]
+fn make_credential_shows_the_relying_party_name() {
+    let name = format!("{}\u{e9}xtra", "n".repeat(63));
+    let mut request: Value = from_reader(&make_credential_payload()[..]).expect("decode");
+    let Value::Map(entries) = &mut request else {
+        panic!("a map");
+    };
+    for (key, value) in entries.iter_mut() {
+        if *key == Value::Integer(Integer::from(2)) {
+            *value = canonical_map(vec![
+                (Value::Text("id".into()), Value::Text(RP_ID.into())),
+                (Value::Text("name".into()), Value::Text(name.clone())),
+            ]);
+        }
+    }
+    let (mut app, log) = scripted_app([0x25; 16], [PresenceOutcome::Approved]);
+    let mut payload = Vec::new();
+    into_writer(&request, &mut payload).expect("encode");
+    app.handle_make_credential(&payload)
+        .expect("makeCredential succeeds");
+    assert_eq!(
+        log.take(),
+        asked(SeenRequest {
+            rp_name: Some(name[..63].to_owned()),
+            ..register_request()
+        })
     );
 }

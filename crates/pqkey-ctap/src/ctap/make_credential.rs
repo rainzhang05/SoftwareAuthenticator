@@ -115,7 +115,8 @@ impl CtapApp<'_> {
         // PublicKeyCredentialUserEntity: a missing or wrongly typed member is
         // CTAP2_ERR_CBOR_UNEXPECTED_TYPE (CTAP 2.3 §8).
         let rp_id = cbor::structure_text(rp, "id")?.to_owned();
-        cbor::optional_structure_text(rp, "name")?;
+        let rp_name = cbor::optional_structure_text(rp, "name")?
+            .map(|name| request::truncate_utf8(name, request::MAX_NAME_LENGTH));
 
         let user = match parameter(3) {
             Some(Value::Map(user)) => user,
@@ -128,9 +129,8 @@ impl CtapApp<'_> {
         }
         let user_id = user_id.to_vec();
         let user_string = |name: &str| {
-            cbor::optional_structure_text(user, name).map(|text| {
-                text.map(|text| request::truncate_utf8(text, request::MAX_USER_STRING_LENGTH))
-            })
+            cbor::optional_structure_text(user, name)
+                .map(|text| text.map(|text| request::truncate_utf8(text, request::MAX_NAME_LENGTH)))
         };
         let user_name = user_string("name")?;
         let user_display_name = user_string("displayName")?;
@@ -258,6 +258,7 @@ impl CtapApp<'_> {
         let timeout = self.presence_timeout;
         let register_request = |timeout| PresenceRequest {
             rp_id: Some(&rp_id),
+            rp_name: rp_name.as_deref(),
             user_name: user_name.as_deref(),
             user_display_name: user_display_name.as_deref(),
             ..PresenceRequest::new(PresenceOperation::Register, timeout)

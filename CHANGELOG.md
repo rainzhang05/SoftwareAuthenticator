@@ -190,6 +190,9 @@ Upgrading from `867a591` or earlier is not an in-place update:
 - Credential management cuts a long non-ASCII RP ID at a character boundary,
   within 32 bytes. It used to return up to 34 bytes with U+FFFD in place of
   the split character.
+- The relying party's `rp.name` reaches the registration prompt, cut to 64
+  bytes, as WebAuthn Level 3 §6.3.2 step 6 recommends
+  (`PresenceRequest::rp_name`).
 - The notification prompt gives up on a session bus that accepts the
   connection but never answers after 2 seconds, as it does on a D-Bus call,
   instead of holding the request and the daemon's shutdown forever.

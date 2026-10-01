@@ -220,8 +220,7 @@ impl CtapApp<'_> {
             Value::Text("id".into()),
             Value::Bytes(credential.user_id.clone()),
         )];
-        let bounded =
-            |text: &str| Value::Text(truncate_utf8(text, request::MAX_USER_STRING_LENGTH));
+        let bounded = |text: &str| Value::Text(truncate_utf8(text, request::MAX_NAME_LENGTH));
         if let Some(name) = &credential.user_name {
             user_entries.push((Value::Text("name".into()), bounded(name)));
         }
@@ -354,9 +353,7 @@ impl CtapApp<'_> {
         let non_empty_text = |key: &str| match cbor::map_get(user_map, Value::Text(key.into())) {
             None => Ok(None),
             Some(Value::Text(text)) if text.is_empty() => Ok(None),
-            Some(Value::Text(text)) => {
-                Ok(Some(truncate_utf8(text, request::MAX_USER_STRING_LENGTH)))
-            }
+            Some(Value::Text(text)) => Ok(Some(truncate_utf8(text, request::MAX_NAME_LENGTH))),
             Some(_) => Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
         };
         let user_name = non_empty_text("name")?;

@@ -54,6 +54,13 @@ pub struct PresenceRequest<'a> {
     /// The relying party the operation is for, if there is one, so a prompt
     /// can say "Sign in to example.com".
     pub rp_id: Option<&'a str>,
+    /// `rp.name` of a registration, the relying party's own name for itself:
+    /// "The prompt SHOULD display rpEntity.id, rpEntity.name, userEntity.name
+    /// and userEntity.displayName, if possible." (WebAuthn Level 3 §6.3.2
+    /// step 6)  Cut to 64 bytes at a character boundary.  Any website can
+    /// claim any name, so a prompt must show it next to the relying party ID,
+    /// never instead of it, and treat it as untrusted text.
+    pub rp_name: Option<&'a str>,
     /// `user.name` of the account: when registering, of the account the new
     /// credential is for; when signing in, of the credential that will be
     /// used if it is the only discoverable credential the request applies to.
@@ -82,6 +89,7 @@ impl PresenceRequest<'_> {
         Self {
             operation,
             rp_id: None,
+            rp_name: None,
             user_name: None,
             user_display_name: None,
             timeout,
