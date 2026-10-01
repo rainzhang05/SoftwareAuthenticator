@@ -20,6 +20,7 @@ STATUS_PROCESSING = 1
 STATUS_UPNEEDED = 2
 ERR_CHANNEL_BUSY = 0x06
 CTAP2_ERR_KEEPALIVE_CANCEL = 0x2D
+CTAP2_ERR_NOT_ALLOWED = 0x30
 
 # CTAP 2.3 §11.2.9.1.7: while processing, the authenticator sends a keepalive
 # "at least every 100ms".
@@ -111,3 +112,24 @@ def test_cancel_during_the_prompt_gets_only_a_keepalive_cancel_response(hid):
             break
 
     _cancel_and_expect_only_keepalive_cancel(hid, cid)
+
+
+def test_a_late_reset_is_refused_without_asking_the_user(hid):
+    """CTAP 2.3 §6.6: "In case of authenticators with no display, request MUST
+    have come to the authenticator within 10 seconds of powering up of the
+    authenticator." The key has run for longer than that and was not started
+    with --allow-late-reset, so authenticatorReset is answered with
+    CTAP2_ERR_NOT_ALLOWED at once, with no prompt (no UPNEEDED keepalive) and
+    nothing reset."""
+    cid = hid.allocate_channel()
+    hid.send(cid, ctaphid.CBOR, bytes([0x07]))
+    deadline = time.monotonic() + 2
+    while True:
+        assert time.monotonic() < deadline, "no answer to authenticatorReset"
+        _, channel, cmd, payload = _packet(hid)
+        assert channel == cid, f"packet on channel {channel:#010x}"
+        if cmd == ctaphid.KEEPALIVE:
+            assert payload[0] != STATUS_UPNEEDED, "the late reset asked the user"
+            continue
+        assert (cmd, payload[:1]) == (ctaphid.CBOR, bytes([CTAP2_ERR_NOT_ALLOWED]))
+        break

@@ -226,7 +226,6 @@ pub struct DeviceArgs {
     /// Accept authenticatorReset at any time instead of only within 10 seconds
     /// of start-up. Does not conform to CTAP 2.3 section 6.6; for test rigs that
     /// reset a long-running authenticator. User presence is still required.
-    /// With --presence notify a reset is accepted at any time anyway.
     #[clap(long, hide = true)]
     pub allow_late_reset: bool,
     /// Ignored; accepted so that existing command lines keep working. uhid

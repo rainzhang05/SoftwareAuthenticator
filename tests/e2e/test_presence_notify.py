@@ -43,9 +43,9 @@ def notify_device(notify_hidraw_path):
 def notify_ctap(notify_device, notifications) -> Ctap2:
     """A CTAP2 session on the notify key, reset with the user's approval.
 
-    The key has been running for longer than the 10 seconds after power-up
-    CTAP 2.3 §6.6 allows a key without a display to reset in, and it was not
-    started with --allow-late-reset: the notification counts as a display.
+    The key has been running for longer than the 10 seconds after power-up in
+    which CTAP 2.3 §6.6 lets a key without a display reset, which pqkey is in
+    every presence mode, so it was started with --allow-late-reset.
     """
     notifications.answer = "approve"
     session = Ctap2(notify_device)

@@ -239,11 +239,10 @@ bind the token; a user presence test clears every permission but `lbw`, which
 pqkey never grants.
 
 **Reset.** authenticatorReset asks for user presence and calls
-`CredentialStore::clear`. Without a display CTAP only accepts it within 10
-seconds of power-up (§6.6). The daemon lifts that window with
-`--presence notify`, whose notification states what a reset deletes, and
-applies it with `--presence auto-approve` and `unanswered`, which show
-nothing. The hidden `--allow-late-reset` lifts it for test rigs.
+`CredentialStore::clear`. pqkey has no display, whatever its presence prompt
+shows, so CTAP only accepts a reset within 10 seconds of power-up (§6.6), the
+start of the daemon. The hidden `--allow-late-reset` lifts that window for
+test rigs.
 
 **Attestation formats.** A request whose attestationFormatsPreference is only
 "none" gets "none". A statement that would make the response longer than a

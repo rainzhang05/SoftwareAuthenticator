@@ -189,12 +189,13 @@ Its limits:
 - **`--presence auto-approve`** approves everything without asking. It exists
   for tests and CI. Never use it on a key with credentials that matter.
 
-Without a display, CTAP 2.3 §6.6 only accepts authenticatorReset within 10
-seconds of power-up. With `--presence notify` the notification serves as the
-display (it states that a reset deletes all passkeys and needs Approve), so
-pqkey accepts a reset at any time; with `auto-approve` the 10-second window
-applies, unless the hidden `--allow-late-reset` option, meant for test rigs,
-lifts it. `pqkey reset` on the command line shows no notification: it asks
+pqkey is an authenticator without a display in every presence mode: the
+notification belongs to the platform, which any program on the session bus can
+replace or close. So, as CTAP 2.3 §6.6 requires of such an authenticator, it
+only accepts authenticatorReset within 10 seconds of power-up, the start of the
+daemon, as a hardware key only accepts it right after it is plugged in; a
+browser's reset works right after the key is restarted. The hidden
+`--allow-late-reset` option, meant for test rigs, lifts the window. `pqkey reset` on the command line shows no notification: it asks
 for confirmation in the terminal (skipped by `--yes`) and needs the daemon
 stopped.
 

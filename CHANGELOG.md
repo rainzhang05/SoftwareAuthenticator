@@ -68,6 +68,11 @@ also break an existing installation of that commit:
   Non-discoverable credentials registered with an earlier commit stop working
   and must be registered again; their `hmac-secret` outputs are gone with
   them.
+- **authenticatorReset only within 10 seconds of start-up, also with
+  `--presence notify`.** The notification is not a display of the
+  authenticator, so CTAP 2.3 §6.6 applies as it does to a hardware key
+  without one: reset right after starting the key, as a hardware key is reset
+  right after plugging it in.
 
 ### Added
 

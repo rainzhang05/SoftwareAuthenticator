@@ -175,7 +175,8 @@ To run them on a Linux machine:
    export DBUS_SESSION_BUS_ADDRESS="unix:path=$E2E_WORK/session-bus"
    dbus-daemon --config-file=tests/e2e/session-bus.conf --address="$DBUS_SESSION_BUS_ADDRESS" \
      --fork --print-pid > "$E2E_WORK/session-bus.pid"
-   export E2E_NOTIFY_HIDRAW=$(tests/e2e/daemon.sh start notify 0003 --presence notify --presence-timeout 3)
+   export E2E_NOTIFY_HIDRAW=$(tests/e2e/daemon.sh start notify 0003 --presence notify --presence-timeout 3 \
+     --allow-late-reset)
    export E2E_UNANSWERED_HIDRAW=$(tests/e2e/daemon.sh start unanswered 0004 --presence unanswered)
    ```
 

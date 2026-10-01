@@ -354,17 +354,11 @@ pub fn serve_ctap_with_presence(
     if let Some(timeout) = data.presence_timeout {
         ctap.set_presence_timeout(timeout);
     }
-    let window = reset_window(data.presence, data.allow_late_reset);
+    let window = reset_window(data.allow_late_reset);
     if window.is_none() {
-        if data.presence == PresenceMode::Notify {
-            log::info!(
-                "accepting authenticatorReset at any time: the notification says what a reset deletes and needs Approve"
-            );
-        } else {
-            log::warn!(
-                "accepting authenticatorReset at any time (--allow-late-reset); this does not conform to CTAP"
-            );
-        }
+        log::warn!(
+            "accepting authenticatorReset at any time (--allow-late-reset); this does not conform to CTAP 2.3 §6.6"
+        );
     }
     ctap.set_reset_window(window);
     let app_waiting = waiting.clone();
@@ -376,19 +370,15 @@ pub fn serve_ctap_with_presence(
 ///
 /// CTAP 2.3 §6.6: "In case of authenticators with no display, request MUST
 /// have come to the authenticator within 10 seconds of powering up of the
-/// authenticator." Without a display, a touch is all the user gives, and it
-/// does not say what it approves, so a reset is only accepted right after
-/// the user plugged the key in. With `--presence notify` the notification
-/// is the display: it states "Reset the security key? This deletes all
-/// passkeys." and the reset needs its Approve button, so the window does not
-/// apply. `auto-approve` and `unanswered` show nothing and keep it, unless
-/// `allow_late_reset` lifts it for a test rig.
-pub fn reset_window(presence: PresenceMode, allow_late_reset: bool) -> Option<Duration> {
-    match presence {
-        PresenceMode::Notify => None,
-        PresenceMode::AutoApprove | PresenceMode::Unanswered if allow_late_reset => None,
-        PresenceMode::AutoApprove | PresenceMode::Unanswered => Some(RESET_WINDOW_AFTER_POWER_UP),
-    }
+/// authenticator."  pqkey has no display in any presence mode: a desktop
+/// notification belongs to the platform, which any program on the session
+/// bus can replace or close, and the engine follows CTAP's steps for an
+/// authenticator without one throughout (see `CtapApp`).  So a reset is
+/// only accepted right after the key is started, as a hardware key only
+/// accepts it right after it is plugged in; `pqkey reset` restarts the key
+/// first.  Only `allow_late_reset`, for test rigs, lifts the window.
+pub fn reset_window(allow_late_reset: bool) -> Option<Duration> {
+    (!allow_late_reset).then_some(RESET_WINDOW_AFTER_POWER_UP)
 }
 
 pub fn descriptor(
@@ -648,15 +638,13 @@ mod tests {
         }
     }
 
+    /// The notification is no display of the authenticator, so a reset is
+    /// only accepted within 10 seconds of start-up whatever presence shows,
+    /// unless a test rig asks otherwise.
     #[test]
-    fn only_notifications_lift_the_reset_window_unless_a_test_rig_asks() {
-        let window = Some(RESET_WINDOW_AFTER_POWER_UP);
-        assert_eq!(reset_window(PresenceMode::Notify, false), None);
-        assert_eq!(reset_window(PresenceMode::Notify, true), None);
-        assert_eq!(reset_window(PresenceMode::AutoApprove, false), window);
-        assert_eq!(reset_window(PresenceMode::AutoApprove, true), None);
-        assert_eq!(reset_window(PresenceMode::Unanswered, false), window);
-        assert_eq!(reset_window(PresenceMode::Unanswered, true), None);
+    fn only_a_test_rig_lifts_the_reset_window() {
+        assert_eq!(reset_window(false), Some(RESET_WINDOW_AFTER_POWER_UP));
+        assert_eq!(reset_window(true), None);
     }
 
     /// The daemon loop must build the CTAP app, answer a request that goes
