@@ -21,6 +21,9 @@ clap-num = "1.0"
 log.workspace = true
 env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
 pqkey-ctap = { path = "../pqkey-ctap" }
+# CTAP2 requests and responses of the command line's client for the running
+# key.
+ciborium.workspace = true
 # CTAPHID channel allocation: the operating system RNG behind rand_core's
 # `CryptoRng`, so tests can inject a deterministic one.
 rand_core.workspace = true
@@ -41,7 +44,6 @@ async-io = "2"
 
 [dev-dependencies]
 # CBOR requests and responses in the CTAP-level tests.
-ciborium.workspace = true
 # Reads the attestation certificate back independently of rcgen, which wrote it.
 x509-parser = "0.18"
 # Verifies the ML-DSA signatures of the full-stack test.

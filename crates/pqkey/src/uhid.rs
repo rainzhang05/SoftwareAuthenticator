@@ -53,6 +53,9 @@ pub struct HidDeviceDescriptor {
     pub product_id: u32,
     pub version: u32,
     pub country: u32,
+    /// The device's unique identifier (`HID_UNIQ` in sysfs, a USB device's
+    /// serial number), which lets `pqkey` find this daemon's hidraw node.
+    pub uniq: String,
 }
 
 impl Default for HidDeviceDescriptor {
@@ -63,6 +66,7 @@ impl Default for HidDeviceDescriptor {
             product_id: DEFAULT_PRODUCT_ID,
             version: 0x0001,
             country: 0,
+            uniq: String::new(),
         }
     }
 }
@@ -347,6 +351,7 @@ fn descriptor_to_create2(descriptor: &HidDeviceDescriptor) -> io::Result<raw::uh
 
     let mut req = raw::uhid_create2_req::default();
     copy_str_to_array(&descriptor.name, &mut req.name);
+    copy_str_to_array(&descriptor.uniq, &mut req.uniq);
     req.rd_size = CTAPHID_REPORT_DESCRIPTOR.len() as u16;
 
     log::debug!(

@@ -419,7 +419,14 @@ pub fn descriptor(
         product_id,
         version,
         country: 0,
+        uniq: device_uniq(std::process::id()),
     }
+}
+
+/// The HID unique identifier the daemon with process ID `pid` gives its
+/// device, by which `pqkey` finds its hidraw node: `pqkey-<pid>`.
+pub fn device_uniq(pid: u32) -> String {
+    format!("pqkey-{pid}")
 }
 
 pub fn parse_aaguid(input: &str) -> Result<[u8; 16], String> {

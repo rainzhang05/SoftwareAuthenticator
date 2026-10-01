@@ -1120,6 +1120,7 @@ name = "pqkey"
 version = "0.1.0"
 dependencies = [
  "async-io",
+ "ciborium",
  "clap",
  "clap-num",
  "env_logger",
