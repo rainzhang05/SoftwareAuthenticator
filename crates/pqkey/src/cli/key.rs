@@ -28,7 +28,7 @@ use super::output::{self, errln, outln};
 use crate::client::ctap2::{Authenticator, ClientError, Passkey, PinRetries, Token};
 use crate::client::ctaphid::{ReportLink, STATUS_UPNEEDED};
 use crate::client::hidraw::{self, Hidraw};
-use crate::pin_input::{Pin, PinReader, PinSource, validate_pin};
+use crate::pin_input::{MIN_PIN_CODE_POINTS, Pin, PinReader, PinSource, validate_pin};
 use crate::presence::dbus::SessionBus;
 use crate::presence::notification::{ConnectError, Keep, NotificationServer, ServerInfo, sanitise};
 use crate::service;
@@ -285,24 +285,56 @@ fn service_problems(state_dir: &Path, running: Option<Running>) -> Vec<Problem> 
     }
 }
 
-/// After `pqkey setup`: offer to set a PIN on the key `running` if it has
-/// none, or say how, as Chromium uses passkeys only on a key with a PIN.
-pub fn offer_pin(running: Running, interactive: bool) -> io::Result<()> {
+/// How often `pqkey setup` asks for a new PIN that was mistyped.
+const PIN_ATTEMPTS: usize = 3;
+
+/// The last step of `pqkey setup`: a PIN on the key `running`, which
+/// browsers ask for before they use passkeys. Asked for on a terminal, and
+/// again if it was mistyped.
+pub fn ensure_pin(running: Running, interactive: bool) -> io::Result<()> {
     let Ok((_, mut key)) = connect_to(running, DEVICE_WAIT) else {
-        return Ok(());
+        return output::problem(
+            "the key could not be reached to set its PIN",
+            "run `pqkey pin`",
+        );
     };
-    if key.info().map_err(client_error)?.pin_set != Some(false) {
-        return Ok(());
+    match key.info().map_err(client_error)?.pin_set {
+        Some(true) => return output::done("PIN is set"),
+        Some(false) => {}
+        None => return Ok(()),
     }
-    let why = "The key has no PIN yet, and Chromium asks for one before it uses passkeys";
     if !interactive {
-        return outln!("{why}: `pqkey pin` sets one.");
+        return output::problem(
+            "the key has no PIN, which browsers ask for before they use passkeys",
+            "run `pqkey pin`",
+        );
     }
-    if !ask(&format!("{why}. Set one now?"), true)? {
-        return outln!("`pqkey pin` sets one later.");
+    outln!()?;
+    outln!(
+        "Choose a PIN for the key, at least {MIN_PIN_CODE_POINTS} characters. Browsers ask for it \
+         before they use passkeys."
+    )?;
+    set_first_pin(&mut key, &mut PinReader::from_stdin())?;
+    output::done("PIN set")
+}
+
+/// Set a PIN on `key`, which has none, asking `pins` again for one that was
+/// mistyped: too short, or not the same twice.
+fn set_first_pin<L: ReportLink>(
+    key: &mut Authenticator<L>,
+    pins: &mut dyn PinSource,
+) -> io::Result<()> {
+    let mut attempt = 1;
+    loop {
+        match set_or_change_pin(key, pins) {
+            Ok(_) => return Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::InvalidInput && attempt < PIN_ATTEMPTS => {
+                errln!("{err}; try again.");
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
     }
-    set_or_change_pin(&mut key, &mut PinReader::from_stdin())?;
-    outln!("PIN set.")
 }
 
 fn pin_state(retries: PinRetries) -> String {
@@ -755,6 +787,20 @@ mod tests {
             PinChange::Changed
         );
         assert!(key.management_token(b"5678").is_ok());
+    }
+
+    #[test]
+    fn setup_asks_again_for_a_mistyped_pin() {
+        let dir = TempDir::new("cli-first-pin");
+        let (_daemon, mut key) = start(&dir);
+        set_first_pin(&mut key, &mut Script::of(&["12", "1234"])).unwrap();
+        assert!(key.management_token(b"1234").is_ok());
+
+        let dir = TempDir::new("cli-first-pin-gives-up");
+        let (_daemon, mut key) = start(&dir);
+        let err = set_first_pin(&mut key, &mut Script::of(&["1", "2", "3", "4567"])).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        assert_eq!(key.info().unwrap().pin_set, Some(false));
     }
 
     #[test]

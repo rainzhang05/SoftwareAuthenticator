@@ -311,7 +311,7 @@ pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
         outln!("Still to fix:")?;
         output::problems(&problems)?;
     }
-    key::offer_pin(running, interactive)
+    key::ensure_pin(running, interactive)
 }
 
 /// Whether the process `pid` runs another file than `binary`: `cargo
