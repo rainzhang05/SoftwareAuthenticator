@@ -215,13 +215,69 @@ pub(super) fn raw_map_value(bytes: &[u8], key: u64) -> Result<Option<&[u8]>, ()>
 /// §8)  So `payload` must be exactly one data item in that form (see
 /// [`canonical_item_end`]) and a map, or the request fails with
 /// CTAP2_ERR_INVALID_CBOR.
+///
+/// "If map keys are present that an implementation does not understand, they
+/// MUST be ignored." (§8)  Their values may be any well-formed item, simple
+/// values that CBOR leaves unassigned among them, which ciborium cannot
+/// represent as a [`Value`].  So those are decoded as `undefined`, which
+/// ciborium turns into [`Value::Null`]: ignored under an unknown key, and of
+/// the wrong type, CTAP2_ERR_CBOR_UNEXPECTED_TYPE, under a known one.
+/// [`raw_map_value`] still sees the payload exactly as received.
 pub(super) fn request_parameters(payload: &[u8]) -> Result<Vec<(Value, Value)>, u8> {
     if canonical_item_end(payload, 0, 0) != Some(payload.len()) {
         return Err(CTAP2_ERR_INVALID_CBOR);
     }
-    match ciborium::de::from_reader(payload) {
+    let mut decodable = Vec::with_capacity(payload.len());
+    if copy_with_unassigned_simple_values_undefined(payload, 0, &mut decodable)
+        != Some(payload.len())
+    {
+        return Err(CTAP2_ERR_INVALID_CBOR);
+    }
+    match ciborium::de::from_reader(&decodable[..]) {
         Ok(Value::Map(entries)) => Ok(entries),
         _ => Err(CTAP2_ERR_INVALID_CBOR),
+    }
+}
+
+/// The simple value `undefined` (RFC 8949 §3.3).
+const UNDEFINED: u8 = 0xF7;
+
+/// Append the data item at `bytes[pos]` to `out`, with every unassigned
+/// simple value replaced by `undefined`, and return the position after it.
+/// RFC 8949 §3.3 leaves simple values 0 to 19 and 32 to 255 "(unassigned)";
+/// 20 to 23 are false, true, null and undefined, and additional information
+/// 25 to 27 are floats.  `bytes` has passed [`canonical_item_end`], so its
+/// nesting is bounded and it carries no tags.
+fn copy_with_unassigned_simple_values_undefined(
+    bytes: &[u8],
+    pos: usize,
+    out: &mut Vec<u8>,
+) -> Option<usize> {
+    let (major, argument, header_end) = header(bytes, pos)?;
+    let info = bytes[pos] & 0x1f;
+    match major {
+        7 if info < 20 || info == 24 => {
+            out.push(UNDEFINED);
+            Some(header_end)
+        }
+        4 | 5 => {
+            out.extend_from_slice(&bytes[pos..header_end]);
+            let items = if major == 4 {
+                argument
+            } else {
+                argument.checked_mul(2)?
+            };
+            let mut end = header_end;
+            for _ in 0..items {
+                end = copy_with_unassigned_simple_values_undefined(bytes, end, out)?;
+            }
+            Some(end)
+        }
+        _ => {
+            let end = item_end(bytes, pos, 0)?;
+            out.extend_from_slice(&bytes[pos..end]);
+            Some(end)
+        }
     }
 }
 

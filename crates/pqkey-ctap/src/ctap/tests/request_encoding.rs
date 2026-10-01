@@ -68,6 +68,48 @@ fn canonical_unknown_keys_and_floats_are_accepted() {
     assert_eq!(call(&mut app, &get_pin_retries(7, &extra))[0], CTAP2_OK);
 }
 
+/// Unknown keys are ignored whatever their value, simple values that CBOR
+/// leaves unassigned included (RFC 8949 §3.3: 0 to 19 and 32 to 255 are
+/// "(unassigned)", and are well formed): "If map keys are present that an
+/// implementation does not understand, they MUST be ignored." (CTAP 2.3 §8)
+/// Under a key the authenticator knows, such a value has the wrong type,
+/// CTAP2_ERR_CBOR_UNEXPECTED_TYPE.
+#[test]
+fn unassigned_simple_values_under_unknown_keys_are_ignored() {
+    for value in [
+        &[0xF6][..],
+        &[0xF7],
+        &[0xF0],
+        &[0xE0],
+        &[0xF3],
+        &[0xF8, 0x20],
+        &[0xF8, 0xFF],
+        // In a nested map and in an array.
+        &[0xA1, 0x01, 0xF0],
+        &[0x82, 0xF8, 0x20, 0xF1],
+    ] {
+        let mut extra = vec![0x03];
+        extra.extend_from_slice(value);
+        let mut app = test_app([0x8E; 16]);
+        assert_eq!(
+            call(&mut app, &get_pin_retries(3, &extra))[0],
+            CTAP2_OK,
+            "{value:02x?}"
+        );
+    }
+    // getPinRetries with subCommand (0x02) an unassigned simple value.
+    for value in [&[0xF0][..], &[0xF8, 0x20]] {
+        let mut request = vec![CTAP_CMD_CLIENT_PIN, 0xA2, 0x01, 0x02, 0x02];
+        request.extend_from_slice(value);
+        let mut app = test_app([0x8E; 16]);
+        assert_eq!(
+            call(&mut app, &request),
+            [CTAP2_ERR_CBOR_UNEXPECTED_TYPE],
+            "{value:02x?}"
+        );
+    }
+}
+
 #[test]
 fn bytes_after_the_parameters_are_rejected() {
     // {2: 1} followed by 0x00, and by a second map.

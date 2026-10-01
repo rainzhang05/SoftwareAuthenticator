@@ -302,6 +302,39 @@ fn ctap_request(dir: &Path) {
     non_canonical.extend_from_slice(&[0x03, 0x02, 0x04, 0x58, 0x20]);
     non_canonical.extend_from_slice(&[0x77; 32]);
     seeds.push(non_canonical);
+    // getPinRetries with unassigned simple values under an unknown key, at the
+    // top and nested, and as the value of a known key.
+    for raw in [
+        &[0x06, 0xA3, 0x01, 0x02, 0x02, 0x01, 0x03, 0xF0][..],
+        &[
+            0x06, 0xA3, 0x01, 0x02, 0x02, 0x01, 0x03, 0x82, 0xF8, 0x20, 0xA1, 0x01, 0xE0,
+        ],
+        &[0x06, 0xA2, 0x01, 0x02, 0x02, 0xF8, 0xFF],
+    ] {
+        seeds.push(raw.to_vec());
+    }
+    // A clientDataHash of another length than 32 bytes, with and without the
+    // zero length pinUvAuthParam probe.
+    seeds.push(command(
+        0x01,
+        &map(vec![
+            (int(1), bytes(&hash[..31])),
+            (int(2), rp.clone()),
+            (int(3), user.clone()),
+            (int(4), params(-7)),
+            (int(8), bytes(&[])),
+        ]),
+    ));
+    seeds.push(command(
+        0x02,
+        &map(vec![
+            (int(1), text("example.com")),
+            (int(2), bytes(&[0x68; 33])),
+        ]),
+    ));
+    // getCredsMetadata with subCommandParams, which its pinUvAuthParam does
+    // not cover.
+    seeds.push(credential_management(1, Some(map(vec![]))));
     write_all(dir, &seeds);
 }
 

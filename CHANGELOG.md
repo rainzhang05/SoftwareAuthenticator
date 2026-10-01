@@ -183,6 +183,10 @@ Upgrading from `867a591` or earlier is not an in-place update:
   subcommand byte alone, as CTAP 2.3 §6.8.2 and §6.8.3 define, even when the
   request carries subCommandParams. Such a request used to need a MAC over
   the parameters too.
+- Requests whose unknown map keys hold simple values that CBOR leaves
+  unassigned (such as `0xF0` or `0xF8 0x20`) are answered instead of failing
+  with CTAP2_ERR_INVALID_CBOR: CTAP 2.3 §8 says unknown keys "MUST be
+  ignored". Under a known key such a value is a wrong type.
 - The notification prompt gives up on a session bus that accepts the
   connection but never answers after 2 seconds, as it does on a D-Bus call,
   instead of holding the request and the daemon's shutdown forever.
