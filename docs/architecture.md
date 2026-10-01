@@ -462,6 +462,10 @@ the stored record cannot be read, registrations fall back to self attestation.
 - **`stop`** stops the unit with `systemctl --user` if it runs the key, and
   otherwise sends SIGTERM; it waits up to 10 seconds for the lock to be
   released.
+- **Exit status.** 0 on success, also when standard output is closed early
+  (`pqkey passkeys | head -1`); 3 when `run` or `start` finds the key already
+  running, which the systemd unit does not restart on; 1 for any other error,
+  reported as `pqkey: <message>`.
 - **PIN input** is read with terminal echo off (a new PIN twice), or one line
   per PIN from a non-terminal standard input. PINs are zeroized on drop and
   never accepted as arguments.

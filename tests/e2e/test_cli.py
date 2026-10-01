@@ -9,7 +9,7 @@ use (product IDs 0001 to 0004, see .github/workflows/e2e.yml), and with
 binary is $PQKEY, by default target/release/pqkey, as for tests/e2e/daemon.sh.
 
 pqkey reports an error as "pqkey: <message>" on standard error and exits with
-status 1. Standard input is not a terminal here, so the commands read one PIN
+status 1, or 3 when the key it would start already runs. Standard input is not a terminal here, so the commands read one PIN
 per line from it, and confirmations too.
 """
 
@@ -121,7 +121,11 @@ def test_start_status_and_stop(pqkey: Pqkey):
     assert status["PIN"] == "not set; `pqkey pin` sets one (Chromium asks for one)"
     assert status["Passkeys"] == "room for 1000 more"
 
-    assert pqkey.error(*START) == f"the key is already running (pid {pid})"
+    # A second key on the same state exits with status 3, which the systemd
+    # unit does not restart on.
+    result = pqkey.run(*START)
+    assert result.returncode == 3, result
+    assert result.stderr == f"pqkey: the key is already running (pid {pid})\n"
 
     assert pqkey.ok("stop") == "Key stopped\n"
     assert pqkey.ok("stop") == "The key is not running\n"

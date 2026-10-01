@@ -21,12 +21,17 @@ mod daemon;
 mod key;
 pub mod output;
 
-use std::{ffi::OsString, fs, io, path::PathBuf, time::Duration};
+use std::{ffi::OsString, fs, io, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_num::maybe_hex;
 
 use crate::{attestation, presence::PresenceMode, service, state::default_state_dir};
+
+/// The exit status when the key runs already, so a second one cannot start.
+/// The systemd unit does not restart on it (`RestartPreventExitStatus=3`): a
+/// key started by hand holds the state, and restarting cannot change that.
+pub const EXIT_ALREADY_RUNNING: u8 = 3;
 
 /// The AAGUID pqkey reports unless `--aaguid` says otherwise: a random
 /// (version 4) UUID of its own.
@@ -344,6 +349,35 @@ fn daemon_args_from(cmdline: &[u8]) -> Option<DaemonArgs> {
     }
 }
 
+/// Run the command line and turn its outcome into pqkey's exit status:
+/// 0 on success, [`EXIT_ALREADY_RUNNING`], or 1 with the error on standard
+/// error.
+pub fn main() -> ExitCode {
+    let result = run_cli();
+    if let Err(err) = &result
+        && !output::is_closed_output(err)
+    {
+        output::error_line(format_args!("pqkey: {err}"));
+    }
+    ExitCode::from(exit_status(&result))
+}
+
+fn exit_status(result: &io::Result<()>) -> u8 {
+    match result {
+        Ok(()) => 0,
+        // Whoever read the output has all they wanted, as with `| head`.
+        Err(err) if output::is_closed_output(err) => 0,
+        Err(err)
+            if err
+                .get_ref()
+                .is_some_and(|inner| inner.is::<daemon::AlreadyRunning>()) =>
+        {
+            EXIT_ALREADY_RUNNING
+        }
+        Err(_) => 1,
+    }
+}
+
 pub fn run_cli() -> io::Result<()> {
     let cli = Cli::parse();
     let state_dir = cli.state_dir;
@@ -590,6 +624,26 @@ mod tests {
             format!("{:?}", start.to_runner_config("/s".into()))
         );
         assert!(DaemonArgs::default().are_defaults());
+    }
+
+    /// A second key on the same state exits with a status of its own, which
+    /// the systemd unit does not restart on.
+    #[test]
+    fn a_second_key_on_the_same_state_exits_with_status_3() {
+        let dir = crate::test_support::TempDir::new("cli-already-running");
+        let lock = crate::state_lock::StateLock::try_acquire(dir.path())
+            .unwrap()
+            .unwrap();
+        crate::state_lock::write_pid_file(dir.path(), &lock).unwrap();
+        let result = daemon::run(dir.path().to_owned(), &DaemonArgs::default());
+        let err = result.as_ref().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("the key is already running (pid {})", std::process::id())
+        );
+        assert_eq!(exit_status(&result), EXIT_ALREADY_RUNNING);
+        assert_eq!(exit_status(&Ok(())), 0);
+        assert_eq!(exit_status(&Err(io::Error::other("failed"))), 1);
     }
 
     /// A re-plug restarts the daemon with the options it was started with,

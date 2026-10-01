@@ -8,6 +8,8 @@
 
 use std::{
     env,
+    error::Error,
+    fmt,
     fs::{File, OpenOptions},
     io::{self, Read, Seek, SeekFrom},
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
@@ -43,13 +45,34 @@ fn log_path(state_dir: &Path) -> PathBuf {
     state_dir.join("authenticator.log")
 }
 
+/// A key runs on the state directory already, so another cannot start; pqkey
+/// exits with [`EXIT_ALREADY_RUNNING`](super::EXIT_ALREADY_RUNNING).
+#[derive(Debug)]
+pub struct AlreadyRunning(String);
+
+impl fmt::Display for AlreadyRunning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Error for AlreadyRunning {}
+
 /// The error for a key that runs already.
-pub fn already_running(state_dir: &Path) -> io::Error {
+fn already_running(state_dir: &Path) -> io::Error {
     let message = match state_lock::read_pid(state_dir) {
         Ok(Some(pid)) => format!("the key is already running (pid {pid})"),
         _ => format!("{} is in use by another pqkey process", state_dir.display()),
     };
-    io::Error::new(io::ErrorKind::ResourceBusy, message)
+    io::Error::new(io::ErrorKind::ResourceBusy, AlreadyRunning(message))
+}
+
+/// The error for a key that is still starting or already stopping.
+fn starting_or_stopping() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ResourceBusy,
+        "the key is starting or stopping; try again in a moment",
+    )
 }
 
 /// `pqkey run`: the key itself, in the foreground until it is told to stop,
@@ -104,7 +127,7 @@ pub fn running(state_dir: &Path) -> io::Result<Option<Running>> {
             Some(Running::Service(pid))
         }
         DaemonState::Running(pid) => Some(Running::Daemon(pid)),
-        DaemonState::Busy => return Err(already_running(state_dir)),
+        DaemonState::Busy => return Err(starting_or_stopping()),
         DaemonState::Stopped => None,
     })
 }

@@ -286,6 +286,11 @@ also break an existing installation of that commit:
 - The CLI panicked when standard output was a closed pipe (`pqkey status |
   head -1`) or a full device. A closed output now ends it quietly with status
   0; other write errors are reported with status 1.
+- With the systemd unit enabled and a key started by hand on the same state,
+  the unit restarted every 5 seconds forever. `pqkey run` and `pqkey start`
+  now exit with status 3 when the key already runs, which the unit does not
+  restart on (`RestartPreventExitStatus=3`), and the unit gives up after 5
+  failed starts within a minute.
 - Panics removed from fallible ML-DSA paths.
 
 ### Removed

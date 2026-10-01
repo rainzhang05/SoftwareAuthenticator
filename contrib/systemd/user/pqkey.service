@@ -47,6 +47,9 @@
 [Unit]
 Description=pqkey ML-DSA software authenticator (virtual FIDO security key)
 Documentation=https://github.com/rainzhang05/SoftwareAuthenticator
+# Give up after 5 failed starts within a minute instead of retrying forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=exec
@@ -56,6 +59,10 @@ Environment=RUST_LOG=info
 # stopping the service is not a failure and does not trigger a restart.
 Restart=on-failure
 RestartSec=5s
+# Status 3: a key started by hand ("pqkey start" with other options, or
+# "pqkey run") holds the state directory. Restarting cannot change that, so
+# the unit stays failed until it is started again; "pqkey status" says why.
+RestartPreventExitStatus=3
 
 # Sandboxing. A user service manager has no privileges, so this uses only
 # settings enforced with prctl() and seccomp, which need none:
