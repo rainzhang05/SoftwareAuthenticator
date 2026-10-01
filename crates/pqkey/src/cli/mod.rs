@@ -17,9 +17,11 @@
 //! itself, for the systemd unit and for test rigs, with the options only they
 //! need.
 
+mod checks;
 mod daemon;
 mod key;
 pub mod output;
+mod setup;
 
 use std::{ffi::OsString, fs, io, path::PathBuf, process::ExitCode, time::Duration};
 
@@ -392,11 +394,8 @@ pub fn run_cli() -> io::Result<()> {
             action: Some(PasskeysAction::Delete { query, yes }),
         } => key::delete_passkey(&state_dir, &query, yes),
         Command::Reset { yes } => key::reset(&state_dir, yes),
-        Command::Setup { uninstall } => Err(io::Error::other(if uninstall {
-            "pqkey setup --uninstall is not available yet"
-        } else {
-            "pqkey setup is not available yet"
-        })),
+        Command::Setup { uninstall: false } => setup::setup(&state_dir),
+        Command::Setup { uninstall: true } => setup::uninstall(&state_dir),
     }
 }
 

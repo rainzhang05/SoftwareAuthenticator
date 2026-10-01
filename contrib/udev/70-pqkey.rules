@@ -1,6 +1,7 @@
 # udev rules for pqkey, the ML-DSA software authenticator.
 #
-# Install with:
+# "pqkey setup" installs these rules (it prints the commands for root). By
+# hand, install with:
 #   sudo install -m 644 70-pqkey.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger

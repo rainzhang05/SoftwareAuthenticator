@@ -462,6 +462,22 @@ the stored record cannot be read, registrations fall back to self attestation.
 - **`stop`** stops the unit with `systemctl --user` if it runs the key, and
   otherwise sends SIGTERM; it waits up to 10 seconds for the lock to be
   released.
+- **`setup`** installs the systemd user unit (the shipped file, embedded in
+  the binary, with `ExecStart` naming the canonical path of the running
+  binary), enables and starts it, and offers to set a PIN. What needs root
+  (the embedded udev rules into `/etc/udev/rules.d`, `uhid` in
+  `/etc/modules-load.d/pqkey.conf`, `modprobe uhid`, joining `plugdev`) goes
+  into a script in `$XDG_RUNTIME_DIR`, created with mode 0600, which setup
+  prints in full with the `sudo sh` command to run it; pqkey itself never runs
+  as root. `--uninstall` stops and removes the unit and prints the root undo.
+- **`status`** also reports every problem it finds with its fix: missing or
+  outdated udev rules, `uhid` not loaded (now or at boot), no access to
+  `/dev/uhid` (not in `plugdev`, or in it since after this session started),
+  a device node this user cannot open, a snap browser installed but the node
+  not tagged for it (from udev's database in `/run/udev/data`), a
+  notification server without `actions` or `body`, no systemd unit, and a
+  key started by hand where the unit should run it. The checks read files
+  under a root directory, so tests run them on a temporary one.
 - **Exit status.** 0 on success, also when standard output is closed early
   (`pqkey passkeys | head -1`); 3 when `run` or `start` finds the key already
   running, which the systemd unit does not restart on; 1 for any other error,

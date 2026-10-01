@@ -23,40 +23,34 @@ credentials (FIPS 204). Written in Rust, with pure-Rust cryptography.
 ## Install
 
 ```bash
-git clone https://github.com/rainzhang05/SoftwareAuthenticator.git
-cd SoftwareAuthenticator
-cargo build --release --locked -p pqkey
-install -D -m 755 target/release/pqkey ~/.local/bin/pqkey
+cargo install --locked --git https://github.com/rainzhang05/SoftwareAuthenticator pqkey
+pqkey setup
 ```
 
-Give the `plugdev` group access to `/dev/uhid` with the shipped udev rules,
-which also give the key's hidraw node to the active session's user and let
-the Firefox and Chromium snaps (Ubuntu's browsers) open it.
-`plugdev` exists on Debian and Ubuntu; the comments in
-[`contrib/udev/70-pqkey.rules`](contrib/udev/70-pqkey.rules) cover other
-systems.
+`pqkey setup` installs a systemd user service that starts the key with your
+session. The steps that need root it writes to a short script, shows it to
+you, and asks you to run it with `sudo sh`, then `pqkey setup` again:
 
-```bash
-sudo install -m 644 contrib/udev/70-pqkey.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-echo uhid | sudo tee /etc/modules-load.d/uhid.conf
-sudo modprobe uhid
-sudo udevadm trigger
-sudo usermod -aG plugdev "$USER"   # then log in again
-```
+- udev rules ([`contrib/udev/70-pqkey.rules`](contrib/udev/70-pqkey.rules))
+  that give `/dev/uhid` to the `plugdev` group, and the key's device to the
+  active session's user and to the Firefox and Chromium snaps (Ubuntu's
+  browsers);
+- loading the `uhid` module at boot;
+- adding you to `plugdev`, if you are not in it yet (on Ubuntu you are), after
+  which you log in again.
+
+It ends by offering to set a PIN, which Chromium needs before it uses
+passkeys. `pqkey status` shows anything that is still missing, and how to fix
+it. `pqkey setup --uninstall` removes the service and prints what undoes the
+root part; your passkeys stay in `~/.local/share/pqkey`.
 
 > **Warning.** Anyone who can open `/dev/uhid` can create any HID device,
 > keyboards included, and so type into the active session. Only add users you
 > would trust with that.
 
-To start the key with your session, install the systemd user unit. Its
-comments cover desktops that start their own D-Bus session bus.
-
-```bash
-install -D -m 644 contrib/systemd/user/pqkey.service ~/.config/systemd/user/pqkey.service
-systemctl --user daemon-reload
-systemctl --user enable --now pqkey.service
-```
+The comments in
+[`contrib/systemd/user/pqkey.service`](contrib/systemd/user/pqkey.service)
+cover desktops that start their own D-Bus session bus.
 
 ## Usage
 

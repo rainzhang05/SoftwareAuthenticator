@@ -72,8 +72,11 @@ class Pqkey:
         return lines[-1].removeprefix("pqkey: ")
 
     def status(self) -> dict[str, str]:
-        """The lines of `pqkey status`, by their label."""
-        return dict(re.findall(r"^(\w+):\s+(.*)$", self.ok("status"), re.M))
+        """The lines of `pqkey status` about the key, by their label. The
+        problems it lists after them (here: the CI's own udev rule is not
+        pqkey's) are left out."""
+        key = self.ok("status").split("\n\n")[0]
+        return dict(re.findall(r"^(\w+): +(.*)$", key, re.M))
 
     def passkeys(self) -> list[list[str]]:
         """The rows of `pqkey passkeys`, whose columns are at least two spaces
@@ -136,6 +139,8 @@ def test_start_status_and_stop(pqkey: Pqkey):
 def test_commands_need_a_running_key(pqkey: Pqkey):
     for command in (["pin"], ["passkeys"], ["passkeys", "delete", "x", "--yes"]):
         assert pqkey.error(*command, stdin=f"{PIN}\n") == "the key is not running; start it with `pqkey start`"
+    # setup installs the key for the default state directory only.
+    assert pqkey.error("setup") == "pqkey setup only sets up the key in the default state directory"
 
 
 def test_pin_is_set_and_changed_over_ctap(pqkey: Pqkey):

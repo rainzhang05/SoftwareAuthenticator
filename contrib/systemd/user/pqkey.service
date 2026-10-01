@@ -8,7 +8,8 @@
 # XDG_DATA_HOME in your shell, set it for the user manager as well (see
 # environment.d(5)), or the two will use different directories.
 #
-# Setup:
+# Setup: "pqkey setup" installs this unit, with ExecStart naming the pqkey
+# binary it runs from, and starts it. By hand:
 #   1. Install contrib/udev/70-pqkey.rules as described in that file, add
 #      yourself to its group, and log in again.
 #   2. Install the binary where this unit expects it:

@@ -22,19 +22,24 @@ use pqkey_ctap::ctap::constants::{
 };
 use signal_hook::{consts::SIGINT, flag};
 
+use super::checks::{self, Problem, System};
 use super::daemon::{self, Running};
 use super::output::{errln, outln};
 use crate::client::ctap2::{Authenticator, ClientError, Passkey, PinRetries, Token};
 use crate::client::ctaphid::{ReportLink, STATUS_UPNEEDED};
 use crate::client::hidraw::{self, Hidraw};
 use crate::pin_input::{Pin, PinReader, PinSource, validate_pin};
-use crate::presence::notification::{Keep, sanitise};
+use crate::presence::dbus::SessionBus;
+use crate::presence::notification::{ConnectError, Keep, NotificationServer, ServerInfo, sanitise};
 use crate::service;
+use crate::state::default_state_dir;
 
 /// How long to wait for the running key's hidraw node, and for access to it:
 /// the kernel creates the node and udev grants access just after the key
 /// starts.
 const DEVICE_WAIT: Duration = Duration::from_secs(5);
+/// The same for `status`, which only reports what it finds.
+const STATUS_WAIT: Duration = Duration::from_secs(1);
 
 /// What re-plugging the key takes, for the messages that ask for it.
 const REPLUG: &str = "pqkey stop && pqkey start";
@@ -56,23 +61,28 @@ fn client_error(err: ClientError) -> io::Error {
 /// The running key on `state_dir`, through its hidraw node.
 fn connect(state_dir: &Path) -> io::Result<Authenticator<Hidraw>> {
     let running = daemon::running(state_dir)?.ok_or_else(not_running)?;
-    connect_to(running).map(|(_, key)| key)
+    connect_to(running, DEVICE_WAIT).map(|(_, key)| key)
 }
 
 /// The hidraw node of the key `running`, which names its device after its
-/// pid, and a CTAPHID channel to it.
-fn connect_to(running: Running) -> io::Result<(PathBuf, Authenticator<Hidraw>)> {
+/// pid, and a CTAPHID channel to it, waiting up to `wait` for both.
+fn connect_to(running: Running, wait: Duration) -> io::Result<(PathBuf, Authenticator<Hidraw>)> {
+    let (path, link) = open_node(running, wait)?;
+    let key = Authenticator::open(link).map_err(client_error)?;
+    Ok((path, key))
+}
+
+/// The hidraw node of the key `running`, opened, waiting up to `wait` for
+/// it to appear and for access to it.
+fn open_node(running: Running, wait: Duration) -> io::Result<(PathBuf, Hidraw)> {
     let pid = running.pid();
     let uniq = service::device_uniq(pid.as_raw().unsigned_abs());
-    let deadline = Instant::now() + DEVICE_WAIT;
+    let deadline = Instant::now() + wait;
     loop {
         let waited = Instant::now() >= deadline;
         match hidraw::find_system_node(&uniq)? {
             Some(path) => match Hidraw::open(&path) {
-                Ok(link) => {
-                    let key = Authenticator::open(link).map_err(client_error)?;
-                    return Ok((path, key));
-                }
+                Ok(link) => return Ok((path, link)),
                 // udev has not granted access yet.
                 Err(err) if err.kind() == io::ErrorKind::PermissionDenied && !waited => {}
                 Err(err) => {
@@ -117,30 +127,56 @@ fn confirm(question: &str) -> io::Result<bool> {
 // ---------------------------------------------------------------------------
 // status
 
-/// `pqkey status`.
+/// `pqkey status`: whether the key runs, its device, PIN and room for
+/// passkeys, then every problem found, with its fix.
 pub fn status(state_dir: &Path) -> io::Result<()> {
+    let system = System::real();
+    let mut problems = Vec::new();
     let running = match daemon::running(state_dir) {
-        Ok(running) => running,
         Err(err) if err.kind() == io::ErrorKind::ResourceBusy => {
             return outln!("Key:      starting or stopping");
         }
-        Err(err) => return Err(err),
-    };
-    let Some(running) = running else {
-        return outln!("Key:      not running; `pqkey start` starts it");
+        result => result?,
     };
     match running {
-        Running::Service(pid) => {
-            outln!(
-                "Key:      running (pid {pid}, systemd user service {})",
-                daemon::UNIT
-            )?;
+        None => {
+            outln!("Key:      not running; `pqkey start` starts it")?;
+            problems.extend(checks::start_problems(&system, &checks::membership()));
+            // `pqkey start` asks with notifications on the default state
+            // directory; test rigs choose for themselves.
+            if state_dir == default_state_dir() {
+                problems.extend(checks::notification_problem(&notification_server()));
+            }
         }
-        Running::Daemon(pid) => outln!("Key:      running (pid {pid})")?,
+        Some(running) => {
+            match running {
+                Running::Service(pid) => outln!(
+                    "Key:      running (pid {pid}, systemd user service {})",
+                    daemon::UNIT
+                )?,
+                Running::Daemon(pid) => outln!("Key:      running (pid {pid})")?,
+            }
+            show_key(running)?;
+            problems.extend(running_problems(&system, running, STATUS_WAIT));
+        }
     }
-    let (path, mut key) = match connect_to(running) {
+    problems.extend(service_problems(state_dir, running));
+    if !problems.is_empty() {
+        outln!()?;
+        outln!("Problems:")?;
+        for problem in &problems {
+            outln!("- {}", problem.what)?;
+            outln!("  Fix: {}", problem.fix)?;
+        }
+    }
+    Ok(())
+}
+
+/// The lines of `status` about the running key itself.
+fn show_key(running: Running) -> io::Result<()> {
+    let (path, mut key) = match connect_to(running, STATUS_WAIT) {
         Ok(connected) => connected,
-        Err(err) => return outln!("Device:   {err}"),
+        Err(_) => return outln!("Device:   cannot be opened (see below)"),
     };
     outln!("Device:   {}", path.display())?;
     let info = key.info().map_err(client_error)?;
@@ -158,6 +194,95 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
         outln!("Passkeys: room for {remaining} more")?;
     }
     Ok(())
+}
+
+/// What keeps browsers from using the key `running`, waiting up to `wait`
+/// for its device: one they cannot open, or notifications that cannot ask.
+pub fn running_problems(system: &System, running: Running, wait: Duration) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    match open_node(running, wait) {
+        Ok((node, _)) => problems.extend(checks::browser_problems(system, &node, &Ok(()))),
+        Err(err) => match hidraw::find_system_node(&service::device_uniq(
+            running.pid().as_raw().unsigned_abs(),
+        )) {
+            Ok(Some(node)) => {
+                problems.extend(checks::browser_problems(system, &node, &Err(err)));
+            }
+            _ => problems.push(Problem {
+                what: format!(
+                    "the key runs (pid {}), but its device is missing",
+                    running.pid()
+                ),
+                fix: format!("run `{REPLUG}`"),
+            }),
+        },
+    }
+    if asks_with_notifications(running) {
+        problems.extend(checks::notification_problem(&notification_server()));
+    }
+    problems
+}
+
+/// Whether the key `running` asks for presence with notifications, as the
+/// systemd unit and `pqkey start` without test options have it do.
+fn asks_with_notifications(running: Running) -> bool {
+    match running {
+        Running::Service(_) => true,
+        Running::Daemon(pid) => {
+            super::daemon_args_of(pid).is_ok_and(|args| args.presence == super::PresenceArg::Notify)
+        }
+    }
+}
+
+/// What the desktop's notification server says about itself.
+fn notification_server() -> Result<ServerInfo, ConnectError> {
+    let mut bus = SessionBus::new();
+    let server = bus.connect();
+    bus.disconnect();
+    server
+}
+
+/// Whether the systemd user service runs the key on the default state
+/// directory, as `pqkey setup` arranges.
+fn service_problems(state_dir: &Path, running: Option<Running>) -> Vec<Problem> {
+    if state_dir != default_state_dir() {
+        return Vec::new();
+    }
+    if !daemon::uses_service(state_dir) {
+        return vec![Problem {
+            what: "the key does not start with your session".into(),
+            fix: "run `pqkey setup`".into(),
+        }];
+    }
+    match running {
+        Some(Running::Daemon(pid)) => vec![Problem {
+            what: format!(
+                "the key (pid {pid}) was started by hand, so the systemd user service cannot run it"
+            ),
+            fix: format!("run `{REPLUG}`"),
+        }],
+        _ => Vec::new(),
+    }
+}
+
+/// After `pqkey setup`: offer to set a PIN on the key `running` if it has
+/// none, or say how, as Chromium uses passkeys only on a key with a PIN.
+pub fn offer_pin(running: Running, interactive: bool) -> io::Result<()> {
+    let Ok((_, mut key)) = connect_to(running, DEVICE_WAIT) else {
+        return Ok(());
+    };
+    if key.info().map_err(client_error)?.pin_set != Some(false) {
+        return Ok(());
+    }
+    let why = "The key has no PIN yet, and Chromium asks for one before it uses passkeys";
+    if !interactive {
+        return outln!("{why}: `pqkey pin` sets one.");
+    }
+    if !confirm(&format!("{why}. Set one now?"))? {
+        return outln!("`pqkey pin` sets one later.");
+    }
+    set_or_change_pin(&mut key, &mut PinReader::from_stdin())?;
+    outln!("PIN set.")
 }
 
 fn pin_state(retries: PinRetries) -> String {
@@ -496,7 +621,7 @@ pub fn reset(state_dir: &Path, yes: bool) -> io::Result<()> {
         return Ok(());
     }
     let running = daemon::replug(state_dir)?;
-    let result = connect_to(running).and_then(|(_, key)| reset_key(key));
+    let result = connect_to(running, DEVICE_WAIT).and_then(|(_, key)| reset_key(key));
     let restored = if was_running {
         Ok(())
     } else {
