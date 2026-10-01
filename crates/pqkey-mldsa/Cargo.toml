@@ -28,11 +28,11 @@ log = { workspace = true, optional = true }
 # SHAKE128/256, which ml-dsa hashes the seed and every intermediate value with.
 # ml-dsa's own `zeroize` feature does not reach it; enabling it here (feature
 # unification) wipes the sponge states that held ξ, ρ′, K and μ on drop.
-shake = { version = "0.1", default-features = false, features = ["zeroize"] }
+shake = { workspace = true, features = ["zeroize"] }
 
 [dev-dependencies]
 # The residue test recomputes ρ′ and K = SHAKE256(ξ || k || ℓ) independently.
-shake = { version = "0.1", default-features = false }
+shake.workspace = true
 
 [[test]]
 name = "residue"
