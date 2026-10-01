@@ -55,7 +55,8 @@ impl PendingHmacSecret {
 }
 
 /// The authenticatorGetAssertion parameters remembered for
-/// authenticatorGetNextAssertion (CTAP 2.3 §6.2.2 step 11.2.2.1.1).
+/// authenticatorGetNextAssertion: "Remember the authenticatorGetAssertion
+/// parameters." (CTAP 2.3 §6.2.2 step 12.2.2.1)
 pub(super) struct PendingAssertion {
     rp_id: String,
     client_hash: Vec<u8>,
@@ -187,8 +188,9 @@ impl CtapApp<'_> {
 
     /// authenticatorGetAssertion, following the steps of CTAP 2.3 §6.2.2 for
     /// an authenticator with clientPin and pinUvAuthToken, no built-in user
-    /// verification, no alwaysUv and no display.  It "is protected by some
-    /// form of user verification" exactly when a PIN is set.
+    /// verification, no alwaysUv and no display (see [`CtapApp`]).  It "is
+    /// protected by some form of user verification" exactly when a PIN is
+    /// set.
     pub(super) fn handle_get_assertion(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
         let map = cbor::request_parameters(payload)?;
         let parameter = |key: i64| cbor::map_get(&map, Value::Integer(Integer::from(key)));
@@ -333,10 +335,11 @@ impl CtapApp<'_> {
 
         // Step 11.  With an allowList: "Select any credential from the
         // applicable credentials list. Delete the numberOfCredentials member."
-        // Without one, the most recently created credential, and when there
-        // are several the authenticator (which has no display) remembers the
-        // request for authenticatorGetNextAssertion and reports
-        // numberOfCredentials.
+        // Step 12, without one: the most recently created credential (step
+        // 12.2.1), and when there are several, "If the authenticator does not
+        // have a display [...]: Remember the authenticatorGetAssertion
+        // parameters." for authenticatorGetNextAssertion, and report
+        // numberOfCredentials (step 12.2.2).
         let mut applicable = applicable.into_iter();
         let credential = applicable.next().ok_or(CTAP2_ERR_NO_CREDENTIALS)?;
         let remaining_credentials: VecDeque<Vec<u8>> = if allow_list.is_some() {

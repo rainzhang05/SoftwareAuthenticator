@@ -17,9 +17,10 @@ pub const RESET_WINDOW_AFTER_POWER_UP: Duration = Duration::from_secs(10);
 impl CtapApp<'_> {
     /// CTAP2 `authenticatorReset` (command 0x07), CTAP 2.3 §6.6.
     ///
-    /// This authenticator has no display, so the request must arrive within
-    /// [`RESET_WINDOW_AFTER_POWER_UP`] of power-up, which for this software
-    /// authenticator is the construction of the [`CtapApp`] ("If the request
+    /// This authenticator has no display (see [`CtapApp`]), so the request
+    /// must arrive within [`RESET_WINDOW_AFTER_POWER_UP`] of power-up, which
+    /// for this software authenticator is the construction of the [`CtapApp`]
+    /// ("If the request
     /// comes after 10 seconds of powering up, the authenticator returns
     /// CTAP2_ERR_NOT_ALLOWED."), and "evidence of user interaction is
     /// required": "If user presence is explicitly denied, the authenticator

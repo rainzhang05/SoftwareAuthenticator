@@ -93,6 +93,17 @@ pub enum AttestationMode {
 /// The CTAP2 authenticator: [`call`](Self::call) answers one CTAP request, the
 /// payload of a CTAPHID_CBOR message.
 ///
+/// It is an authenticator **without a display**, whatever its
+/// [`UserPresence`] shows.  A prompt such as a desktop notification belongs to
+/// the platform: other programs can replace or close it, and it may be shown
+/// without its text.  So the engine takes every branch CTAP 2.3 gives an
+/// authenticator without a display, and none of those for one with a display:
+/// authenticatorReset only "within 10 seconds of powering up" (§6.6), several
+/// discoverable credentials remembered for authenticatorGetNextAssertion with
+/// numberOfCredentials rather than chosen on the authenticator (§6.2.2 step
+/// 12.2.2), and no consent prompt before a pinUvAuthToken is issued
+/// (§6.5.5.7.1, §6.5.5.7.2 step 4.7).
+///
 /// `'interrupt` is the lifetime of the interrupt flag the transport uses to
 /// cancel a request.
 pub struct CtapApp<'interrupt> {
@@ -186,11 +197,12 @@ impl<'interrupt> CtapApp<'interrupt> {
     /// How long after power-up, the construction of this engine,
     /// authenticatorReset is accepted.  Defaults to
     /// [`RESET_WINDOW_AFTER_POWER_UP`], the 10 seconds CTAP 2.3 §6.6 requires
-    /// of an authenticator without a display.
+    /// of an authenticator without a display, which this one is.
     ///
     /// `None` accepts a reset at any time, which does not conform to CTAP.  It
-    /// exists for test rigs that reset a long-running authenticator before
-    /// every test; user presence is still required.
+    /// exists only for test rigs that reset a long-running authenticator
+    /// before every test; user presence is still required.  A real user
+    /// restarts the authenticator, as they would unplug and replug a key.
     pub fn set_reset_window(&mut self, window: Option<Duration>) {
         self.reset_window = window;
     }
