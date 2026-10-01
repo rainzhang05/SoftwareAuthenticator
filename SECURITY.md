@@ -23,7 +23,8 @@ for a private channel before sending details if you prefer.
 Please include:
 
 - the commit you tested;
-- how the daemon was started (the `pqkey attach` options, or the systemd unit);
+- how the key was started (`pqkey start`, the systemd unit, or `pqkey run`
+  with which options);
 - the client involved (browser and version, libfido2, python-fido2, ...);
 - steps to reproduce, and what an attacker gains.
 
@@ -200,9 +201,9 @@ replace or close. So, as CTAP 2.3 §6.6 requires of such an authenticator, it
 only accepts authenticatorReset within 10 seconds of power-up, the start of the
 daemon, as a hardware key only accepts it right after it is plugged in; a
 browser's reset works right after the key is restarted. The hidden
-`--allow-late-reset` option, meant for test rigs, lifts the window. `pqkey reset` on the command line shows no notification: it asks
-for confirmation in the terminal (skipped by `--yes`) and needs the daemon
-stopped.
+`--allow-late-reset` option, meant for test rigs, lifts the window. `pqkey
+reset` is no exception: it restarts the key and sends authenticatorReset over
+CTAP, which the user approves in the notification like any other.
 
 Logs at info level and above name only the kind of presence request. Relying
 party IDs and user names appear only at debug level. Without `RUST_LOG` the
@@ -211,11 +212,13 @@ daemon logs to `authenticator.log` (mode 0600) in the state directory.
 
 ### PIN
 
-The PIN retry counter is persisted before a PIN is compared, both in the
-engine and in the `pqkey pin` commands, so interrupting a check never gives a
-free guess. 8 wrong PINs block the PIN until a reset. After 3 wrong PINs in a
-row the daemon refuses PIN checks until it restarts (the CTAP "power cycle").
-The CLI never accepts PINs as command-line arguments.
+The PIN retry counter is persisted before a PIN is compared, so interrupting a
+check never gives a free guess. 8 wrong PINs block the PIN until a reset.
+After 3 wrong PINs in a row the daemon refuses PIN checks until it restarts
+(the CTAP "power cycle"). The CLI never opens the store: `pqkey pin` and
+`pqkey passkeys` send PINs to the running key over CTAP (PIN/UV auth protocol
+2), so the key's own checks and counters apply to them. The CLI never accepts
+PINs as command-line arguments.
 
 ### Attestation and privacy
 

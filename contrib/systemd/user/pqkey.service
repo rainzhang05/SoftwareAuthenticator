@@ -40,9 +40,9 @@
 # Do not add --presence auto-approve here: it approves everything without
 # asking, so any program running as you could use your passkeys unnoticed.
 #
-# While the service runs, "pqkey status" reports it, and "pqkey pin ..." and
-# "pqkey reset" refuse to touch its state. Stop it first with
-# "systemctl --user stop pqkey".
+# Once the unit is installed, "pqkey start" and "pqkey stop" start and stop
+# it, "pqkey status" reports it, and "pqkey pin", "pqkey passkeys" and
+# "pqkey reset" manage the running key over CTAP.
 
 [Unit]
 Description=pqkey ML-DSA software authenticator (virtual FIDO security key)
@@ -50,7 +50,7 @@ Documentation=https://github.com/rainzhang05/SoftwareAuthenticator
 
 [Service]
 Type=exec
-ExecStart=%h/.local/bin/pqkey attach --foreground
+ExecStart=%h/.local/bin/pqkey run
 Environment=RUST_LOG=info
 # On SIGTERM the daemon removes the virtual device and exits with status 0, so
 # stopping the service is not a failure and does not trigger a restart.

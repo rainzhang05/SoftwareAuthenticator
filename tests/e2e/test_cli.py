@@ -1,35 +1,40 @@
-"""The pqkey command line: attach, status and detach of a daemon of the tests'
-own, and the pin and reset commands on its state directory.
+"""The pqkey command line: start, status and stop of a key of the tests' own,
+and pin, passkeys and reset, which manage it over CTAP through its hidraw
+node as a security key's management application does.
 
-Every test has a state directory of its own under pytest's tmp_path. The
-daemon is attached with product ID 0005, so it never touches the keys the
-other tests use (product IDs 0001 to 0004, see .github/workflows/e2e.yml): it
-needs /dev/uhid, but nothing opens its hidraw node. The binary is $PQKEY, by
-default target/release/pqkey, as for tests/e2e/daemon.sh.
+Every test has a state directory of its own under pytest's tmp_path. The key
+is started with product ID 0005, so it never touches the keys the other tests
+use (product IDs 0001 to 0004, see .github/workflows/e2e.yml), and with
+`--presence auto-approve` (or `unanswered`), so nothing asks a person. The
+binary is $PQKEY, by default target/release/pqkey, as for tests/e2e/daemon.sh.
 
 pqkey reports an error as "pqkey: <message>" on standard error and exits with
-status 1. Standard input is not a terminal here, so the pin commands read one
-PIN per line from it.
+status 1. Standard input is not a terminal here, so the commands read one PIN
+per line from it, and confirmations too.
 """
 
 import os
 import re
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 from typing import Iterator
 
 import pytest
+from fido2.ctap2 import Ctap2
+
+import ctap as client
 
 PQKEY = os.environ.get("PQKEY", "target/release/pqkey")
-# Only attach takes these; the other commands refuse options they do not know.
-ATTACH = ["attach", "--product-id", "0x0005", "--presence", "auto-approve"]
+# The options of the tests' key; only start (and run) take them.
+START = ["start", "--product-id", "0x0005"]
 PIN = "4821"
 NEW_PIN = "730915"
 WRONG_PIN = "0000"
 MAX_RETRIES = 8
-# attach and detach each wait up to 10 seconds for the daemon.
-TIMEOUT_S = 30
+# start and stop each wait up to 10 seconds for the key, reset both.
+TIMEOUT_S = 40
 
 
 class Pqkey:
@@ -38,11 +43,14 @@ class Pqkey:
     def __init__(self, state_dir: Path):
         self.state_dir = state_dir
 
+    def command(self, *args: str) -> list[str]:
+        return [PQKEY, *args, "--state-dir", str(self.state_dir)]
+
     def run(self, *args: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
-        # Standard input is always a pipe, even if empty: on a terminal the pin
+        # Standard input is always a pipe, even if empty: on a terminal the
         # commands would prompt for PINs with echo off.
         return subprocess.run(
-            [PQKEY, *args, "--state-dir", str(self.state_dir)],
+            self.command(*args),
             input=stdin,
             capture_output=True,
             text=True,
@@ -63,79 +71,161 @@ class Pqkey:
         assert lines and lines[-1].startswith("pqkey: "), result.stderr
         return lines[-1].removeprefix("pqkey: ")
 
-    def pin_status(self) -> tuple[bool, int, bool]:
-        """Whether a PIN is set, the retries remaining and whether the PIN is
-        blocked, as `pin status` shows them."""
-        output = self.ok("pin", "status")
-        is_set = re.search(r"^PIN set:\s+(true|false)$", output, re.M)
-        retries = re.search(r"^Retries remaining:\s+(\d+)$", output, re.M)
-        blocked = re.search(r"^Blocked:\s+(true|false)$", output, re.M)
-        assert is_set and retries and blocked, output
-        return is_set[1] == "true", int(retries[1]), blocked[1] == "true"
+    def status(self) -> dict[str, str]:
+        """The lines of `pqkey status`, by their label."""
+        return dict(re.findall(r"^(\w+):\s+(.*)$", self.ok("status"), re.M))
+
+    def passkeys(self) -> list[list[str]]:
+        """The rows of `pqkey passkeys`, whose columns are at least two spaces
+        apart."""
+        heading, *rows = self.ok("passkeys", stdin=f"{PIN}\n").splitlines()
+        assert re.split(r"\s{2,}", heading) == ["SITE", "USER", "ALGORITHM", "ID"], heading
+        return [re.split(r"\s{2,}", row) for row in rows]
+
+    def start(self, presence: str = "auto-approve") -> int:
+        output = self.ok(*START, "--presence", presence)
+        started = re.fullmatch(r"Key started \(pid (\d+)\); logging to (.+)\n", output)
+        assert started, output
+        assert started[2] == str(self.state_dir / "authenticator.log")
+        return int(started[1])
 
 
 @pytest.fixture
 def pqkey(request, tmp_path: Path) -> Iterator[Pqkey]:
     """pqkey on a state directory of the test's own. Whatever the test did, a
-    daemon it attached is detached afterwards, and under the workflow its log
-    joins the diagnostics that a failed run uploads."""
+    key it started is stopped afterwards, and under the workflow its log joins
+    the diagnostics that a failed run uploads."""
     if not os.access(PQKEY, os.X_OK):
         pytest.fail(f"{PQKEY} must be the pqkey binary: build it with cargo build -p pqkey --release, or set PQKEY")
     cli = Pqkey(tmp_path / "state")
     try:
         yield cli
     finally:
-        result = cli.run("detach")
+        result = cli.run("stop")
         log = cli.state_dir / "authenticator.log"
         if os.environ.get("E2E_WORK") and log.exists():
             diagnostics = Path(os.environ["E2E_WORK"]) / "e2e-diagnostics"
             diagnostics.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(log, diagnostics / f"cli-{request.node.name}.log")
-        assert result.returncode == 0, f"pqkey detach exited with {result.returncode}: {result.stderr}"
+        assert result.returncode == 0, f"pqkey stop exited with {result.returncode}: {result.stderr}"
 
 
-def test_attach_status_and_detach(pqkey: Pqkey):
-    """A daemon attached in the background, and the other commands while it
-    runs: a second daemon, pin set and reset would work on the state the daemon
-    holds and are refused, while pin status only reads it and works."""
-    output = pqkey.ok(*ATTACH)
-    attached = re.fullmatch(r"Authenticator attached \(pid (\d+)\); logging to (.+)\n", output)
-    assert attached, output
-    pid = int(attached[1])
-    assert attached[2] == str(pqkey.state_dir / "authenticator.log")
-    assert pqkey.ok("status") == f"Authenticator running (pid {pid})\n"
+def test_start_status_and_stop(pqkey: Pqkey):
+    """A key started in the background, found by its device name, and stopped
+    again. A second start is refused while it runs."""
+    assert pqkey.status() == {"Key": "not running; `pqkey start` starts it"}
+    pid = pqkey.start()
+    status = pqkey.status()
+    assert status["Key"] == f"running (pid {pid})"
+    assert re.fullmatch(r"/dev/hidraw\d+", status["Device"]), status
+    assert status["PIN"] == "not set; `pqkey pin` sets one (Chromium asks for one)"
+    assert status["Passkeys"] == "room for 1000 more"
 
-    running = f"the authenticator daemon is running (pid {pid}); run 'pqkey detach' first"
-    assert pqkey.error(*ATTACH) == running
-    assert pqkey.error("pin", "set", stdin=f"{PIN}\n") == running
-    assert pqkey.error("reset", "--yes") == running
-    assert pqkey.pin_status() == (False, MAX_RETRIES, False)
+    assert pqkey.error(*START) == f"the key is already running (pid {pid})"
 
-    assert pqkey.ok("detach") == "Authenticator stopped\n"
-    assert pqkey.ok("status") == "Authenticator is not running\n"
+    assert pqkey.ok("stop") == "Key stopped\n"
+    assert pqkey.ok("stop") == "The key is not running\n"
+    assert pqkey.status() == {"Key": "not running; `pqkey start` starts it"}
     assert (pqkey.state_dir / "authenticator.log").is_file()
 
 
-def test_pin_commands(pqkey: Pqkey):
-    """pin set, change and remove, with the daemon stopped. They check PINs
-    with the engine's retry state machine, so as over CTAP a wrong PIN costs a
-    retry and the right one restores them all (CTAP 2.3 §6.5.2.3)."""
-    assert pqkey.ok("pin", "set", stdin=f"{PIN}\n") == "PIN set.\n"
-    assert pqkey.pin_status() == (True, MAX_RETRIES, False)
-
-    # pin change reads the current PIN, then the new one.
-    wrong = pqkey.error("pin", "change", stdin=f"{WRONG_PIN}\n{NEW_PIN}\n")
-    assert wrong == f"PIN is incorrect ({MAX_RETRIES - 1} retries remaining)"
-    assert pqkey.pin_status() == (True, MAX_RETRIES - 1, False)
-    assert pqkey.ok("pin", "change", stdin=f"{PIN}\n{NEW_PIN}\n") == "PIN changed.\n"
-    assert pqkey.pin_status() == (True, MAX_RETRIES, False)
-
-    assert pqkey.ok("pin", "remove", stdin=f"{NEW_PIN}\n") == "PIN removed.\n"
-    assert pqkey.pin_status() == (False, MAX_RETRIES, False)
+def test_commands_need_a_running_key(pqkey: Pqkey):
+    for command in (["pin"], ["passkeys"], ["passkeys", "delete", "x", "--yes"]):
+        assert pqkey.error(*command, stdin=f"{PIN}\n") == "the key is not running; start it with `pqkey start`"
 
 
-def test_reset(pqkey: Pqkey):
-    """reset --yes wipes the stored state, the PIN included, without asking."""
-    pqkey.ok("pin", "set", stdin=f"{PIN}\n")
-    assert pqkey.ok("reset", "--yes") == "Authenticator state has been reset.\n"
-    assert pqkey.pin_status() == (False, MAX_RETRIES, False)
+def test_pin_is_set_and_changed_over_ctap(pqkey: Pqkey):
+    """pin sets a PIN, then changes it, through the key's ClientPIN command:
+    a wrong current PIN costs a retry and the right one restores them all
+    (CTAP 2.3 §6.5.2.3)."""
+    pqkey.start()
+    assert pqkey.ok("pin", stdin=f"{PIN}\n") == "PIN set.\n"
+    assert pqkey.status()["PIN"] == f"set ({MAX_RETRIES} retries left)"
+
+    # With a PIN set, pin reads the current PIN, then the new one.
+    wrong = pqkey.error("pin", stdin=f"{WRONG_PIN}\n{NEW_PIN}\n")
+    assert wrong == f"wrong PIN; {MAX_RETRIES - 1} retries left"
+    assert pqkey.status()["PIN"] == f"set ({MAX_RETRIES - 1} retries left)"
+    assert pqkey.ok("pin", stdin=f"{PIN}\n{NEW_PIN}\n") == "PIN changed.\n"
+    assert pqkey.status()["PIN"] == f"set ({MAX_RETRIES} retries left)"
+
+    # A PIN shorter than any that can be set is wrong without costing a retry.
+    assert "no retry was used" in pqkey.error("pin", stdin="12\n")
+    assert pqkey.status()["PIN"] == f"set ({MAX_RETRIES} retries left)"
+
+
+def test_passkeys_are_listed_and_deleted(pqkey: Pqkey):
+    """passkeys lists the discoverable credentials with a credential
+    management token, and passkeys delete removes the one a query names."""
+    pqkey.start()
+    node = pqkey.status()["Device"]
+    with client.open_device(node) as device:
+        ctap = Ctap2(device)
+        for name in ("alice", "bob"):
+            client.register(
+                ctap, "example.com", client.ML_DSA_65, user=client.user_entity(name), options={"rk": True}
+            )
+
+    assert "`pqkey pin` sets one" in pqkey.error("passkeys")
+    pqkey.ok("pin", stdin=f"{PIN}\n")
+
+    listing = pqkey.passkeys()
+    assert [row[:3] for row in listing] == [
+        ["example.com", "alice (Alice)", "ML-DSA-65"],
+        ["example.com", "bob (Bob)", "ML-DSA-65"],
+    ], listing
+    assert all(re.fullmatch(r"[0-9a-f]{16}", row[3]) for row in listing), listing
+
+    # An ambiguous query lists the passkeys it matches after the error.
+    result = pqkey.run("passkeys", "delete", "example", "--yes", stdin=f"{PIN}\n")
+    assert result.returncode == 1, result
+    assert result.stderr.startswith('pqkey: "example" matches 2 passkeys'), result.stderr
+    assert "bob (Bob)" in result.stderr, result.stderr
+    # Without --yes it asks, and only "y" deletes.
+    result = pqkey.run("passkeys", "delete", "bob", stdin=f"{PIN}\nn\n")
+    assert result.returncode == 0 and "Nothing was deleted." in result.stderr, result
+    assert pqkey.ok("passkeys", "delete", "bob", stdin=f"{PIN}\ny\n") == "Passkey deleted.\n"
+    assert [row[1] for row in pqkey.passkeys()] == ["alice (Alice)"]
+
+    assert pqkey.error("passkeys", stdin=f"{WRONG_PIN}\n") == f"wrong PIN; {MAX_RETRIES - 1} retries left"
+
+
+def test_reset_replugs_the_key_and_erases_it(pqkey: Pqkey):
+    """reset restarts the key with its options, as re-plugging does, so
+    authenticatorReset comes within 10 seconds of power-up (CTAP 2.3 §6.6),
+    and leaves it running."""
+    old_pid = pqkey.start()
+    pqkey.ok("pin", stdin=f"{PIN}\n")
+    assert pqkey.ok("reset", "--yes") == "The key is reset: its passkeys and its PIN are erased.\n"
+    status = pqkey.status()
+    assert status["PIN"].startswith("not set"), status
+    pid = int(re.fullmatch(r"running \(pid (\d+)\)", status["Key"])[1])
+    assert pid != old_pid
+
+    # Declined, nothing happens.
+    pqkey.ok("pin", stdin=f"{PIN}\n")
+    result = pqkey.run("reset", stdin="no\n")
+    assert result.returncode == 0 and "Nothing was reset." in result.stderr, result
+    assert pqkey.status()["PIN"] == f"set ({MAX_RETRIES} retries left)"
+
+
+def test_ctrl_c_cancels_a_reset_waiting_for_approval(pqkey: Pqkey):
+    """While the key waits for its user, Ctrl-C sends CTAPHID_CANCEL and the
+    key answers CTAP2_ERR_KEEPALIVE_CANCEL (CTAP 2.3 §11.2.9.1.5)."""
+    pqkey.start("unanswered")
+    process = subprocess.Popen(
+        pqkey.command("reset", "--yes"),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        line = process.stderr.readline()
+        assert line.startswith("Approve the reset in the notification"), line
+        process.send_signal(signal.SIGINT)
+        _, stderr = process.communicate(timeout=TIMEOUT_S)
+    finally:
+        process.kill()
+    assert process.returncode == 1, stderr
+    assert stderr.splitlines()[-1] == "pqkey: the reset was cancelled; nothing was erased"

@@ -3,7 +3,10 @@
 
 use std::{
     io,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -42,9 +45,6 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 const BUSY_RETRY_FOR: Duration = Duration::from_secs(10);
 const BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Set by Ctrl-C while a request waits for the user, to send CTAPHID_CANCEL.
-pub static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
-
 /// What went wrong talking CTAPHID.
 #[derive(Debug)]
 pub enum HidError {
@@ -82,7 +82,8 @@ impl std::fmt::Display for HidError {
 pub struct CtapHid<L> {
     link: L,
     channel: u32,
-    cancel: &'static AtomicBool,
+    /// Once set, a request that waits for the user is cancelled.
+    cancel: Arc<AtomicBool>,
 }
 
 impl<L: ReportLink> CtapHid<L> {
@@ -97,7 +98,7 @@ impl<L: ReportLink> CtapHid<L> {
             match receive_message(
                 &mut link,
                 BROADCAST_CID,
-                &CANCEL_REQUESTED,
+                &AtomicBool::new(false),
                 &mut |_| {},
                 |payload| payload.starts_with(&nonce),
             ) {
@@ -109,7 +110,7 @@ impl<L: ReportLink> CtapHid<L> {
                     return Ok(Self {
                         link,
                         channel,
-                        cancel: &CANCEL_REQUESTED,
+                        cancel: Arc::default(),
                     });
                 }
                 Err(HidError::Ctaphid(ERR_CHANNEL_BUSY)) if Instant::now() < deadline => {
@@ -121,17 +122,17 @@ impl<L: ReportLink> CtapHid<L> {
         }
     }
 
-    /// Cancel waiting requests when `flag` is set instead of
-    /// [`CANCEL_REQUESTED`].
-    pub fn with_cancel_flag(mut self, flag: &'static AtomicBool) -> Self {
+    /// Cancel a request that waits for the user once `flag` is set, for
+    /// example by a SIGINT handler.
+    pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.cancel = flag;
         self
     }
 
     /// Send a CTAPHID_CBOR request and return the response, status byte
     /// included.  `keepalive` sees each KEEPALIVE status, so the caller can
-    /// tell the user to approve; Ctrl-C ([`CANCEL_REQUESTED`]) sends
-    /// CTAPHID_CANCEL.
+    /// tell the user to approve; the cancel flag
+    /// ([`with_cancel_flag`](Self::with_cancel_flag)) sends CTAPHID_CANCEL.
     pub fn cbor(
         &mut self,
         request: &[u8],
@@ -140,9 +141,13 @@ impl<L: ReportLink> CtapHid<L> {
         let deadline = Instant::now() + BUSY_RETRY_FOR;
         loop {
             send_message(&mut self.link, self.channel, Command::Cbor, request)?;
-            match receive_message(&mut self.link, self.channel, self.cancel, keepalive, |_| {
-                true
-            }) {
+            match receive_message(
+                &mut self.link,
+                self.channel,
+                &self.cancel,
+                keepalive,
+                |_| true,
+            ) {
                 Err(HidError::Ctaphid(ERR_CHANNEL_BUSY)) if Instant::now() < deadline => {
                     thread::sleep(BUSY_RETRY_INTERVAL);
                 }
@@ -184,8 +189,8 @@ fn send_message<L: ReportLink>(
 /// The next message on `channel` that `accept` takes: KEEPALIVE statuses go
 /// to `keepalive`, CTAPHID_ERROR is an error, packets of other channels
 /// (every reader of a hidraw node sees every report) are skipped.  Once
-/// `cancel` is set (Ctrl-C sets [`CANCEL_REQUESTED`]), the request is cancelled with
-/// CTAPHID_CANCEL (§11.2.9.1.5), once, and its answer awaited.
+/// `cancel` is set, the request is cancelled with CTAPHID_CANCEL
+/// (§11.2.9.1.5), once, and its answer awaited.
 fn receive_message<L: ReportLink>(
     link: &mut L,
     channel: u32,

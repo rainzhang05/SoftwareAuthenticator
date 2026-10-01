@@ -17,15 +17,13 @@ Trussed-based "FIDO Software Authenticator" with the `pc-hid-runner` binary.
 Upgrading from `867a591` or earlier is not an in-place update:
 
 - **Stored state is not migrated.** Credentials and the PIN from the old
-  format are lost; there is nothing to convert them with. The daemon deletes
-  the old files (`master.seed`, `internal.lfs2`, `external.lfs2`,
-  `volatile.lfs2`) from the state directory it uses when it starts, and so
-  does `pqkey reset`.
+  format are lost; there is nothing to convert them with. Nothing reads the
+  old files (`master.seed`, `internal.lfs2`, `external.lfs2`,
+  `volatile.lfs2`); delete them from the state directory.
 - **The state directory moved** from `$XDG_DATA_HOME/feitian-mldsa-authenticator`
   (`~/.local/share/feitian-mldsa-authenticator`) to `$XDG_DATA_HOME/pqkey`
-  (`~/.local/share/pqkey`). Nothing touches the old directory: the CLI
-  notes that it is unused as long as the new default directory does not exist
-  yet, and deleting it is up to you.
+  (`~/.local/share/pqkey`). Nothing touches the old directory; deleting it is
+  up to you.
 - **Renamed:** the project to pqkey; the binary `pc-hid-runner` to `pqkey`; the
   crates `pc-hid-runner`, `authenticator` and `trussed-mldsa` to `pqkey`,
   `pqkey-ctap` and `pqkey-mldsa`, now under `crates/`; the udev rules
@@ -54,8 +52,7 @@ Upgrading from `867a591` or earlier is not an in-place update:
   `--suppress-attestation` (use `--attestation none`), and `--pin`,
   `--current` and `--new` of the `pin` commands (PINs are now read from the
   terminal or standard input). `--manufacturer` no longer has a default.
-  `--serial`, `--vid`, `--pid` and `--backend` are still accepted but
-  ignored.
+  `--serial`, `--vid`, `--pid` and `--backend` are gone.
 - **Build requirements:** Rust 1.89 or later (was 1.85), edition 2024.
 - **Licence:** MIT only (was Apache-2.0 OR MIT).
 
@@ -73,6 +70,27 @@ also break an existing installation of that commit:
   authenticator, so CTAP 2.3 §6.6 applies as it does to a hardware key
   without one: reset right after starting the key, as a hardware key is reset
   right after plugging it in.
+- **A new command set, which manages the running key over CTAP.** `pqkey
+  start`, `stop`, `status`, `pin`, `passkeys [delete QUERY]` and `reset`
+  replace `attach`, `detach`, `status`, `pin set|change|remove|status` and
+  `reset`, without aliases:
+  - `pin`, `passkeys` and `reset` talk to the running key through its hidraw
+    node, as a browser's security key settings do, instead of editing the
+    state directory. They need the key running and access to its hidraw node,
+    and the key checks the PIN.
+  - `pin` sets a PIN, or changes the one that is set. `pin remove` is gone:
+    CTAP has no command for it, and only a reset removes a PIN. `pin status`
+    is gone: `status` shows the PIN.
+  - `reset` restarts the key and has the reset approved in a notification, as
+    a browser's reset does, instead of deleting the state without asking the
+    key.
+  - The daemon is the hidden `pqkey run`: an installed systemd unit needs
+    `ExecStart=%h/.local/bin/pqkey run` instead of `attach --foreground`.
+  - The device, presence and attestation options are hidden and taken only by
+    `run` and `start`, which passes them on; `--state-dir` is hidden too.
+- **No more cleanup of the old format.** The daemon and `reset` no longer
+  delete `master.seed` and the `*.lfs2` files, and the CLI no longer points
+  out the old `feitian-mldsa-authenticator` directory.
 
 ### Added
 
@@ -104,9 +122,15 @@ also break an existing installation of that commit:
   set, and the `uv` option is no longer reported (there is no built-in user
   verification).
 - attestationFormatsPreference "none" is honoured.
-- An exclusive lock on the state directory, so two daemons, or a daemon and a
-  `pin` or `reset` command, never use the same state at once; `pqkey status`
-  reports a daemon that is still starting.
+- An exclusive lock on the state directory, so two daemons never use the same
+  state at once; `pqkey status` reports a daemon that is still starting.
+- A CTAP client for the running key in the `pqkey` command line: `pqkey
+  passkeys` lists the passkeys on the key and `pqkey passkeys delete` deletes
+  one, with the PIN, through credential management (CTAP 2.3 §6.8). Ctrl-C
+  cancels a request that waits for approval with CTAPHID_CANCEL.
+- `pqkey start` and `pqkey stop` go through the systemd user unit when it is
+  installed. The key's HID device carries the unique identifier
+  `pqkey-<pid>`, by which the CLI finds its hidraw node.
 - Hardened systemd user unit.
 - NIST ACVP known-answer tests for ML-DSA-44/65/87; known-answer tests for the
   store's envelope, key hierarchy and record encoding.
@@ -134,7 +158,7 @@ also break an existing installation of that commit:
 - A CTAP reset is accepted only within 10 seconds of start-up, in every
   presence mode (CTAP 2.3 §6.6); the hidden `--allow-late-reset` lifts that
   for test rigs.
-- `pqkey attach` starts the background daemon by running itself again in a new
+- `pqkey start` starts the background daemon by running itself again in a new
   session instead of daemonizing, and reports start-up failures.
 - SIGINT and SIGTERM stop the daemon cleanly and remove the virtual device.
 - The udev rules grant `/dev/uhid` to `plugdev` and the virtual key's hidraw
@@ -253,8 +277,8 @@ also break an existing installation of that commit:
 - The notification prompt gives up on a session bus that accepts the
   connection but never answers after 2 seconds, as it does on a D-Bus call,
   instead of holding the request and the daemon's shutdown forever.
-- `status` and `detach` ignore a pid file naming pid 0, 1 or a negative pid,
-  which `detach` would have signalled as a process group or as every process.
+- `status` and `stop` ignore a pid file naming pid 0, 1 or a negative pid,
+  which `stop` would have signalled as a process group or as every process.
 - The state directory is created with mode 0700 instead of being made
   private after it is created, and a shared directory with the sticky bit set,
   such as `/tmp`, is refused instead of having its permissions changed.
@@ -290,13 +314,14 @@ also break an existing installation of that commit:
   sponges ML-DSA hashes with are wiped on drop. Before, ML-DSA's ρ′, which
   rebuilds the private key, and the ECDSA nonce, which reveals it, were left
   behind (FIPS 204 §3.6.3). Regression tests scan the stack for them.
-- A spent PIN retry is written to disk before the PIN is compared, in the
-  engine and in the CLI, so interrupting a check gives no free guess. The
+- A spent PIN retry is written to disk before the PIN is compared, so
+  interrupting a check gives no free guess; the CLI's PIN checks go through
+  the running key and its counters too. The
   3-mismatch lockout stays volatile, as CTAP intends.
 - The old state format encrypted its littlefs images with a keystream that
   never changed its nonce, so the files exposed the credentials they held. The
-  new store uses a fresh random nonce per write and authenticates every file,
-  and the old files are deleted.
+  new store uses a fresh random nonce per write and authenticates every file;
+  delete the old files.
 - User presence is no longer approved without asking by default.
 - Self attestation by default avoids linking a user's credentials across sites
   through a shared attestation certificate.

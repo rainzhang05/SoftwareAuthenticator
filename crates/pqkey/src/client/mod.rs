@@ -8,4 +8,4 @@ pub mod ctaphid;
 pub mod hidraw;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

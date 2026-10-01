@@ -7,7 +7,7 @@ name: E2E
 #
 # This needs a Linux kernel with uhid, so it only runs on GitHub's Ubuntu
 # runners. To reproduce it on a Linux machine, follow the steps below: build
-# pqkey, attach it in the foreground, point E2E_HIDRAW at its hidraw
+# pqkey, run it in the foreground (pqkey run), point E2E_HIDRAW at its hidraw
 # node, then run tests/e2e/libfido2.sh and pytest tests/e2e.
 
 on:
@@ -59,7 +59,9 @@ jobs:
       # the authenticator is meant to be used, rather than as root: a root
       # daemon would hide permission problems, and there is no reason to run
       # test code from PyPI as root. A CI-only udev rule gives this user
-      # /dev/uhid and the hidraw node of the virtual key (and nothing else).
+      # /dev/uhid and the hidraw nodes of the virtual keys (and nothing else):
+      # product IDs 0001 to 0004 for the keys below, 0005 for the one
+      # tests/e2e/test_cli.py starts.
       # The shipped contrib/udev rule is not used because it grants the node
       # through "uaccess", which needs a logged-in seat that a runner lacks.
       - name: Load uhid and grant the job user access
@@ -67,7 +69,7 @@ jobs:
           user=$(id -un)
           sudo tee /etc/udev/rules.d/99-e2e-virtual-key.rules >/dev/null <<EOF
           KERNEL=="uhid", SUBSYSTEM=="misc", OWNER="$user", MODE="0600"
-          SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/0003:1209:000[1-4].*", OWNER="$user", MODE="0600"
+          SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/0003:1209:000[1-5].*", OWNER="$user", MODE="0600"
           EOF
           sudo udevadm control --reload-rules
           if ! sudo modprobe uhid; then
@@ -87,7 +89,7 @@ jobs:
       # Each virtual key is a pqkey instance of its own, told apart by its
       # product ID, one of the pid.codes test product IDs 0001 to 0004 under
       # the pid.codes vendor ID 1209; tests/e2e/daemon.sh starts and stops them.
-      - name: Attach the virtual security key
+      - name: Start the virtual security key
         run: |
           echo "E2E_WORK=$RUNNER_TEMP" >> "$GITHUB_ENV"
           export E2E_WORK=$RUNNER_TEMP
@@ -96,7 +98,7 @@ jobs:
 
       # The same with certificate attestation, for the attestation certificate
       # tests.
-      - name: Attach the certificate key
+      - name: Start the certificate key
         run: |
           node=$(tests/e2e/daemon.sh start certificate 0002 --presence auto-approve --allow-late-reset \
             --attestation certificate --manufacturer "pqkey E2E" --product "pqkey E2E key" --country US)
@@ -115,14 +117,14 @@ jobs:
       # presence timeout keeps the test of an unanswered prompt quick.
       # --allow-late-reset lets the tests reset it long after it started,
       # which CTAP 2.3 §6.6 does not allow a key without a display.
-      - name: Attach the notify key
+      - name: Start the notify key
         run: |
           node=$(tests/e2e/daemon.sh start notify 0003 --presence notify --presence-timeout 3 --allow-late-reset)
           echo "E2E_NOTIFY_HIDRAW=$node" >> "$GITHUB_ENV"
 
       # Asks for presence and never gets an answer, so tests can watch the
       # transport while a prompt is showing.
-      - name: Attach the unanswered key
+      - name: Start the unanswered key
         run: |
           node=$(tests/e2e/daemon.sh start unanswered 0004 --presence unanswered)
           echo "E2E_UNANSWERED_HIDRAW=$node" >> "$GITHUB_ENV"
@@ -150,7 +152,7 @@ jobs:
           "$RUNNER_TEMP/e2e-venv/bin/python" -m pytest tests/e2e -v \
             --junitxml="$RUNNER_TEMP/e2e-diagnostics/pytest-junit.xml"
 
-      - name: Detach the virtual security keys
+      - name: Stop the virtual security keys
         if: always() && env.E2E_WORK != ''
         run: |
           failed=0

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Start and stop a pqkey instance for the end-to-end tests.
 #
-#   tests/e2e/daemon.sh start NAME PRODUCT_ID [ATTACH_ARGUMENTS...]
+#   tests/e2e/daemon.sh start NAME PRODUCT_ID [RUN_ARGUMENTS...]
 #   tests/e2e/daemon.sh stop NAME PRODUCT_ID
 #
 # NAME keeps the state directory, log and exit status of instances apart;
 # PRODUCT_ID (four hex digits, e.g. 0001) tells their virtual keys apart. Each
-# instance must use a different one. `start` runs `pqkey attach
-# --foreground` in the background and prints the key's hidraw node once it is
-# accessible. `stop` detaches the instance and checks that it exited with
-# status 0 and that its device is gone.
+# instance must use a different one. `start` runs `pqkey run` in the
+# background and prints the key's hidraw node once it is accessible. `stop`
+# stops the instance with `pqkey stop` and checks that it exited with status 0
+# and that its device is gone.
 #
 # Everything goes under $E2E_WORK: NAME-state/, NAME.status and
 # e2e-diagnostics/NAME.log. The binary is $PQKEY, by default
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 start NAME PRODUCT_ID [ATTACH_ARGUMENTS...] | stop NAME PRODUCT_ID" >&2
+  echo "usage: $0 start NAME PRODUCT_ID [RUN_ARGUMENTS...] | stop NAME PRODUCT_ID" >&2
   exit 2
 }
 
@@ -46,8 +46,8 @@ start() {
   # process to close them.
   (
     status=0
-    RUST_LOG=info,pqkey=debug "$binary" attach --foreground \
-      --product-id "0x$product_id" --state-dir "$state_dir" "$@" || status=$?
+    RUST_LOG=info,pqkey=debug "$binary" --state-dir "$state_dir" run \
+      --product-id "0x$product_id" "$@" || status=$?
     echo "$status" > "$status_file"
   ) </dev/null >"$log" 2>&1 &
 
@@ -85,14 +85,14 @@ start() {
 
 stop() {
   local started=$SECONDS
-  "$binary" detach --state-dir "$state_dir"
+  "$binary" --state-dir "$state_dir" stop
 
-  # detach returns once the daemon has released its lock; its exit status
+  # stop returns once the daemon has released its lock; its exit status
   # follows immediately.
   local deadline=$((started + 5))
   until [ -e "$status_file" ]; do
     if [ "$SECONDS" -ge "$deadline" ]; then
-      echo "::error::pqkey ($name) did not exit within 5s of detach"
+      echo "::error::pqkey ($name) did not exit within 5s of stop"
       return 1
     fi
     sleep 0.1
@@ -107,7 +107,7 @@ stop() {
 
   until ! compgen -G "$device_glob" >/dev/null; do
     if [ "$SECONDS" -ge "$deadline" ]; then
-      echo "::error::the $name key's device is still present after detach"
+      echo "::error::the $name key's device is still present after stop"
       ls -l /dev/hidraw* || true
       return 1
     fi

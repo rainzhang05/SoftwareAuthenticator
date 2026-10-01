@@ -1,17 +1,14 @@
 //! Exclusive use of a state directory, and the pid file that goes with it.
 //!
-//! The daemon, and every command that opens the stored state (`pin`,
-//! `reset`), hold an exclusive `flock` on `authenticator.lock` for as long as
-//! they use the directory. So two daemons never run on the same state, the
-//! CLI never changes a PIN underneath a running daemon, and two CLI commands
-//! cannot interleave their reads and writes of the retry counter. The kernel
-//! releases the lock when the holder exits, however it exits.
+//! The daemon holds an exclusive `flock` on `authenticator.lock` for as long
+//! as it uses the directory, so two daemons never run on the same state. The
+//! kernel releases the lock when the holder exits, however it exits.
 //!
-//! The lock is also what makes the pid file trustworthy: `status` and
-//! `detach` only use the pid while the lock is held, and whoever takes the
-//! lock first removes a pid file left behind by a killed daemon. So such a
-//! pid is not signalled after it has been reused by an unrelated process,
-//! unless a `detach` reads it in the moment between the two.
+//! The lock is also what makes the pid file trustworthy: `status` and `stop`
+//! only use the pid while the lock is held, and whoever takes the lock first
+//! removes a pid file left behind by a killed daemon. So such a pid is not
+//! signalled after it has been reused by an unrelated process, unless a
+//! `stop` reads it in the moment between the two.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -91,15 +88,15 @@ pub fn is_locked(state_dir: &Path) -> io::Result<bool> {
     }
 }
 
-/// What `status` and `detach` can tell about a state directory.
+/// What `status` and `stop` can tell about a state directory.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DaemonState {
     /// Nothing holds the lock; any pid file is stale.
     Stopped,
     /// The lock is held and the daemon has published its pid.
     Running(Pid),
-    /// The lock is held but there is no pid: a daemon that has not finished
-    /// starting, or a `pin` or `reset` command.
+    /// The lock is held but there is no pid: a daemon that is starting or
+    /// stopping.
     Busy,
 }
 

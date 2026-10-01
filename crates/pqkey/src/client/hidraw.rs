@@ -5,10 +5,13 @@ use std::{
     io::{self, Read, Write},
     os::fd::AsFd,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::{
+    errno::Errno,
+    poll::{PollFd, PollFlags, PollTimeout, poll},
+};
 
 use super::ctaphid::{Report, ReportLink};
 use crate::uhid::CTAPHID_FRAME_LEN;
@@ -64,13 +67,29 @@ impl ReportLink for Hidraw {
     }
 
     fn receive(&mut self, timeout: Duration) -> io::Result<Option<Report>> {
-        let mut fds = [PollFd::new(self.file.as_fd(), PollFlags::POLLIN)];
-        let timeout = PollTimeout::try_from(timeout).unwrap_or(PollTimeout::MAX);
-        if poll(&mut fds, timeout).map_err(io::Error::from)? == 0 {
-            return Ok(None);
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let mut fds = [PollFd::new(self.file.as_fd(), PollFlags::POLLIN)];
+            match poll(
+                &mut fds,
+                PollTimeout::try_from(left).unwrap_or(PollTimeout::MAX),
+            ) {
+                Ok(0) => return Ok(None),
+                Ok(_) => break,
+                // A signal, such as the Ctrl-C that cancels a request, ends
+                // the wait early; it goes on for the time left.
+                Err(Errno::EINTR) => {}
+                Err(err) => return Err(err.into()),
+            }
         }
         let mut report = [0u8; CTAPHID_FRAME_LEN];
-        let read = self.file.read(&mut report)?;
+        let read = loop {
+            match self.file.read(&mut report) {
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                other => break other?,
+            }
+        };
         if read != CTAPHID_FRAME_LEN {
             return Err(io::Error::other(format!("a {read}-byte report")));
         }
@@ -82,6 +101,44 @@ impl ReportLink for Hidraw {
 mod tests {
     use super::*;
     use crate::test_support::TempDir;
+    use std::{
+        sync::{Arc, atomic::AtomicBool},
+        thread,
+    };
+
+    /// A signal while the client waits for the key, such as the Ctrl-C that
+    /// cancels a request, does not end the wait: the cancellation still has
+    /// to reach the key, and its answer to come back.
+    #[test]
+    fn a_signal_does_not_end_the_wait_for_a_report() {
+        use nix::sys::{pthread, signal::Signal, stat::Mode};
+        let _serialized = crate::test_support::lock_signal_handlers();
+        let dir = TempDir::new("hidraw-eintr");
+        // A FIFO stands in for the node: opened for reading and writing, it
+        // blocks reads until a report is written.
+        let node = dir.path().join("hidraw0");
+        nix::unistd::mkfifo(&node, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+        let mut link = Hidraw::open(&node).unwrap();
+        let handler =
+            signal_hook::flag::register(Signal::SIGUSR2 as i32, Arc::new(AtomicBool::new(false)))
+                .unwrap();
+        let waiting = pthread::pthread_self();
+        let key = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            pthread::pthread_kill(waiting, Signal::SIGUSR2).unwrap();
+            thread::sleep(Duration::from_millis(100));
+            OpenOptions::new()
+                .write(true)
+                .open(&node)
+                .unwrap()
+                .write_all(&[0x42; CTAPHID_FRAME_LEN])
+                .unwrap();
+        });
+        let report = link.receive(Duration::from_secs(10));
+        key.join().unwrap();
+        signal_hook::low_level::unregister(handler);
+        assert_eq!(report.unwrap(), Some([0x42; CTAPHID_FRAME_LEN]));
+    }
 
     #[test]
     fn the_node_is_found_by_its_unique_identifier() {

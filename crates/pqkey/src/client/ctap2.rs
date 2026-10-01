@@ -2,6 +2,8 @@
 //! `pqkey pin`, `pqkey passkeys`, `pqkey reset` and `pqkey status` do with
 //! the running key, through the same commands a browser uses.
 
+use std::sync::{Arc, atomic::AtomicBool};
+
 use ciborium::value::{Integer, Value};
 use pqkey_ctap::ClassicPinProtocol;
 use pqkey_ctap::CryptoError;
@@ -93,6 +95,12 @@ pub struct Passkey {
 /// A pinUvAuthToken.
 pub struct Token(Zeroizing<Vec<u8>>);
 
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Token(<redacted>)")
+    }
+}
+
 /// The running key, through CTAPHID.
 pub struct Authenticator<L> {
     hid: CtapHid<L>,
@@ -143,9 +151,9 @@ impl<L: ReportLink> Authenticator<L> {
         })
     }
 
-    /// Cancel a request that waits for the user once `flag` is set, instead
-    /// of on Ctrl-C.
-    pub fn with_cancel_flag(mut self, flag: &'static std::sync::atomic::AtomicBool) -> Self {
+    /// Cancel a request that waits for the user once `flag` is set, for
+    /// example by a SIGINT handler.
+    pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.hid = self.hid.with_cancel_flag(flag);
         self
     }

@@ -500,8 +500,9 @@ pub fn prompt_text(request: &PresenceRequest<'_>) -> String {
     }
 }
 
+/// Which end of a long text [`sanitise`] keeps.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Keep {
+pub(crate) enum Keep {
     Start,
     End,
 }
@@ -510,7 +511,7 @@ enum Keep {
 /// characters ([`is_invisible_format`]) are removed, runs of whitespace collapse, and anything longer than
 /// `max_chars` is cut, keeping its start or its end, with an ellipsis. `None`
 /// if nothing is left.
-fn sanitise(text: &str, max_chars: usize, keep: Keep) -> Option<String> {
+pub(crate) fn sanitise(text: &str, max_chars: usize, keep: Keep) -> Option<String> {
     let mut cleaned = String::with_capacity(text.len().min(4 * max_chars));
     for c in text.chars() {
         if is_invisible_format(c) {

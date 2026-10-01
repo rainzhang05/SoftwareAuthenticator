@@ -54,23 +54,24 @@ contrib/            udev rules and systemd user unit
   It forbids `unsafe` code, as does `pqkey-mldsa`.
 - **`pqkey`** is the Linux program: it creates the uhid device, runs CTAPHID,
   runs the engine on a worker thread, asks for user presence over D-Bus, and
-  provides the `attach`/`detach`/`status`/`reset`/`pin` commands. The only
-  `unsafe` code in the project is here: the uhid device's kernel structures,
-  `setsid` in `pre_exec` when `attach` starts the daemon, and the signal
-  handlers of the PIN prompt (plus a `setsockopt` in a test helper). Every
-  block carries a safety comment.
+  provides the `start`/`stop`/`status`/`pin`/`passkeys`/`reset` commands,
+  which manage the running key as a CTAP client. The only `unsafe` code in
+  the project is here: the uhid device's kernel structures, `setsid` in
+  `pre_exec` when `start` starts the daemon, and the signal handlers of the
+  PIN prompt (plus a `setsockopt` in a test helper). Every block carries a
+  safety comment.
 
 ## The daemon
 
-`pqkey attach --foreground` takes an exclusive `flock` on
-`<state dir>/authenticator.lock`, deletes state files from before the storage
-rework (`master.seed`, `internal.lfs2`, `external.lfs2`, `volatile.lfs2`),
-opens the credential store, creates the uhid device, writes
-`authenticator.pid`, and then serves requests until it is told to stop.
-`pqkey attach` without `--foreground` runs the same binary again with
-`--foreground` in a new session, with its output appended to
-`authenticator.log`, and waits up to 10 seconds for the pid file. `start` and
-`stop` are aliases of `attach` and `detach`.
+`pqkey run` (hidden from the help; the systemd unit and test rigs use it)
+takes an exclusive `flock` on `<state dir>/authenticator.lock`, opens the
+credential store, creates the uhid device, writes `authenticator.pid`, and
+then serves requests until it is told to stop. The device's HID unique
+identifier is `pqkey-<pid>`, which is how the CLI finds its hidraw node.
+`pqkey start` starts `pqkey.service` with `systemctl --user` when that unit
+is installed and the default state directory and options are used; otherwise
+it runs the same binary's `run` in a new session, with its output appended to
+`authenticator.log`. Either way it waits up to 10 seconds for the pid file.
 
 ### Threads
 
@@ -227,7 +228,8 @@ never gives a free guess. A match restores pinRetries to 8. Three consecutive
 mismatches return CTAP2_ERR_PIN_AUTH_BLOCKED until the daemon restarts; that
 count is volatile on purpose (§6.5.5.6 step 5.7.1.2.2, §6.5.5.7.2 step
 4.9.1.2.2, which ask for a power cycle). At pinRetries 0 only a reset helps.
-The `pqkey pin` commands use the same state machine on the same store.
+`pqkey pin` goes through the running key's ClientPIN commands, so this state
+machine checks its PINs too.
 
 **PIN/UV auth protocols** (`pin/protocol.rs`). Protocols 2 and 1 are
 supported, for PIN operations, pinUvAuthParam verification and hmac-secret.
@@ -427,34 +429,52 @@ the stored record cannot be read, registrations fall back to self attestation.
 
 ## Command-line interface and state directory
 
-`crates/pqkey/src/cli.rs`, `state.rs`, `state_lock.rs`, `pin_input.rs`.
+`crates/pqkey/src/cli/`, `client/`, `state.rs`, `state_lock.rs`,
+`pin_input.rs`.
 
-- **Locking.** The daemon, `reset` and `pin set|change|remove` hold an
-  exclusive `flock` on `authenticator.lock`. `status` and `detach` probe it
-  with a shared lock and trust the pid file only while the lock is held, and
-  whoever takes the lock first removes a pid file a killed daemon left
-  behind. So its pid is not signalled once reused, unless a `detach` reads it
-  in the moment between the two. A pid file naming pid 0, 1 or a negative pid
-  is ignored.
-- **`detach`** sends SIGTERM and waits up to 10 seconds for the lock to be
+- **A CTAP client.** `pin`, `passkeys` and `reset` manage the running key the
+  way a security key's management application does (`client/`): CTAPHID over
+  its hidraw node, one transaction at a time, then CTAP2 with PIN/UV auth
+  protocol 2. `pin` is setPIN or changePIN; `passkeys` gets a
+  pinUvAuthToken with the `cm` permission and enumerates or deletes
+  credentials (§6.8); `reset` is authenticatorReset. Only the daemon opens the
+  store, and the key's own checks (PIN rules, retry counters, user presence,
+  the reset window) apply to the CLI as to a browser. Without a running key
+  these commands say so and name `pqkey start`.
+- **`reset`** asks for confirmation unless `--yes` is given, then restarts the
+  key with the options it runs with (read from `/proc/<pid>/cmdline`, or
+  `systemctl --user restart`), because a key without a display accepts
+  authenticatorReset only within 10 seconds of power-up (§6.6). It starts a
+  stopped key for the reset and stops it again afterwards. While the key waits
+  for approval, Ctrl-C sends CTAPHID_CANCEL.
+- **Wrong PINs.** Before asking for a PIN the CLI reads getPinRetries, so a
+  blocked PIN or one that needs a re-plug is reported without a prompt. A PIN
+  that could never have been set (fewer than 4 code points, more than 63
+  bytes) is refused without sending it, so it costs no retry.
+- **Output.** Site and user names come from relying parties, so `passkeys`
+  removes control and invisible characters before printing them.
+- **Locking.** The daemon holds an exclusive `flock` on `authenticator.lock`
+  for as long as it runs. `status` and `stop` probe it with a shared lock and
+  trust the pid file only while the lock is held, and whoever takes the lock
+  first removes a pid file a killed daemon left behind. So its pid is not
+  signalled once reused, unless a `stop` reads it in the moment between the
+  two. A pid file naming pid 0, 1 or a negative pid is ignored.
+- **`stop`** stops the unit with `systemctl --user` if it runs the key, and
+  otherwise sends SIGTERM; it waits up to 10 seconds for the lock to be
   released.
-- **`reset`** asks for confirmation unless `--yes` is given, and also deletes
-  the state files from before the storage rework, saying which it removed.
-- **`pin status`** only reads, so it needs no lock.
 - **PIN input** is read with terminal echo off (a new PIN twice), or one line
   per PIN from a non-terminal standard input. PINs are zeroized on drop and
   never accepted as arguments.
 - **State directory** defaults to `$XDG_DATA_HOME/pqkey` or
   `~/.local/share/pqkey`, and is created with mode `0700` or tightened to it. A
   shared directory with the sticky bit set, such as `/tmp`, is refused rather
-  than made private. If the default state directory does not exist yet but the
-  pre-rename default `feitian-mldsa-authenticator` does, the CLI prints a note
-  that the old directory is unused.
-- **Device identity.** `--name` sets the HID product name, `--vendor-id` and
-  `--product-id` the USB IDs (default `1209:0001`), `attach --version` the
-  version in the HID descriptor, and `--aaguid` the AAGUID (default
-  `5931e805-a166-4eb7-845a-7f6aa93d9cd8`). The legacy options `--serial`,
-  `--vid`, `--pid` and `--backend` are hidden, accepted and ignored.
+  than made private. The hidden `--state-dir` option (or `PQKEY_STATE_DIR`)
+  chooses another, for test rigs.
+- **Device identity and test options.** `run` and `start` take hidden options
+  for test rigs: `--presence`, `--presence-timeout`, `--allow-late-reset`,
+  `--name`, `--vendor-id` and `--product-id` (default `1209:0001`),
+  `--version`, `--aaguid` (default `5931e805-a166-4eb7-845a-7f6aa93d9cd8`)
+  and the attestation options. `start` passes them on to `run`.
 
 ## Testing
 
@@ -466,7 +486,7 @@ the stored record cannot be read, registrations fall back to self attestation.
 | Engine over files | `crates/pqkey-ctap/tests/ctap_file_store.rs` | CTAP requests over a real `FileStore`, rebuilding the engine between requests as a restart would |
 | ML-DSA KATs | `crates/pqkey-mldsa/tests/fips204_kat.rs` | NIST ACVP key generation, signing and verification vectors for all three parameter sets |
 | Attestation | `crates/pqkey/tests/packed_attestation.rs` | The provisioned certificate's AAGUID matches authenticatorData and the signature verifies |
-| End to end | `tests/e2e/`, `.github/workflows/e2e.yml` | The release daemon on a GitHub Actions Ubuntu runner, driven through its hidraw node by libfido2's tools and python-fido2: getInfo, ES256 and ML-DSA credentials, PINs, hmac-secret and credential management with both PIN/UV auth protocols, CTAPHID edge cases, certificate attestation, notification presence on a private session bus, the transport while a prompt stays unanswered, an independent check of the test suite's ML-DSA verifier, and the CLI's `attach`, `status`, `detach`, `pin` and `reset` commands |
+| End to end | `tests/e2e/`, `.github/workflows/e2e.yml` | The release daemon on a GitHub Actions Ubuntu runner, driven through its hidraw node by libfido2's tools and python-fido2: getInfo, ES256 and ML-DSA credentials, PINs, hmac-secret and credential management with both PIN/UV auth protocols, CTAPHID edge cases, certificate attestation, notification presence on a private session bus, the transport while a prompt stays unanswered, an independent check of the test suite's ML-DSA verifier, and the CLI's `start`, `status`, `stop`, `pin`, `passkeys` and `reset` commands over the key's hidraw node |
 | Fuzzing | `fuzz/`, `.github/workflows/fuzz.yml` | libFuzzer targets `ctaphid_packets`, `ctap_request`, `ctap_request_structured`, `ctap_sequence`, `credential_key` |
 
 How to run each of these is in [development-notes.md](development-notes.md).

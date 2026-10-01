@@ -23,7 +23,7 @@ use crate::test_support::TempDir;
 use crate::uhid;
 
 /// Reports through the kernel's side of a uhid device.
-struct KernelSide(UnixStream);
+pub(crate) struct KernelSide(UnixStream);
 
 impl ReportLink for KernelSide {
     fn send(&mut self, report: &Report) -> io::Result<()> {
@@ -48,7 +48,7 @@ impl ReportLink for KernelSide {
 
 /// A running daemon over `dir`'s store, approving every presence request,
 /// and a client of it.  The daemon stops when the returned guard drops.
-struct Daemon {
+pub(crate) struct Daemon {
     shutdown: ShutdownSignal,
     done: mpsc::Receiver<()>,
 }
@@ -60,11 +60,14 @@ impl Drop for Daemon {
     }
 }
 
-fn start(dir: &TempDir) -> (Daemon, Authenticator<KernelSide>) {
+pub(crate) fn start(dir: &TempDir) -> (Daemon, Authenticator<KernelSide>) {
     start_with(dir, PresenceMode::AutoApprove)
 }
 
-fn start_with(dir: &TempDir, presence: PresenceMode) -> (Daemon, Authenticator<KernelSide>) {
+pub(crate) fn start_with(
+    dir: &TempDir,
+    presence: PresenceMode,
+) -> (Daemon, Authenticator<KernelSide>) {
     let (device, kernel) = crate::tests::socket_device();
     let data = AppData {
         store: FileStore::open(dir.path()).expect("open the store"),
@@ -93,7 +96,7 @@ fn start_with(dir: &TempDir, presence: PresenceMode) -> (Daemon, Authenticator<K
     (Daemon { shutdown, done }, client)
 }
 
-fn discoverable(rp_id: &str, id: u8, name: &str, alg: CoseAlg) -> CredentialRecord {
+pub(crate) fn discoverable(rp_id: &str, id: u8, name: &str, alg: CoseAlg) -> CredentialRecord {
     let mut credential_id = vec![0x01];
     credential_id.extend([id; 32]);
     CredentialRecord {
@@ -252,16 +255,19 @@ fn a_reset_right_after_start_erases_the_pin_and_passkeys() {
 /// CTAPHID_CANCEL, and the key answers CTAP2_ERR_KEEPALIVE_CANCEL.
 #[test]
 fn a_request_waiting_for_the_user_is_cancelled() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static CANCEL: AtomicBool = AtomicBool::new(false);
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
     let dir = TempDir::new("client-cancel");
     let (_daemon, key) = start_with(&dir, PresenceMode::Unanswered);
-    let mut key = key.with_cancel_flag(&CANCEL);
+    let mut key = key.with_cancel_flag(Arc::clone(&cancel));
     let mut statuses = Vec::new();
     let result = key.reset(&mut |status| {
         statuses.push(status);
         if status == super::ctaphid::STATUS_UPNEEDED {
-            CANCEL.store(true, Ordering::Relaxed);
+            cancel.store(true, Ordering::Relaxed);
         }
     });
     assert!(

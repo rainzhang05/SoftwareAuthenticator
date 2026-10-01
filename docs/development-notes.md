@@ -47,14 +47,18 @@ Then build and run in the foreground. Debug logs include the relying party
 and user names of presence prompts and CTAPHID channel IDs; info logs do not.
 
 ```bash
-pqkey detach 2>/dev/null || true
+pqkey stop
 cargo build --release
-RUST_LOG=pqkey=debug,pqkey_ctap=debug cargo run --release -p pqkey -- attach --foreground
+RUST_LOG=pqkey=debug,pqkey_ctap=debug cargo run --release -p pqkey -- run
 ```
 
-`pqkey status` shows whether a daemon runs on the state directory, `pqkey
-detach` stops it. `--presence auto-approve` approves every request without
-asking and is only for tests.
+`pqkey run` is the key itself, in the foreground; the systemd unit runs it
+too. `pqkey status` shows whether a key runs on the state directory, `pqkey
+stop` stops it. `run` and `start` take hidden options for test rigs (see
+`docs/architecture.md`); `--presence auto-approve` approves every request
+without asking and is only for tests. Keep tests away from the state directory
+of the key you use: give them `--state-dir` (or `PQKEY_STATE_DIR`) and a
+`--product-id` of their own.
 
 ## Checks
 
@@ -154,7 +158,7 @@ To run them on a Linux machine:
    user=$(id -un)
    sudo tee /etc/udev/rules.d/99-e2e-virtual-key.rules >/dev/null <<EOF
    KERNEL=="uhid", SUBSYSTEM=="misc", OWNER="$user", MODE="0600"
-   SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/0003:1209:000[1-4].*", OWNER="$user", MODE="0600"
+   SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/0003:1209:000[1-5].*", OWNER="$user", MODE="0600"
    EOF
    sudo udevadm control --reload-rules
    sudo modprobe uhid
@@ -162,9 +166,9 @@ To run them on a Linux machine:
    ```
 
 3. Start the four instances with
-   [`tests/e2e/daemon.sh`](../tests/e2e/daemon.sh), which runs
-   `pqkey attach --foreground` in the background under `$E2E_WORK` and prints
-   the hidraw node once it is accessible. The notify instance needs a session
+   [`tests/e2e/daemon.sh`](../tests/e2e/daemon.sh), which runs `pqkey run`
+   in the background under `$E2E_WORK` and prints the hidraw node once it is
+   accessible. The notify instance needs a session
    bus of its own:
 
    ```bash
@@ -289,7 +293,7 @@ normal banner up until you move the mouse, and everything waits behind it.
 
 **Every registration or sign-in fails immediately.** No notification could be
 shown, so presence was denied. The log says why: `journalctl --user -u pqkey`,
-`<state dir>/authenticator.log`, or the terminal with `--foreground`. Run the
+`<state dir>/authenticator.log`, or the terminal of `pqkey run`. Run the
 daemon inside your desktop session and check `DBUS_SESSION_BUS_ADDRESS`; the
 comments in
 [`contrib/systemd/user/pqkey.service`](../contrib/systemd/user/pqkey.service)

@@ -21,7 +21,6 @@ use crate::{
         notification::{NotificationPresence, PROMPT_FILE},
     },
     shutdown::{ShutdownSignal, is_shutdown, ok_if_shutdown},
-    state::remove_and_log_legacy_state,
     uhid::UhidDevice,
 };
 
@@ -56,6 +55,7 @@ impl AttestationConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct RunnerConfig {
     pub descriptor: HidDeviceDescriptor,
     pub state_dir: PathBuf,
@@ -266,7 +266,6 @@ pub fn run(
         allow_late_reset,
     } = config;
 
-    remove_and_log_legacy_state(&state_dir)?;
     let store = match &attestation {
         AttestationConfig::Certificate(identity) => {
             log::warn!(

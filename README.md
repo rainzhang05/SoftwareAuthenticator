@@ -60,20 +60,24 @@ systemctl --user enable --now pqkey.service
 ## Usage
 
 ```bash
-pqkey attach                 # start in the background (--foreground to stay)
-pqkey status                 # is it running?
-pqkey detach                 # stop it and remove the virtual device
+pqkey start                  # plug the key in
+pqkey status                 # is it running, its PIN and free passkey slots (also plain `pqkey`)
+pqkey stop                   # pull it out
 
-pqkey pin status             # PIN set, retries remaining, blocked
-pqkey pin set | change | remove
-pqkey reset [--yes]          # delete every credential and the PIN
+pqkey pin                    # set the PIN, or change it
+pqkey passkeys               # list the passkeys stored on the key (needs the PIN)
+pqkey passkeys delete QUERY  # delete the one QUERY names: part of its site, user or ID
+pqkey reset [--yes]          # erase every passkey and the PIN
 ```
 
-Every registration, sign-in and reset from a browser asks for your approval
-with a desktop notification. PINs are read from the terminal with echo off, or
-one per line from standard input. `pin set|change|remove` and `reset` need the
-daemon stopped. The state lives in `~/.local/share/pqkey` (`--state-dir`
-changes it), and `pqkey attach --help` lists the other options.
+Every registration, sign-in and reset asks for your approval with a desktop
+notification. `pin`, `passkeys` and `reset` talk to the running key over CTAP,
+as a browser's security key settings do, so the key itself checks the PIN and
+counts its retries. Like a hardware key, it accepts a reset only within 10
+seconds of being plugged in, so `pqkey reset` restarts it first. PINs are read
+from the terminal with echo off, or one per line from standard input. When the
+systemd user unit is installed, `start` and `stop` go through it. The state
+lives in `~/.local/share/pqkey`.
 
 ## ML-DSA in clients
 
