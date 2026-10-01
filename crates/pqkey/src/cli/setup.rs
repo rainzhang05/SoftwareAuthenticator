@@ -225,7 +225,8 @@ fn check_caller(state_dir: &Path) -> io::Result<()> {
 }
 
 /// `pqkey setup`.
-pub fn setup(state_dir: &Path) -> io::Result<()> {
+/// `pqkey setup`; `yes` runs the steps that need root without asking.
+pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
     check_caller(state_dir)?;
     let binary = env::current_exe()?.canonicalize()?;
     if binary.components().any(|part| part.as_os_str() == "target") {
@@ -245,7 +246,7 @@ pub fn setup(state_dir: &Path) -> io::Result<()> {
         outln!()?;
         print_script(&script)?;
         outln!()?;
-        if !interactive || !key::ask("Run them now with sudo?", true)? {
+        if !yes && (!interactive || !key::ask("Run them now with sudo?", true)?) {
             outln!("Run them, then `pqkey setup` again:")?;
             outln!()?;
             outln!("    sudo sh {}", path.display())?;

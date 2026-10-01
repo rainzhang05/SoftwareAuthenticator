@@ -77,6 +77,9 @@ enum Command {
         /// Remove the user service again, and print what undoes the root part
         #[clap(long)]
         uninstall: bool,
+        /// Run the steps that need root without asking first
+        #[clap(long, conflicts_with = "uninstall")]
+        yes: bool,
     },
     /// Plug the key in: start it, through its systemd user service when that
     /// is installed
@@ -394,8 +397,13 @@ pub fn run_cli() -> io::Result<()> {
             action: Some(PasskeysAction::Delete { query, yes }),
         } => key::delete_passkey(&state_dir, &query, yes),
         Command::Reset { yes } => key::reset(&state_dir, yes),
-        Command::Setup { uninstall: false } => setup::setup(&state_dir),
-        Command::Setup { uninstall: true } => setup::uninstall(&state_dir),
+        Command::Setup {
+            uninstall: false,
+            yes,
+        } => setup::setup(&state_dir, yes),
+        Command::Setup {
+            uninstall: true, ..
+        } => setup::uninstall(&state_dir),
     }
 }
 
