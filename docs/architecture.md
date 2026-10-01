@@ -37,7 +37,10 @@ contrib/            udev rules and systemd user unit
 - **`pqkey-mldsa`** exposes key generation, signing and verification for the
   three FIPS 204 parameter sets, working from the 32-byte seed. Signing is pure
   ML-DSA over the external interface, hedged (randomised) by default. Each
-  parameter set is a Cargo feature; all are on by default.
+  parameter set is a Cargo feature; all are on by default. The FIPS 204
+  internal interfaces that take a caller's randomness (`try_keypair_from_seed`,
+  `try_sign_deterministic`) exist only with the `hazmat` feature, for the
+  known-answer tests.
 - **`pqkey-ctap`** answers CTAP requests: `CtapApp::call` takes a CTAP
   command byte and its CBOR parameters, the payload of a CTAPHID_CBOR message,
   and returns the response, and an `InterruptFlag` lets the transport cancel

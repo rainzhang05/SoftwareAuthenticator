@@ -135,6 +135,10 @@ also break an existing installation of that commit:
   about `--presence auto-approve`, `--attestation certificate` and a
   world-accessible hidraw node reach the log.
 - CLI errors are printed as messages.
+- `pqkey_mldsa::try_keypair_from_seed` and `try_sign_deterministic`, FIPS 204's
+  internal interfaces with caller-chosen randomness, need the new `hazmat`
+  feature (FIPS 204 §6: "Other than for testing purposes, [...] should not be
+  made available to applications").
 - Dependencies updated to current majors (for example sha2 0.11, p256 0.14,
   getrandom 0.4, rand_core 0.10); `pretty_env_logger` replaced by
   `env_logger`.

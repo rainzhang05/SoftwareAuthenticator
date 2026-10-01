@@ -33,7 +33,10 @@ shake = { workspace = true, features = ["zeroize"] }
 [dev-dependencies]
 # The residue test recomputes ρ′ and K = SHAKE256(ξ || k || ℓ) independently.
 shake.workspace = true
+# The known-answer tests need the `hazmat` interfaces.
+pqkey-mldsa = { workspace = true, features = ["hazmat"] }
 
+# A program of its own: it reads the stack other functions left behind.
 [[test]]
 name = "residue"
 harness = false
@@ -47,3 +50,10 @@ mldsa44 = []
 mldsa65 = []
 mldsa87 = []
 log = ["dep:log"]
+# FIPS 204's internal interfaces with caller-chosen randomness,
+# `try_keypair_from_seed` (ML-DSA.KeyGen_internal) and `try_sign_deterministic`
+# (ML-DSA.Sign_internal with a given rnd), for known-answer tests.  FIPS 204
+# §6: "Other than for testing purposes, the interfaces for key generation and
+# signature generation specified in this section should not be made available
+# to applications".
+hazmat = []

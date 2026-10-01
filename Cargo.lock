@@ -1229,6 +1229,7 @@ dependencies = [
  "getrandom",
  "log",
  "ml-dsa",
+ "pqkey-mldsa",
  "shake",
  "zeroize",
 ]
