@@ -215,15 +215,33 @@ pub fn setup(state_dir: &Path) -> io::Result<()> {
     let system = System::real();
     let membership = checks::membership();
 
+    let interactive = io::stdin().is_terminal();
     if let Some(script) = root_script(&system, &membership) {
         let path = hand_over(&runtime_dir(), &script, "pqkey-setup.sh")?;
         outln!("These steps need root, once:")?;
         outln!()?;
         print_script(&script)?;
         outln!()?;
-        outln!("Run them, then `pqkey setup` again:")?;
-        outln!()?;
-        outln!("    sudo sh {}", path.display())?;
+        if !interactive || !key::ask("Run them now with sudo?", true)? {
+            outln!("Run them, then `pqkey setup` again:")?;
+            outln!()?;
+            outln!("    sudo sh {}", path.display())?;
+            return Ok(());
+        }
+        run_as_root("sudo", &path)?;
+        let _ = fs::remove_file(&path);
+    }
+    // The script may have added this user to the group.
+    let membership = checks::membership();
+    if checks::needs_login(&system, &membership) {
+        // The key starts by itself once the new session has the group.
+        install_unit(&binary)?;
+        systemctl(&["enable", UNIT])?;
+        outln!(
+            "Log out and in again: this session started before you joined '{}'. The key then \
+             starts by itself; `pqkey pin` sets its PIN, which Chromium asks for.",
+            UHID_GROUP
+        )?;
         return Ok(());
     }
     let problems = checks::start_problems(&system, &membership);
@@ -265,7 +283,28 @@ pub fn setup(state_dir: &Path) -> io::Result<()> {
         outln!("Still to fix:")?;
         print_problems(&problems)?;
     }
-    key::offer_pin(running, io::stdin().is_terminal())
+    key::offer_pin(running, interactive)
+}
+
+/// Run `script` as root with `sudo` (or, in tests, another program), which
+/// asks for the user's password on the terminal.
+fn run_as_root(sudo: &str, script: &Path) -> io::Result<()> {
+    let rerun = format!(
+        "run `sudo sh {}`, then `pqkey setup` again",
+        script.display()
+    );
+    let status = std::process::Command::new(sudo)
+        .arg("sh")
+        .arg(script)
+        .status()
+        .map_err(|err| io::Error::new(err.kind(), format!("cannot run {sudo}: {err}; {rerun}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "the steps that need root did not finish ({status}); {rerun}"
+        )))
+    }
 }
 
 /// Install the unit for `binary` and have systemd read it, unless it is
@@ -402,6 +441,20 @@ mod tests {
         let missing = path_problem(&binary, Some(&path(&[&none]))).unwrap();
         assert!(missing.what.ends_with("is not on your PATH"), "{missing:?}");
         assert!(path_problem(&binary, None).is_some());
+    }
+
+    #[test]
+    fn a_failed_root_step_says_how_to_run_it_again() {
+        let script = Path::new("/run/user/1000/pqkey-setup.sh");
+        run_as_root("true", script).unwrap();
+        let err = run_as_root("false", script).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("run `sudo sh /run/user/1000/pqkey-setup.sh`"),
+            "{err}"
+        );
+        let err = run_as_root("/nonexistent/sudo", script).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
     }
 
     #[test]

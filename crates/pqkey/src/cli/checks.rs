@@ -290,6 +290,19 @@ pub fn start_problems(system: &System, membership: &Membership) -> Vec<Problem> 
     problems
 }
 
+/// Whether all that keeps the key from starting is a session older than the
+/// user's membership in [`UHID_GROUP`], which logging in again fixes.
+pub fn needs_login(system: &System, membership: &Membership) -> bool {
+    membership.member
+        && !membership.in_session
+        && system.rules() == Rules::Current
+        && system.uhid_at_boot()
+        && system.uhid_loaded()
+        && system
+            .open_uhid()
+            .is_err_and(|err| err.kind() == ErrorKind::PermissionDenied)
+}
+
 /// What keeps browsers from opening the running key's node `node`.
 pub fn browser_problems(system: &System, node: &Path, opened: &io::Result<()>) -> Vec<Problem> {
     let mut problems = Vec::new();
@@ -488,6 +501,35 @@ mod tests {
             "{outsider:?}"
         );
         assert_eq!(outsider[0].fix, "run `pqkey setup`");
+    }
+
+    #[test]
+    fn only_a_session_older_than_the_membership_needs_a_new_login() {
+        if unistd::geteuid().is_root() {
+            return; // root opens anything
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("checks-login");
+        let system = System::under(dir.path().to_owned());
+        write(&system, UDEV_RULES_PATH, UDEV_RULES);
+        write(&system, MODULES_LOAD_PATH, "uhid\n");
+        write(&system, "/dev/uhid", "");
+        fs::set_permissions(system.path("/dev/uhid"), fs::Permissions::from_mode(0o000)).unwrap();
+        let joined = Membership {
+            in_session: false,
+            ..member()
+        };
+        assert!(needs_login(&system, &joined));
+        assert!(!needs_login(&system, &member()));
+        assert!(!needs_login(
+            &system,
+            &Membership {
+                member: false,
+                ..joined.clone()
+            }
+        ));
+        fs::remove_file(system.path(UDEV_RULES_PATH)).unwrap();
+        assert!(!needs_login(&system, &joined), "the rules are missing too");
     }
 
     #[test]

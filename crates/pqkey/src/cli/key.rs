@@ -112,19 +112,30 @@ fn open_node(running: Running, wait: Duration) -> io::Result<(PathBuf, Hidraw)> 
 
 /// Ask `question` on the terminal; only "y" or "yes" is a yes.
 fn confirm(question: &str) -> io::Result<bool> {
+    ask(question, false)
+}
+
+/// Ask `question` on the terminal. An empty answer is `default_yes`.
+pub(super) fn ask(question: &str, default_yes: bool) -> io::Result<bool> {
     {
         let mut stderr = io::stderr().lock();
-        write!(stderr, "{question} [y/N] ")?;
+        let choices = if default_yes { "[Y/n]" } else { "[y/N]" };
+        write!(stderr, "{question} {choices} ")?;
         stderr.flush()?;
     }
     // Standard input's own buffer, which PIN lines read before were taken
     // from: a reader of its own could swallow lines meant for later.
     let mut answer = String::new();
     io::stdin().lock().read_line(&mut answer)?;
-    Ok(matches!(
-        answer.trim().to_ascii_lowercase().as_str(),
-        "y" | "yes"
-    ))
+    Ok(is_yes(&answer, default_yes))
+}
+
+fn is_yes(answer: &str, default_yes: bool) -> bool {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" => default_yes,
+        "y" | "yes" => true,
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -291,7 +302,7 @@ pub fn offer_pin(running: Running, interactive: bool) -> io::Result<()> {
     if !interactive {
         return outln!("{why}: `pqkey pin` sets one.");
     }
-    if !confirm(&format!("{why}. Set one now?"))? {
+    if !ask(&format!("{why}. Set one now?"), true)? {
         return outln!("`pqkey pin` sets one later.");
     }
     set_or_change_pin(&mut key, &mut PinReader::from_stdin())?;
@@ -868,6 +879,15 @@ mod tests {
         assert_eq!(algorithm(Some(-7)), "ES256");
         assert_eq!(algorithm(Some(-8)), "COSE -8");
         assert_eq!(algorithm(None), "-");
+    }
+
+    #[test]
+    fn an_empty_answer_takes_the_default() {
+        assert!(is_yes("\n", true));
+        assert!(!is_yes("\n", false));
+        assert!(is_yes(" Yes\n", false));
+        assert!(!is_yes("no\n", true));
+        assert!(!is_yes("yep\n", true));
     }
 
     #[test]

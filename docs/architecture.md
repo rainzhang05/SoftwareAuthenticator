@@ -488,8 +488,11 @@ credential's. Certificate attestation is meant for testing relying parties
   (the embedded udev rules into `/etc/udev/rules.d`, `uhid` in
   `/etc/modules-load.d/pqkey.conf`, `modprobe uhid`, joining `plugdev`) goes
   into a script in `$XDG_RUNTIME_DIR`, created with mode 0600, which setup
-  prints in full with the `sudo sh` command to run it; pqkey itself never runs
-  as root. `--uninstall` stops and removes the unit and prints the root undo.
+  prints in full and, on a terminal and once the user agrees, runs with `sudo
+  sh`; otherwise it prints that command. pqkey itself never runs as root. If
+  the script added the user to `plugdev`, setup enables the unit without
+  starting it, so the key starts at the next login, which brings the group.
+  `--uninstall` stops and removes the unit and prints the root undo.
 - **`status`** also reports every problem it finds with its fix: missing or
   outdated udev rules, `uhid` not loaded (now or at boot), no access to
   `/dev/uhid` (not in `plugdev`, or in it since after this session started),

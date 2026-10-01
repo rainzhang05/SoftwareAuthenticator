@@ -128,11 +128,11 @@ also break an existing installation of that commit:
   passkeys` lists the passkeys on the key and `pqkey passkeys delete` deletes
   one, with the PIN, through credential management (CTAP 2.3 §6.8). Ctrl-C
   cancels a request that waits for approval with CTAPHID_CANCEL.
-- `pqkey setup [--uninstall]`: installs and starts the systemd user service,
-  offers to set a PIN, and writes the steps that need root (udev rules, `uhid`
-  at boot, joining `plugdev`) to a script it shows, for `sudo sh`. The unit
-  and the rules are embedded in the binary, so `cargo install` and `pqkey
-  setup` are the whole installation.
+- `pqkey setup [--uninstall]`: shows the steps that need root (udev rules,
+  `uhid` at boot, joining `plugdev`) and runs them with `sudo` once you agree,
+  then installs and starts the systemd user service and offers to set a PIN.
+  The unit and the rules are embedded in the binary, so `cargo install` and
+  `pqkey setup` are the whole installation.
 - `pqkey status` lists every problem it finds with its fix: udev rules,
   `uhid`, group membership and re-login, access to the key's device, snap
   browsers the device is not tagged for, the notification server, and the
