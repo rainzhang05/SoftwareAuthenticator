@@ -151,6 +151,14 @@ impl<L: ReportLink> Authenticator<L> {
         })
     }
 
+    /// [`open`](Self::open), waiting at most `patience` for a key that is
+    /// busy with another client.
+    pub fn open_within(link: L, patience: std::time::Duration) -> Result<Self, ClientError> {
+        Ok(Self {
+            hid: CtapHid::open_within(link, patience)?,
+        })
+    }
+
     /// Cancel a request that waits for the user once `flag` is set, for
     /// example by a SIGINT handler.
     pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {

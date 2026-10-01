@@ -73,7 +73,10 @@ impl std::fmt::Display for HidError {
             HidError::Ctaphid(code) => write!(f, "the key answered CTAPHID error {code:#04x}"),
             HidError::Silent => f.write_str("the key stopped answering"),
             HidError::Malformed(what) => write!(f, "the key's answer is malformed: {what}"),
-            HidError::Busy => f.write_str("the key is busy with another program's request"),
+            HidError::Busy => f.write_str(
+                "the key is busy with another program's request, such as a browser waiting for \
+                 your approval; finish or cancel that first",
+            ),
         }
     }
 }
@@ -89,10 +92,16 @@ pub struct CtapHid<L> {
 impl<L: ReportLink> CtapHid<L> {
     /// Allocate a channel with CTAPHID_INIT on the broadcast channel
     /// (§11.2.9.1.3), retrying while the key is busy with another client.
-    pub fn open(mut link: L) -> Result<Self, HidError> {
+    pub fn open(link: L) -> Result<Self, HidError> {
+        Self::open_within(link, BUSY_RETRY_FOR)
+    }
+
+    /// [`open`](Self::open), retrying for at most `patience` while the key
+    /// is busy.
+    pub fn open_within(mut link: L, patience: Duration) -> Result<Self, HidError> {
         let mut nonce = [0u8; 8];
         getrandom::fill(&mut nonce).map_err(|err| HidError::Io(io::Error::other(err)))?;
-        let deadline = Instant::now() + BUSY_RETRY_FOR;
+        let deadline = Instant::now() + patience;
         loop {
             send_message(&mut link, BROADCAST_CID, Command::Init, &nonce)?;
             match receive_message(
@@ -236,5 +245,47 @@ fn receive_message<L: ReportLink>(
             Ok(_) if accept(&payload) => return Ok(payload),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A key that answers every request with CTAPHID_ERROR ERR_CHANNEL_BUSY,
+    /// as one does while another client's transaction runs.
+    struct BusyKey {
+        answer: Option<Report>,
+    }
+
+    impl ReportLink for BusyKey {
+        fn send(&mut self, report: &Report) -> io::Result<()> {
+            let mut answer = [0u8; CTAPHID_FRAME_LEN];
+            answer[..4].copy_from_slice(&report[..4]);
+            answer[4] = Command::Error.into_u8() | 0x80;
+            answer[6] = 1;
+            answer[7] = ERR_CHANNEL_BUSY;
+            self.answer = Some(answer);
+            Ok(())
+        }
+
+        fn receive(&mut self, _timeout: Duration) -> io::Result<Option<Report>> {
+            Ok(self.answer.take())
+        }
+    }
+
+    #[test]
+    fn a_busy_key_is_given_up_on_after_the_patience_asked_for() {
+        let started = Instant::now();
+        let result = CtapHid::open_within(BusyKey { answer: None }, Duration::from_millis(300));
+        assert!(matches!(result, Err(HidError::Busy)));
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(300), "{waited:?}");
+        assert!(waited < Duration::from_secs(2), "{waited:?}");
+        assert!(
+            HidError::Busy
+                .to_string()
+                .contains("finish or cancel that first")
+        );
     }
 }

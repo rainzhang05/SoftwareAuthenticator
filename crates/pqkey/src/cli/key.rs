@@ -54,6 +54,9 @@ fn not_running() -> io::Error {
 fn client_error(err: ClientError) -> io::Error {
     match err {
         ClientError::Hid(crate::client::ctaphid::HidError::Io(err)) => err,
+        ClientError::Hid(err @ crate::client::ctaphid::HidError::Busy) => {
+            io::Error::new(io::ErrorKind::ResourceBusy, err.to_string())
+        }
         err => io::Error::other(err.to_string()),
     }
 }
@@ -174,9 +177,19 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
 
 /// The lines of `status` about the running key itself.
 fn show_key(running: Running) -> io::Result<()> {
-    let (path, mut key) = match connect_to(running, STATUS_WAIT) {
-        Ok(connected) => connected,
-        Err(_) => return outln!("Device:   cannot be opened (see below)"),
+    let Ok((path, link)) = open_node(running, STATUS_WAIT) else {
+        return outln!("Device:   cannot be opened (see below)");
+    };
+    let mut key = match Authenticator::open_within(link, STATUS_WAIT) {
+        Ok(key) => key,
+        Err(ClientError::Hid(crate::client::ctaphid::HidError::Busy)) => {
+            return outln!(
+                "Device:   {}, busy with another program's request (a browser waiting for your \
+                 approval?)",
+                path.display()
+            );
+        }
+        Err(err) => return outln!("Device:   {}, not answering: {err}", path.display()),
     };
     outln!("Device:   {}", path.display())?;
     let info = key.info().map_err(client_error)?;

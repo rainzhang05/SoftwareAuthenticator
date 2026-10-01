@@ -347,7 +347,10 @@ program's request waits for approval, the key answers every other program,
 also one opening a channel, with ERR_CHANNEL_BUSY (CTAP 2.3 §11.2.5.1: such a
 request "will immediately fail with a busy-error message"). The client "SHOULD
 retry the request after a short delay"; python-fido2 does, libfido2 1.16 gives
-up. Answer or cancel the pending request first.
+up. Answer or cancel the pending request first. `pqkey status`, `pin` and
+`passkeys` meet the same answer and say the key is busy. The busy answer is
+for the program that asked, but every program reading the device sees it:
+python-fido2 2.2.1 then aborts its own waiting request with "Wrong channel".
 
 **The service and the CLI use different state.** If you set `XDG_DATA_HOME` in
 your shell, set it for the systemd user manager too (`environment.d(5)`).
