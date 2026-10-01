@@ -63,7 +63,9 @@ def notify_ctap(notify_device, notifications) -> Ctap2:
 
 
 def test_approve_registers_and_signs_in_with_user_presence(notify_ctap, notifications):
-    credential = client.register(notify_ctap, RP_ID, client.ES256, user=client.user_entity("alice"))
+    credential = client.register(
+        notify_ctap, RP_ID, client.ES256, user=client.user_entity("alice"), options={"rk": True}
+    )
     shown = notifications.wait_for_shown(1)
     assert shown.summary == "Create a passkey"
     assert shown.body == f"Create a passkey for {RP_ID} as alice (Alice)?"
@@ -168,7 +170,8 @@ def test_names_are_escaped_for_servers_that_interpret_markup(notify_device, noti
         client.make_credential(Ctap2(notify_device), RP_ID, user, [client.ES256], os.urandom(32))
     assert excinfo.value.code == CtapError.ERR.OPERATION_DENIED
     body = notifications.wait_for_shown(1).body
-    assert body == f"Create a passkey for {RP_ID} as &lt;b&gt;mallory&lt;/b&gt; &amp; co?"
+    # Not discoverable: the relying party keeps the credential, so it is no passkey on the key.
+    assert body == f"Register this security key with {RP_ID} as &lt;b&gt;mallory&lt;/b&gt; &amp; co?"
 
 
 def test_cancel_withdraws_the_notification(notify_hidraw_path, notifications):

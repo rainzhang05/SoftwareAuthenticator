@@ -388,8 +388,8 @@ enum Unavailable {
 impl Unavailable {
     fn message(&self, request: &PresenceRequest<'_>) -> String {
         const OPT_OUT: &str = "or, for tests only, start the daemon with --presence auto-approve, which approves everything without asking";
-        // The summary, unlike the prompt, holds nothing from the request.
-        let denied = format!("denied without asking ({}): ", summary(request.operation));
+        // The summary, unlike the prompt, holds no text from the request.
+        let denied = format!("denied without asking ({}): ", summary(request));
         match self {
             Unavailable::Connect(ConnectError::NoSessionBus(err)) => format!(
                 "{denied}cannot ask for user presence because there is no D-Bus session bus ({err}). \
@@ -429,17 +429,20 @@ impl Unavailable {
 pub fn notification_for(request: &PresenceRequest<'_>, markup: bool) -> Notification {
     let text = prompt_text(request);
     Notification {
-        summary: summary(request.operation),
+        summary: summary(request),
         body: if markup { escape_markup(&text) } else { text },
         timeout: request.timeout,
     }
 }
 
-/// The notification title for `operation`: fixed text, nothing from the
-/// request.
-fn summary(operation: PresenceOperation) -> &'static str {
-    match operation {
-        PresenceOperation::Register => "Create a passkey",
+/// The notification title for `request`'s operation: fixed text, nothing
+/// the request's sender chose.
+fn summary(request: &PresenceRequest<'_>) -> &'static str {
+    match request.operation {
+        PresenceOperation::Register if request.discoverable => "Create a passkey",
+        // The relying party keeps the credential: nothing is stored on the
+        // key, and `pqkey passkeys` will not list it.
+        PresenceOperation::Register => "Register a security key",
         PresenceOperation::Authenticate => "Sign in with a passkey",
         PresenceOperation::Reset => "Reset the security key",
         PresenceOperation::CredentialManagement => "Manage passkeys",
@@ -479,7 +482,11 @@ pub fn prompt_text(request: &PresenceRequest<'_>) -> String {
             let rp_name = rp_name
                 .map(|name| format!(" (\u{201c}{name}\u{201d})"))
                 .unwrap_or_default();
-            format!("Create a passkey for {rp}{rp_name}{as_user}?")
+            if request.discoverable {
+                format!("Create a passkey for {rp}{rp_name}{as_user}?")
+            } else {
+                format!("Register this security key with {rp}{rp_name}{as_user}?")
+            }
         }
         (PresenceOperation::Authenticate, Some(rp)) => format!("Sign in to {rp}{as_user}?"),
         // The platform asks the user to pick this authenticator among
@@ -761,6 +768,7 @@ mod tests {
             rp_id: Some("example.com"),
             user_name: Some("alice"),
             user_display_name: Some("Alice"),
+            discoverable: true,
             ..PresenceRequest::new(PresenceOperation::Register, TIMEOUT)
         }
     }
@@ -1009,10 +1017,19 @@ mod tests {
         use PresenceOperation::*;
         assert_eq!(
             text(Register, Some("example.com"), None),
-            "Create a passkey for example.com?"
+            "Register this security key with example.com?"
         );
         assert_eq!(
             text(Register, Some("example.com"), Some("alice")),
+            "Register this security key with example.com as alice?"
+        );
+        assert_eq!(
+            prompt_text(&PresenceRequest {
+                rp_id: Some("example.com"),
+                user_name: Some("alice"),
+                discoverable: true,
+                ..PresenceRequest::new(Register, TIMEOUT)
+            }),
             "Create a passkey for example.com as alice?"
         );
         assert_eq!(
@@ -1054,6 +1071,7 @@ mod tests {
             prompt_text(&PresenceRequest {
                 rp_id: Some("example.com"),
                 user_display_name: Some("Alice"),
+                discoverable: true,
                 ..PresenceRequest::new(Register, TIMEOUT)
             }),
             "Create a passkey for example.com as Alice?"
@@ -1068,12 +1086,13 @@ mod tests {
                 user_name: Some("alice"),
                 ..PresenceRequest::new(Register, TIMEOUT)
             }),
-            "Create a passkey for example.com (\u{201c}Example Corp\u{201d}) as alice?"
+            "Register this security key with example.com (\u{201c}Example Corp\u{201d}) as alice?"
         );
         assert_eq!(
             prompt_text(&PresenceRequest {
                 rp_id: Some("example.com"),
                 rp_name: Some("example.com"),
+                discoverable: true,
                 ..PresenceRequest::new(Register, TIMEOUT)
             }),
             "Create a passkey for example.com?"
@@ -1086,12 +1105,16 @@ mod tests {
         assert_eq!(
             summaries,
             [
-                "Create a passkey",
+                "Register a security key",
                 "Sign in with a passkey",
                 "Reset the security key",
                 "Manage passkeys",
                 "Select a security key"
             ]
+        );
+        assert_eq!(
+            notification_for(&register(), false).summary,
+            "Create a passkey"
         );
     }
 
@@ -1154,6 +1177,7 @@ mod tests {
         let request = PresenceRequest {
             rp_id: Some("<b>evil</b>.example"),
             user_name: Some("<a href=\"https://x\">bob</a> & 'co'"),
+            discoverable: true,
             ..PresenceRequest::new(PresenceOperation::Register, TIMEOUT)
         };
         let plain = notification_for(&request, false);
