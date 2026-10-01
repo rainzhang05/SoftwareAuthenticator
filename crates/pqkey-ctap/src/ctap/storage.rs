@@ -91,13 +91,18 @@ impl CtapApp<'_> {
 
     /// The ID of a new non-discoverable credential: the credential itself,
     /// sealed by the store and bound to its relying party, so that nothing
-    /// needs to be stored.  See [`is_discoverable`].
-    pub(super) fn seal_credential(&mut self, record: &CredentialRecord) -> Result<Vec<u8>, u8> {
+    /// needs to be stored.  A fresh random seed for its hmac-secret
+    /// CredRandom values goes into the ID too, and `record` gets the values
+    /// it derives.  See [`is_discoverable`].
+    pub(super) fn seal_credential(&mut self, record: &mut CredentialRecord) -> Result<Vec<u8>, u8> {
         let alg = i8::try_from(record.alg as i32).map_err(|_| CTAP2_ERR_PROCESSING)?;
+        let seed = Zeroizing::new(self.random_array::<32>());
+        derive_sealed_cred_randoms(record, &seed)?;
         let mut plaintext = Zeroizing::new([0u8; SEALED_PLAINTEXT_LENGTH]);
         plaintext[0] = alg as u8;
         plaintext[1] = record.cred_protect;
-        plaintext[2..].copy_from_slice(private_key_bytes(&record.private_key));
+        plaintext[2..34].copy_from_slice(private_key_bytes(&record.private_key));
+        plaintext[34..].copy_from_slice(&seed[..]);
         let sealed = self
             .store
             .seal_credential_id(&plaintext[..], &sealed_associated_data(&record.rp_id))
@@ -227,9 +232,10 @@ const NON_DISCOVERABLE_MARKER: u8 = 0x00;
 const SEALED_MARKER: u8 = 0x02;
 
 /// What a sealed credential ID holds: the COSE algorithm as a signed byte, the
-/// credProtect level, and the 32-byte private key (a P-256 scalar or an
-/// ML-DSA seed).
-const SEALED_PLAINTEXT_LENGTH: usize = 34;
+/// credProtect level, the 32-byte private key (a P-256 scalar or an ML-DSA
+/// seed), and the 32-byte random seed of its hmac-secret CredRandom values
+/// (see [`derive_sealed_cred_randoms`]).
+const SEALED_PLAINTEXT_LENGTH: usize = 66;
 
 /// The length of a sealed credential ID: [`SEALED_MARKER`], then the sealed
 /// plaintext.
@@ -241,7 +247,9 @@ const _: () = assert!(SEALED_ID_LENGTH as u64 <= super::get_info::MAX_CREDENTIAL
 
 /// Bound into every sealed credential ID, followed by the SHA-256 hash of the
 /// relying party ID.
-const SEALED_ID_CONTEXT: &[u8] = b"pqkey/v1/sealed-credential-id";
+/// Version 2 added the CredRandom seed; version 1 IDs, 75 bytes long, are no
+/// longer opened.
+const SEALED_ID_CONTEXT: &[u8] = b"pqkey/v2/sealed-credential-id";
 
 /// Whether `credential_id` has the form of a sealed credential ID.
 pub(super) fn is_sealed(credential_id: &[u8]) -> bool {
@@ -262,21 +270,29 @@ fn private_key_bytes(private_key: &PrivateKeyMaterial) -> &[u8; 32] {
     }
 }
 
-/// Derive a sealed credential's hmac-secret CredRandom values from its private
-/// key: nothing about the credential is stored, yet they must be the same at
-/// every assertion (CTAP 2.3 §12.7).  HKDF keeps them independent of the key
-/// and of each other.
-pub(super) fn derive_sealed_cred_randoms(record: &mut CredentialRecord) -> Result<(), u8> {
-    let key = private_key_bytes(&record.private_key);
+/// Derive a sealed credential's hmac-secret CredRandom values from the random
+/// seed sealed into its ID.  "The authenticator generates two random 32-byte
+/// values (called CredRandomWithUV and CredRandomWithoutUV) and associates
+/// them with the credential." (CTAP 2.3 §12.7)  Nothing about a sealed
+/// credential is stored and a credential ID may hold at most 128 bytes, so
+/// one random 32-byte seed is sealed instead of the two values, and HKDF
+/// expands it into two independent values, the same at every assertion.
+/// They never derive from the signing key, which is used for nothing but
+/// signing (FIPS 204: "digital signature key pairs shall not be used for
+/// other purposes").
+pub(super) fn derive_sealed_cred_randoms(
+    record: &mut CredentialRecord,
+    seed: &[u8; 32],
+) -> Result<(), u8> {
     hkdf_sha256(
-        key,
-        b"pqkey/v1/sealed-credential/cred-random-with-uv",
+        seed,
+        b"pqkey/v2/sealed-credential/cred-random-with-uv",
         &mut record.cred_random_with_uv,
     )
     .and_then(|()| {
         hkdf_sha256(
-            key,
-            b"pqkey/v1/sealed-credential/cred-random-without-uv",
+            seed,
+            b"pqkey/v2/sealed-credential/cred-random-without-uv",
             &mut record.cred_random_without_uv,
         )
     })
@@ -290,12 +306,14 @@ fn sealed_credential(
     rp_id: &str,
     plaintext: &[u8],
 ) -> Option<CredentialRecord> {
-    let [alg, cred_protect, key @ ..] = plaintext else {
+    let [alg, cred_protect, rest @ ..] = plaintext else {
         return None;
     };
-    if key.len() != 32 {
+    if rest.len() != 64 {
         return None;
     }
+    let (key, seed) = rest.split_at(32);
+    let seed: &[u8; 32] = seed.try_into().ok()?;
     let alg = CoseAlg::try_from(i32::from(*alg as i8)).ok()?;
     let mut private_key = match alg {
         CoseAlg::ES256 => PrivateKeyMaterial::Es256 { scalar: [0; 32] },
@@ -322,7 +340,7 @@ fn sealed_credential(
         sign_count: 0,
         created_at: 0,
     };
-    derive_sealed_cred_randoms(&mut credential).ok()?;
+    derive_sealed_cred_randoms(&mut credential, seed).ok()?;
     validate_credential(&credential).ok()?;
     Some(credential)
 }
@@ -341,10 +359,10 @@ fn sealed_credential(
 ///   bytes.
 /// * A non-discoverable credential is not stored.  Its ID is
 ///   [`SEALED_ID_LENGTH`] bytes: [`SEALED_MARKER`], then its algorithm,
-///   credProtect level and private key, sealed by the store under a key that
-///   a reset replaces and bound to the relying party.  It has no signature
-///   counter (it reports 0), and its hmac-secret CredRandom values derive from
-///   its key.
+///   credProtect level, private key and the random seed of its hmac-secret
+///   CredRandom values, sealed by the store under a key that a reset replaces
+///   and bound to the relying party.  It has no signature counter of its own
+///   (it reports 0).
 /// * Non-discoverable credentials made before they were sealed are stored
 ///   records whose ID is [`NON_DISCOVERABLE_MARKER`] and 32 random bytes.
 /// * Any other stored ID, such as the 32 random bytes of credentials created

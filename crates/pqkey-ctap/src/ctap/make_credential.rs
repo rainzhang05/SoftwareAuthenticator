@@ -5,7 +5,7 @@ use super::pin::permissions::PIN_PERMISSION_MC;
 use super::pin::protocol::parse_pin_uv_auth_param;
 use super::presence::{PresenceOperation, PresenceRequest};
 use super::request;
-use super::storage::{derive_sealed_cred_randoms, is_discoverable, store_status};
+use super::storage::{is_discoverable, store_status};
 use super::{AttestationMode, CtapApp};
 use crate::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial, StoreError};
 use crate::try_sign_challenge;
@@ -328,8 +328,7 @@ impl CtapApp<'_> {
             record.cred_random_with_uv = self.random_array();
             record.cred_random_without_uv = self.random_array();
         } else {
-            derive_sealed_cred_randoms(&mut record)?;
-            record.credential_id = self.seal_credential(&record)?;
+            record.credential_id = self.seal_credential(&mut record)?;
         }
         // The signing key and the public key in one step.
         let (secret_key, cose_key) = record.keypair().map_err(|err| {

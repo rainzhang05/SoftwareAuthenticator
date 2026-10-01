@@ -12,7 +12,7 @@
 //! * a new credential's authenticator data carries the RP ID hash of the
 //!   request, the AT flag and a credential ID of the form its "rk" option
 //!   asks for: 33 bytes starting 0x01 for a stored discoverable credential,
-//!   75 bytes starting 0x02 for a sealed non-discoverable one;
+//!   107 bytes starting 0x02 for a sealed non-discoverable one;
 //! * getAssertion, getNextAssertion and credential enumeration only return
 //!   credentials this engine created and has not deleted, and getAssertion
 //!   and getNextAssertion only for the RP ID requested; getNextAssertion only
@@ -230,7 +230,11 @@ impl Platform {
                     Some(Value::Map(options))
                         if matches!(get_text(options, "rk"), Some(Value::Bool(true)))
                 );
-                let (expected_length, marker) = if discoverable { (33, 0x01) } else { (75, 0x02) };
+                let (expected_length, marker) = if discoverable {
+                    (33, 0x01)
+                } else {
+                    (107, 0x02)
+                };
                 assert_eq!(length, expected_length, "credential ID length");
                 assert_eq!(auth_data[55], marker, "credential ID marker");
                 self.credentials.push(Credential {

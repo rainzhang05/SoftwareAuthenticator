@@ -186,13 +186,15 @@ authenticatorGetInfo reports:
 **Credentials.** A discoverable credential (`rk` true) is a record in the
 store with a 33-byte ID, the marker 0x01 and 32 random bytes. The store holds
 at most 1,000 of them, and a new one for the same relying party and user ID
-replaces the old one. A non-discoverable credential is not stored: its 75-byte
-ID is the marker 0x02 followed by its algorithm, credProtect level and private
-key, sealed with XChaCha20-Poly1305 under a key derived from the credential
-root key and bound to the SHA-256 hash of the relying party ID. It works only
-for that relying party and only until a reset replaces the key, reports a
-signature count of 0, and derives its hmac-secret `CredRandom` values from its
-key with HKDF. Non-discoverable credentials stored before they were sealed
+replaces the old one. A non-discoverable credential is not stored: its
+107-byte ID is the marker 0x02 followed by its algorithm, credProtect level,
+private key and a random 32-byte seed, sealed with XChaCha20-Poly1305 under a
+key derived from the credential root key and bound to the SHA-256 hash of the
+relying party ID. It works only for that relying party and only until a reset
+replaces the key, reports a signature count of 0, and derives its
+hmac-secret `CredRandom` values from the seed with HKDF, never from its key.
+75-byte sealed IDs of the earlier format, which derived them from the key,
+are no longer recognised. Non-discoverable credentials stored before they were sealed
 (IDs starting with 0x00) keep working until a reset and count towards the
 limit; stored IDs without a marker, from before non-discoverable credentials
 existed, are discoverable. Private keys are a P-256

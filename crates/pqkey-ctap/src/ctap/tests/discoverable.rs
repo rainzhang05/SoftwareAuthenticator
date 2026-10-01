@@ -156,8 +156,9 @@ fn a_discoverable_registration_replaces_only_discoverable_credentials() {
 }
 
 /// A non-discoverable credential is sealed into its ID: nothing is stored,
-/// and the ID holds its algorithm, credProtect level and private key, sealed
-/// for its relying party.
+/// and the ID holds its algorithm, credProtect level, private key and the
+/// random seed of its hmac-secret CredRandom values, sealed for its relying
+/// party.
 #[test]
 fn a_non_discoverable_credential_is_sealed_into_its_id() {
     for alg in [CoseAlg::ES256, CoseAlg::MLDSA87] {
@@ -188,7 +189,7 @@ fn a_non_discoverable_credential_is_sealed_into_its_id() {
         assert_eq!(credential_id[0], 0x02);
         assert!(is_sealed(credential_id) && !is_discoverable(credential_id));
 
-        let mut associated_data = b"pqkey/v1/sealed-credential-id".to_vec();
+        let mut associated_data = b"pqkey/v2/sealed-credential-id".to_vec();
         associated_data.extend_from_slice(&Sha256::digest(RP_ID.as_bytes()));
         let plaintext = app
             .store
@@ -199,11 +200,70 @@ fn a_non_discoverable_credential_is_sealed_into_its_id() {
             PrivateKeyMaterial::Es256 { scalar } => scalar,
             PrivateKeyMaterial::MlDsa { seed } => seed,
         };
+        assert_eq!(plaintext.len(), 66);
         assert_eq!(plaintext[0], alg as i32 as i8 as u8, "{alg:?}");
         assert_eq!(plaintext[1], 2, "credProtect");
-        assert_eq!(&plaintext[2..], key.as_slice());
+        assert_eq!(&plaintext[2..34], key.as_slice());
         assert_eq!(credential.cred_protect, 2);
+
+        // "The authenticator generates two random 32-byte values (called
+        // CredRandomWithUV and CredRandomWithoutUV)" (CTAP 2.3 §12.7): they
+        // come from the sealed random seed, not from the signing key.
+        let seed: [u8; 32] = plaintext[34..].try_into().expect("32 bytes");
+        assert_ne!(&seed, key, "{alg:?}");
+        let mut from_seed = es256_credential(RP_ID, &[0x01]);
+        derive_sealed_cred_randoms(&mut from_seed, &seed).expect("derive");
+        assert_eq!(
+            credential.cred_random_with_uv,
+            from_seed.cred_random_with_uv
+        );
+        assert_eq!(
+            credential.cred_random_without_uv,
+            from_seed.cred_random_without_uv
+        );
+        let mut from_key = es256_credential(RP_ID, &[0x01]);
+        derive_sealed_cred_randoms(&mut from_key, key).expect("derive");
+        assert_ne!(credential.cred_random_with_uv, from_key.cred_random_with_uv);
     }
+}
+
+/// Each sealed credential gets a seed of its own, so two credentials of the
+/// same key would still get different CredRandom values.
+#[test]
+fn every_sealed_credential_has_its_own_cred_random_seed() {
+    let mut app = test_app([0x6A; 16]);
+    let first = register(&mut app, &[0x01], None);
+    let second = register(&mut app, &[0x01], None);
+    let open = |app: &TestApp, id: &[u8]| {
+        app.credential_for_rp(id, RP_ID)
+            .expect("open")
+            .expect("a credential")
+    };
+    let (first, second) = (open(&app, &first), open(&app, &second));
+    assert_ne!(first.cred_random_with_uv, second.cred_random_with_uv);
+    assert_ne!(first.cred_random_without_uv, second.cred_random_without_uv);
+}
+
+/// Sealed IDs in the earlier 75-byte format, which derived CredRandom from
+/// the private key, are not opened any more.
+#[test]
+fn sealed_ids_of_the_earlier_format_are_not_credentials() {
+    let mut app = test_app([0x6B; 16]);
+    let mut plaintext = vec![CoseAlg::ES256 as i32 as i8 as u8, 1];
+    plaintext.extend_from_slice(&[0x5A; 32]);
+    let mut associated_data = b"pqkey/v1/sealed-credential-id".to_vec();
+    associated_data.extend_from_slice(&Sha256::digest(RP_ID.as_bytes()));
+    let sealed = app
+        .store
+        .seal_credential_id(&plaintext, &associated_data)
+        .expect("seal");
+    let mut credential_id = vec![0x02];
+    credential_id.extend_from_slice(&sealed);
+    assert_eq!(credential_id.len(), 75);
+    assert_eq!(
+        assertion_with_allow_list(&mut app, &credential_id),
+        Err(CTAP2_ERR_NO_CREDENTIALS)
+    );
 }
 
 /// A sealed credential is found only for its relying party, only unaltered,
@@ -380,32 +440,29 @@ fn non_discoverable_credentials_stored_before_sealing_stay_non_discoverable() {
 }
 
 /// Pins how a sealed credential's hmac-secret CredRandom values derive from
-/// its key to an independent computation with Python's standard library
-/// (HKDF-SHA-256, RFC 5869, no salt, info strings as below).  A change would
-/// change the hmac-secret outputs of every existing non-discoverable
+/// its sealed seed to an independent computation with Python's standard
+/// library (HKDF-SHA-256, RFC 5869, no salt, info strings as below).  A change
+/// would change the hmac-secret outputs of every existing non-discoverable
 /// credential, which can be disk encryption keys.
 #[test]
 fn sealed_cred_randoms_match_an_independent_implementation() {
     let mut credential = es256_credential(RP_ID, &[0x01]);
-    credential.alg = CoseAlg::MLDSA44;
-    credential.private_key = PrivateKeyMaterial::MlDsa {
-        seed: core::array::from_fn(|i| 0x80 + i as u8),
-    };
-    derive_sealed_cred_randoms(&mut credential).expect("derive");
+    let seed: [u8; 32] = core::array::from_fn(|i| 0x40 + i as u8);
+    derive_sealed_cred_randoms(&mut credential, &seed).expect("derive");
     let hex = |bytes: &[u8]| {
         bytes
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     };
-    // pqkey/v1/sealed-credential/cred-random-with-uv
+    // pqkey/v2/sealed-credential/cred-random-with-uv
     assert_eq!(
         hex(&credential.cred_random_with_uv),
-        "84adcaa5eebe8a26d2538bce06595434c507f05ba9c38c9ae317a8effc3382b4"
+        "ee8a54128403ed2a617729d037a1ec15b8eaf858ff7f85bd7e981a207df0b95e"
     );
-    // pqkey/v1/sealed-credential/cred-random-without-uv
+    // pqkey/v2/sealed-credential/cred-random-without-uv
     assert_eq!(
         hex(&credential.cred_random_without_uv),
-        "6e39697a8a3f192e1673f64f097d3dc55a7007f09c695c70c41a4df3d3ec9c7f"
+        "35c71b7c676af00fa30f0753765261e11437dbe692c4683e6016b6f49bf795ae"
     );
 }

@@ -59,6 +59,16 @@ Upgrading from `867a591` or earlier is not an in-place update:
 - **Build requirements:** Rust 1.89 or later (was 1.85), edition 2024.
 - **Licence:** MIT only (was Apache-2.0 OR MIT).
 
+Changes since `d61871f`, the commit tested end to end on 2026-09-30, that
+also break an existing installation of that commit:
+
+- **Sealed credential IDs changed format.** A non-discoverable credential's
+  ID now also seals a random seed for its `hmac-secret` values, which no
+  longer derive from its private key, and is 107 bytes instead of 75.
+  Non-discoverable credentials registered with an earlier commit stop working
+  and must be registered again; their `hmac-secret` outputs are gone with
+  them.
+
 ### Added
 
 - `pqkey` identity: its own AAGUID, product name, pid.codes USB IDs and state
@@ -75,9 +85,10 @@ Upgrading from `867a591` or earlier is not an in-place update:
   replaces the key protecting credentials and PIN state.
 - authenticatorSelection.
 - Non-discoverable credentials for `rk` false. They are not stored: each
-  credential ID holds its credential, sealed with XChaCha20-Poly1305 under a
-  key that a reset replaces and bound to the relying party, so they take no
-  room in the store and report a signature count of 0.
+  credential ID holds its credential and a random seed for its `hmac-secret`
+  values, sealed with XChaCha20-Poly1305 under a key that a reset replaces and
+  bound to the relying party, so they take no room in the store and report a
+  signature count of 0.
 - `FIDO_2_3` in getInfo versions, plus `maxCredentialCountInList`,
   `remainingDiscoverableCredentials`, `attestationFormats` and the
   `makeCredUvNotRqd` option. `clientPin` is reported as false until a PIN is

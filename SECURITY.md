@@ -46,8 +46,8 @@ designed to protect against and what it does not.
 - The PIN, stored as `LEFT(SHA-256(PIN), 16)`, and the PIN retry counter.
 - The attestation private key, when `--attestation certificate` is used.
 - The per-credential `CredRandom` values behind the `hmac-secret` extension
-  (stored for discoverable credentials, derived from the private key for
-  non-discoverable ones).
+  (stored for discoverable credentials, and for non-discoverable ones derived
+  from a random seed sealed into the credential ID).
 - While the daemon runs: pinUvAuthTokens and PIN/UV auth key agreement keys,
   which are never stored.
 
@@ -74,7 +74,8 @@ XChaCha20-Poly1305 under keys derived from two 32-byte root keys. By default
 the root keys are files in `keys/` inside the same state directory as the data.
 Non-discoverable credentials are not stored at all (except ones created
 before this scheme, whose IDs start with 0x00): each credential ID holds
-its private key, sealed the same way under a key derived from the credential
+its private key and the seed of its `hmac-secret` values, sealed the same way
+under a key derived from the credential
 root key and bound to its relying party. Credential IDs are not secret, since a
 relying party hands them to anyone who starts a sign-in, so those private keys
 are exactly as safe as the credential root key.

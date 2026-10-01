@@ -110,13 +110,13 @@ fn credential_parameters(u: &mut Unstructured<'_>) -> Result<Value> {
 
 /// A credential ID: of a length and shape this authenticator issues (a
 /// stored credential's marker and 32 bytes, or a sealed credential's marker
-/// and 74 bytes, which the store must reject), or anything.
+/// and 106 bytes, which the store must reject), or anything.
 pub fn credential_id(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
     if u.ratio(1, 4)? {
         return arbitrary_bytes(u);
     }
     if u.ratio(1, 3)? {
-        let mut id = vec![0u8; 75];
+        let mut id = vec![0u8; 107];
         u.fill_buffer(&mut id)?;
         id[0] = 0x02;
         return Ok(id);
