@@ -442,3 +442,33 @@ fn a_zero_length_pin_uv_auth_param_asks_for_a_touch() {
         assert_eq!(after, sign_count, "nothing was signed");
     }
 }
+
+/// clientDataHash is 32 bytes (WebAuthn Level 3 §6.3.3 step 1, "of the
+/// correct length"); any other length is CTAP1_ERR_INVALID_LENGTH (CTAP 2.3
+/// §8.2) before any prompt, the zero length pinUvAuthParam probe included,
+/// and nothing is signed.
+#[test]
+fn a_client_data_hash_must_be_32_bytes() {
+    let id = credential_id(true, 0xD3);
+    for length in [0, 16, 31, 33, 64, 100] {
+        for probe in [false, true] {
+            let (mut app, log) =
+                app_with(&[named_credential(&id, 1)], vec![PresenceOutcome::Approved]);
+            let mut entries = vec![
+                (int(1), text(RP_ID)),
+                (int(2), Value::Bytes(vec![0x5C; length])),
+            ];
+            if probe {
+                entries.push((int(6), Value::Bytes(vec![])));
+            }
+            assert_eq!(
+                app.handle_get_assertion(&encode(&canonical_map(entries))),
+                Err(CTAP1_ERR_INVALID_LENGTH),
+                "{length} bytes, probe {probe}"
+            );
+            assert!(log.take().is_empty(), "{length} bytes: no prompt");
+            let credential = app.store.get(&id).expect("get").expect("stored");
+            assert_eq!(credential.sign_count, 0, "{length} bytes: nothing signed");
+        }
+    }
+}

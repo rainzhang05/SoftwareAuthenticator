@@ -174,6 +174,11 @@ Upgrading from `867a591` or earlier is not an in-place update:
   CTAP2_ERR_INVALID_CBOR, and credential management never checked a
   descriptor's `type`. Only a pubKeyCredParams element keeps
   CTAP2_ERR_INVALID_CBOR (§6.1.2 step 3.1.1).
+- makeCredential and getAssertion refuse a clientDataHash that is not 32 bytes
+  with CTAP1_ERR_INVALID_LENGTH (WebAuthn Level 3 §6.3.2 and §6.3.3 step 1).
+  Any length used to be signed. Their required parameters are now checked
+  before anything else, so a malformed request, including the zero-length
+  pinUvAuthParam probe, no longer shows a prompt.
 - The notification prompt gives up on a session bus that accepts the
   connection but never answers after 2 seconds, as it does on a D-Bus call,
   instead of holding the request and the daemon's shutdown forever.

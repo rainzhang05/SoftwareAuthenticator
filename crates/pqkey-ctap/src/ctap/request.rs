@@ -103,6 +103,29 @@ pub(super) fn public_key_credential_id(descriptor: &[(Value, Value)]) -> Result<
     Ok((credential_type == PUBLIC_KEY).then_some(id))
 }
 
+/// The length of clientDataHash, a SHA-256 hash of the client data.
+const CLIENT_DATA_HASH_LENGTH: usize = 32;
+
+/// The clientDataHash parameter of authenticatorMakeCredential and
+/// authenticatorGetAssertion.  CTAP 2.3 only types it as a byte string, but
+/// it is "Hash of the serialized client data collected by the host", and
+/// WebAuthn Level 3 §6.3.2 and §6.3.3 step 1 ask the authenticator to "Check
+/// if all the supplied parameters are syntactically well-formed and of the
+/// correct length. If not, return an error code equivalent to
+/// "UnknownError" and terminate the operation."  A byte string of any length
+/// but 32 is CTAP1_ERR_INVALID_LENGTH, "Invalid message or item length" (CTAP
+/// 2.3 §8.2), the status this authenticator also gives a user.id longer than
+/// 64 bytes: the type is right, only the length is not, so
+/// CTAP2_ERR_CBOR_UNEXPECTED_TYPE (§8) does not fit.
+pub(super) fn client_data_hash(value: Option<&Value>) -> Result<Vec<u8>, u8> {
+    match value {
+        Some(Value::Bytes(bytes)) if bytes.len() == CLIENT_DATA_HASH_LENGTH => Ok(bytes.clone()),
+        Some(Value::Bytes(_)) => Err(CTAP1_ERR_INVALID_LENGTH),
+        Some(_) => Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+        None => Err(CTAP2_ERR_MISSING_PARAMETER),
+    }
+}
+
 /// The option keys of authenticatorMakeCredential and
 /// authenticatorGetAssertion that CTAP defines, each `None` when absent.
 /// "Treat any option keys that are not understood as absent." (CTAP 2.3

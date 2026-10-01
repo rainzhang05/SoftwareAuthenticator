@@ -479,3 +479,59 @@ fn malformed_entities_and_descriptors_are_unexpected_types() {
         assert!(stored(&app).is_empty(), "{case}: nothing stored");
     }
 }
+
+/// clientDataHash is a SHA-256 hash, 32 bytes: "Check if all the supplied
+/// parameters are syntactically well-formed and of the correct length. If
+/// not, return an error code equivalent to "UnknownError" and terminate the
+/// operation." (WebAuthn Level 3 §6.3.2 step 1)  Any other length is
+/// CTAP1_ERR_INVALID_LENGTH, "Invalid message or item length" (CTAP 2.3 §8.2),
+/// before anything is shown to the user, the zero length pinUvAuthParam probe
+/// of step 1 included, and nothing is stored.
+#[test]
+fn a_client_data_hash_must_be_32_bytes() {
+    let probe = (int(8), Value::Bytes(vec![]));
+    for length in [0, 16, 31, 33, 64, 100] {
+        for extra in [vec![], vec![probe.clone()]] {
+            let (mut app, log) = app(vec![PresenceOutcome::Approved]);
+            let mut entries = vec![
+                (int(1), Value::Bytes(vec![0x3D; length])),
+                (int(2), canonical_map(vec![(text("id"), text(RP_ID))])),
+                (
+                    int(3),
+                    canonical_map(vec![(text("id"), Value::Bytes(vec![0x01]))]),
+                ),
+                (
+                    int(4),
+                    Value::Array(vec![canonical_map(vec![
+                        (text("type"), text("public-key")),
+                        (text("alg"), int(CoseAlg::ES256 as i64)),
+                    ])]),
+                ),
+            ];
+            entries.extend(extra.clone());
+            assert_eq!(
+                app.handle_make_credential(&encode(&canonical_map(entries))),
+                Err(CTAP1_ERR_INVALID_LENGTH),
+                "{length} bytes, probe {}",
+                !extra.is_empty()
+            );
+            assert!(log.take().is_empty(), "{length} bytes: no prompt");
+            assert!(stored(&app).is_empty(), "{length} bytes: nothing stored");
+        }
+    }
+    let (mut app, _) = app(vec![PresenceOutcome::Approved]);
+    assert!(app.handle_make_credential(&request(vec![])).is_ok());
+}
+
+/// The probe of step 1 is a makeCredential request like any other: without
+/// its mandatory parameters it gets CTAP2_ERR_MISSING_PARAMETER and no prompt.
+#[test]
+fn a_probe_without_mandatory_parameters_asks_nothing() {
+    let (mut app, log) = app(vec![PresenceOutcome::Approved]);
+    let request = canonical_map(vec![(int(8), Value::Bytes(vec![])), (int(9), int(2))]);
+    assert_eq!(
+        app.handle_make_credential(&encode(&request)),
+        Err(CTAP2_ERR_MISSING_PARAMETER)
+    );
+    assert!(log.take().is_empty());
+}

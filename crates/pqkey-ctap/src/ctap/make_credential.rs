@@ -94,20 +94,17 @@ impl CtapApp<'_> {
         let map = cbor::request_parameters(payload)?;
         let parameter = |key: i64| cbor::map_get(&map, Value::Integer(Integer::from(key)));
 
-        // Step 1: a zero length pinUvAuthParam asks the user to select this
-        // authenticator.
-        if request::is_zero_length(parameter(8)) {
-            return Err(self.select_for_pin_uv_auth());
-        }
-
-        // Step 2.
-        let pin_uv_auth = parse_pin_uv_auth_param(parameter(8), parameter(9))?;
-
-        let client_hash = match parameter(1) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
-            None => return Err(CTAP2_ERR_MISSING_PARAMETER),
-        };
+        // The parameters the table of CTAP 2.3 §6.1 marks Required are
+        // checked before step 1, so that a malformed request, the zero length
+        // pinUvAuthParam probe of step 1 included, never reaches the user.  A
+        // missing one is CTAP2_ERR_MISSING_PARAMETER, as CTAP says of other
+        // commands ("If the authenticator does not receive mandatory
+        // parameters for this command, it returns CTAP2_ERR_MISSING_PARAMETER
+        // error.", §6.5.5.5 step 5.1), and their syntax and length are those
+        // WebAuthn Level 3 §6.3.2 step 1 checks first: "Check if all the
+        // supplied parameters are syntactically well-formed and of the
+        // correct length."
+        let client_hash = request::client_data_hash(parameter(1))?;
 
         let rp = match parameter(2) {
             Some(Value::Map(rp)) => rp,
@@ -138,12 +135,23 @@ impl CtapApp<'_> {
         let user_name = user_string("name")?;
         let user_display_name = user_string("displayName")?;
 
-        // Step 3.
-        let alg = match parameter(4) {
-            Some(Value::Array(params)) => request::chosen_algorithm(params)?,
+        let pub_key_cred_params = match parameter(4) {
+            Some(Value::Array(params)) => params,
             Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
             None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
+
+        // Step 1: a zero length pinUvAuthParam asks the user to select this
+        // authenticator.
+        if request::is_zero_length(parameter(8)) {
+            return Err(self.select_for_pin_uv_auth());
+        }
+
+        // Step 2.
+        let pin_uv_auth = parse_pin_uv_auth_param(parameter(8), parameter(9))?;
+
+        // Step 3.
+        let alg = request::chosen_algorithm(pub_key_cred_params)?;
 
         let exclude_list = parameter(5)
             .map(request::credential_ids)
