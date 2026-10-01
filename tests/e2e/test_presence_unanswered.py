@@ -114,13 +114,17 @@ def test_cancel_during_the_prompt_gets_only_a_keepalive_cancel_response(hid):
     _cancel_and_expect_only_keepalive_cancel(hid, cid)
 
 
-def test_a_late_reset_is_refused_without_asking_the_user(hid):
+def test_a_late_reset_is_refused_without_asking_the_user(hid, unanswered_hidraw_path):
     """CTAP 2.3 §6.6: "In case of authenticators with no display, request MUST
     have come to the authenticator within 10 seconds of powering up of the
-    authenticator." The key has run for longer than that and was not started
-    with --allow-late-reset, so authenticatorReset is answered with
+    authenticator." Once the key has run for longer than that, as it was not
+    started with --allow-late-reset, authenticatorReset is answered with
     CTAP2_ERR_NOT_ALLOWED at once, with no prompt (no UPNEEDED keepalive) and
     nothing reset."""
+    # The key starts before its device node appears, and the node's status
+    # changes only after that (udev sets its mode), so 11 seconds after that
+    # change the window has surely closed.
+    time.sleep(max(0.0, os.stat(unanswered_hidraw_path).st_ctime + 11 - time.time()))
     cid = hid.allocate_channel()
     hid.send(cid, ctaphid.CBOR, bytes([0x07]))
     deadline = time.monotonic() + 2
