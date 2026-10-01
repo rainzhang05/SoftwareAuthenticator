@@ -8,6 +8,7 @@
 
 use std::{
     env,
+    ffi::OsStr,
     fs::{self, OpenOptions},
     io::{self, IsTerminal, Write},
     os::unix::fs::OpenOptionsExt,
@@ -258,7 +259,7 @@ pub fn setup(state_dir: &Path) -> io::Result<()> {
     )?;
 
     let mut problems = key::running_problems(&system, running, Duration::from_secs(5));
-    problems.extend(path_problem(&binary));
+    problems.extend(path_problem(&binary, env::var_os("PATH").as_deref()));
     if !problems.is_empty() {
         outln!()?;
         outln!("Still to fix:")?;
@@ -294,15 +295,39 @@ fn systemctl(args: &[&str]) -> io::Result<()> {
     daemon::systemctl(args).map(drop)
 }
 
-/// Whether `pqkey` on the PATH is `binary`, as the README's commands assume.
-fn path_problem(binary: &Path) -> Option<checks::Problem> {
+/// Whether `pqkey`, run from the shell, is `binary`, as the README's
+/// commands assume: an older pqkey earlier on the PATH would run instead.
+fn path_problem(binary: &Path, path: Option<&OsStr>) -> Option<checks::Problem> {
     let dir = binary.parent()?;
-    let on_path =
-        env::var_os("PATH").is_some_and(|path| env::split_paths(&path).any(|entry| entry == dir));
-    (!on_path).then(|| checks::Problem {
-        what: format!("{} is not on your PATH", dir.display()),
-        fix: "add it in your shell's profile, or log in again if your profile adds it".into(),
-    })
+    let found = path.and_then(|path| {
+        env::split_paths(path)
+            .map(|entry| entry.join("pqkey"))
+            .find(|candidate| is_executable(candidate))
+    });
+    match found {
+        Some(found) if found.canonicalize().is_ok_and(|found| found == binary) => None,
+        Some(found) => Some(checks::Problem {
+            what: format!(
+                "`pqkey` runs {}, not {}, which the service runs",
+                found.display(),
+                binary.display()
+            ),
+            fix: format!(
+                "remove {} if it is an older pqkey, or put {} first on your PATH",
+                found.display(),
+                dir.display()
+            ),
+        }),
+        None => Some(checks::Problem {
+            what: format!("{} is not on your PATH", dir.display()),
+            fix: "add it in your shell's profile, or log in again if your profile adds it".into(),
+        }),
+    }
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 /// `pqkey setup --uninstall`.
@@ -347,6 +372,36 @@ mod tests {
             member,
             in_session: member,
         }
+    }
+
+    #[test]
+    fn an_older_pqkey_earlier_on_the_path_is_found() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("setup-path");
+        let (old, new, none) = (
+            dir.path().join("old"),
+            dir.path().join("new"),
+            dir.path().join("none"),
+        );
+        for bin in [&old, &new] {
+            fs::create_dir_all(bin).unwrap();
+            fs::write(bin.join("pqkey"), "").unwrap();
+            fs::set_permissions(bin.join("pqkey"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::create_dir_all(&none).unwrap();
+        let binary = new.join("pqkey").canonicalize().unwrap();
+        let path = |dirs: &[&PathBuf]| env::join_paths(dirs).unwrap();
+
+        assert_eq!(
+            path_problem(&binary, Some(&path(&[&none, &new, &old]))),
+            None
+        );
+        let shadowed = path_problem(&binary, Some(&path(&[&old, &new]))).unwrap();
+        assert!(shadowed.what.contains("old/pqkey"), "{shadowed:?}");
+        assert!(shadowed.fix.starts_with("remove "), "{shadowed:?}");
+        let missing = path_problem(&binary, Some(&path(&[&none]))).unwrap();
+        assert!(missing.what.ends_with("is not on your PATH"), "{missing:?}");
+        assert!(path_problem(&binary, None).is_some());
     }
 
     #[test]
