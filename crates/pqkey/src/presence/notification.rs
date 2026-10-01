@@ -280,6 +280,14 @@ pub fn prompt_text(request: &PresenceRequest<'_>) -> String {
     let rp = request
         .rp_id
         .and_then(|rp| sanitise(rp, MAX_RP_ID_CHARS, Keep::End));
+    // "The prompt SHOULD display rpEntity.id, rpEntity.name, userEntity.name
+    // and userEntity.displayName, if possible." (WebAuthn Level 3 §6.3.2 step
+    // 6)  Any website can claim any name, so it only ever follows the RP ID,
+    // quoted as a claim, and is left out where it just repeats the ID.
+    let rp_name = request
+        .rp_name
+        .and_then(|name| sanitise(name, MAX_USER_CHARS, Keep::Start))
+        .filter(|name| Some(name) != rp.as_ref());
     let name = request
         .user_name
         .and_then(|name| sanitise(name, MAX_USER_CHARS, Keep::Start));
@@ -293,7 +301,12 @@ pub fn prompt_text(request: &PresenceRequest<'_>) -> String {
     };
     let as_user = user.map(|user| format!(" as {user}")).unwrap_or_default();
     match (request.operation, rp) {
-        (PresenceOperation::Register, Some(rp)) => format!("Create a passkey for {rp}{as_user}?"),
+        (PresenceOperation::Register, Some(rp)) => {
+            let rp_name = rp_name
+                .map(|name| format!(" (\u{201c}{name}\u{201d})"))
+                .unwrap_or_default();
+            format!("Create a passkey for {rp}{rp_name}{as_user}?")
+        }
         (PresenceOperation::Authenticate, Some(rp)) => format!("Sign in to {rp}{as_user}?"),
         // The platform asks the user to pick this authenticator among
         // several; no relying party is involved.
@@ -303,9 +316,9 @@ pub fn prompt_text(request: &PresenceRequest<'_>) -> String {
         (PresenceOperation::Register | PresenceOperation::Authenticate, None) => {
             "Use this security key?".to_owned()
         }
-        (PresenceOperation::Reset, _) => {
-            "Reset the security key? This deletes all passkeys.".to_owned()
-        }
+        (PresenceOperation::Reset, _) => "Reset the security key? Every passkey and every \
+             other sign-in made with it stops working, and its PIN is removed."
+            .to_owned(),
         (PresenceOperation::CredentialManagement, _) => {
             "Allow access to the passkeys stored on the security key?".to_owned()
         }
@@ -757,9 +770,12 @@ mod tests {
             text(Authenticate, Some("example.com"), None),
             "Sign in to example.com?"
         );
+        // It says what a reset does to a user who may not call every
+        // credential a passkey (REPORT F12).
         assert_eq!(
             text(Reset, None, None),
-            "Reset the security key? This deletes all passkeys."
+            "Reset the security key? Every passkey and every other sign-in made \
+             with it stops working, and its PIN is removed."
         );
         assert_eq!(
             text(CredentialManagement, None, None),
@@ -788,6 +804,26 @@ mod tests {
                 ..PresenceRequest::new(Register, TIMEOUT)
             }),
             "Create a passkey for example.com as Alice?"
+        );
+
+        // The relying party's own name, as it claims it, follows its ID, and
+        // is left out when it only repeats the ID.
+        assert_eq!(
+            prompt_text(&PresenceRequest {
+                rp_id: Some("example.com"),
+                rp_name: Some("Example Corp"),
+                user_name: Some("alice"),
+                ..PresenceRequest::new(Register, TIMEOUT)
+            }),
+            "Create a passkey for example.com (\u{201c}Example Corp\u{201d}) as alice?"
+        );
+        assert_eq!(
+            prompt_text(&PresenceRequest {
+                rp_id: Some("example.com"),
+                rp_name: Some("example.com"),
+                ..PresenceRequest::new(Register, TIMEOUT)
+            }),
+            "Create a passkey for example.com?"
         );
 
         let summaries: Vec<_> = [Register, Authenticate, Reset, CredentialManagement, Select]

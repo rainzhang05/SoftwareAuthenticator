@@ -214,6 +214,10 @@ also break an existing installation of that commit:
 - The relying party's `rp.name` reaches the registration prompt, cut to 64
   bytes, as WebAuthn Level 3 §6.3.2 step 6 recommends
   (`PresenceRequest::rp_name`).
+- The reset prompt says that every passkey and every other sign-in made with
+  the key stops working and that its PIN is removed; it used to say only
+  "This deletes all passkeys." The registration prompt also shows the relying
+  party's name, quoted after its ID.
 - A random number generator failure while generating a credential key fails
   that registration with CTAP1_ERR_OTHER instead of panicking the daemon
   (`PrivateKeyMaterial::try_generate`, `CryptoError::Randomness`).

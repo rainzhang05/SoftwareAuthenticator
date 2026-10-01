@@ -52,7 +52,10 @@ def notify_ctap(notify_device, notifications) -> Ctap2:
     session.reset()
     reset = notifications.wait_for_shown(1)
     assert reset.summary == "Reset the security key"
-    assert reset.body == "Reset the security key? This deletes all passkeys."
+    assert reset.body == (
+        "Reset the security key? Every passkey and every other sign-in made with it stops working, "
+        "and its PIN is removed."
+    )
     assert reset.actions == ACTIONS
     notifications.shown.clear()
     notifications.close_requests.clear()
