@@ -475,7 +475,8 @@ pub fn list_passkeys(state_dir: &Path) -> io::Result<()> {
     let token = management_token(&mut key, &mut PinReader::from_stdin())?;
     let passkeys = key.passkeys(&token).map_err(client_error)?;
     if passkeys.is_empty() {
-        return outln!("No passkeys are stored on the key.");
+        outln!("No passkeys are stored on the key.")?;
+        return outln!("{NOT_LISTED}");
     }
     for line in passkey_table(&passkeys) {
         outln!("{line}")?;
@@ -503,6 +504,13 @@ pub fn delete_passkey(state_dir: &Path, query: &str, yes: bool) -> io::Result<()
         .map_err(client_error)?;
     outln!("Passkey deleted.")
 }
+
+/// Why a registration can be missing from `pqkey passkeys`: a credential that
+/// is not discoverable is sealed into its ID, which the site keeps, so the
+/// key has nothing to list.
+const NOT_LISTED: &str = "A site that registered it as a security key (a second factor), or \
+                          before the PIN was set,\nkeeps that sign-in itself: it works, but is \
+                          not listed here.";
 
 /// Columns of [`passkey_table`].
 const HEADINGS: [&str; 4] = ["SITE", "USER", "ALGORITHM", "ID"];
