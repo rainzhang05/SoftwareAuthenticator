@@ -735,6 +735,32 @@ fn rp_ids_are_truncated_as_the_specification_shows() {
     }
 }
 
+/// The procedure of CTAP 2.3 §6.8.7 counts bytes, and the result is a CBOR
+/// text string, so a multi-byte character it would split is left out
+/// whole: at most 32 bytes, never U+FFFD.
+#[test]
+fn rp_ids_are_truncated_at_character_boundaries() {
+    let accents = "\u{e9}".repeat(20);
+    for (input, stored) in [
+        (
+            format!("x{accents}.example"),
+            format!("\u{2026}{}.example", "\u{e9}".repeat(10)),
+        ),
+        (
+            format!("a{accents}://example.com"),
+            format!("a{}", "\u{e9}".repeat(15)),
+        ),
+        (
+            format!("ab:{accents}.example"),
+            format!("ab:\u{2026}{}.example", "\u{e9}".repeat(9)),
+        ),
+    ] {
+        let truncated = truncated_rp_id(&input);
+        assert_eq!(truncated, stored, "{input}");
+        assert!(truncated.len() <= 32, "{input}");
+    }
+}
+
 /// enumerateRPsBegin returns the truncated RP ID with the hash of the full
 /// one.
 #[test]

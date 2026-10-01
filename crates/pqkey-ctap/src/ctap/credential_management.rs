@@ -43,25 +43,34 @@ fn rp_entity(rp_id: &str) -> Value {
     )])
 }
 
-/// `maybe_truncate_rpid` of CTAP 2.3 §6.8.7.  The byte-oriented procedure can
-/// split a multi-byte character of a non-ASCII identifier; such a split is
-/// replaced by U+FFFD so the result stays a CBOR text string.
+/// `maybe_truncate_rpid` of CTAP 2.3 §6.8.7.  That procedure counts bytes,
+/// and could split a multi-byte character of a non-ASCII identifier, which a
+/// CBOR text string cannot hold.  So the protocol prefix ends, and the kept
+/// end of the identifier starts, at a character boundary: the result is the
+/// procedure's for every identifier it does not split, and otherwise leaves
+/// the split character out, staying within 32 bytes.
 pub(super) fn truncated_rp_id(rp_id: &str) -> String {
-    let rpid = rp_id.as_bytes();
-    if rpid.len() <= MAX_RETURNED_RP_ID_LENGTH {
+    if rp_id.len() <= MAX_RETURNED_RP_ID_LENGTH {
         return rp_id.to_string();
     }
-    let mut stored = Vec::with_capacity(MAX_RETURNED_RP_ID_LENGTH);
-    if let Some(colon) = rpid.iter().position(|byte| *byte == b':') {
+    let mut stored = String::with_capacity(MAX_RETURNED_RP_ID_LENGTH);
+    if let Some(colon) = rp_id.find(':') {
         let protocol_len = colon + 1;
-        stored.extend_from_slice(&rpid[..protocol_len.min(MAX_RETURNED_RP_ID_LENGTH)]);
+        let mut to_copy = protocol_len.min(MAX_RETURNED_RP_ID_LENGTH);
+        while !rp_id.is_char_boundary(to_copy) {
+            to_copy -= 1;
+        }
+        stored.push_str(&rp_id[..to_copy]);
     }
     if MAX_RETURNED_RP_ID_LENGTH - stored.len() >= 3 {
-        stored.extend_from_slice("\u{2026}".as_bytes());
-        let to_copy = MAX_RETURNED_RP_ID_LENGTH - stored.len();
-        stored.extend_from_slice(&rpid[rpid.len() - to_copy..]);
+        stored.push('\u{2026}');
+        let mut start = rp_id.len() - (MAX_RETURNED_RP_ID_LENGTH - stored.len());
+        while !rp_id.is_char_boundary(start) {
+            start += 1;
+        }
+        stored.push_str(&rp_id[start..]);
     }
-    String::from_utf8_lossy(&stored).into_owned()
+    stored
 }
 
 /// The state of the two stateful subcommands, enumerateRPsGetNextRP and

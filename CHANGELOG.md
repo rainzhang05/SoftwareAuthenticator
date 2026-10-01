@@ -187,6 +187,9 @@ Upgrading from `867a591` or earlier is not an in-place update:
   unassigned (such as `0xF0` or `0xF8 0x20`) are answered instead of failing
   with CTAP2_ERR_INVALID_CBOR: CTAP 2.3 §8 says unknown keys "MUST be
   ignored". Under a known key such a value is a wrong type.
+- Credential management cuts a long non-ASCII RP ID at a character boundary,
+  within 32 bytes. It used to return up to 34 bytes with U+FFFD in place of
+  the split character.
 - The notification prompt gives up on a session bus that accepts the
   connection but never answers after 2 seconds, as it does on a D-Bus call,
   instead of holding the request and the daemon's shutdown forever.
