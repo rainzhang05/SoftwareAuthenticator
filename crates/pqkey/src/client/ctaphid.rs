@@ -52,7 +52,7 @@ pub enum HidError {
     Io(io::Error),
     /// The key answered CTAPHID_ERROR with this code.
     Ctaphid(u8),
-    /// No packet arrived for [`IDLE_TIMEOUT`].
+    /// No packet arrived for 3 seconds, not even a keepalive.
     Silent,
     /// The key answered something that is not CTAPHID.
     Malformed(&'static str),
