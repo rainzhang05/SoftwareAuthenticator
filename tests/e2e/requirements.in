@@ -5,6 +5,10 @@
 #     --python-version 3.14 --python-platform x86_64-unknown-linux-gnu \
 #     -o tests/e2e/requirements.txt
 #
+# The hashes cover every wheel of each pinned version, and no dependency
+# differs by platform, so the same file installs on the arm64 runners
+# (checked with `pip install --require-hashes --only-binary :all:` on aarch64).
+#
 # python-fido2: CTAPHID transport, CTAP2 commands and the PIN/UV protocols.
 fido2==2.2.1
 # cryptography: independent verification of ES256 and ML-DSA signatures. ML-DSA

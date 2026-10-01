@@ -113,10 +113,21 @@ jobs:
         run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- ${{ env.CLIPPY_FLAGS }}
 
   # The main correctness gate: the full workspace on Linux, the platform where
-  # the pqkey daemon actually runs.
+  # the pqkey daemon actually runs, on x86_64 and on arm64. Nothing here is
+  # architecture-specific by design, but the uhid event layout, stack residue
+  # and timing are all exercised for real only by running there. The x86_64
+  # job keeps the plain name "test".
   test:
-    name: test
-    runs-on: ubuntu-latest
+    name: ${{ matrix.arch == 'x86_64' && 'test' || format('test ({0})', matrix.arch) }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     permissions:
       contents: read
     steps:

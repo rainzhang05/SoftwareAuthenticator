@@ -31,9 +31,19 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # On x86_64 and on arm64. The tests keep HID traffic at the pace of the
+  # protocol, one transaction at a time. The x86_64 job keeps the plain name.
   e2e:
-    name: virtual security key
-    runs-on: ubuntu-latest
+    name: ${{ matrix.arch == 'x86_64' && 'virtual security key' || format('virtual security key ({0})', matrix.arch) }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     timeout-minutes: 45
     permissions:
       contents: read
@@ -185,6 +195,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: e2e-diagnostics
+          name: e2e-diagnostics-${{ matrix.arch }}
           path: ${{ runner.temp }}/e2e-diagnostics
           retention-days: 14

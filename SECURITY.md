@@ -280,8 +280,8 @@ validated module either.
 - ML-DSA is tested against NIST ACVP known-answer vectors; the store's envelope
   format, record encoding and key derivation are pinned to values computed
   with independent implementations.
-- End-to-end tests run the release daemon on a GitHub Actions Ubuntu runner and
-  talk to the real hidraw node with libfido2 and python-fido2, including the
+- End-to-end tests run the release daemon on GitHub Actions Ubuntu runners,
+  x86_64 and arm64, and talk to the real hidraw node with libfido2 and python-fido2, including the
   notification prompt against a fake notification server.
 - libFuzzer targets cover CTAPHID packet handling, single CTAP requests (raw and
   structure-aware), stateful request sequences, and parsing and signing with

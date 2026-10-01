@@ -149,7 +149,8 @@ also break an existing installation of that commit:
   and stored key material, run weekly and smoke-tested on pushes to `main`.
 - CI: clippy and rustdoc with warnings denied, MSRV check, feature powerset,
   release build, an 85% line coverage floor, cargo-audit and cargo-deny on both
-  lockfiles, and formatting and lints of the fuzz crate.
+  lockfiles, and formatting and lints of the fuzz crate. The tests and the
+  end-to-end tests run on arm64 runners as well as x86_64.
 - Dependabot with automatic merging of semver-compatible Cargo updates once CI,
   Security and E2E (and Fuzz, for the fuzz crate) pass.
 - `LICENSE` (MIT); README, SECURITY.md and docs/, with a dated table of what
