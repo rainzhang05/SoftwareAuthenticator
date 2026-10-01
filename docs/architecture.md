@@ -375,7 +375,7 @@ The implementations the daemon chooses from with `--presence`:
 
 - **`NotificationPresence`** (`--presence notify`, in
   `crates/pqkey/src/presence/`). For each request it connects to the session
-  bus anew, calls `GetCapabilities` and requires `actions`, subscribes to
+  bus anew, calls `GetCapabilities` and requires `actions` and `body`, subscribes to
   `ActionInvoked` and `NotificationClosed` from the server's unique bus name,
   and calls `Notify` with Approve and Deny actions and critical urgency.
   Approve approves; Deny or closing the notification denies; expiry or the

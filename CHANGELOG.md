@@ -214,6 +214,11 @@ also break an existing installation of that commit:
 - The relying party's `rp.name` reaches the registration prompt, cut to 64
   bytes, as WebAuthn Level 3 §6.3.2 step 6 recommends
   (`PresenceRequest::rp_name`).
+- A notification server without the `body` capability gets no prompt and the
+  request is denied, as without `actions`: the prompt's question is in the
+  body. The prompt sanitiser removes every Unicode 16.0 default-ignorable and
+  format character, not a fixed list that let tag characters and others
+  through.
 - The reset prompt says that every passkey and every other sign-in made with
   the key stops working and that its PIN is removed; it used to say only
   "This deletes all passkeys." The registration prompt also shows the relying

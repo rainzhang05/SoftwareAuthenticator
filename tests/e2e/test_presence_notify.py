@@ -150,6 +150,16 @@ def test_a_server_that_cannot_show_buttons_gets_nothing_and_requests_are_denied(
     assert notifications.shown == []
 
 
+def test_a_server_that_shows_no_bodies_gets_nothing_and_requests_are_denied(notify_device, notifications):
+    """The relying party, the account and what a reset deletes are only in the
+    body, so a server that shows only summaries gets nothing to show."""
+    notifications.capabilities = ["actions"]
+    with pytest.raises(CtapError) as excinfo:
+        client.make_credential(Ctap2(notify_device), RP_ID, client.user_entity("erin"), [client.ES256], os.urandom(32))
+    assert excinfo.value.code == CtapError.ERR.OPERATION_DENIED
+    assert notifications.shown == []
+
+
 def test_names_are_escaped_for_servers_that_interpret_markup(notify_device, notifications):
     notifications.capabilities = ["actions", "body", "body-markup"]
     notifications.answer = "deny"

@@ -150,8 +150,10 @@ It protects against programs that silently use the key without the user
 noticing, as long as they cannot also interact with the desktop session.
 
 It fails closed. The request is **denied** if there is no session bus, no
-notification server, a server without the `actions` capability, or any error
-talking to it. Deny, dismissing the notification, or closing it any other way
+notification server, a server without the `actions` capability (buttons) or
+the `body` capability (the prompt's text), or any error talking to it. There
+is no fallback prompt: a notification server that cannot show the question and
+its buttons cannot ask it. Deny, dismissing the notification, or closing it any other way
 denies the request. If nobody answers within 30 seconds (the hidden
 `--presence-timeout` option changes this for tests), or the server lets the
 notification expire, the request times out. If the client cancels the
@@ -166,7 +168,9 @@ Its limits:
   against it.
 - **The prompt shows what the client claims.** The relying party ID and user
   names come from the request, not from a verified origin. They are sanitised
-  before they are shown (invisible formatting characters removed, control
+  before they are shown (every Unicode 16.0 default-ignorable and format
+  character removed, such as bidirectional overrides, zero-width and tag
+  characters, control
   characters and runs of whitespace turned into single spaces, relying party
   IDs cut to their last 80 characters and user names to 64, markup escaped
   where the server interprets it), which limits spoofing through odd characters

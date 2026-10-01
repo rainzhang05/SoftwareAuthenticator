@@ -131,6 +131,13 @@ impl<S: NotificationServer> NotificationPresence<S> {
             log::error!("{}", Unavailable::NoActions.message(request));
             return PresenceOutcome::Denied;
         }
+        // The relying party, the account and what a reset deletes are only
+        // in the body: "Some implementations may only show the summary"
+        // (Desktop Notifications Specification, "body" capability).
+        if !capabilities.iter().any(|c| c == "body") {
+            log::error!("{}", Unavailable::NoBody.message(request));
+            return PresenceOutcome::Denied;
+        }
         let markup = capabilities.iter().any(|c| c == "body-markup");
         let notification = notification_for(request, markup);
         log::debug!("notification prompt: {}", prompt_text(request));
@@ -214,6 +221,7 @@ impl<S: NotificationServer> UserPresence for NotificationPresence<S> {
 enum Unavailable {
     Connect(ConnectError),
     NoActions,
+    NoBody,
     Failed(String),
 }
 
@@ -242,6 +250,12 @@ impl Unavailable {
                  cannot show Approve and Deny buttons (it lacks the \"actions\" capability). Use a \
                  notification server that supports actions, such as GNOME Shell, KDE Plasma or \
                  dunst, {OPT_OUT}"
+            ),
+            Unavailable::NoBody => format!(
+                "{denied}cannot ask for user presence because the desktop notification server \
+                 shows no notification text (it lacks the \"body\" capability), so the prompt \
+                 could not say what it asks to approve. Use a notification server that shows \
+                 bodies, such as GNOME Shell, KDE Plasma or dunst, {OPT_OUT}"
             ),
             Unavailable::Failed(err) => {
                 format!("{denied}the desktop notification server failed ({err}); {OPT_OUT}")
@@ -333,8 +347,7 @@ enum Keep {
 }
 
 /// `text` made safe to show: control characters become spaces, invisible
-/// formatting characters (bidirectional overrides, zero-width characters)
-/// are removed, runs of whitespace collapse, and anything longer than
+/// characters ([`is_invisible_format`]) are removed, runs of whitespace collapse, and anything longer than
 /// `max_chars` is cut, keeping its start or its end, with an ellipsis. `None`
 /// if nothing is left.
 fn sanitise(text: &str, max_chars: usize, keep: Keep) -> Option<String> {
@@ -371,19 +384,43 @@ fn sanitise(text: &str, max_chars: usize, keep: Keep) -> Option<String> {
     })
 }
 
-/// Characters that change how surrounding text is displayed without being
-/// visible themselves (Unicode general category Cf, the ones in use).
+/// Characters that are not displayed themselves but can change how the text
+/// around them is: every Default_Ignorable_Code_Point and every character of
+/// general category Cf (format) in Unicode 16.0, including bidirectional
+/// overrides, zero-width characters, tag characters and variation selectors.
+///
+/// Generated from DerivedCoreProperties-16.0.0.txt and
+/// extracted/DerivedGeneralCategory-16.0.0.txt of the Unicode Character
+/// Database: the code points with `Default_Ignorable_Code_Point` or `Cf`,
+/// merged into ranges.
 fn is_invisible_format(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'
+            | '\u{034F}'
+            | '\u{0600}'..='\u{0605}'
             | '\u{061C}'
-            | '\u{180E}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
             | '\u{200B}'..='\u{200F}'
             | '\u{202A}'..='\u{202E}'
             | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
             | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
     )
 }
 
@@ -727,6 +764,17 @@ mod tests {
         assert_eq!(server.calls(), [Call::Connect, Call::Disconnect]);
     }
 
+    /// The relying party, the account and what a reset deletes are all in
+    /// the body, so a server that shows only summaries cannot ask the user
+    /// anything meaningful (notification spec §3: "Some implementations may
+    /// only show the summary").
+    #[test]
+    fn a_server_without_bodies_denies_without_showing_anything() {
+        let server = FakeServer::with_capabilities(&["actions"]);
+        assert_eq!(confirm(&server, &register()), PresenceOutcome::Denied);
+        assert_eq!(server.calls(), [Call::Connect, Call::Disconnect]);
+    }
+
     #[test]
     fn failing_to_show_or_to_wait_denies() {
         let server = FakeServer::working();
@@ -852,6 +900,18 @@ mod tests {
             ),
             "Sign in to example.com as al ice Approve this?"
         );
+        // Every default-ignorable or format character of Unicode 16.0 is
+        // removed: tag characters, Arabic and Kaithi number signs, musical
+        // symbol formatting, the combining grapheme joiner, variation
+        // selectors and Hangul fillers among them.
+        assert_eq!(
+            text(
+                PresenceOperation::Authenticate,
+                Some("ex\u{E0041}\u{E0001}am\u{0600}ple\u{110BD}.\u{1D173}com"),
+                Some("a\u{034F}l\u{FE0F}i\u{3164}c\u{115F}e\u{FFA0}\u{180F}")
+            ),
+            "Sign in to example.com as alice?"
+        );
         // Nothing but invisible characters is no name at all.
         assert_eq!(
             text(
@@ -904,7 +964,7 @@ mod tests {
         );
         assert!(!escaped.body.contains(['<', '>', '"', '\'']));
 
-        let server = FakeServer::with_capabilities(&["actions", "body-markup"]).event(
+        let server = FakeServer::with_capabilities(&["actions", "body", "body-markup"]).event(
             NotificationEvent::ActionInvoked {
                 id: 7,
                 key: DENY_ACTION.into(),
