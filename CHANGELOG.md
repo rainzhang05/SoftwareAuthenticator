@@ -242,6 +242,12 @@ also break an existing installation of that commit:
 - HKDF is implemented locally over `hmac` instead of taken from the `hkdf`
   crate, so the pseudorandom key it extracts from a root key or shared secret
   is wiped after use.
+- ML-DSA and ES256 intermediates no longer stay in the stack: after every key
+  expansion, signature and key agreement the stack that computation used is
+  overwritten (64 KiB for P-256, 512 KiB or 1 MiB for ML-DSA), and the SHAKE
+  sponges ML-DSA hashes with are wiped on drop. Before, ML-DSA's ρ′, which
+  rebuilds the private key, and the ECDSA nonce, which reveals it, were left
+  behind (FIPS 204 §3.6.3). Regression tests scan the stack for them.
 - A spent PIN retry is written to disk before the PIN is compared, in the
   engine and in the CLI, so interrupting a check gives no free guess. The
   3-mismatch lockout stays volatile, as CTAP intends.

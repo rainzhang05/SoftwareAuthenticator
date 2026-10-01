@@ -134,6 +134,12 @@ jobs:
       - name: Doctests
         run: cargo test --workspace --locked --doc
 
+      # The stack residue tests look for secrets that signing leaves in the
+      # stack. Optimised builds lay out frames differently and are what the
+      # daemon runs, so they also run in release.
+      - name: Stack residue (release)
+        run: cargo test --locked --release -p pqkey-mldsa -p pqkey-ctap --test residue
+
       # Every feature combination of every crate, not just "all on". pqkey-mldsa
       # dispatches per parameter set behind cfg(feature), so a build with one set
       # compiled out is exactly where a silent break would otherwise hide until a

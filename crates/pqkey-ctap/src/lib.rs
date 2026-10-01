@@ -31,6 +31,37 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 pub mod ctap;
 pub mod store;
 
+/// Run `operation`, which handles a P-256 private key, then overwrite the
+/// stack it used.
+///
+/// RustCrypto's `ecdsa` and `elliptic-curve` wipe their key types on drop but
+/// leave intermediates in plain locals, among them an ECDSA signature's
+/// nonce `k`, which together with the signature reveals the private key.
+/// They stay in the stack after the call returns.  `operation` therefore runs
+/// in a frame of its own below the caller, and the 64 KiB below the caller
+/// are then filled with zeros, many times what ES256 signing and key
+/// generation use (`tests/residue.rs` found `k` 3 KiB down).  `zeroize`
+/// writes with volatile stores the compiler may not remove.
+pub(crate) fn with_scrubbed_stack<T>(operation: impl FnOnce() -> T) -> T {
+    let result = run_below(operation);
+    scrub_stack();
+    result
+}
+
+/// `operation()` in a frame of its own; see [`with_scrubbed_stack`].
+#[inline(never)]
+fn run_below<T>(operation: impl FnOnce() -> T) -> T {
+    operation()
+}
+
+/// Overwrite the 64 KiB of stack below the caller with zeros.
+#[inline(never)]
+fn scrub_stack() {
+    let mut words = [0u64; 64 * 1024 / 8];
+    words.zeroize();
+    core::hint::black_box(&words);
+}
+
 /// The operating system's random number generator, for the infallible
 /// `rand_core::Rng` interface.  Like `rand_core` 0.6's `OsRng`, it panics if the
 /// operating system cannot provide randomness; use [`SysRng`] directly with
@@ -546,8 +577,9 @@ pub fn try_credential_secret_from_bytes(
 pub fn try_create_credential(alg: CoseAlg) -> Result<(Vec<u8>, CredentialSecretKey), CryptoError> {
     match alg {
         CoseAlg::ES256 => {
-            let signing_key = P256SigningKey::try_generate_from_rng(&mut SysRng)
-                .map_err(|_| CryptoError::Randomness)?;
+            let signing_key =
+                with_scrubbed_stack(|| P256SigningKey::try_generate_from_rng(&mut SysRng))
+                    .map_err(|_| CryptoError::Randomness)?;
             let public_key = signing_key.verifying_key().to_sec1_point(false);
             let cose = try_cose_es256_public_key(&public_key)?;
             Ok((cose, CredentialSecretKey::Es256(signing_key)))
@@ -596,8 +628,8 @@ pub fn try_sign_challenge(
     msg.extend_from_slice(client_data_hash);
     match (alg, sk) {
         (CoseAlg::ES256, CredentialSecretKey::Es256(sk)) => {
-            let signature: P256EcdsaSignature =
-                sk.try_sign(&msg).map_err(|_| CryptoError::SigningFailed)?;
+            let signature: P256EcdsaSignature = with_scrubbed_stack(|| sk.try_sign(&msg))
+                .map_err(|_| CryptoError::SigningFailed)?;
             Ok(signature.to_der().as_bytes().to_vec())
         }
         (CoseAlg::ES256, _) => Err(CryptoError::KeyTypeMismatch),

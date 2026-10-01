@@ -106,10 +106,15 @@ It does **not** protect against:
   counter, so a relying party that checks counters may notice a copy of the
   state directory used alongside the original. A copy used only after the
   original stops cannot be told apart.
-- **Reading the daemon's memory.** Secrets are zeroized when they are dropped,
-  but the daemon does not lock its memory or disable core dumps, and a process
-  that can debug it (subject to the kernel's ptrace restrictions) can read
-  keys while they are in use.
+- **Reading the daemon's memory.** Keys, PINs, tokens and session keys are
+  zeroized when they are dropped, and after every ML-DSA and ES256 key
+  expansion, signature and key agreement the stack the computation used is
+  overwritten, because the cryptography libraries leave intermediates there
+  (ML-DSA's ρ′, which rebuilds the private key, and an ECDSA signature's
+  nonce, which reveals it). That is best effort: Rust moves values by copying
+  them, so stale copies can remain elsewhere, and the daemon does not lock its
+  memory or disable core dumps. A process that can debug it (subject to the
+  kernel's ptrace restrictions) can read keys while they are in use.
 
 It does provide:
 

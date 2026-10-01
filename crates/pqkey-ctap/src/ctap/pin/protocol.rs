@@ -243,7 +243,9 @@ impl KeyAgreementKey {
 
         let peer_public = P256PublicKey::from_sec1_bytes(&peer_encoded)
             .map_err(|_| CTAP1_ERR_INVALID_PARAMETER)?;
-        let shared = diffie_hellman(self.secret_key.to_nonzero_scalar(), peer_public.as_affine());
+        let shared = crate::with_scrubbed_stack(|| {
+            diffie_hellman(self.secret_key.to_nonzero_scalar(), peer_public.as_affine())
+        });
 
         let shared_bytes = shared.raw_secret_bytes();
         Ok(derive_classic_pin_uv_session_keys(

@@ -407,7 +407,13 @@ impl CtapApp<'_> {
                     let mut message = Vec::with_capacity(auth_data.len() + client_hash.len());
                     message.extend_from_slice(&auth_data);
                     message.extend_from_slice(&client_hash);
-                    let signature: P256EcdsaSignature = signing_key.sign(&message);
+                    let signature: P256EcdsaSignature =
+                        crate::with_scrubbed_stack(|| signing_key.try_sign(&message)).map_err(
+                            |err| {
+                                log::error!("the attestation signature failed: {err}");
+                                CTAP2_ERR_PROCESSING
+                            },
+                        )?;
                     let statement = canonical_map(vec![
                         (
                             Value::Text("alg".into()),
