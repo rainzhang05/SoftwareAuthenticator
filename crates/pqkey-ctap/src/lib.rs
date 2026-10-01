@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub mod ctap;
+pub mod platform;
 pub mod store;
 
 /// Run `operation`, which handles a P-256 private key, then overwrite the

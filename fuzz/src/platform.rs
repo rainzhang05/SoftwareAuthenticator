@@ -2,40 +2,25 @@
 //! so the stateful target can send requests that authenticate.
 
 use ciborium::value::Value;
-use hmac::{Hmac, KeyInit, Mac};
-use p256::{PublicKey, SecretKey, ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point};
-use pqkey_ctap::{
-    ClassicPinProtocol, PinUvSessionKeys, decrypt_classic_pin_block,
-    derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
-};
-use sha2::{Digest, Sha256};
+use pqkey_ctap::ClassicPinProtocol;
+use pqkey_ctap::platform::{self, PlatformKeyAgreement};
 
 use crate::cbor::{bytes, get_int, int};
 
 /// `authenticate(key, message)`: HMAC-SHA-256, the first 16 bytes for
 /// protocol one (§6.5.6) and all 32 for protocol two (§6.5.7).
 pub fn authenticate(protocol: ClassicPinProtocol, key: &[u8], message: &[u8]) -> Vec<u8> {
-    let mut mac = <Hmac<Sha256>>::new_from_slice(key).expect("HMAC takes any key");
-    mac.update(message);
-    let tag = mac.finalize().into_bytes();
-    match protocol {
-        ClassicPinProtocol::V1 => tag[..16].to_vec(),
-        ClassicPinProtocol::V2 => tag.to_vec(),
-    }
+    platform::authenticate(protocol, key, message)
 }
 
 /// `LEFT(SHA-256(pin), 16)`.
 pub fn pin_hash(pin: &[u8]) -> [u8; 16] {
-    let digest = Sha256::digest(pin);
-    let mut hash = [0u8; 16];
-    hash.copy_from_slice(&digest[..16]);
-    hash
+    *platform::pin_hash(pin)
 }
 
 /// A shared secret with the authenticator, from getKeyAgreement.
 pub struct Session {
-    pub protocol: ClassicPinProtocol,
-    pub keys: PinUvSessionKeys,
+    shared: PlatformKeyAgreement,
     /// The platform's COSE key, for keyAgreement (0x03).
     pub key_agreement: Value,
 }
@@ -55,45 +40,43 @@ impl Session {
             return None;
         };
         let coordinate = |label| match get_int(key, label) {
-            Some(Value::Bytes(value)) if value.len() == 32 => Some(value.clone()),
+            Some(Value::Bytes(value)) => <[u8; 32]>::try_from(value.as_slice()).ok(),
             _ => None,
         };
-        let mut encoded = vec![0x04];
-        encoded.extend(coordinate(-2)?);
-        encoded.extend(coordinate(-3)?);
-        let authenticator_key = PublicKey::from_sec1_bytes(&encoded).ok()?;
-
-        let secret = SecretKey::from_slice(&secret).ok()?;
-        let shared = diffie_hellman(secret.to_nonzero_scalar(), authenticator_key.as_affine());
-        let keys = derive_classic_pin_uv_session_keys(protocol, shared.raw_secret_bytes().as_ref());
-        let point = secret.public_key().to_sec1_point(false);
+        let shared =
+            PlatformKeyAgreement::new(protocol, &coordinate(-2)?, &coordinate(-3)?, &secret)
+                .ok()?;
+        let (x, y) = shared.public_key();
         let key_agreement = Value::Map(vec![
             (int(1), int(2)),
             (int(3), int(-25)),
             (int(-1), int(1)),
-            (int(-2), bytes(point.x()?.as_ref())),
-            (int(-3), bytes(point.y()?.as_ref())),
+            (int(-2), bytes(&x)),
+            (int(-3), bytes(&y)),
         ]);
         Some(Self {
-            protocol,
-            keys,
+            shared,
             key_agreement,
         })
     }
 
     /// `encrypt(shared secret, plaintext)`, `plaintext` a multiple of 16 bytes.
     pub fn encrypt(&self, plaintext: &[u8], iv: [u8; 16]) -> Vec<u8> {
-        encrypt_classic_pin_block(self.protocol, &self.keys, Some(&iv), plaintext)
+        self.shared
+            .encrypt(plaintext, iv)
             .expect("the plaintext is a whole number of blocks")
     }
 
     pub fn decrypt(&self, ciphertext: &[u8]) -> Option<Vec<u8>> {
-        decrypt_classic_pin_block(self.protocol, &self.keys, ciphertext).ok()
+        self.shared
+            .decrypt(ciphertext)
+            .ok()
+            .map(|plaintext| plaintext.to_vec())
     }
 
     /// `authenticate(shared secret, message)`.
     pub fn authenticate(&self, message: &[u8]) -> Vec<u8> {
-        authenticate(self.protocol, &self.keys.auth_key, message)
+        self.shared.authenticate(message)
     }
 }
 

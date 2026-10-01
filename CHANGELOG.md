@@ -76,6 +76,9 @@ also break an existing installation of that commit:
 
 ### Added
 
+- `pqkey_ctap::platform`: the platform's side of PIN/UV auth protocols one and
+  two (key agreement, PIN encryption, token decryption, pinUvAuthParam), for
+  clients that manage a key over CTAP, such as the `pqkey` command line.
 - `pqkey` identity: its own AAGUID, product name, pid.codes USB IDs and state
   directory.
 - Desktop notification prompt for user presence over D-Bus
