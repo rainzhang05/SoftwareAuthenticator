@@ -324,10 +324,11 @@ pub fn decrypt_classic_pin_block(
     }
 }
 
-/// Enumeration of COSE algorithm identifiers for ML-DSA.  These values are
-/// registered by RFC 9964; they are negative because COSE reserves negative
-/// numbers for signature algorithms.
+/// The COSE algorithm identifiers this authenticator signs with: ES256 (-7)
+/// and the three ML-DSA parameter sets, which RFC 9964 §8.1 registered in the
+/// IANA "COSE Algorithms" registry as -48, -49 and -50.
 ///
+/// * -7 -> ES256
 /// * -48 -> ML-DSA-44
 /// * -49 -> ML-DSA-65
 /// * -50 -> ML-DSA-87

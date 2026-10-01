@@ -144,8 +144,8 @@ def verify_signature(cose_key: Mapping[int, Any], message: bytes, signature: byt
 
     ES256 is ECDSA P-256/SHA-256 with a DER signature. ML-DSA is pure ML-DSA
     (FIPS 204 ML-DSA.Verify) with an empty context, verified by the OpenSSL
-    implementation in cryptography's wheels, not by the fips204 crate the
-    authenticator signs with.
+    implementation in cryptography's wheels, not by RustCrypto's ml-dsa crate
+    the authenticator signs with.
     """
     alg = cose_key[3]
     if alg == ES256:

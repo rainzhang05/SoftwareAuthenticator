@@ -272,7 +272,9 @@ impl PinUvAuthTokenState {
 
     /// "If the pinUvAuthToken does not have a permissions RP ID associated:
     /// Associate the request's rp.id parameter value with the pinUvAuthToken
-    /// as its permissions RP ID." (§6.1.2 step 11.1.6, §6.2.2 step 6.1.7)
+    /// as its permissions RP ID." (CTAP 2.3 §6.1.2 step 11.1.7 and 11.1.7.1;
+    /// §6.2.2 step 6.1.6 and 6.1.6.1 say the same of "the request's rpId
+    /// parameter value")
     pub(crate) fn bind_permissions_rp_id(&mut self, now: Duration, rp_id: &str) {
         self.observe(now);
         if let Some(token) = self.in_use.as_mut()

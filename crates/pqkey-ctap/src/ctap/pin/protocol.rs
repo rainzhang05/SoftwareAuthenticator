@@ -253,8 +253,11 @@ impl KeyAgreementKey {
     }
 }
 
-/// The key agreement key of each supported PIN/UV auth protocol: "Each PIN/UV
-/// auth protocol [...] maintains its own" state (CTAP 2.3 §6.5).
+/// The key agreement key of each supported PIN/UV auth protocol: "This PIN/UV
+/// auth protocol maintains the following state: Key agreement key: a P-256
+/// private key, x, and the associated public point xB" (CTAP 2.3 §6.5.6,
+/// protocol one), and protocol two "inherits all the behavior of PIN protocol
+/// one" (§6.5.7), so each has a key of its own.
 ///
 /// A key lives from power-up, when "the authenticator calls initialize for
 /// each pinUvAuthProtocol that it supports" (§6.5.5.1), until that protocol's

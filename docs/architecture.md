@@ -216,7 +216,8 @@ otherwise decrements pinRetries; the caller persists that; only then does
 `finish_attempt` compare, in constant time. So cutting power during a check
 never gives a free guess. A match restores pinRetries to 8. Three consecutive
 mismatches return CTAP2_ERR_PIN_AUTH_BLOCKED until the daemon restarts; that
-count is volatile on purpose (§6.5.2.3). At pinRetries 0 only a reset helps.
+count is volatile on purpose (§6.5.5.6 step 5.7.1.2.2, §6.5.5.7.2 step
+4.9.1.2.2, which ask for a power cycle). At pinRetries 0 only a reset helps.
 The `pqkey pin` commands use the same state machine on the same store.
 
 **PIN/UV auth protocols** (`pin/protocol.rs`). Protocols 2 and 1 are
