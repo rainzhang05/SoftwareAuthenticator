@@ -164,7 +164,7 @@ fn hand_over(dir: &Path, script: &str, name: &str) -> io::Result<PathBuf> {
 }
 
 fn print_script(script: &str) -> io::Result<()> {
-    for line in script.lines() {
+    for line in shown_script(script) {
         if line.is_empty() {
             outln!()?;
         } else {
@@ -172,6 +172,29 @@ fn print_script(script: &str) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The lines of `script` to show: the udev rules it installs, a file of
+/// mostly comments, are named rather than shown, so the steps stand out.
+fn shown_script(script: &str) -> Vec<String> {
+    let mut shown = Vec::new();
+    let mut in_rules = false;
+    for line in script.lines() {
+        if in_rules {
+            if line == "PQKEY_UDEV_RULES" {
+                in_rules = false;
+                shown.push(format!(
+                    "  (the {} lines of contrib/udev/70-pqkey.rules)",
+                    UDEV_RULES.lines().count()
+                ));
+                shown.push(line.to_owned());
+            }
+            continue;
+        }
+        in_rules = line.ends_with("<<'PQKEY_UDEV_RULES'");
+        shown.push(line.to_owned());
+    }
+    shown
 }
 
 fn print_problems(problems: &[checks::Problem]) -> io::Result<()> {
@@ -506,6 +529,32 @@ mod tests {
         assert!(script.contains(UDEV_RULES), "{script}");
         assert!(!UDEV_RULES.contains("PQKEY_UDEV_RULES"));
         assert!(UDEV_RULES.ends_with('\n'));
+    }
+
+    #[test]
+    fn the_rules_are_named_rather_than_shown() {
+        let dir = TempDir::new("setup-shown");
+        let system = System::under(dir.path().to_owned());
+        let script = root_script(&system, &membership(true, true)).unwrap();
+        let shown = shown_script(&script);
+        let rules = shown
+            .iter()
+            .position(|line| line.ends_with("<<'PQKEY_UDEV_RULES'"))
+            .unwrap();
+        assert!(
+            shown[rules + 1].contains("lines of contrib/udev/70-pqkey.rules"),
+            "{shown:?}"
+        );
+        assert_eq!(shown[rules + 2], "PQKEY_UDEV_RULES");
+        assert!(
+            shown.iter().any(|line| line.starts_with("echo uhid >")),
+            "{shown:?}"
+        );
+        assert!(shown.len() < 30, "{shown:?}");
+        assert!(
+            !shown.iter().any(|line| line.contains("SUBSYSTEM==")),
+            "{shown:?}"
+        );
     }
 
     #[test]
