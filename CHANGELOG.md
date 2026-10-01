@@ -291,6 +291,10 @@ also break an existing installation of that commit:
   now exit with status 3 when the key already runs, which the unit does not
   restart on (`RestartPreventExitStatus=3`), and the unit gives up after 5
   failed starts within a minute.
+- PINs entered on the command line are normalized to Unicode Normalization
+  Form C before their length is checked and they are used (CTAP 2.3 §6.5.1),
+  so a PIN typed or pasted with combining characters is the PIN a browser
+  sends for the same text, and counts characters, not combining marks.
 - Panics removed from fallible ML-DSA paths.
 
 ### Removed

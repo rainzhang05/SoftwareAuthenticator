@@ -22,6 +22,7 @@ use nix::{
         termios::{self, LocalFlags, SetArg, Termios},
     },
 };
+use unicode_normalization::UnicodeNormalization;
 use zeroize::{Zeroize, Zeroizing};
 
 /// A PIN as read from the user. It is wiped from memory when dropped and its
@@ -223,7 +224,8 @@ fn read_tty_line(tty: BorrowedFd<'_>) -> io::Result<Pin> {
     finish_line(line)
 }
 
-/// Strip the line ending and check the result is a plausible PIN string.
+/// Strip the line ending, check the result is a plausible PIN string, and
+/// normalize it to NFC.
 fn finish_line(mut line: Zeroizing<Vec<u8>>) -> io::Result<Pin> {
     if line.last() == Some(&b'\n') {
         line.pop();
@@ -238,7 +240,7 @@ fn finish_line(mut line: Zeroizing<Vec<u8>>) -> io::Result<Pin> {
         ));
     }
     match String::from_utf8(std::mem::take(&mut *line)) {
-        Ok(pin) => Ok(Pin::new(pin)),
+        Ok(pin) => Ok(nfc(Zeroizing::new(pin))),
         Err(err) => {
             err.into_bytes().zeroize();
             Err(io::Error::new(
@@ -247,6 +249,23 @@ fn finish_line(mut line: Zeroizing<Vec<u8>>) -> io::Result<Pin> {
             ))
         }
     }
+}
+
+/// `pin` in Unicode Normalization Form C. CTAP 2.3 §6.5.1: "Platforms MUST
+/// enforce the following, baseline, requirements on PINs used with this
+/// specification: [...] PIN are in Unicode normalization form C." Otherwise
+/// a PIN typed or pasted with combining characters would not be the PIN a
+/// browser sends for the same text, and would count more code points than it
+/// has characters (§6.5.5.5 step 2: "Let platformCollectedPinLengthInCodePoints
+/// be the length in code points of newPinUnicode after normalization is
+/// applied.").
+fn nfc(pin: Zeroizing<String>) -> Pin {
+    // NFC makes UTF-8 text at most three times longer (Unicode's
+    // normalization FAQ). With room for that the buffer never grows, so it
+    // leaves no copy of the PIN behind in freed memory.
+    let mut normalized = String::with_capacity(3 * pin.len());
+    normalized.extend(pin.nfc());
+    Pin::new(normalized)
 }
 
 /// Turns terminal echo off, and back on when dropped.
@@ -428,6 +447,27 @@ mod tests {
         assert_eq!(&*read_line(&mut input).unwrap(), " 12 \t34 ");
         let mut input = Cursor::new("\u{e9}t\u{e9}!\n".as_bytes().to_vec());
         assert_eq!(&*read_line(&mut input).unwrap(), "\u{e9}t\u{e9}!");
+    }
+
+    /// A PIN with combining characters is the PIN a browser sends for the
+    /// same text, and its length counts characters, not combining marks.
+    #[test]
+    fn pins_are_normalized_to_nfc() {
+        const DECOMPOSED: &str = "e\u{301}"; // e, combining acute accent
+        const COMPOSED: &str = "\u{e9}"; // e with acute accent
+        let read = |line: String| read_line(&mut Cursor::new(format!("{line}\n").into_bytes()));
+        assert_eq!(&*read(DECOMPOSED.repeat(4)).unwrap(), COMPOSED.repeat(4));
+        assert_eq!(&*read(COMPOSED.repeat(4)).unwrap(), COMPOSED.repeat(4));
+        // Four code points as typed, two characters: too short.
+        let short = read(DECOMPOSED.repeat(2)).unwrap();
+        assert_eq!(short.chars().count(), 2);
+        assert!(validate_pin(&short).is_err());
+        // Hangul jamo compose to syllables; Å (U+212B) is a singleton.
+        assert_eq!(
+            &*read("\u{1100}\u{1161}\u{11A8}abc".into()).unwrap(),
+            "\u{AC01}abc"
+        );
+        assert_eq!(&*read("\u{212B}abc".into()).unwrap(), "\u{C5}abc");
     }
 
     #[test]

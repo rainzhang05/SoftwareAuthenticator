@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Iterator
 
 import pytest
-from fido2.ctap2 import Ctap2
+from fido2.ctap2 import ClientPin, Ctap2
 
 import ctap as client
 
@@ -156,6 +156,18 @@ def test_pin_is_set_and_changed_over_ctap(pqkey: Pqkey):
     # A PIN shorter than any that can be set is wrong without costing a retry.
     assert "no retry was used" in pqkey.error("pin", stdin="12\n")
     assert pqkey.status()["PIN"] == f"set ({MAX_RETRIES} retries left)"
+
+
+def test_pins_are_normalized_to_nfc(pqkey: Pqkey):
+    """PINs are in Unicode normalization form C (CTAP 2.3 §6.5.1): one typed
+    with combining characters is the PIN a browser sends for the same text."""
+    pqkey.start()
+    decomposed = "e\u0301" * 4
+    assert pqkey.ok("pin", stdin=f"{decomposed}\n") == "PIN set.\n"
+    with client.open_device(pqkey.status()["Device"]) as device:
+        ClientPin(Ctap2(device)).get_pin_token("\u00e9" * 4, ClientPin.PERMISSION.CREDENTIAL_MGMT)
+    # Four code points as typed, but two characters: too short.
+    assert pqkey.error("pin", stdin=f"{decomposed}\n{'e\u0301' * 2}\n") == "PIN must be at least 4 characters long"
 
 
 def test_passkeys_are_listed_and_deleted(pqkey: Pqkey):
