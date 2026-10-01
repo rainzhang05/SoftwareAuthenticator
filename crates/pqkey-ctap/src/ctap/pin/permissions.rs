@@ -53,10 +53,31 @@ impl CtapApp<'_> {
     /// * deleteCredential and updateUserInformation: only for a credential of
     ///   that RP, "the pinUvAuthToken permissions RP ID matches the RP ID of
     ///   the credential" (§6.8.5, §6.8.6).
-    /// * enumerateCredentials: only for that RP.  CTAP 2.1 §6.8.4 allows this
-    ///   ("matches the RP ID of this request") and CTAP 2.3 §6.8 still describes
-    ///   it for fetching a credential's public key, although 2.3's step text
-    ///   asks for no RP ID; libfido2 and OpenSSH request exactly this token.
+    /// * enumerateCredentialsBegin: only for that RP.  This follows CTAP 2.1,
+    ///   not the step text of CTAP 2.3, which contradicts the rest of 2.3:
+    ///   - CTAP 2.3 §6.8.4 step 3: "The authenticator verifies that the
+    ///     pinUvAuthToken has the cm permission and no associated permissions
+    ///     RP ID. If not, return CTAP2_ERR_PIN_AUTH_INVALID."
+    ///   - CTAP 2.1 (Proposed Standard, errata 2022-06-21) §6.8.4: "The
+    ///     authenticator verifies that the pinUvAuthToken has the cm
+    ///     permission and that the pinUvAuthToken does not have an permissions
+    ///     RP ID associated or that the pinUvAuthToken permissions RP ID
+    ///     matches the RP ID of this request."
+    ///   - CTAP 2.3 §6.5.5.7, the cm permission: "The rpId parameter is
+    ///     optional, if it is present, the pinUvAuthToken can only be used for
+    ///     Credential Management operations on Credentials associated with
+    ///     that RP ID."
+    ///   - CTAP 2.3 §6.8: "When making the authenticatorGetAssertion request,
+    ///     a permissions RP ID is present [...] but now the cm permission will
+    ///     only allow you to retrieve credentials related to that
+    ///     authenticatorGetAssertion request."
+    ///
+    ///   This authenticator reports FIDO_2_1 as well as FIDO_2_3, and libfido2
+    ///   (1.16 `fido_credman_get_dev_rk`, which OpenSSH's `ssh-keygen -K`
+    ///   uses) asks for a token bound to the RP before
+    ///   enumerateCredentialsBegin, so refusing it would break CTAP 2.1
+    ///   platforms for no gain: such a token reveals no more than the
+    ///   deleteCredential and updateUserInformation steps already allow it.
     ///
     /// enumerateRPsGetNextRP and enumerateCredentialsGetNextCredential carry
     /// no pinUvAuthParam and never come here: their begin subcommand did.
