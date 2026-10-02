@@ -45,6 +45,39 @@ Dependabot proposes updates every week. Cargo updates that are
 semver-compatible and pass every workflow are merged automatically. Commit
 changes to `Cargo.lock` and `fuzz/Cargo.lock` together.
 
+## Adding a signature algorithm
+
+Each algorithm is described once, in the table in
+`crates/pqkey-ctap/src/crypto/alg.rs`, and the compiler finds most of what
+else has to change.
+
+1. Add a `CoseAlg` variant whose value is its COSE identifier, its row in
+   `CoseAlg::properties` (its name and signature scheme), and its place in
+   `CoseAlg::ALL`, the order getInfo lists the algorithms in. An algorithm
+   that differs from another only in its identifier, as ESP256 does from
+   ES256, shares its scheme and needs nothing more in Rust.
+2. A new scheme needs a `Scheme` variant and a module for its family next to
+   `crypto/ecdsa_p256.rs` and `crypto/mldsa.rs`, and a new type of key a
+   `CredentialSecretKey` variant. Keys kept in a new form need a `KeyKind`, a
+   `PrivateKeyMaterial` variant and a key type in `store/codec.rs`.
+3. Build and run clippy, and handle every match they point to, among them
+   the test verifier in `crypto/verify.rs`, which pqkey's tests and the fuzz
+   targets reach through pqkey-ctap's `test-support` feature. A check at
+   compile time says if the algorithm does not fit a sealed credential ID.
+4. Run the tests. The table-driven ones cover the new algorithm, and the
+   known-answer tests of the table, of getInfo and of the CLI say what to
+   add to them.
+5. Outside Rust, add it to `ALGORITHMS` in `tests/e2e/ctap.py` and to
+   `test_get_info.py`, to `NAMES` in `tests/browser/q.py` and
+   `tests/browser/index.html`, to the `fido2-token -I` line that
+   `tests/e2e/libfido2.sh` expects, and to the algorithm lists in the README
+   and the [architecture notes](architecture.md).
+
+Then run `scripts/check.sh`, regenerate the fuzz seeds with `cargo run
+--release --manifest-path fuzz/Cargo.toml --example seeds` (the
+`credential_key` seeds pick algorithms by their place in `CoseAlg::ALL`), run
+`scripts/fuzz.sh`, and run `scripts/e2e.sh` on Linux.
+
 ## Clients
 
 These were tested on 2026-09-30 on Ubuntu 26.04.1 (aarch64, GNOME 50.1).
