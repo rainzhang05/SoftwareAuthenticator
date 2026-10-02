@@ -1,298 +1,105 @@
-# Security policy
-
-## Supported versions
-
-pqkey has not been released. Security fixes go to the `main` branch only.
-
-| Version | Supported |
-|---------|-----------|
-| `main` | Yes |
-| anything else | No |
+# Security
 
 ## Reporting a vulnerability
 
-Please report vulnerabilities privately, not in a public issue or pull request.
+Please report vulnerabilities privately, not in a public issue. Contact the
+maintainer through their GitHub profile,
+[@rainzhang05](https://github.com/rainzhang05). Include the commit you tested,
+the client involved, the steps to reproduce, and what an attacker gains.
 
-GitHub private vulnerability reporting is **not enabled** for
-[rainzhang05/SoftwareAuthenticator](https://github.com/rainzhang05/SoftwareAuthenticator)
-at the moment, and the repository has no issue tracker or discussions. Until
-that changes, contact the maintainer privately through the contact details on
-their GitHub profile, [@rainzhang05](https://github.com/rainzhang05), and ask
-for a private channel before sending details if you prefer.
-
-Please include:
-
-- the commit you tested;
-- how the key was started (`pqkey start`, the systemd unit, or `pqkey run`
-  with which options);
-- the client involved (browser and version, libfido2, python-fido2, ...);
-- steps to reproduce, and what an attacker gains.
-
-There is no bug bounty. Reports are handled on a best-effort basis by a
-volunteer maintainer.
+pqkey has no releases, so only `main` gets fixes. There is no bug bounty.
 
 ## Threat model
 
 pqkey is a software security key. Its private keys live on the same computer,
 under the same user account, as the browser that uses them. It cannot give the
-guarantees of a hardware security key, whose keys cannot be read out and whose
-touch sensor cannot be driven by software. This section states what pqkey is
-designed to protect against and what it does not.
+guarantees of a hardware key, whose keys cannot be read out and whose touch
+sensor software cannot press.
 
-### Assets
+### What it protects against
 
-- The two root keys, `keys/device.key` and `keys/credential.key`, from which
-  every key protecting the store is derived.
-- Credential private keys (ES256 scalars and ML-DSA seeds, 32 bytes each).
-- The PIN, stored as `LEFT(SHA-256(PIN), 16)`, and the PIN retry counter.
-- The attestation private key, when `--attestation certificate` is used.
-- The per-credential `CredRandom` values behind the `hmac-secret` extension
-  (stored for discoverable credentials, and for non-discoverable ones derived
-  from a random seed sealed into the credential ID).
-- While the daemon runs: pinUvAuthTokens and PIN/UV auth key agreement keys,
-  which are never stored.
+- **Silent use.** Every registration, sign-in that needs your presence, and
+  reset asks for your approval in a desktop notification. If the notification
+  cannot be shown, the request is denied, never approved.
+- **Other users on the computer.** The state directory is `0700`, its files
+  are `0600`, and udev gives the key's device only to the user of the active
+  local session.
+- **Copies of the files without the keys.** The credential, PIN and counter
+  files in `~/.local/share/pqkey` are encrypted and authenticated with
+  XChaCha20-Poly1305 under keys derived from two root keys in `keys/`. A
+  modified, truncated or swapped file is reported as corrupt and never used.
+  File names are HMACs, so they reveal neither credentials nor sites.
+- **Old data after a reset.** A reset replaces the credential root key, so
+  leftover copies of files, and the credential IDs that sites hold, can no
+  longer be decrypted.
+- **PIN guessing through the key.** The retry count is saved before each
+  comparison. After 8 wrong PINs the PIN is blocked until a reset, and after 3
+  in a row the key must be restarted.
 
-### Who can talk to the key
+### What it does not protect against
 
-The virtual key is a hidraw node. The shipped udev rules
-([`contrib/udev/70-pqkey.rules`](contrib/udev/70-pqkey.rules)) make it mode
-`0600` and grant access to the user of the active local session through
-systemd's `uaccess` tag. Any process running as that user can open it and send
-CTAP requests: pqkey cannot tell a browser from any other program, and the
-relying party ID and user names in a request are whatever that process wrote.
-Other udev rules can grant access too, as they do for hardware keys: on
-Ubuntu, sssd's `90-sssd-token-access.rules` gives the `sssd` user an ACL on
-every security token's node, pqkey's included. The rules also tag the node for
-the Firefox and Chromium snaps, whose sandbox otherwise refuses it; that lets
-those snaps open it as far as its mode and ACL allow, no further.
-Without the rules the node's mode is up to the system; if every user can open
-it, the daemon logs a warning once a client first opens the key (by then udev
-has set the node's mode), and keeps serving it.
-
-`/dev/uhid` itself is opened by the daemon. The rules give the `plugdev` group
-access to it, and `pqkey setup` adds you to the group if you are not a member,
-with an ACL on `/dev/uhid` for you until your next login applies the group.
-Anyone who can open `/dev/uhid` can create any HID device, including a
-keyboard that types into the active session, so membership in that group is a
-privilege in its own right. On Ubuntu the user created at installation is a
-member already, so installing the rules grants it to them.
-
-### The encrypted credential store
-
-Each record is a separate file encrypted and authenticated with
-XChaCha20-Poly1305 under keys derived from two 32-byte root keys. By default
-the root keys are files in `keys/` inside the same state directory as the data.
-Non-discoverable credentials are not stored at all: each credential ID holds
-its private key and the seed of its `hmac-secret` values, sealed the same way
-under a key derived from the credential root key and bound to its relying
-party. Credential IDs are not secret, since a
-relying party hands them to anyone who starts a sign-in, so those private keys
-are exactly as safe as the credential root key.
-The full format is in [docs/architecture.md](docs/architecture.md#credential-store)
-and in the documentation of `crates/pqkey-ctap/src/store/`.
-
-It does **not** protect against:
-
-- **Anyone who can read the state directory as your user, or as root.** They
-  read the key files and decrypt everything, private keys included. A single
-  copy of `keys/credential.key` also yields the private key and hmac-secret of
-  every non-discoverable credential until the next reset, including ones
-  created after the copy, because their credential IDs come from relying
-  parties. The `0700` directory and `0600` file permissions are the access
-  control, and they only keep out other unprivileged local users.
+- **Anything running as you, or as root.** It can read the root keys and so
+  every private key, or use the key while a prompt is up, or interfere with the
+  notification. A single copy of `keys/credential.key` also opens every
+  non-discoverable credential until the next reset.
 - **Offline PIN guessing by such an attacker.** The stored PIN hash is an
-  unsalted, truncated SHA-256. The retry counter only limits guessing through
-  CTAP.
-- **Deleting a record, or replacing a file with an older copy of itself** made
-  since the last reset. Integrity is per file, so rolling back `pin-state`
-  restores PIN retries and rolling back a credential file restores its
-  signature counter. Deleting `pin-state` removes the PIN. (A `pin-state` that
-  exists but cannot be read fails closed: the PIN counts as set and blocked
-  until a reset.)
-- **Anyone holding the keys forging records.**
-- **Clones, reliably.** Every credential counts its signatures, discoverable
-  ones each on their own counter and non-discoverable ones on one global
-  counter, so a relying party that checks counters may notice a copy of the
-  state directory used alongside the original. A copy used only after the
-  original stops cannot be told apart.
-- **Reading the daemon's memory.** Keys, PINs, tokens and session keys are
-  zeroized when they are dropped, and after every ML-DSA and ES256 key
-  expansion, signature and key agreement the stack the computation used is
-  overwritten, because the cryptography libraries leave intermediates there
-  (ML-DSA's ρ′, which rebuilds the private key, and an ECDSA signature's
-  nonce, which reveals it). That is best effort: Rust moves values by copying
-  them, so stale copies can remain elsewhere, and the daemon does not lock its
-  memory or disable core dumps. A process that can debug it (subject to the
-  kernel's ptrace restrictions) can read keys while they are in use.
+  unsalted, truncated SHA-256.
+- **Rolling files back.** Integrity is per file, so an older copy of
+  `pin-state` restores PIN retries, and deleting it removes the PIN.
+- **Clones.** A copy of the state directory works as well as the original.
+  Signature counters may show a relying party that two copies are in use, but
+  not a copy used after the original stops.
+- **Reading the daemon's memory.** Secrets are wiped after use as far as Rust
+  allows, but the daemon neither locks its memory nor disables core dumps.
 
-It does provide:
+### Limits of the prompt
 
-- **Integrity of each file.** The authentication tag covers the record type and
-  the file's name, so a modified, truncated, or swapped file is reported as
-  corrupt and never used. Corrupt records are not deleted automatically.
-- **Crypto-shredding on reset.** `pqkey reset` and authenticatorReset replace
-  the key that protects credentials and PIN state. Ciphertext left behind in
-  free blocks, snapshots or backups can no longer be decrypted, and neither can
-  the non-discoverable credential IDs relying parties hold. The attestation
-  key, under the device key, is kept. The old key file is overwritten with
-  zeros as a best effort, but on SSDs and copy-on-write filesystems that
-  32-byte file may survive too.
-- **No plaintext secrets in copies that leave out `keys/`**, such as a backup
-  that deliberately excludes it.
-- **Credential file names that reveal nothing.** A file name is an HMAC of the
-  credential ID, so a directory listing shows neither credential IDs nor
-  relying parties.
+- **It shows what the client claims.** Site and user names come from the
+  request. They are cleaned of control and invisible characters, but a lying
+  local program can still claim any site. Browsers check the site; other
+  programs need not.
+- **Some requests need no prompt.** As CTAP allows, a sign-in may ask for no
+  user presence, and the signed data then says so. PIN changes and passkey
+  management are protected by the PIN instead. On a key without a PIN, any
+  program that can open the device can set one.
+- **Some registrations need no PIN.** A site may register a non-discoverable
+  credential without the PIN even when one is set, as getInfo's
+  `makeCredUvNotRqd` announces. It still needs your approval.
+- **Reset is only possible within 10 seconds of the key starting** (CTAP 2.3
+  §6.6), as with a hardware key that has just been plugged in.
 
-Keeping the root keys in an OS-backed store (systemd-creds, a TPM, the Secret
-Service) would change the first point; the store has an interface for that
-(`KeySource`), but only the file-based implementation exists today.
+### Device access
 
-### User presence
+The daemon opens `/dev/uhid`, which the udev rules give to the `plugdev`
+group. Anyone who can open it can create any HID device, including a keyboard
+that types into your session, so membership in that group is a privilege of
+its own. `pqkey setup` adds you to the group if needed. Until your next login
+applies the group, it gives you an ACL on `/dev/uhid` instead. On Ubuntu, the
+first user is in `plugdev` already.
 
-With `--presence notify`, the default, each registration, each sign-in that
-requests user presence, each authenticatorReset from a client and each
-authenticator selection shows a desktop notification through
-`org.freedesktop.Notifications` on the D-Bus session bus, with Approve and Deny
-buttons.
+The key's own device is mode `0600` and goes to the active session's user. The
+rules also tag it for the Firefox and Chromium snaps, which their sandbox
+otherwise refuses. Other rules may grant access too, as they do for hardware
+keys: on Ubuntu, sssd's rules give the `sssd` user every security token.
 
-It protects against programs that silently use the key without the user
-noticing, as long as they cannot also interact with the desktop session.
+### Privacy
 
-It fails closed. The request is **denied** if there is no session bus, no
-notification server, a server without the `actions` capability (buttons) or
-the `body` capability (the prompt's text), or any error talking to it. There
-is no fallback prompt: a notification server that cannot show the question and
-its buttons cannot ask it. Deny, dismissing the notification, or closing it
-any other way denies the request. If nobody answers within 30 seconds (the hidden
-`--presence-timeout` option changes this for tests), or the server lets the
-notification expire, the request times out. If the client cancels the
-request, the notification is withdrawn.
+- Registrations use self attestation, which says nothing about the key beyond
+  its AAGUID. That AAGUID is the same for every installation, so it identifies
+  pqkey, not you.
+- Non-discoverable credentials share one signature counter, as on most
+  hardware keys.
+- Logs name sites and users only at debug level.
+- The USB IDs `1209:0001` are a [pid.codes](https://pid.codes/1209/0001/) test
+  ID that is not unique to pqkey.
 
-Its limits:
+### Cryptography and assurance
 
-- **Same-user malware with access to the session bus.** A process running as
-  you can in principle interfere with the prompt, for example by replacing the
-  notification server or driving the desktop. Such a process can also read the
-  credential store directly (see above), so user presence is not a boundary
-  against it.
-- **The prompt shows what the client claims.** The relying party ID and user
-  names come from the request, not from a verified origin. They are sanitised
-  before they are shown (every Unicode 16.0 default-ignorable and format
-  character removed, such as bidirectional overrides, zero-width and tag
-  characters, control characters and runs of whitespace turned into single
-  spaces, relying party
-  IDs cut to their last 80 characters and user names to 64, markup escaped
-  where the server interprets it), which limits spoofing through odd characters
-  but cannot make a lying client honest. Browsers check the relying party ID
-  against the page's origin; other local programs need not.
-- **Silent assertions.** As CTAP allows, a getAssertion request with the `up`
-  option set to false is answered without a prompt, with the user-present flag
-  cleared in the signed authenticator data. A relying party that requires user
-  presence rejects such an assertion; one that does not check the flag accepts
-  it. `hmac-secret` is refused without user presence, and so is a registration
-  with `up` false.
-- **Registration without the PIN.** getInfo reports `makeCredUvNotRqd`, so a
-  non-discoverable credential can be registered without the PIN even when one
-  is set, and credentials with credProtect level 1, or level 2 when the
-  relying party names them, can sign without it. Both still need user
-  presence.
-- **No prompt for PIN operations or credential management.** Those are
-  protected by the PIN instead. On a key without a PIN, any program that can
-  open the device can set one.
-- **`--presence auto-approve`** approves everything without asking. It exists
-  for tests and CI. Never use it on a key with credentials that matter.
-
-pqkey is an authenticator without a display in every presence mode: the
-notification belongs to the platform, which any program on the session bus can
-replace or close. So, as CTAP 2.3 §6.6 requires of such an authenticator, it
-only accepts authenticatorReset within 10 seconds of power-up, the start of the
-daemon, as a hardware key only accepts it right after it is plugged in; a
-browser's reset works right after the key is restarted. The hidden
-`--allow-late-reset` option, meant for test rigs, lifts the window. `pqkey
-reset` is no exception: it restarts the key and sends authenticatorReset over
-CTAP, which the user approves in the notification like any other.
-
-Logs at info level and above name only the kind of presence request. Relying
-party IDs and user names appear only at debug level. Without `RUST_LOG` the
-daemon logs warnings and errors; the systemd unit sets `info`. A background
-daemon logs to `authenticator.log` (mode 0600) in the state directory.
-
-### PIN
-
-The PIN retry counter is persisted before a PIN is compared, so interrupting a
-check never gives a free guess. 8 wrong PINs block the PIN until a reset.
-After 3 wrong PINs in a row the daemon refuses PIN checks until it restarts
-(the CTAP "power cycle"). Restarting it, by hand or by systemd after a crash,
-is that power cycle: it resets only this volatile count, never the persistent
-8-retry limit. The CLI never opens the store: `pqkey pin` and
-`pqkey passkeys` send PINs to the running key over CTAP (PIN/UV auth protocol
-2), so the key's own checks and counters apply to them. The CLI never accepts
-PINs as command-line arguments.
-
-### Attestation and privacy
-
-- `--attestation self` (default): the attestation statement is signed with the
-  new credential's own key and carries no information about the authenticator.
-- `--attestation certificate`: every registration carries the same
-  per-installation certificate, so relying parties that compare certificates
-  can link your credentials across sites (WebAuthn Level 3 §14.4.1). A reset
-  keeps the certificate, so credentials from before and after a reset stay
-  linkable. If the attestation record cannot be read, or the statement would
-  not fit in a CTAPHID message, the registration gets self attestation
-  instead; a client that asks only for "none" gets "none". The
-  certificate is self-signed and not in any metadata service, so it does not
-  prove to a relying party that the key is genuine.
-- `--attestation none`: no statement.
-
-Non-discoverable credentials share one global signature counter, as on most
-hardware security keys, so a relying party that compares the counts it sees
-learns how many sign-ins with non-discoverable credentials happened elsewhere
-in between. WebAuthn Level 3 §6.1.1 calls a global counter "less
-privacy-friendly"; discoverable credentials count on their own.
-
-The default AAGUID `5931e805-a166-4eb7-845a-7f6aa93d9cd8` is the same for every
-pqkey installation. It tells a relying party that the key is pqkey, not which
-installation it is.
-
-### USB IDs
-
-The default USB IDs `1209:0001` are a [pid.codes](https://pid.codes/1209/0001/)
-test assignment that pid.codes says must not be used on redistributed devices.
-They are not unique to pqkey, so other test devices may use them too. pqkey is
-a test project that is not released, so it keeps this test ID; a build that is
-redistributed needs a product ID of its own.
-
-### Randomness and FIPS 204
-
-Credential private keys, ML-DSA key generation seeds (`ξ`), the randomness of
-hedged ML-DSA signing (`rnd`) and the store's nonces come from the operating
-system's generator, getrandom(2) on Linux. It is a cryptographically secure
-generator, but not a random bit generator approved under NIST SP 800-90A,
-which FIPS 204 §3.6.1 asks a validated module to use. pqkey makes no FIPS 140
-claim, and its ML-DSA implementation (RustCrypto's `ml-dsa`) is not a
-validated module either.
-
-### Testing and its scope
-
-- Unit and integration tests cover the CTAP engine, the CTAPHID state machine,
-  the credential store (including tampering, key handling, permissions and
-  an interrupted reset), the CLI's PIN handling and the attestation
-  certificate. CI enforces a line coverage floor of 85% across the workspace.
-- ML-DSA is tested against NIST ACVP known-answer vectors; the store's envelope
-  format, record encoding and key derivation are pinned to values computed
-  with independent implementations.
-- End-to-end tests run the release daemon on GitHub Actions Ubuntu runners,
-  x86_64 and arm64, and talk to the real hidraw node with libfido2 and
-  python-fido2, including the notification prompt against a fake notification
-  server.
-- libFuzzer targets cover CTAPHID packet handling, single CTAP requests (raw and
-  structure-aware), stateful request sequences, and parsing and signing with
-  arbitrary stored key bytes. The engine targets run over the in-memory store,
-  which seals and opens non-discoverable credential IDs with the real code.
-  Not fuzzed: the uhid device I/O, the D-Bus client, the CLI, and decoding of
-  the on-disk envelope and record format (those have unit tests).
-- `cargo audit` and `cargo deny` (advisories, bans, licences and sources)
-  check both lockfiles on every push and pull request to `main` and weekly,
-  and tolerate no advisory.
-
-No independent security audit of pqkey has been published.
+- Private keys, ML-DSA seeds and signing randomness come from getrandom(2).
+  pqkey makes no FIPS 140 claim, and RustCrypto's `ml-dsa` is not a validated
+  module.
+- ML-DSA is tested against NIST ACVP vectors, and the store's format is pinned
+  to values from independent implementations.
+- Unit, end-to-end and fuzz tests run in CI, with a coverage floor of 85%.
+  `cargo audit` and `cargo deny` check every dependency.
+- No independent security audit has been published.
