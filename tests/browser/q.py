@@ -16,6 +16,7 @@ import sys
 import urllib.request
 
 BASE = f"http://localhost:{os.environ.get('RP_PORT', '8080')}"
+# The names of the algorithms, as in ALGORITHMS in tests/e2e/ctap.py.
 NAMES = {-7: "ES256", -48: "ML-DSA-44", -49: "ML-DSA-65", -50: "ML-DSA-87"}
 
 

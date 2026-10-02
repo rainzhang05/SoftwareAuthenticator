@@ -10,13 +10,7 @@ import ctap as client
 
 RP_ID = "e2e.example"
 
-ALGORITHMS = [
-    pytest.param(client.ES256, id="ES256"),
-    *(
-        pytest.param(alg, id=f"ML-DSA-{name}")
-        for alg, name in ((client.ML_DSA_44, 44), (client.ML_DSA_65, 65), (client.ML_DSA_87, 87))
-    ),
-]
+ALGORITHMS = [pytest.param(algorithm.identifier, id=algorithm.name) for algorithm in client.ALGORITHMS]
 
 
 @pytest.mark.parametrize("alg", ALGORITHMS)

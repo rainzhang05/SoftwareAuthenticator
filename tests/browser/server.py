@@ -52,7 +52,6 @@ DB_PATH = DATA / "db.json"
 RESULTS = DATA / "results.jsonl"
 RP_ID = "localhost"
 PORT = int(os.environ.get("RP_PORT", "8080"))
-ALG_NAMES = {-7: "ES256", -48: "ML-DSA-44", -49: "ML-DSA-65", -50: "ML-DSA-87"}
 LOCK = threading.RLock()
 PENDING: dict[str, dict] = {}  # ceremony id -> state
 QUEUES: dict[str, list] = {"firefox": [], "chrome": []}  # remote-control queues per browser family
@@ -130,7 +129,7 @@ def flags_str(f: int) -> str:
 
 def register_options(req: dict) -> dict:
     username = req["username"].strip()
-    algs = [int(a) for a in req.get("algs", [-7])]
+    algs = [int(a) for a in req.get("algs", [rc.ES256])]
     with LOCK:
         db = load_db()
         user = db["users"].setdefault(username, {"id": b64u(secrets.token_bytes(16)), "credentials": []})
@@ -206,10 +205,10 @@ def register_verify(body: dict) -> dict:
     checks.note("client extension results", cred.get("clientExtensionResults"))
     checks.note("transports / attachment", {"transports": cred.get("transports"),
                                             "authenticatorAttachment": cred.get("authenticatorAttachment")})
-    checks.note("public key algorithm", f"{alg} ({ALG_NAMES.get(alg, '?')})")
+    checks.note("public key algorithm", f"{alg} ({rc.NAMES.get(alg, '?')})")
     checks.note("client-side parsing (getPublicKeyAlgorithm / getPublicKey / toJSON)", cred.get("clientSide"))
     checks.run("algorithm is one the RP offered", lambda: _assert(alg in p["algs"], f"{alg} not in {p['algs']}"))
-    first = next(a for a in p["algs"] if a in ALG_NAMES)
+    first = next(a for a in p["algs"] if a in rc.NAMES)
     checks.note("algorithm choice (RP order; a client may strip algorithms it does not know, e.g. Firefox and ML-DSA)",
                 {"rp_order": p["algs"], "first_pqkey_supported": first, "picked": alg,
                  "matches_rp_order": alg == first})
@@ -253,7 +252,7 @@ def register_verify(body: dict) -> dict:
             save_db(db)
     outcome = "PASS" if checks.ok else "FAIL"
     cs = cred.get("clientSide") or {}
-    summary = f"{ALG_NAMES.get(alg, alg)} {'disc' if expected_disc else 'non-disc'} id={len(ad.credential_id)}B " \
+    summary = f"{rc.NAMES.get(alg, alg)} {'disc' if expected_disc else 'non-disc'} id={len(ad.credential_id)}B " \
               f"client:getPublicKey={cs.get('getPublicKey')!s} " \
               f"fmt={fmt} flags={flags_str(ad.flags)} signCount={ad.sign_count} ext={jsonable(ad.extensions)}"
     entry = {"kind": "register", "label": req.get("label"), "ua": body.get("ua"), "elapsed_ms": body.get("elapsed_ms"),
@@ -331,7 +330,7 @@ def login_verify(body: dict) -> dict:
     ad = rc.AuthData.parse(auth_data_raw)
     cose = cbor.decode(bytes.fromhex(stored["cose"]))
     alg = cose[3]
-    checks.note("credential", {"owner": owner, "alg": ALG_NAMES.get(alg, alg), "discoverable": stored.get("disc"),
+    checks.note("credential", {"owner": owner, "alg": rc.NAMES.get(alg, alg), "discoverable": stored.get("disc"),
                                "registered": stored.get("created"), "label": stored.get("label")})
     checks.note("flags", flags_str(ad.flags))
     checks.note("signCount", {"now": ad.sign_count, "stored": stored.get("signCount")})
@@ -339,7 +338,7 @@ def login_verify(body: dict) -> dict:
     checks.note("userHandle", cred["response"].get("userHandle"))
     checks.note("authenticator extension outputs", jsonable(ad.extensions))
     checks.note("client extension results", cred.get("clientExtensionResults"))
-    checks.run(f"rc.verify_signature over authData||SHA-256(clientDataJSON) ({ALG_NAMES.get(alg)})",
+    checks.run(f"rc.verify_signature over authData||SHA-256(clientDataJSON) ({rc.NAMES.get(alg)})",
                lambda: rc.verify_signature(cose, auth_data_raw + rc.sha256(client_data_json), sig))
     checks.run("rpIdHash == SHA-256('localhost')", lambda: _assert(ad.rp_id_hash == rc.sha256(RP_ID.encode())))
     uv_required = req.get("userVerification") == "required"
@@ -388,7 +387,7 @@ def login_verify(body: dict) -> dict:
                     c["signCount"] = ad.sign_count
             save_db(db)
     outcome = "PASS" if checks.ok else "FAIL"
-    summary = f"{owner} {ALG_NAMES.get(alg, alg)} sig={len(sig)}B flags={flags_str(ad.flags)} " \
+    summary = f"{owner} {rc.NAMES.get(alg, alg)} sig={len(sig)}B flags={flags_str(ad.flags)} " \
               f"signCount={ad.sign_count} ext={jsonable(ad.extensions)}"
     entry = {"kind": "login", "label": req.get("label"), "ua": body.get("ua"), "elapsed_ms": body.get("elapsed_ms"),
              "request": {k: req.get(k) for k in ("username", "allow", "userVerification", "prfSalt1", "prfSalt2", "hints")},

@@ -62,6 +62,7 @@ test_token_info() {
   echo "$info"
   grep -qE '^version strings: .*FIDO_2_1' <<<"$info" || fail "FIDO_2_1 is not advertised"
   grep -qE '^version strings: .*FIDO_2_0' <<<"$info" || fail "FIDO_2_0 is not advertised"
+  # The key's algorithms in getInfo order (ALGORITHMS in tests/e2e/ctap.py).
   # libfido2 names only the algorithms it implements; the three ML-DSA
   # parameter sets show up as unknown public-key algorithms.
   local expected='algorithms: es256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key)'

@@ -14,7 +14,7 @@ import os
 import select
 import struct
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
@@ -24,20 +24,11 @@ from fido2.ctap2 import Ctap2
 from fido2.hid import CtapHidDevice
 from fido2.hid.linux import LinuxCtapHidConnection, get_descriptor
 
-# COSE algorithm identifiers.
+# COSE algorithm identifiers, each described once in ALGORITHMS below.
 ES256 = -7
 ML_DSA_44 = -48
 ML_DSA_65 = -49
 ML_DSA_87 = -50
-
-MLDSA_PUBLIC_KEYS = {
-    ML_DSA_44: mldsa.MLDSA44PublicKey,
-    ML_DSA_65: mldsa.MLDSA65PublicKey,
-    ML_DSA_87: mldsa.MLDSA87PublicKey,
-}
-# FIPS 204, table 2.
-MLDSA_PUBLIC_KEY_SIZES = {ML_DSA_44: 1312, ML_DSA_65: 1952, ML_DSA_87: 2592}
-MLDSA_SIGNATURE_SIZES = {ML_DSA_44: 2420, ML_DSA_65: 3309, ML_DSA_87: 4627}
 
 COSE_KTY_EC2 = 2
 COSE_KTY_AKP = 7
@@ -125,40 +116,83 @@ class AuthData:
         assert not self.flags & 0x3A, f"reserved or backup flags set in {self.flags:#04x}"
 
 
-def check_public_key(cose_key: Mapping[int, Any], alg: int) -> None:
-    """Check the COSE_Key structure for an ES256 or ML-DSA (RFC 9964) key."""
-    assert cose_key.get(3) == alg, f"COSE alg {cose_key.get(3)} != {alg}"
-    if alg == ES256:
-        assert cose_key.get(1) == COSE_KTY_EC2
-        assert cose_key.get(-1) == COSE_CRV_P256
-        assert len(cose_key.get(-2, b"")) == 32 and len(cose_key.get(-3, b"")) == 32
-        assert set(cose_key) == {1, 3, -1, -2, -3}, f"unexpected labels {set(cose_key)}"
-    else:
+def _check_ec2_p256(cose_key: Mapping[int, Any]) -> None:
+    """An EC2 key on P-256 with both coordinates (WebAuthn Level 3, 5.8.5)."""
+    assert cose_key.get(1) == COSE_KTY_EC2
+    assert cose_key.get(-1) == COSE_CRV_P256
+    assert len(cose_key.get(-2, b"")) == 32 and len(cose_key.get(-3, b"")) == 32
+    assert set(cose_key) == {1, 3, -1, -2, -3}, f"unexpected labels {set(cose_key)}"
+
+
+def _verify_es256(cose_key: Mapping[int, Any], message: bytes, signature: bytes) -> None:
+    """ECDSA P-256/SHA-256 with a DER signature."""
+    x = int.from_bytes(cose_key[-2], "big")
+    y = int.from_bytes(cose_key[-3], "big")
+    key = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key()
+    key.verify(signature, message, ec.ECDSA(hashes.SHA256()))
+
+
+def _check_akp(public_key_size: int) -> Callable[[Mapping[int, Any]], None]:
+    """An AKP key (RFC 9964) whose public key is `public_key_size` bytes."""
+
+    def check(cose_key: Mapping[int, Any]) -> None:
         assert cose_key.get(1) == COSE_KTY_AKP
-        assert len(cose_key.get(-1, b"")) == MLDSA_PUBLIC_KEY_SIZES[alg]
+        assert len(cose_key.get(-1, b"")) == public_key_size
         assert set(cose_key) == {1, 3, -1}, f"unexpected labels {set(cose_key)}"
+
+    return check
+
+
+def _verify_mldsa(public_key_class: Any, signature_size: int) -> Callable[[Mapping[int, Any], bytes, bytes], None]:
+    """Pure ML-DSA (FIPS 204 ML-DSA.Verify) with an empty context, verified by
+    the OpenSSL implementation in cryptography's wheels, not by RustCrypto's
+    ml-dsa crate the authenticator signs with."""
+
+    def verify(cose_key: Mapping[int, Any], message: bytes, signature: bytes) -> None:
+        if len(signature) != signature_size:
+            raise InvalidSignature(f"ML-DSA signature is {len(signature)} bytes")
+        public_key_class.from_public_bytes(cose_key[-1]).verify(signature, message)
+
+    return verify
+
+
+@dataclass(frozen=True)
+class Algorithm:
+    """A signature algorithm the key supports: how its COSE_Key looks and how
+    its signatures verify."""
+
+    identifier: int
+    name: str
+    check_public_key: Callable[[Mapping[int, Any]], None]
+    verify: Callable[[Mapping[int, Any], bytes, bytes], None]
+
+
+# Every signature algorithm the key supports, in the order getInfo lists them:
+# the key's own table is CoseAlg in crates/pqkey-ctap/src/crypto/alg.rs. The
+# ML-DSA public key and signature sizes are FIPS 204's, table 2.
+ALGORITHMS = (
+    Algorithm(ES256, "ES256", _check_ec2_p256, _verify_es256),
+    Algorithm(ML_DSA_44, "ML-DSA-44", _check_akp(1312), _verify_mldsa(mldsa.MLDSA44PublicKey, 2420)),
+    Algorithm(ML_DSA_65, "ML-DSA-65", _check_akp(1952), _verify_mldsa(mldsa.MLDSA65PublicKey, 3309)),
+    Algorithm(ML_DSA_87, "ML-DSA-87", _check_akp(2592), _verify_mldsa(mldsa.MLDSA87PublicKey, 4627)),
+)
+BY_IDENTIFIER = {algorithm.identifier: algorithm for algorithm in ALGORITHMS}
+NAMES = {algorithm.identifier: algorithm.name for algorithm in ALGORITHMS}
+
+
+def check_public_key(cose_key: Mapping[int, Any], alg: int) -> None:
+    """Check the COSE_Key structure of a key of algorithm `alg`."""
+    assert cose_key.get(3) == alg, f"COSE alg {cose_key.get(3)} != {alg}"
+    BY_IDENTIFIER[alg].check_public_key(cose_key)
 
 
 def verify_signature(cose_key: Mapping[int, Any], message: bytes, signature: bytes) -> None:
-    """Verify with pyca/cryptography; raises InvalidSignature on failure.
-
-    ES256 is ECDSA P-256/SHA-256 with a DER signature. ML-DSA is pure ML-DSA
-    (FIPS 204 ML-DSA.Verify) with an empty context, verified by the OpenSSL
-    implementation in cryptography's wheels, not by RustCrypto's ml-dsa crate
-    the authenticator signs with.
-    """
+    """Verify with pyca/cryptography, as the key's algorithm in ALGORITHMS
+    does; raises InvalidSignature on failure."""
     alg = cose_key[3]
-    if alg == ES256:
-        x = int.from_bytes(cose_key[-2], "big")
-        y = int.from_bytes(cose_key[-3], "big")
-        key = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key()
-        key.verify(signature, message, ec.ECDSA(hashes.SHA256()))
-    elif alg in MLDSA_PUBLIC_KEYS:
-        if len(signature) != MLDSA_SIGNATURE_SIZES[alg]:
-            raise InvalidSignature(f"ML-DSA signature is {len(signature)} bytes")
-        MLDSA_PUBLIC_KEYS[alg].from_public_bytes(cose_key[-1]).verify(signature, message)
-    else:
+    if alg not in BY_IDENTIFIER:
         raise ValueError(f"unsupported COSE algorithm {alg}")
+    BY_IDENTIFIER[alg].verify(cose_key, message, signature)
 
 
 def verify_attestation(response: Mapping[int, Any], cose_key: Mapping[int, Any], client_data_hash: bytes) -> None:

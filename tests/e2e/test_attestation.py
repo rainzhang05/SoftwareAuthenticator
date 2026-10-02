@@ -22,6 +22,8 @@ import ctap as client
 
 RP_ID = "e2e.example"
 
+ALGORITHMS = [pytest.param(algorithm.identifier, id=algorithm.name) for algorithm in client.ALGORITHMS]
+
 ID_FIDO_GEN_CE_AAGUID = ObjectIdentifier("1.3.6.1.4.1.45724.1.1.4")
 
 # ASN.1 universal tags.
@@ -132,15 +134,7 @@ def check_attestation_certificate(der: bytes, aaguid: bytes) -> x509.Certificate
     return certificate
 
 
-@pytest.mark.parametrize(
-    "alg",
-    [
-        pytest.param(client.ES256, id="ES256"),
-        pytest.param(client.ML_DSA_44, id="ML-DSA-44"),
-        pytest.param(client.ML_DSA_65, id="ML-DSA-65"),
-        pytest.param(client.ML_DSA_87, id="ML-DSA-87"),
-    ],
-)
+@pytest.mark.parametrize("alg", ALGORITHMS)
 def test_self_attestation_by_default(ctap: Ctap2, alg):
     client_data_hash = os.urandom(32)
     response = client.make_credential(ctap, RP_ID, client.user_entity("alice"), [alg], client_data_hash)
@@ -156,15 +150,7 @@ def test_self_attestation_by_default(ctap: Ctap2, alg):
     client.verify_signature(auth_data.public_key, response[2] + client_data_hash, att_stmt["sig"])
 
 
-@pytest.mark.parametrize(
-    "alg",
-    [
-        pytest.param(client.ES256, id="ES256"),
-        pytest.param(client.ML_DSA_44, id="ML-DSA-44"),
-        pytest.param(client.ML_DSA_65, id="ML-DSA-65"),
-        pytest.param(client.ML_DSA_87, id="ML-DSA-87"),
-    ],
-)
+@pytest.mark.parametrize("alg", ALGORITHMS)
 def test_packed_attestation_certificate(certificate_ctap: Ctap2, alg):
     ctap = certificate_ctap
     client_data_hash = os.urandom(32)

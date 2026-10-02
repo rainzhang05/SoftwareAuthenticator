@@ -26,8 +26,6 @@ import ctap as rc  # noqa: E402
 from fido2 import cbor  # noqa: E402
 from uhid_strace_decode import LINE, Assembler, lines, unhex  # noqa: E402
 
-NAMES = {-7: "ES256", -48: "ML-DSA-44", -49: "ML-DSA-65", -50: "ML-DSA-87"}
-
 
 def messages(path):
     host, dev = Assembler(">>"), Assembler("<<")
@@ -81,7 +79,7 @@ def main(paths, since):
                     rc.verify_attestation(resp, ad.public_key, params[1])
                     keys[ad.credential_id] = ad.public_key
                     if show:
-                        print(f"{ts} makeCredential rp={params[2]['id']} {NAMES[alg]} fmt={resp[1]} "
+                        print(f"{ts} makeCredential rp={params[2]['id']} {rc.NAMES[alg]} fmt={resp[1]} "
                               f"id={len(ad.credential_id)}B flags={ad.flags:#04x} ext={ad.extensions} "
                               f"resp={len(payload)}B -> attestation signature VALID, COSE key OK")
                 else:
@@ -94,7 +92,7 @@ def main(paths, since):
                         continue
                     rc.verify_signature(key, resp[2] + params[2], resp[3])
                     if show:
-                        print(f"{ts} getAssertion   rp={params[1]} {NAMES[key[3]]} id={len(cred_id)}B "
+                        print(f"{ts} getAssertion   rp={params[1]} {rc.NAMES[key[3]]} id={len(cred_id)}B "
                               f"flags={ad.flags:#04x} signCount={ad.sign_count} sig={len(resp[3])}B "
                               f"user={resp.get(4)} resp={len(payload)}B -> signature VALID")
             except Exception as e:  # noqa: BLE001
