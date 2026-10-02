@@ -290,6 +290,21 @@ After merging it starts CI, Security and E2E on `main`, since a merge made
 with `GITHUB_TOKEN` starts no push workflows. Everything else, including GitHub
 Actions updates (which `GITHUB_TOKEN` may not merge), waits for a person.
 
+## Clients
+
+Tested on 2026-09-30 on Ubuntu 26.04.1 (aarch64, GNOME 50.1):
+
+| Client | ES256 | ML-DSA-44/65/87 | Notes |
+|---|---|---|---|
+| Chromium 153 (snap) | yes | yes | `getPublicKey()` returns null for ML-DSA and `toJSON()` leaves the key out, so relying parties read it from the attestation object; `getPublicKeyAlgorithm()` returns -48, -49 or -50. Passkeys and requests that require user verification need a PIN on the key. |
+| Firefox 154 (snap) | yes | no | Drops algorithms it does not know: an ML-DSA-only request reaches the key with none (`NotAllowedError`), a mixed one as ES256 only. Without a PIN its account chooser shows "Unknown account". |
+| python-fido2 2.2.1 | yes | yes | Used by the end-to-end tests. |
+| libfido2 1.16 | yes | no | No ML-DSA credential type; `fido2-token -I` lists the algorithms as unknown, and `fido2-token -L -k` cannot list ML-DSA passkeys (`FIDO_ERR_RX_INVALID_CBOR`, or `FIDO_ERR_RX` for ML-DSA-65 and -87); `pqkey passkeys` can. PINs, credential management and `hmac-secret` work. |
+
+Chromium 155 and later are said to return ML-DSA public keys from
+`getPublicKey()`; that is not tested yet. Any CTAP 2.1 client can use ES256
+credentials, PINs, credential management and `hmac-secret`.
+
 ## Troubleshooting
 
 **The browser waits, but no prompt appears.** On GNOME the prompt can be
@@ -325,6 +340,14 @@ created before the rules were installed, lack the tags: `pqkey status` says
 so, `pqkey setup` updates the rules, and `pqkey stop && pqkey start` creates
 the device again. For another browser snap, add its tag to the rule (see the
 comment there).
+
+**`pqkey passkeys` lists nothing, although sites accepted the key.** It
+lists discoverable credentials, the ones the key stores. A site that asks for
+a non-discoverable one (`residentKey: "discouraged"`, as for a second factor),
+or Chromium asking without a PIN on the key, gets a credential sealed into its
+own ID, which the site keeps: signing in works, but the key has nothing to
+list. The approval prompt says "Register a security key" for those and
+"Create a passkey" for the ones it stores.
 
 **Chromium says "Your device can't be used with this site".** Chromium only
 uses a security key for passkeys (sign-in without a user name) or for a
