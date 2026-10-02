@@ -23,6 +23,7 @@ use std::path::Path;
 use arbitrary::{Arbitrary, Unstructured};
 use ciborium::value::Value;
 use p256::elliptic_curve::sec1::ToSec1Point;
+use pqkey_ctap::CoseAlg;
 use pqkey_fuzz::cbor::{bytes, int, text};
 use pqkey_fuzz::ctaphid::{Action, CONT_DATA, Channel, INIT_DATA, Mangle};
 use pqkey_fuzz::requests::command;
@@ -119,14 +120,14 @@ fn ctap_request(dir: &Path) {
         vec![0x0B],
         vec![0x04, 0xA0],
     ];
-    for alg in [-7, -48, -49, -50] {
+    for alg in CoseAlg::ALL {
         seeds.push(command(
             0x01,
             &map(vec![
                 (int(1), bytes(&hash)),
                 (int(2), rp.clone()),
                 (int(3), user.clone()),
-                (int(4), params(alg)),
+                (int(4), params(i64::from(alg.identifier()))),
                 (int(7), map(vec![(text("rk"), Value::Bool(true))])),
             ]),
         ));
@@ -321,7 +322,7 @@ fn ctap_request(dir: &Path) {
             (int(1), bytes(&hash[..31])),
             (int(2), rp.clone()),
             (int(3), user.clone()),
-            (int(4), params(-7)),
+            (int(4), params(i64::from(CoseAlg::ES256.identifier()))),
             (int(8), bytes(&[])),
         ]),
     ));

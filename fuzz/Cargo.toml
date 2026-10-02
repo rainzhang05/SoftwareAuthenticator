@@ -17,7 +17,9 @@ members = ["."]
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-pqkey-ctap = { path = "../crates/pqkey-ctap" }
+# test-support: `verify_signature`, which checks the signatures of the
+# credential_key target.
+pqkey-ctap = { path = "../crates/pqkey-ctap", features = ["test-support"] }
 pqkey = { path = "../crates/pqkey" }
 ciborium = { version = "0.2", default-features = false, features = ["std"] }
 p256 = { version = "0.14", features = ["ecdh"] }

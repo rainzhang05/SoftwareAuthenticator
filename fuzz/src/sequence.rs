@@ -25,9 +25,9 @@ use crate::platform::{Session, authenticate, pin_hash, protocol_value};
 use crate::requests::{self, Overrides, command};
 use arbitrary::{Arbitrary, Result, Unstructured};
 use ciborium::value::Value;
-use pqkey_ctap::ClassicPinProtocol;
 use pqkey_ctap::ctap::constants::*;
 use pqkey_ctap::store::MemoryStore;
+use pqkey_ctap::{ClassicPinProtocol, CoseAlg};
 use sha2::{Digest, Sha256};
 
 const MAX_STEPS: usize = 24;
@@ -78,8 +78,8 @@ enum Op {
         rp: u8,
         /// Ask for a discoverable credential rather than generating options.
         rk: bool,
-        /// One supported algorithm, by index, rather than generated
-        /// pubKeyCredParams.
+        /// One supported algorithm, by its index in `CoseAlg::ALL`, rather
+        /// than generated pubKeyCredParams.
         alg: Option<u8>,
     },
     GetAssertion {
@@ -532,9 +532,9 @@ impl Platform {
                         options: rk.then(|| Value::Map(vec![(text("rk"), Value::Bool(true))])),
                         no_allow_list: false,
                         credential_parameters: alg.map(|alg| {
-                            let alg = [-7, -48, -49, -50][usize::from(alg) % 4];
+                            let alg = CoseAlg::ALL[usize::from(alg) % CoseAlg::ALL.len()];
                             Value::Array(vec![Value::Map(vec![
-                                (text("alg"), int(alg)),
+                                (text("alg"), int(i64::from(alg.identifier()))),
                                 (text("type"), text("public-key")),
                             ])])
                         }),

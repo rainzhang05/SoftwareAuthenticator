@@ -4,6 +4,7 @@
 
 use arbitrary::{Result, Unstructured};
 use ciborium::value::Value;
+use pqkey_ctap::CoseAlg;
 use pqkey_ctap::ctap::constants::*;
 
 use crate::cbor::{MAX_DEPTH, arbitrary_bytes, arbitrary_value, bytes, encode, int, text};
@@ -19,8 +20,25 @@ pub const RP_IDS: &[&str] = &[
     "",
 ];
 
-/// The COSE algorithms supported, and some that are not.
-const ALGORITHMS: &[i64] = &[-7, -48, -49, -50, -8, -9, -257, -51, 0];
+/// COSE algorithms the authenticator does not support: EdDSA, ESP256,
+/// RS256, ESP384 and the reserved 0.
+const UNSUPPORTED_ALGORITHMS: [i64; 5] = [-8, -9, -257, -51, 0];
+
+/// The COSE algorithms supported, in getInfo order, then some that are not.
+const ALGORITHMS: [i64; CoseAlg::ALL.len() + UNSUPPORTED_ALGORITHMS.len()] = {
+    let mut algorithms = [0; CoseAlg::ALL.len() + UNSUPPORTED_ALGORITHMS.len()];
+    let mut i = 0;
+    while i < CoseAlg::ALL.len() {
+        algorithms[i] = CoseAlg::ALL[i].identifier() as i64;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < UNSUPPORTED_ALGORITHMS.len() {
+        algorithms[CoseAlg::ALL.len() + i] = UNSUPPORTED_ALGORITHMS[i];
+        i += 1;
+    }
+    algorithms
+};
 
 /// A parameter: of the expected shape most of the time, sometimes missing,
 /// sometimes any CBOR value.
@@ -99,7 +117,7 @@ fn credential_parameters(u: &mut Unstructured<'_>) -> Result<Value> {
                 "private-key"
             }))
         })?;
-        let alg = field(u, |u| Ok(int(*u.choose(ALGORITHMS)?)))?;
+        let alg = field(u, |u| Ok(int(*u.choose(&ALGORITHMS)?)))?;
         params.push(map(
             u,
             vec![(text("type"), credential_type), (text("alg"), alg)],
