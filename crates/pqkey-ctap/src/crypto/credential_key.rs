@@ -137,8 +137,8 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
 /// Sign `auth_data || client_data_hash` as `alg` signs, and return the
 /// signature in the encoding WebAuthn requires for `alg`:
 ///
-/// * **ES256**: ECDSA over P-256 with SHA-256, as an ASN.1 DER
-///   `Ecdsa-Sig-Value`.
+/// * **ES256** and **ESP256**: ECDSA over P-256 with SHA-256 and an RFC 6979
+///   nonce, as an ASN.1 DER `Ecdsa-Sig-Value` (WebAuthn Level 3 §6.5.5).
 /// * **ML-DSA-44/65/87**: the raw FIPS 204 signature bytes.
 ///
 /// Returns [`CryptoError::KeyTypeMismatch`] when `alg` signs with another
@@ -321,6 +321,26 @@ mod tests {
     // Fallible APIs return errors rather than panicking
     // ---------------------------------------------------------------------
 
+    /// ESP256 is ES256 under its fully specified identifier: the same scalar
+    /// gives the same COSE_Key but for its alg.
+    #[test]
+    fn an_esp256_key_is_the_es256_key_but_for_its_alg() {
+        let scalar = [0x42; 32];
+        let cose_key = |alg| {
+            let secret = try_credential_secret_from_bytes(alg, &scalar).expect("a key");
+            try_cose_public_key(alg, &secret).expect("a COSE_Key")
+        };
+        let relabelled = edited(&cose_key(CoseAlg::ES256), |entries| {
+            for (label, value) in entries.iter_mut() {
+                if *label == Value::Integer(Integer::from(3)) {
+                    *value = Value::Integer(Integer::from(-9));
+                }
+            }
+        });
+        assert_ne!(cose_key(CoseAlg::ES256), cose_key(CoseAlg::ESP256));
+        assert_eq!(relabelled, cose_key(CoseAlg::ESP256));
+    }
+
     #[test]
     fn try_sign_challenge_rejects_mismatched_key_variant() {
         // A stored `alg` that names another type of key than the one on disk,
@@ -487,6 +507,7 @@ mod tests {
     fn the_verifier_rejects_keys_of_another_shape() {
         let int = |value: i64| Value::Integer(Integer::from(value));
         let (es256, _) = generated(CoseAlg::ES256);
+        let (esp256, _) = generated(CoseAlg::ESP256);
         let (mldsa65, _) = generated(CoseAlg::MLDSA65);
         let mut not_a_map = Vec::new();
         into_writer(&Value::Array(Vec::new()), &mut not_a_map).expect("encode");
@@ -526,6 +547,11 @@ mod tests {
                 [es256.clone(), vec![0]].concat(),
             ),
             (CoseAlg::ES256, "not a map", not_a_map),
+            (
+                CoseAlg::ESP256,
+                "crv P-384",
+                with_label(&esp256, -1, int(2)),
+            ),
             (CoseAlg::MLDSA65, "kty EC2", with_label(&mldsa65, 1, int(2))),
             (
                 CoseAlg::MLDSA65,

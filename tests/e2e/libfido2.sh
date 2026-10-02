@@ -4,9 +4,9 @@
 #
 # Usage: tests/e2e/libfido2.sh /dev/hidrawN
 #
-# libfido2 only knows ES256, ES384, RS256 and EdDSA credentials, so ML-DSA is
-# covered by the Python suite instead; `fido2-token -I` prints ML-DSA
-# algorithms as "unknown", and the Python suite checks their exact COSE IDs.
+# libfido2 only knows ES256, ES384, RS256 and EdDSA credentials, so ML-DSA and
+# ESP256 are covered by the Python suite instead; `fido2-token -I` prints them
+# as "unknown", and the Python suite checks their exact COSE IDs.
 # The tests do not reset the authenticator: each registers a non-discoverable
 # credential and asserts with that credential's ID in the allow list, so they do
 # not depend on anything else stored on the key.
@@ -63,9 +63,10 @@ test_token_info() {
   grep -qE '^version strings: .*FIDO_2_1' <<<"$info" || fail "FIDO_2_1 is not advertised"
   grep -qE '^version strings: .*FIDO_2_0' <<<"$info" || fail "FIDO_2_0 is not advertised"
   # The key's algorithms in getInfo order (ALGORITHMS in tests/e2e/ctap.py).
-  # libfido2 names only the algorithms it implements; the three ML-DSA
-  # parameter sets show up as unknown public-key algorithms.
-  local expected='algorithms: es256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key)'
+  # libfido2 names only the algorithms it implements (print_algorithms in
+  # libfido2's tools/token.c); the three ML-DSA parameter sets and ESP256 show
+  # up as unknown public-key algorithms.
+  local expected='algorithms: es256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key)'
   grep -qxF "$expected" <<<"$info" || fail "expected '$expected'"
   grep -qE '^aaguid: 5931e805a1664eb7845a7f6aa93d9cd8$' <<<"$info" || fail "unexpected AAGUID"
   grep -qE '^pin protocols: .*\b1\b' <<<"$info" || fail "PIN/UV auth protocol 1 is not advertised"
@@ -107,7 +108,7 @@ test_es256_register_and_assert() {
 }
 
 run_test "fido2-token -L lists the virtual key" test_token_list
-run_test "fido2-token -I reports FIDO 2.1, four algorithms and both PIN protocols" test_token_info
+run_test "fido2-token -I reports FIDO 2.1, every algorithm and both PIN protocols" test_token_info
 run_test "ES256 fido2-cred -M / -V and fido2-assert -G / -V" test_es256_register_and_assert
 
 if [ "$failures" -ne 0 ]; then

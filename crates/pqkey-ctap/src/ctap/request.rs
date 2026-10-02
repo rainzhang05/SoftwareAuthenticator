@@ -47,11 +47,11 @@ fn text_member<'a>(entries: &'a [(Value, Value)], name: &str) -> Result<&'a str,
 /// An element specifies a supported algorithm when its type is "public-key"
 /// and its alg is exactly one of [`CoseAlg`]'s identifiers.  The identifier is
 /// compared as the full CBOR integer, so a value outside `i32` never aliases a
-/// supported one.  ES256 (-7) is always supported.  ESP256 (-9) is not
-/// accepted as a synonym: WebAuthn Level 3 §5.4 calls it "NOT RECOMMENDED
-/// in pubKeyCredParams", and a relying party that offers only -9 expects a
-/// credential public key labelled -9, which the stored credential cannot
-/// record.
+/// supported one.  ES256 (-7) is always supported.  ESP256 (-9) is an
+/// algorithm of its own rather than a synonym of ES256: a credential made
+/// with it records -9, and its public key is labelled -9.  WebAuthn Level 3
+/// §5.4 calls it "NOT RECOMMENDED in pubKeyCredParams", so a relying party
+/// that lists -7 first gets ES256.
 pub(super) fn chosen_algorithm(pub_key_cred_params: &[Value]) -> Result<CoseAlg, u8> {
     let mut chosen = None;
     for element in pub_key_cred_params {

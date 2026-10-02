@@ -211,9 +211,10 @@ impl CredentialRecord {
     /// step.
     ///
     /// Prefer this over calling [`Self::secret_key`] and
-    /// [`Self::cose_public_key`] separately when both are needed: for ES256
-    /// each of those derives the public key.  (An ML-DSA signing key is the
-    /// seed itself: deriving the public key expands it, and so does signing.)
+    /// [`Self::cose_public_key`] separately when both are needed: for a
+    /// P-256 key each of those derives the public key.  (An ML-DSA signing
+    /// key is the seed itself: deriving the public key expands it, and so
+    /// does signing.)
     ///
     /// Returns [`CryptoError::KeyTypeMismatch`] when `alg` and the key material
     /// disagree, and [`CryptoError::InvalidKey`] for an out-of-range P-256
@@ -517,7 +518,8 @@ mod tests {
             let material = PrivateKeyMaterial::generate(alg);
             assert_eq!(material.kind(), alg.key_kind(), "{alg:?}");
             for other in CoseAlg::ALL {
-                let same_family = (alg == CoseAlg::ES256) == (other == CoseAlg::ES256);
+                let p256 = |alg| matches!(alg, CoseAlg::ES256 | CoseAlg::ESP256);
+                let same_family = p256(alg) == p256(other);
                 assert_eq!(
                     material.kind() == other.key_kind(),
                     same_family,

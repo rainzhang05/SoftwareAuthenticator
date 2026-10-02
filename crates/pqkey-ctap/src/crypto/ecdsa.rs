@@ -17,7 +17,7 @@ use super::cose::{CRV_P256, try_ec2_key};
 /// hash only: "SHA-256 be used only with curve P-256" (RFC 9053 §2.1).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum Curve {
-    /// P-256 with SHA-256: ES256.  Keys are kept as their scalar.
+    /// P-256 with SHA-256: ES256 and ESP256.  Keys are kept as their scalar.
     P256,
 }
 

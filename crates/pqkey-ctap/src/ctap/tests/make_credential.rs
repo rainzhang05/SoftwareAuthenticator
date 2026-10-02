@@ -2,7 +2,7 @@
 
 use super::support::new_app;
 use super::support::{TestStore, install_pin_uv_auth_token, token_pin_auth};
-use super::support::{created_credential, stored};
+use super::support::{created_credential, response_auth_data, stored};
 use crate::ctap::AttestationMode;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
@@ -638,16 +638,60 @@ fn make_credential_chooses_the_first_supported_algorithm_in_rp_order() {
     }
 }
 
+/// The alg of the credential public key in a makeCredential `response`.
+fn attested_alg(response: &[u8]) -> Value {
+    let auth_data = response_auth_data(response);
+    let length = usize::from(u16::from_be_bytes([auth_data[53], auth_data[54]]));
+    let Value::Map(entries) =
+        from_reader(&auth_data[55 + length..]).expect("decode the credential public key")
+    else {
+        panic!("the credential public key is a map");
+    };
+    entries
+        .into_iter()
+        .find(|(label, _)| *label == Value::Integer(Integer::from(3)))
+        .map(|(_, alg)| alg)
+        .expect("the credential public key has an alg")
+}
+
+/// ESP256 (-9) is an algorithm of its own, not a synonym of ES256 (-7): the
+/// first of the two in the relying party's list is chosen (CTAP 2.3 §6.1.2
+/// step 3), and the credential public key names it.
+#[test]
+fn make_credential_chooses_between_es256_and_esp256_in_rp_order() {
+    for (params, expected) in [
+        (vec![public_key(-9)], CoseAlg::ESP256),
+        (vec![public_key(-7), public_key(-9)], CoseAlg::ES256),
+        (vec![public_key(-9), public_key(-7)], CoseAlg::ESP256),
+    ] {
+        let mut app = new_app(TestStore::new(), [0x73; 16]);
+        let response = app
+            .handle_make_credential(&request_with_params(params.clone(), None))
+            .expect("makeCredential succeeds");
+        assert_eq!(
+            created_credential(&app, &response, "example.com").alg,
+            expected,
+            "{params:?}"
+        );
+        assert_eq!(
+            attested_alg(&response),
+            Value::Integer(Integer::from(expected.identifier())),
+            "{params:?}"
+        );
+    }
+}
+
 /// An alg outside `i32` whose low 32 bits read -7 is not ES256, an element of
-/// another credential type is not a supported algorithm, and ESP256 (-9) is
-/// not treated as ES256.
+/// another credential type is not a supported algorithm, and neither is
+/// Ed25519 (-19), a fully specified identifier (RFC 9864 §2.2) the key does
+/// not implement.
 #[test]
 fn make_credential_rejects_algorithms_it_does_not_support() {
     for params in [
         vec![public_key((1_i64 << 32) - 7)],
         vec![public_key(-(1_i64 << 32) - 7)],
         vec![param("not-public-key", Value::Integer(Integer::from(-7)))],
-        vec![public_key(-9)],
+        vec![public_key(-19)],
         vec![],
     ] {
         let mut app = new_app(TestStore::new(), [0x72; 16]);

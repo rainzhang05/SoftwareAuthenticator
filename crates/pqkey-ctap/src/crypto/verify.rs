@@ -47,11 +47,12 @@ enum Expected {
 }
 
 /// The COSE identifier of `alg` and what its keys and signatures are.  The
-/// identifiers are IANA's (RFC 9964 §8.1 for ML-DSA), the ML-DSA public key
-/// lengths FIPS 204's, Table 2.
+/// identifiers are IANA's (RFC 9864 §2.1 for ESP256, RFC 9964 §8.1 for
+/// ML-DSA), the ML-DSA public key lengths FIPS 204's, Table 2.
 fn expected(alg: CoseAlg) -> (i64, Expected) {
     match alg {
         CoseAlg::ES256 => (-7, Expected::EcdsaP256),
+        CoseAlg::ESP256 => (-9, Expected::EcdsaP256),
         CoseAlg::MLDSA44 => (
             -48,
             Expected::MlDsa {
@@ -84,8 +85,11 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
 /// and MUST NOT contain any other OPTIONAL parameters." (WebAuthn Level 3
 /// §6.5.1)  For ES256, "Keys with algorithm -7 (ES256) MUST specify 1
 /// (P-256) as the crv parameter and MUST NOT use the compressed point form."
-/// (§5.8.5): x and y are 32 bytes each and form a point on the curve.  For
-/// ML-DSA, `pub` has the length of the parameter set's public key.
+/// (§5.8.5)  ESP256 is "ECDSA using P-256 curve and SHA-256" (RFC 9864
+/// §2.1), and "Keys with algorithm -9 (ESP256) MUST NOT use the compressed
+/// point form." (§5.8.5): x and y are 32 bytes each and form a point on the
+/// curve.  For ML-DSA, `pub` has the length of the parameter set's public
+/// key.
 pub fn verify_signature(
     alg: CoseAlg,
     cose_key: &[u8],

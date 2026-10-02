@@ -1,5 +1,5 @@
-//! ECDSA on P-256 ([`Curve::P256`]) with SHA-256, the scheme of ES256: keys
-//! kept as their scalar.
+//! ECDSA on P-256 ([`Curve::P256`]) with SHA-256, the scheme of ES256 and
+//! ESP256: keys kept as their scalar.
 
 use p256::SecretKey;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
@@ -51,14 +51,14 @@ pub(super) fn cose_public_key(alg: CoseAlg, key: &SigningKey) -> Result<Vec<u8>,
 
 /// Sign `message` with ECDSA over P-256 and SHA-256 (the message is hashed
 /// internally), returned as an ASN.1 DER `Ecdsa-Sig-Value`, the encoding
-/// WebAuthn requires for ES256.
+/// WebAuthn requires for ES256 and ESP256.
 ///
 /// Note: RustCrypto's `p256` does not normalize `s` to the lower half of the
-/// group order (unlike `k256`, it does not override `SignPrimitive`), so
+/// group order (unlike `k256`, its `EcdsaCurve::NORMALIZE_S` is false), so
 /// roughly half of the emitted signatures are "high-S".  That is valid ECDSA
 /// and is accepted by WebAuthn verifiers; neither WebAuthn nor CTAP 2.1
-/// requires low-S for ES256.  Call `Signature::normalize_s` before encoding
-/// if a low-S signature is ever required.
+/// requires low-S for ES256 or ESP256.  Call `Signature::normalize_s` before
+/// encoding if a low-S signature is ever required.
 ///
 /// Returns [`CryptoError::SigningFailed`] if signing fails.
 pub(super) fn sign(key: &SigningKey, message: &[u8]) -> Result<Vec<u8>, CryptoError> {

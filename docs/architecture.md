@@ -47,8 +47,9 @@ Two details carry ML-DSA's large messages across the kernel:
 ## What the key supports
 
 - CTAP 2.3, 2.1 and 2.0 over USB HID.
-- ES256 (-7), ML-DSA-44 (-48), ML-DSA-65 (-49) and ML-DSA-87 (-50). The first
-  algorithm in the relying party's list that the key supports wins (§6.1.2).
+- ES256 (-7), ML-DSA-44 (-48), ML-DSA-65 (-49), ML-DSA-87 (-50) and ESP256
+  (-9). The first algorithm in the relying party's list that the key supports
+  wins (§6.1.2).
 - A PIN, with PIN/UV auth protocols 1 and 2 and pinUvAuthTokens. After 8
   wrong PINs the PIN is blocked, and after 3 in a row the key must be
   restarted. There is no built-in user verification.

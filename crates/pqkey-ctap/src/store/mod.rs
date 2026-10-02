@@ -320,7 +320,7 @@ pub(crate) fn validate_credential(record: &CredentialRecord) -> Result<(), Store
         PrivateKeyMaterial::P256Scalar { scalar } => {
             if p256::SecretKey::from_slice(scalar).is_err() {
                 return Err(StoreError::InvalidRecord(
-                    "ES256 private key is not a valid P-256 scalar",
+                    "the private key is not a valid P-256 scalar",
                 ));
             }
         }

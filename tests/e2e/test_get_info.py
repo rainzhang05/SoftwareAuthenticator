@@ -43,4 +43,5 @@ def test_get_info(ctap: Ctap2):
         {"type": "public-key", "alg": client.ML_DSA_44},
         {"type": "public-key", "alg": client.ML_DSA_65},
         {"type": "public-key", "alg": client.ML_DSA_87},
+        {"type": "public-key", "alg": client.ESP256},
     ]
