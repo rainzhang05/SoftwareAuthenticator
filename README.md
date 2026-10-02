@@ -2,9 +2,9 @@
 
 **A FIDO2 security key in software for Linux, with post-quantum ML-DSA passkeys.**
 
-[![CI](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/ci.yml/badge.svg)](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/ci.yml)
-[![E2E](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/e2e.yml/badge.svg)](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/e2e.yml)
-[![Security](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/security.yml/badge.svg)](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/security.yml)
+[![CI](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/ci.yml)
+[![E2E](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/e2e.yml/badge.svg?branch=main)](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/e2e.yml)
+[![Security](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/security.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 pqkey shows up in your browser as an ordinary USB security key. A user daemon
