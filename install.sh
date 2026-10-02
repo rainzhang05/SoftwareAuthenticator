@@ -47,30 +47,76 @@ log=${XDG_CACHE_HOME:-$HOME/.cache}/pqkey/install.log
 mkdir -p "$(dirname "$log")"
 : >"$log"
 
-# quietly DOING DONE COMMAND...: run COMMAND, its output to the log, showing
-# DOING while it runs and DONE once it is done; if it fails, the end of the
-# log, and exit.
-quietly() {
-  local doing=$1 done=$2 start=$SECONDS took from
-  shift 2
-  [ -t 1 ] && printf '  … %s' "$doing"
+duration() { # duration SECONDS: 1m 05s, or 12s
+  if [ "$1" -ge 60 ]; then
+    printf '%dm %02ds' $(($1 / 60)) $(($1 % 60))
+  else
+    printf '%ds' "$1"
+  fi
+}
+
+# The progress of the whole installation, one line redrawn in place: a bar,
+# the percentage, the step under way and its time so far. Steps weigh what
+# they usually take; done_weight of total_weight is behind us.
+total_weight=0 done_weight=0 drawer=''
+bar() { # bar PERCENT
+  local i filled=$(($1 / 5)) full='' empty=''
+  for ((i = 0; i < 20; i++)); do
+    if [ "$i" -lt "$filled" ]; then full+='█'; else empty+='░'; fi
+  done
+  printf '%s%s%s%s' "$green" "$full" "$reset" "$empty"
+}
+draw_progress() { # draw_progress WEIGHT EXPECTED DOING: until killed
+  local weight=$1 expected=$2 doing=$3 start=$SECONDS elapsed per_mille counts detail
+  while :; do
+    elapsed=$((SECONDS - start)) detail=''
+    if [ "$expected" = cargo ]; then
+      # Cargo's own count of what it has compiled, from its progress line.
+      counts=$(tail -c 4096 "$log" | tr '\r' '\n' |
+        grep -oE 'Building \[[^]]*\] +[0-9]+/[0-9]+' | tail -n 1 | grep -oE '[0-9]+/[0-9]+$' || true)
+      if [ -n "$counts" ]; then
+        per_mille=$((${counts%/*} * 1000 / ${counts#*/})) detail=" · compiled $counts"
+      else
+        per_mille=0 detail=' · getting the sources'
+      fi
+    else
+      # How far a step usually is by now, short of done.
+      per_mille=$((elapsed * 1000 / expected))
+      [ "$per_mille" -le 950 ] || per_mille=950
+    fi
+    local percent=$(((done_weight * 1000 + weight * per_mille) / total_weight / 10))
+    printf '\r\e[K  %s %3d%%  %s%s · %s' "$(bar "$percent")" "$percent" "$doing" "$detail" "$(duration "$elapsed")"
+    sleep 0.2
+  done
+}
+
+# step WEIGHT EXPECTED DOING DONE COMMAND...: run COMMAND, its output to the
+# log, with the progress line while it runs (EXPECTED is how many seconds it
+# usually takes, or "cargo") and DONE once it is done. If it fails, the end of
+# its output, and exit.
+step() {
+  local weight=$1 expected=$2 doing=$3 done=$4 start=$SECONDS from status=0 took=''
+  shift 4
   printf '\n==> %s\n' "$doing" >>"$log"
   from=$(($(wc -l <"$log") + 1))
-  if "$@" >>"$log" 2>&1; then
-    took=$((SECONDS - start))
-    if [ "$took" -ge 60 ]; then
-      took=" ($((took / 60))m $((took % 60))s)"
-    elif [ "$took" -ge 10 ]; then
-      took=" (${took}s)"
-    else
-      took=''
-    fi
-    [ -t 1 ] && printf '\r\e[K'
+  if [ -t 1 ]; then
+    draw_progress "$weight" "$expected" "$doing" &
+    drawer=$!
+  fi
+  "$@" >>"$log" 2>&1 || status=$?
+  if [ -n "$drawer" ]; then
+    kill "$drawer" 2>/dev/null || true
+    wait "$drawer" 2>/dev/null || true
+    drawer=''
+    printf '\r\e[K'
+  fi
+  done_weight=$((done_weight + weight))
+  [ $((SECONDS - start)) -lt 10 ] || took=" ($(duration $((SECONDS - start))))"
+  if [ "$status" = 0 ]; then
     printf '  %s✓%s %s%s\n' "$green" "$reset" "$done" "$took"
   else
-    [ -t 1 ] && printf '\r\e[K'
     printf '  %s✗%s %s\n\n' "$red" "$reset" "$doing"
-    tail -n +"$from" "$log" | tail -n 20 | sed 's/^/    /'
+    tail -n +"$from" "$log" | tr '\r' '\n' | grep -vE '\] +[0-9]+/[0-9]+' | tail -n 20 | sed 's/^/    /'
     printf '\nThat failed. The whole output is in %s\n' "$log"
     exit 1
   fi
@@ -125,7 +171,12 @@ command -v sudo >/dev/null || fail "installing pqkey needs sudo"
 sudo -v -p "Password for sudo (%p): " || fail "installing pqkey needs sudo"
 while sleep 60; do sudo -n -v 2>/dev/null || exit; done &
 sudo_keeper=$!
-trap 'kill "$sudo_keeper" 2>/dev/null || true' EXIT
+trap 'kill "$sudo_keeper" ${drawer:+"$drawer"} 2>/dev/null || true' EXIT
+
+# What each step weighs in the progress bar.
+[ ${#missing[@]} = 0 ] || total_weight=$((total_weight + 15))
+have_rust || total_weight=$((total_weight + 20))
+total_weight=$((total_weight + 60 + 5))
 
 echo
 if [ ${#missing[@]} != 0 ]; then
@@ -156,14 +207,14 @@ if [ ${#missing[@]} != 0 ]; then
       return 1
     fi
   }
-  quietly "Installing the build tools" "Build tools installed" install_packages
+  step 15 90 "Installing the build tools" "Build tools installed" install_packages
 fi
 
 if ! have_rust; then
   install_rust() {
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
   }
-  quietly "Installing Rust" "Rust installed" install_rust
+  step 20 60 "Installing Rust" "Rust installed" install_rust
 fi
 if [ -f "$cargo_home/env" ]; then
   # shellcheck source=/dev/null
@@ -190,10 +241,12 @@ build() {
   if command -v rustup >/dev/null && ! rustup toolchain list | grep -q '^stable'; then
     rustup toolchain install stable --profile minimal
   fi
-  "${cargo[@]}" build --release --locked -p pqkey --target-dir target
+  # Its progress line goes to the log too, for the progress bar to read.
+  CARGO_TERM_PROGRESS_WHEN=always CARGO_TERM_PROGRESS_WIDTH=100 \
+    "${cargo[@]}" build --release --locked -p pqkey --target-dir target
 }
-quietly "Building pqkey (a few minutes)" "pqkey built" build
-quietly "Installing $pqkey" "pqkey installed in $(dirname "$pqkey")" \
+step 60 cargo "Building pqkey" "pqkey built" build
+step 5 3 "Installing $pqkey" "pqkey installed in $(dirname "$pqkey")" \
   sudo install -D -m 755 target/release/pqkey "$pqkey"
 # An earlier install.sh installed pqkey with `cargo install`, in a directory
 # that comes first on the PATH. A link in its place keeps a shell that
