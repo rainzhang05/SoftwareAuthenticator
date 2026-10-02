@@ -225,6 +225,44 @@ fn passkeys_are_listed_and_deleted_with_a_management_token() {
     ));
 }
 
+/// Passkeys of every algorithm are listed with their COSE algorithm, which
+/// the client reads from the public key credential management returns.
+#[test]
+fn passkeys_are_listed_with_their_algorithm() {
+    let dir = TempDir::new("client-algorithms");
+    let passkeys: Vec<CredentialRecord> = (1..)
+        .zip(CoseAlg::ALL)
+        .map(|(id, alg)| discoverable("example.com", id, "user", alg))
+        .collect();
+    {
+        let mut store = FileStore::open(dir.path()).unwrap();
+        for passkey in &passkeys {
+            store.put(passkey).unwrap();
+        }
+    }
+    let (_daemon, mut key) = start(&dir);
+    key.set_pin(b"1234").unwrap();
+    let token = key.management_token(b"1234").unwrap();
+
+    let mut listed: Vec<(Vec<u8>, Option<i64>)> = key
+        .passkeys(&token)
+        .unwrap()
+        .into_iter()
+        .map(|passkey| (passkey.credential_id, passkey.alg))
+        .collect();
+    listed.sort();
+    let expected: Vec<(Vec<u8>, Option<i64>)> = passkeys
+        .iter()
+        .map(|passkey| {
+            (
+                passkey.credential_id.clone(),
+                Some(i64::from(passkey.alg.identifier())),
+            )
+        })
+        .collect();
+    assert_eq!(listed, expected);
+}
+
 #[test]
 fn a_key_without_passkeys_lists_none() {
     let dir = TempDir::new("client-empty");

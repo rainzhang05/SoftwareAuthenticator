@@ -30,13 +30,6 @@ const IDENTITY: IdentityConfig<'static> = IdentityConfig {
     aaguid: *b"an example AAGUI",
 };
 
-const ALGORITHMS: [CoseAlg; 4] = [
-    CoseAlg::ES256,
-    CoseAlg::MLDSA44,
-    CoseAlg::MLDSA65,
-    CoseAlg::MLDSA87,
-];
-
 static INTERRUPT: InterruptFlag = InterruptFlag::new();
 
 /// A uniquely named directory under the system temporary directory, removed
@@ -198,7 +191,7 @@ fn check_packed_attestation(response: &Value, client_data_hash: &[u8], aaguid: [
 fn packed_attestation_certificate_matches_authenticator_data() {
     let dir = TempDir::new();
     let mut largest = 0;
-    for alg in ALGORITHMS {
+    for alg in CoseAlg::ALL {
         for rk in [false, true] {
             let mut app = open_app(&dir, IDENTITY);
             let (length, client_data_hash, response) = make_credential(&mut app, alg, rk);

@@ -773,10 +773,10 @@ mod tests {
             .unwrap_or_else(|err| panic!("{alg:?}: {err}"));
     }
 
-    /// Registration and authentication through the whole stack: uhid events,
-    /// CTAPHID messages of several packets each way, the worker thread, the
-    /// engine and its file store. ML-DSA-87 has the longest responses there
-    /// are. Every signature must verify with the public key the registration
+    /// Registration and authentication with every algorithm through the
+    /// whole stack: uhid events, CTAPHID messages of several packets each way,
+    /// the worker thread, the engine and its file store. ML-DSA-87 has the
+    /// longest responses there are. Every signature must verify with the public key the registration
     /// returned, and the assertion must name the credential it created.
     #[test]
     fn registers_and_authenticates_through_the_whole_stack() {
@@ -788,7 +788,7 @@ mod tests {
             start(move |device, on_ready| serve_ctap(device, data, loop_shutdown, on_ready));
         let cid = host.init();
 
-        for alg in [CoseAlg::ES256, CoseAlg::MLDSA87] {
+        for alg in CoseAlg::ALL {
             let client_data_hash = [0x11; 32];
             let registration = ctap(
                 &mut host,
