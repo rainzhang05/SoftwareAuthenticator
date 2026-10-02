@@ -11,6 +11,10 @@ use pqkey_ctap::ctap::Clock;
 /// while the system is suspended. A pinUvAuthToken therefore expires after
 /// the same real time however long the machine slept in between, much as it
 /// would on a security key that lost power.
+///
+/// macOS has no CLOCK_BOOTTIME; its CLOCK_MONOTONIC is the equivalent, a clock
+/// that "will continue to increment while the system is asleep"
+/// (clock_gettime(3)).
 pub(crate) struct BootTimeClock {
     origin: Duration,
 }
@@ -27,13 +31,18 @@ impl Clock for BootTimeClock {
     fn now(&self) -> Duration {
         // clock_gettime only fails for a clock the kernel lacks, and `new` has
         // shown this one is there.
-        let now = boot_time().expect("CLOCK_BOOTTIME has stopped working");
+        let now = boot_time().expect("the boot-time clock has stopped working");
         now.saturating_sub(self.origin)
     }
 }
 
+#[cfg(target_os = "linux")]
+const BOOT_TIME: ClockId = ClockId::CLOCK_BOOTTIME;
+#[cfg(target_os = "macos")]
+const BOOT_TIME: ClockId = ClockId::CLOCK_MONOTONIC;
+
 fn boot_time() -> io::Result<Duration> {
-    Ok(clock_gettime(ClockId::CLOCK_BOOTTIME)?.into())
+    Ok(clock_gettime(BOOT_TIME)?.into())
 }
 
 #[cfg(test)]
