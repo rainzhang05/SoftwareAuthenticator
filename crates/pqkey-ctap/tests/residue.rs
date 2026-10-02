@@ -10,9 +10,10 @@
 //! gives the signature's r, and that `d`·G is the public key, so that it
 //! looks for the real secrets.  It reads the key, derives its public key and
 //! signs through the engine's public entry points, then scans the dead stack
-//! below the caller for `k`, for `d`, for the SHAKE256 output, and for a
-//! control value nobody computed: each as big-endian bytes and reversed, the
-//! order of crypto-bigint's little-endian limbs.
+//! below the caller for `k`, for the HMAC blocks RFC 6979 drew `k` from (on
+//! P-521, `k` is their leftmost 521 bits), for `d`, for the SHAKE256 output,
+//! and for a control value nobody computed: each as big-endian bytes and
+//! reversed, the order of crypto-bigint's little-endian limbs.
 //!
 //! It does not look for a newly generated private key: a key returned by
 //! value can leave copies in the frames it passes through on its way to the
@@ -32,7 +33,7 @@ use p256::elliptic_curve::sec1::ToSec1Point;
 use pqkey_ctap::{
     CoseAlg, try_cose_public_key, try_credential_secret_from_bytes, try_sign_challenge,
 };
-use sha2::{Digest, Sha256, Sha384};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use shake::{ExtendableOutput, Shake256, Update, XofReader};
 
 const SCAN: usize = 2 * 1024 * 1024;
@@ -69,7 +70,7 @@ enum Kept {
     Seed(&'static str),
 }
 
-const CASES: [Case; 2] = [
+const CASES: [Case; 3] = [
     Case {
         alg: CoseAlg::ES256,
         order: "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
@@ -100,6 +101,21 @@ const CASES: [Case; 2] = [
         },
         kept: Kept::Seed("P-384"),
         key: [0x5A; 32],
+    },
+    Case {
+        alg: CoseAlg::ES512,
+        order: concat!(
+            "01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "fa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409"
+        ),
+        digest: digest::<Sha512>,
+        hmac: hmac::<Sha512>,
+        multiply: |scalar| {
+            let secret = p521::SecretKey::from_slice(scalar).expect("a scalar below n");
+            coordinates(secret.public_key().to_sec1_point(false).as_bytes())
+        },
+        kept: Kept::Seed("P-521"),
+        key: [0xA5; 32],
     },
 ];
 
@@ -240,10 +256,11 @@ fn cose_coordinates(cose_key: &[u8]) -> Point {
 }
 
 /// The RFC 6979 §3.2 nonce for private key `x` and message digest `h1` on a
-/// curve of order `q`, with the case's HMAC.  `h1` is no longer than `q` and
-/// below it, true of the curves and values used here, so bits2octets(`h1`)
-/// is `h1` itself, padded to the length of `q`.
-fn rfc6979_k(case: &Case, q: &[u8], x: &[u8], h1: &[u8]) -> Vec<u8> {
+/// curve of order `q`, with the case's HMAC, and the HMAC blocks T it was
+/// drawn from.  `h1` is no longer than `q` and below it, true of the curves
+/// and values used here, so bits2octets(`h1`) is `h1` itself, padded to the
+/// length of `q`.
+fn rfc6979_k(case: &Case, q: &[u8], x: &[u8], h1: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
     let mut h = vec![0; q.len() - h1.len()];
     h.extend_from_slice(h1);
     assert!(
@@ -260,11 +277,12 @@ fn rfc6979_k(case: &Case, q: &[u8], x: &[u8], h1: &[u8]) -> Vec<u8> {
     k = (case.hmac)(&k, &[&v, &[0x01], x, &h]);
     v = (case.hmac)(&k, &[&v]);
     loop {
-        let mut t = Vec::new();
-        while t.len() * 8 < qlen {
+        let mut blocks = Vec::new();
+        while blocks.len() * h1.len() * 8 < qlen {
             v = (case.hmac)(&k, &[&v]);
-            t.extend_from_slice(&v);
+            blocks.push(v.clone());
         }
+        let t = blocks.concat();
         // bits2int: the leftmost qlen bits of T.
         let candidate: Vec<u8> = (0..q.len())
             .map(|i| match (excess, i) {
@@ -274,7 +292,7 @@ fn rfc6979_k(case: &Case, q: &[u8], x: &[u8], h1: &[u8]) -> Vec<u8> {
             })
             .collect();
         if candidate.iter().any(|byte| *byte != 0) && candidate.as_slice() < q {
-            return candidate;
+            return (candidate, blocks);
         }
         k = (case.hmac)(&k, &[&v, &[0x00]]);
         v = (case.hmac)(&k, &[&v]);
@@ -289,15 +307,24 @@ fn check(case: &Case) -> Vec<String> {
     let (d, returned_bits) = private_scalar(case, &order);
     let (auth_data, client_data_hash) = ([0x11u8; 37], [0x22u8; 32]);
     let message = [&auth_data[..], &client_data_hash[..]].concat();
-    let k = rfc6979_k(case, &order, &d, &(case.digest)(&message));
+    let (k, blocks) = rfc6979_k(case, &order, &d, &(case.digest)(&message));
     let public_key = (case.multiply)(&d);
     let r = reduce(&(case.multiply)(&k).0, &order);
     let control = Sha256::digest(b"never computed by the signer").to_vec();
     // Every needle is made before the engine runs, so that making one leaves
     // nothing behind that a scan would find.
-    let needles: Vec<(&str, Vec<u8>, Vec<u8>)> = [("k", k), ("d", d), ("control", control)]
+    // The blocks are k itself unless qlen is not a whole number of them.
+    let blocks: Vec<(String, Vec<u8>)> = blocks
+        .into_iter()
+        .filter(|block| *block != k)
+        .enumerate()
+        .map(|(i, block)| (format!("T block {}", i + 1), block))
+        .collect();
+    let needles: Vec<(String, Vec<u8>, Vec<u8>)> = [("k", k), ("d", d), ("control", control)]
         .into_iter()
         .chain(returned_bits.map(|bytes| ("SHAKE256 output", bytes)))
+        .map(|(name, bytes)| (name.to_owned(), bytes))
+        .chain(blocks)
         .map(|(name, bytes)| (name, bytes.iter().rev().copied().collect(), bytes))
         .collect();
 
@@ -310,7 +337,7 @@ fn check(case: &Case) -> Vec<String> {
     };
     let found: Vec<(&str, usize, usize)> = needles
         .iter()
-        .map(|(name, reversed, bytes)| (*name, scan(bytes), scan(reversed)))
+        .map(|(name, reversed, bytes)| (name.as_str(), scan(bytes), scan(reversed)))
         .collect();
 
     let report: Vec<String> = found

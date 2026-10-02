@@ -23,8 +23,10 @@ hmac = { version = "0.13", features = ["zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 serde = { version = "1", features = ["derive"] }
 p256 = { workspace = true, features = ["ecdh"] }
-# ECDSA on P-384 (ES384).  It shares elliptic-curve and ecdsa with p256.
+# ECDSA on P-384 (ES384, ESP384) and P-521 (ES512).  They share
+# elliptic-curve and ecdsa with p256.
 p384 = { version = "0.14", features = ["ecdsa"] }
+p521 = { version = "0.14", features = ["ecdsa"] }
 # SHAKE256, from which ECDSA keys kept as a seed derive their scalar.
 # `zeroize` wipes the sponge states that held the seed and the scalar.
 shake = { workspace = true, features = ["zeroize"] }

@@ -26,6 +26,8 @@ const LABEL_EC2_Y: i32 = -3;
 pub(crate) const CRV_P256: i32 = 1;
 /// Curve 2, P-384 (RFC 9053 §7.1).
 pub(crate) const CRV_P384: i32 = 2;
+/// Curve 3, P-521 (RFC 9053 §7.1).
+pub(crate) const CRV_P521: i32 = 3;
 
 /// Key type 7, AKP: an Algorithm Key Pair, whose algorithm determines its
 /// format (RFC 9964).
