@@ -14,8 +14,8 @@ use pqkey_ctap::store::{
 };
 
 use crate::common::{
-    ALL_ALGS, TempDir, assert_signature_verifies, attestation_record, ids, new_record,
-    random_bytes, with_created_at,
+    TempDir, assert_signature_verifies, attestation_record, ids, new_record, random_bytes,
+    with_created_at,
 };
 
 /// A store under test and whatever has to outlive it.
@@ -109,20 +109,10 @@ fn round_trip<B: Backend>(alg: CoseAlg) {
     assert_eq!(store.count().unwrap(), 1);
 }
 
-fn es256_credential_round_trips<B: Backend>() {
-    round_trip::<B>(CoseAlg::ES256);
-}
-
-fn mldsa44_credential_round_trips<B: Backend>() {
-    round_trip::<B>(CoseAlg::MLDSA44);
-}
-
-fn mldsa65_credential_round_trips<B: Backend>() {
-    round_trip::<B>(CoseAlg::MLDSA65);
-}
-
-fn mldsa87_credential_round_trips<B: Backend>() {
-    round_trip::<B>(CoseAlg::MLDSA87);
+fn every_algorithm_round_trips<B: Backend>() {
+    for alg in CoseAlg::ALL {
+        round_trip::<B>(alg);
+    }
 }
 
 fn unusual_field_values_round_trip<B: Backend>() {
@@ -290,7 +280,7 @@ fn list_is_newest_first_for_rapid_inserts<B: Backend>() {
     let mut fixture = fresh::<B>();
     let store = &mut fixture.store;
     let inserted: Vec<CredentialRecord> = (0..48)
-        .map(|i| new_record(ALL_ALGS[i % ALL_ALGS.len()]))
+        .map(|i| new_record(CoseAlg::ALL[i % CoseAlg::ALL.len()]))
         .collect();
     for record in &inserted {
         store.put(record).unwrap();
@@ -589,7 +579,7 @@ fn attestation_round_trips_without_a_size_cap<B: Backend>() {
 fn clear_removes_credentials_and_resets_pin_state<B: Backend>() {
     let mut fixture = fresh::<B>();
     let store = &mut fixture.store;
-    let records: Vec<_> = ALL_ALGS
+    let records: Vec<_> = CoseAlg::ALL
         .iter()
         .map(|&alg| insert(store, &new_record(alg)))
         .collect();
@@ -796,10 +786,7 @@ fn clear_ends_sealed_credential_ids<B: Backend>() {
 
 conformance_suite!(
     empty_store_holds_nothing,
-    es256_credential_round_trips,
-    mldsa44_credential_round_trips,
-    mldsa65_credential_round_trips,
-    mldsa87_credential_round_trips,
+    every_algorithm_round_trips,
     unusual_field_values_round_trip,
     returned_records_are_copies,
     inserts_get_increasing_creation_order_regardless_of_input,

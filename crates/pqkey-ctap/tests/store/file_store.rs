@@ -16,7 +16,7 @@ use pqkey_ctap::store::{
 };
 
 use crate::common::{
-    ALL_ALGS, TempDir, assert_signature_verifies, attestation_record, hex, ids, logs, new_record,
+    TempDir, assert_signature_verifies, attestation_record, hex, ids, logs, new_record,
     random_bytes, with_created_at,
 };
 
@@ -201,7 +201,7 @@ fn data_persists_across_reopen() {
     let attestation = attestation_record(&[1500, 900]);
     let listed = {
         let mut store = scratch.open();
-        for alg in ALL_ALGS {
+        for alg in CoseAlg::ALL {
             store.put(&new_record(alg)).unwrap();
         }
         store.set_pin_state(&pin).unwrap();
@@ -232,7 +232,7 @@ fn data_persists_across_reopen() {
     assert!(store.delete(deleted).unwrap());
     drop(store);
     assert_eq!(scratch.open().get(deleted).unwrap(), None);
-    assert_eq!(scratch.open().count().unwrap(), ALL_ALGS.len());
+    assert_eq!(scratch.open().count().unwrap(), CoseAlg::ALL.len());
 }
 
 /// A sealed credential ID needs only the credential key, which a later process
@@ -590,7 +590,7 @@ fn wrong_credential_key_fails_authentication_and_deletes_nothing() {
     let attestation = attestation_record(&[256]);
     let listed = {
         let mut store = scratch.open();
-        for alg in ALL_ALGS {
+        for alg in CoseAlg::ALL {
             store.put(&new_record(alg)).unwrap();
         }
         store.set_pin_state(&pin).unwrap();
@@ -598,7 +598,7 @@ fn wrong_credential_key_fails_authentication_and_deletes_nothing() {
         store.list().unwrap()
     };
     let credential_files = credential_files(&scratch);
-    assert_eq!(credential_files.len(), ALL_ALGS.len());
+    assert_eq!(credential_files.len(), CoseAlg::ALL.len());
     let key_path = scratch.key_path(KeyDomain::Credential);
     let original_key = fs::read(&key_path).unwrap();
     let wrong_key = random_bytes::<32>();
@@ -961,7 +961,7 @@ fn directories_and_files_are_private() {
     let scratch = Scratch::new();
     {
         let mut store = scratch.open();
-        for alg in ALL_ALGS {
+        for alg in CoseAlg::ALL {
             store.put(&new_record(alg)).unwrap();
         }
         store.set_pin_state(&pin_with_hash()).unwrap();
@@ -1018,7 +1018,7 @@ fn nothing_is_stored_in_plaintext() {
     let scratch = Scratch::new();
     let mut store = scratch.open();
     let mut needles: Vec<(String, Vec<u8>)> = Vec::new();
-    for (i, alg) in ALL_ALGS.into_iter().enumerate() {
+    for (i, alg) in CoseAlg::ALL.into_iter().enumerate() {
         let mut record = new_record(alg);
         record.rp_id = format!("plaintext-canary-{i}.example.org");
         record.user_name = Some(format!("canary user name {i}"));
@@ -1083,7 +1083,7 @@ fn nothing_is_stored_in_plaintext() {
 
     let state = scratch.state();
     let files = scratch.snapshot();
-    assert_eq!(files.len(), ALL_ALGS.len() + 4);
+    assert_eq!(files.len(), CoseAlg::ALL.len() + 4);
     for (path, contents) in &files {
         let name = path.strip_prefix(&state).unwrap().to_string_lossy();
         for (what, needle) in &needles {

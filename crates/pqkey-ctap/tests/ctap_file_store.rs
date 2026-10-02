@@ -26,13 +26,6 @@ mod verify;
 /// §11.2.4).
 const CTAPHID_MAX_MESSAGE: usize = 7609;
 
-const ALL_ALGS: [CoseAlg; 4] = [
-    CoseAlg::ES256,
-    CoseAlg::MLDSA44,
-    CoseAlg::MLDSA65,
-    CoseAlg::MLDSA87,
-];
-
 static INTERRUPT: InterruptFlag = InterruptFlag::new();
 
 /// A uniquely named directory under the system temporary directory, removed
@@ -212,6 +205,11 @@ fn register_rk(app: &mut CtapApp<'static>, user_id: &[u8], alg: CoseAlg, rk: boo
         0x01,
         &make_credential_request_rk(&client_data_hash, user_id, alg, rk),
     );
+    registration(alg, response)
+}
+
+/// What a relying party keeps of the makeCredential `response` for `alg`.
+fn registration(alg: CoseAlg, response: Value) -> Registration {
     let auth_data = bytes(get(&response, &int(2)));
     let (credential_id, public_key) = attested_credential(&auth_data);
     assert_eq!(
@@ -263,7 +261,7 @@ fn authenticate(app: &mut CtapApp<'static>, registration: &Registration) -> u32 
 
 #[test]
 fn every_algorithm_registers_and_authenticates_across_restarts() {
-    for alg in ALL_ALGS {
+    for alg in CoseAlg::ALL {
         let dir = TempDir::new();
         let registration = register(&mut open_app(&dir.state()), &[0x01], alg);
         // Self attestation, since no attestation key is provisioned.
@@ -289,7 +287,7 @@ fn every_algorithm_registers_and_authenticates_across_restarts() {
 /// key that sealed it.
 #[test]
 fn a_sealed_credential_works_across_restarts_until_a_reset() {
-    for alg in ALL_ALGS {
+    for alg in CoseAlg::ALL {
         let dir = TempDir::new();
         let registration = register_rk(&mut open_app(&dir.state()), &[0x01], alg, false);
         assert_eq!(FileStore::open(dir.state()).unwrap().count().unwrap(), 0);
@@ -314,29 +312,35 @@ fn a_sealed_credential_works_across_restarts_until_a_reset() {
     }
 }
 
+/// Self attestation signs with the credential key, for every algorithm and
+/// both kinds of credential, and the credential then signs an assertion.
 #[test]
 fn self_attestation_verifies_with_the_credential_key() {
-    for alg in ALL_ALGS {
-        let dir = TempDir::new();
-        let mut app = open_app(&dir.state());
-        let client_data_hash = random_32();
-        let response = call_ok(
-            &mut app,
-            0x01,
-            &make_credential_request(&client_data_hash, &[0x02], alg),
-        );
-        let auth_data = bytes(get(&response, &int(2)));
-        let (_, public_key) = attested_credential(&auth_data);
-        let att_stmt = get(&response, &int(3));
-        assert!(matches!(&att_stmt, Value::Map(entries) if entries.len() == 2));
-        let mut message = auth_data;
-        message.extend_from_slice(&client_data_hash);
-        verify(
-            alg,
-            &public_key,
-            &message,
-            &bytes(get(&att_stmt, &text("sig"))),
-        );
+    for alg in CoseAlg::ALL {
+        for rk in [true, false] {
+            let dir = TempDir::new();
+            let mut app = open_app(&dir.state());
+            let client_data_hash = random_32();
+            let response = call_ok(
+                &mut app,
+                0x01,
+                &make_credential_request_rk(&client_data_hash, &[0x02], alg, rk),
+            );
+            let auth_data = bytes(get(&response, &int(2)));
+            let (_, public_key) = attested_credential(&auth_data);
+            let att_stmt = get(&response, &int(3));
+            assert!(matches!(&att_stmt, Value::Map(entries) if entries.len() == 2));
+            let mut message = auth_data;
+            message.extend_from_slice(&client_data_hash);
+            verify(
+                alg,
+                &public_key,
+                &message,
+                &bytes(get(&att_stmt, &text("sig"))),
+            );
+            let registration = registration(alg, response);
+            assert_eq!(authenticate(&mut app, &registration), 1, "{alg:?}, rk {rk}");
+        }
     }
 }
 
@@ -365,7 +369,7 @@ fn attestation_record(certificate_len: usize) -> (AttestationRecord, VerifyingKe
 /// credential's own key, and with the configured AAGUID in authenticatorData.
 #[test]
 fn self_attestation_is_the_default_even_with_a_provisioned_certificate() {
-    for alg in ALL_ALGS {
+    for alg in CoseAlg::ALL {
         let dir = TempDir::new();
         let (record, _) = attestation_record(512);
         FileStore::open(dir.state())
@@ -409,59 +413,74 @@ fn self_attestation_is_the_default_even_with_a_provisioned_certificate() {
     }
 }
 
-/// AttestationMode::None returns "none", with or without a certificate.
+/// AttestationMode::None returns "none", with or without a certificate, for
+/// every algorithm and both kinds of credential, and the credential then
+/// signs an assertion.
 #[test]
 fn attestation_mode_none_returns_the_none_format() {
-    for provisioned in [false, true] {
-        let dir = TempDir::new();
-        if provisioned {
-            FileStore::open(dir.state())
-                .unwrap()
-                .set_attestation(&attestation_record(512).0)
-                .expect("provision attestation");
+    for alg in CoseAlg::ALL {
+        for rk in [true, false] {
+            for provisioned in [false, true] {
+                let dir = TempDir::new();
+                if provisioned {
+                    FileStore::open(dir.state())
+                        .unwrap()
+                        .set_attestation(&attestation_record(512).0)
+                        .expect("provision attestation");
+                }
+                let mut app = open_app_with(&dir.state(), AttestationMode::None);
+                let response = call_ok(
+                    &mut app,
+                    0x01,
+                    &make_credential_request_rk(&random_32(), &[0x05], alg, rk),
+                );
+                assert_eq!(get(&response, &int(1)), text("none"));
+                assert_eq!(get(&response, &int(3)), map(Vec::new()));
+                assert_eq!(bytes(get(&response, &int(2)))[37..53], AAGUID);
+                let registration = registration(alg, response);
+                assert_eq!(authenticate(&mut app, &registration), 1, "{alg:?}, rk {rk}");
+            }
         }
-        let mut app = open_app_with(&dir.state(), AttestationMode::None);
-        let response = call_ok(
-            &mut app,
-            0x01,
-            &make_credential_request(&random_32(), &[0x05], CoseAlg::ES256),
-        );
-        assert_eq!(get(&response, &int(1)), text("none"));
-        assert_eq!(get(&response, &int(3)), map(Vec::new()));
-        assert_eq!(bytes(get(&response, &int(2)))[37..53], AAGUID);
     }
 }
 
+/// Basic attestation signs with the provisioned key and returns its
+/// certificate chain, for every algorithm and both kinds of credential, and
+/// the credential then signs an assertion.
 #[test]
 fn packed_attestation_uses_the_provisioned_key_and_certificate_chain() {
-    for alg in ALL_ALGS {
-        let dir = TempDir::new();
-        let (record, verifying_key) = attestation_record(512);
-        FileStore::open(dir.state())
-            .unwrap()
-            .set_attestation(&record)
-            .expect("provision attestation");
+    for alg in CoseAlg::ALL {
+        for rk in [true, false] {
+            let dir = TempDir::new();
+            let (record, verifying_key) = attestation_record(512);
+            FileStore::open(dir.state())
+                .unwrap()
+                .set_attestation(&record)
+                .expect("provision attestation");
 
-        let mut app = open_app_with(&dir.state(), AttestationMode::Certificate);
-        let client_data_hash = random_32();
-        let response = call_ok(
-            &mut app,
-            0x01,
-            &make_credential_request(&client_data_hash, &[0x03], alg),
-        );
-        assert_eq!(get(&response, &int(1)), text("packed"));
-        let att_stmt = get(&response, &int(3));
-        assert_eq!(get(&att_stmt, &text("alg")), int(-7), "{alg:?}");
-        assert_eq!(
-            get(&att_stmt, &text("x5c")),
-            Value::Array(vec![Value::Bytes(record.certificate_chain[0].clone())])
-        );
-        let mut message = bytes(get(&response, &int(2)));
-        message.extend_from_slice(&client_data_hash);
-        let signature = Signature::from_der(&bytes(get(&att_stmt, &text("sig")))).unwrap();
-        verifying_key
-            .verify(&message, &signature)
-            .expect("attestation signature verifies with the attestation key");
+            let mut app = open_app_with(&dir.state(), AttestationMode::Certificate);
+            let client_data_hash = random_32();
+            let response = call_ok(
+                &mut app,
+                0x01,
+                &make_credential_request_rk(&client_data_hash, &[0x03], alg, rk),
+            );
+            assert_eq!(get(&response, &int(1)), text("packed"));
+            let att_stmt = get(&response, &int(3));
+            assert_eq!(get(&att_stmt, &text("alg")), int(-7), "{alg:?}");
+            assert_eq!(
+                get(&att_stmt, &text("x5c")),
+                Value::Array(vec![Value::Bytes(record.certificate_chain[0].clone())])
+            );
+            let mut message = bytes(get(&response, &int(2)));
+            message.extend_from_slice(&client_data_hash);
+            let signature = Signature::from_der(&bytes(get(&att_stmt, &text("sig")))).unwrap();
+            verifying_key
+                .verify(&message, &signature)
+                .expect("attestation signature verifies with the attestation key");
+            let registration = registration(alg, response);
+            assert_eq!(authenticate(&mut app, &registration), 1, "{alg:?}, rk {rk}");
+        }
     }
 }
 

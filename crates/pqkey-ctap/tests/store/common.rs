@@ -9,13 +9,6 @@ use pqkey_ctap::{CoseAlg, try_sign_challenge};
 
 use crate::verify::verify_signature;
 
-pub const ALL_ALGS: [CoseAlg; 4] = [
-    CoseAlg::ES256,
-    CoseAlg::MLDSA44,
-    CoseAlg::MLDSA65,
-    CoseAlg::MLDSA87,
-];
-
 pub fn random_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
     getrandom::fill(&mut bytes).expect("operating system RNG");
