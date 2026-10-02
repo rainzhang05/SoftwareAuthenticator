@@ -2,9 +2,10 @@
 
 use super::CtapApp;
 use super::cbor::{self, canonical_map, canonical_sort, required_bytes, required_map};
+use super::credential_id::is_discoverable;
 use super::pin::protocol::parse_pin_uv_auth_param;
 use super::request::{self, truncate_utf8};
-use super::storage::{is_discoverable, store_status};
+use super::storage::store_status;
 use crate::store::CredentialRecord;
 
 use ciborium::{

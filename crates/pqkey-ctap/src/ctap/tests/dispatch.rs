@@ -119,9 +119,9 @@ mod get_next_assertion_state {
     use crate::CoseAlg;
     use crate::ctap::RESET_WINDOW_AFTER_POWER_UP;
     use crate::ctap::cbor::canonical_map;
+    use crate::ctap::credential_id::CREDENTIAL_ID_LENGTH;
     use crate::ctap::pin::token::ManualClock;
     use crate::ctap::presence::PresenceOutcome;
-    use crate::ctap::storage::CREDENTIAL_ID_LENGTH;
 
     use ciborium::value::Value;
     use core::time::Duration;

@@ -88,7 +88,7 @@ def test_metadata_counts_discoverable_credentials_and_free_space(ctap: Ctap2, ca
     maxPossibleRemainingResidentCredentialsCount is the room left in the store,
     which only they take up: a non-discoverable credential is sealed into its
     credential ID and not stored (is_discoverable in
-    crates/pqkey-ctap/src/ctap/storage.rs). getInfo's
+    crates/pqkey-ctap/src/ctap/credential_id.rs). getInfo's
     remainingDiscoverableCredentials says the same."""
     discoverable = len(registered) - 1
     metadata = credman.get_metadata()

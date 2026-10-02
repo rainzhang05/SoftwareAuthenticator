@@ -8,10 +8,10 @@ use super::support::{
 };
 use crate::ctap::cbor::canonical_map;
 
+use crate::ctap::credential_id::CREDENTIAL_ID_LENGTH;
 use crate::ctap::pin::permissions::PIN_PERMISSION_GA;
 use crate::ctap::pin::token::{MAX_USAGE_TIME_PERIOD, ManualClock};
 use crate::ctap::presence::{PresenceOperation, PresenceOutcome};
-use crate::ctap::storage::CREDENTIAL_ID_LENGTH;
 use crate::store::CredentialRecord;
 use crate::{ClassicPinProtocol, CoseAlg};
 

@@ -45,6 +45,7 @@
 
 mod cbor;
 pub mod constants;
+mod credential_id;
 mod credential_management;
 mod get_assertion;
 mod get_info;

@@ -9,10 +9,10 @@ use super::support::{
 };
 use crate::ctap::CtapApp;
 use crate::ctap::cbor::canonical_map;
-use crate::ctap::pin::permissions::PIN_PERMISSION_CM;
-use crate::ctap::storage::{
+use crate::ctap::credential_id::{
     CREDENTIAL_ID_LENGTH, SEALED_ID_LENGTH, derive_sealed_cred_randoms, is_discoverable, is_sealed,
 };
+use crate::ctap::pin::permissions::PIN_PERMISSION_CM;
 use crate::store::PrivateKeyMaterial;
 use crate::{ClassicPinProtocol, CoseAlg};
 

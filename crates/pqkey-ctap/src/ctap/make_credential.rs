@@ -1,11 +1,12 @@
 //! The authenticatorMakeCredential command.
 
 use super::cbor::{self, canonical_map, canonical_sort};
+use super::credential_id::is_discoverable;
 use super::pin::permissions::PIN_PERMISSION_MC;
 use super::pin::protocol::parse_pin_uv_auth_param;
 use super::presence::{PresenceOperation, PresenceRequest};
 use super::request;
-use super::storage::{is_discoverable, store_status};
+use super::storage::store_status;
 use super::{AttestationMode, CtapApp};
 use crate::store::{AttestationRecord, CredentialRecord, StoreError};
 use crate::try_sign_challenge;
