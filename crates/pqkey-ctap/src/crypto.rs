@@ -34,10 +34,6 @@ pub(crate) fn os_rng() -> UnwrapErr<SysRng> {
 /// that parses data originating from a web browser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoError {
-    /// The COSE algorithm identifier does not name a supported algorithm for
-    /// the requested operation (e.g. an ES256 identifier where an ML-DSA
-    /// parameter set was required).
-    UnsupportedAlgorithm,
     /// The stored secret key variant does not match the requested algorithm.
     KeyTypeMismatch,
     /// The key bytes could not be parsed as a key for the requested algorithm.
@@ -69,7 +65,6 @@ impl From<MlDsaError> for CryptoError {
 impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CryptoError::UnsupportedAlgorithm => f.write_str("unsupported COSE algorithm"),
             CryptoError::KeyTypeMismatch => {
                 f.write_str("secret key type does not match the requested algorithm")
             }

@@ -3,6 +3,7 @@
 //! algorithm, and [`CoseAlg::ALL`], the order getInfo lists them in.
 
 use core::fmt;
+use pqkey_mldsa::ParamSet;
 
 /// The COSE algorithm identifiers this authenticator signs with: ES256 (-7)
 /// and the three ML-DSA parameter sets, which RFC 9964 §8.1 registered in the
@@ -22,10 +23,24 @@ pub enum CoseAlg {
     MLDSA87 = -50,
 }
 
+/// The signature scheme behind an algorithm.  It picks the family that reads
+/// the key, derives the public key and signs: [`super::ecdsa_p256`] or
+/// [`super::mldsa`].  Algorithms that differ only in their identifier share a
+/// scheme.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) enum Scheme {
+    /// ECDSA over P-256 with SHA-256, the signature DER-encoded.
+    EcdsaP256Sha256,
+    /// ML-DSA with this parameter set (FIPS 204).
+    MlDsa(ParamSet),
+}
+
 /// What the authenticator knows about an algorithm: its row in the table.
 struct Properties {
     /// The algorithm's name, as `pqkey passkeys` prints it.
     name: &'static str,
+    /// How the algorithm signs.
+    scheme: Scheme,
 }
 
 impl CoseAlg {
@@ -41,10 +56,22 @@ impl CoseAlg {
     /// The table: what the authenticator knows about each algorithm.
     const fn properties(self) -> Properties {
         match self {
-            CoseAlg::ES256 => Properties { name: "ES256" },
-            CoseAlg::MLDSA44 => Properties { name: "ML-DSA-44" },
-            CoseAlg::MLDSA65 => Properties { name: "ML-DSA-65" },
-            CoseAlg::MLDSA87 => Properties { name: "ML-DSA-87" },
+            CoseAlg::ES256 => Properties {
+                name: "ES256",
+                scheme: Scheme::EcdsaP256Sha256,
+            },
+            CoseAlg::MLDSA44 => Properties {
+                name: "ML-DSA-44",
+                scheme: Scheme::MlDsa(ParamSet::MLDSA44),
+            },
+            CoseAlg::MLDSA65 => Properties {
+                name: "ML-DSA-65",
+                scheme: Scheme::MlDsa(ParamSet::MLDSA65),
+            },
+            CoseAlg::MLDSA87 => Properties {
+                name: "ML-DSA-87",
+                scheme: Scheme::MlDsa(ParamSet::MLDSA87),
+            },
         }
     }
 
@@ -56,6 +83,11 @@ impl CoseAlg {
     /// The algorithm's name, such as "ML-DSA-65".
     pub const fn name(self) -> &'static str {
         self.properties().name
+    }
+
+    /// How the algorithm signs.
+    pub(crate) const fn scheme(self) -> Scheme {
+        self.properties().scheme
     }
 }
 
@@ -101,6 +133,22 @@ mod tests {
                 (-48, "ML-DSA-44"),
                 (-49, "ML-DSA-65"),
                 (-50, "ML-DSA-87"),
+            ]
+        );
+    }
+
+    /// ES256 is ECDSA over P-256 with SHA-256, and each ML-DSA identifier
+    /// names its own parameter set (RFC 9964 §8.1).
+    #[test]
+    fn each_algorithm_signs_with_its_scheme() {
+        let schemes: Vec<Scheme> = CoseAlg::ALL.into_iter().map(CoseAlg::scheme).collect();
+        assert_eq!(
+            schemes,
+            [
+                Scheme::EcdsaP256Sha256,
+                Scheme::MlDsa(ParamSet::MLDSA44),
+                Scheme::MlDsa(ParamSet::MLDSA65),
+                Scheme::MlDsa(ParamSet::MLDSA87),
             ]
         );
     }

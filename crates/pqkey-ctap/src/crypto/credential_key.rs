@@ -1,15 +1,14 @@
-//! Credential keys: generating them, reading them back and signing with them.
+//! Credential keys: reading them back, deriving their public key and
+//! signing with them, each dispatched on the algorithm's [`Scheme`] to the
+//! family that implements it.
 
-use p256::ecdsa::{
-    Signature as P256EcdsaSignature, SigningKey as P256SigningKey, signature::Signer,
-};
-use pqkey_mldsa::{SEED_LEN, try_sign_from_seed};
+use p256::ecdsa::SigningKey as P256SigningKey;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::CryptoError;
-use super::alg::CoseAlg;
-use super::mldsa::{MlDsaSeed, mldsa_paramset_from_alg};
-use super::scrub::with_scrubbed_stack;
+use super::alg::{CoseAlg, Scheme};
+use super::mldsa::MlDsaSeed;
+use super::{ecdsa_p256, mldsa};
 
 /// A credential's signing key, named by its key type: algorithms that share
 /// a key type share a variant.
@@ -54,44 +53,40 @@ pub fn try_credential_secret_from_bytes(
     alg: CoseAlg,
     bytes: &[u8],
 ) -> Result<CredentialSecretKey, CryptoError> {
-    match alg {
-        CoseAlg::ES256 => {
-            // Exactly 32 bytes: `SigningKey::from_slice` would left-pad a
-            // slice of 24 to 31 bytes, reading a truncated key as some other
-            // key.  `from_bytes` performs the full range check (non-zero and
-            // below the group order), and borrowing the bytes in place needs
-            // no intermediate copy of the scalar.
-            let scalar =
-                <&p256::FieldBytes>::try_from(bytes).map_err(|_| CryptoError::InvalidKey)?;
-            let signing_key =
-                P256SigningKey::from_bytes(scalar).map_err(|_| CryptoError::InvalidKey)?;
-            Ok(CredentialSecretKey::P256(signing_key))
-        }
-        // Stored ML-DSA keys are seeds; an expanded secret key is never
-        // stored, so it is not accepted either.
-        CoseAlg::MLDSA44 | CoseAlg::MLDSA65 | CoseAlg::MLDSA87 => <[u8; SEED_LEN]>::try_from(bytes)
-            .map(|seed| CredentialSecretKey::MlDsa(MlDsaSeed::new(seed)))
-            .map_err(|_| CryptoError::InvalidKey),
+    match alg.scheme() {
+        Scheme::EcdsaP256Sha256 => ecdsa_p256::signing_key(bytes).map(CredentialSecretKey::P256),
+        Scheme::MlDsa(_) => mldsa::seed(bytes).map(CredentialSecretKey::MlDsa),
     }
 }
 
-/// Sign `auth_data || client_data_hash` and returns the encoded signature:
+/// The CBOR COSE_Key of `sk`'s public key, labelled with `alg`.
 ///
-/// * **ES256**: ECDSA over P-256 with SHA-256 (the message is hashed
-///   internally), returned as an ASN.1 DER `Ecdsa-Sig-Value`, which is the
-///   encoding WebAuthn requires for COSE algorithm -7.
+/// Returns [`CryptoError::KeyTypeMismatch`] when `alg` signs with another
+/// type of key, [`CryptoError::MlDsa`] when an ML-DSA seed cannot be
+/// expanded, and [`CryptoError::CborEncoding`] when the key cannot be
+/// encoded.  None of these abort.
+pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec<u8>, CryptoError> {
+    match sk {
+        CredentialSecretKey::P256(key) => match alg.scheme() {
+            Scheme::EcdsaP256Sha256 => ecdsa_p256::cose_public_key(alg, key),
+            Scheme::MlDsa(_) => Err(CryptoError::KeyTypeMismatch),
+        },
+        CredentialSecretKey::MlDsa(seed) => match alg.scheme() {
+            Scheme::MlDsa(param_set) => mldsa::cose_public_key(alg, param_set, seed),
+            Scheme::EcdsaP256Sha256 => Err(CryptoError::KeyTypeMismatch),
+        },
+    }
+}
+
+/// Sign `auth_data || client_data_hash` as `alg` signs, and return the
+/// signature in the encoding WebAuthn requires for `alg`:
+///
+/// * **ES256**: ECDSA over P-256 with SHA-256, as an ASN.1 DER
+///   `Ecdsa-Sig-Value`.
 /// * **ML-DSA-44/65/87**: the raw FIPS 204 signature bytes.
 ///
-/// Note: RustCrypto's `p256` does not normalize `s` to the lower half of the
-/// group order (unlike `k256`, it does not override `SignPrimitive`), so roughly
-/// half of the emitted signatures are "high-S".  That is valid ECDSA and is
-/// accepted by WebAuthn verifiers; neither WebAuthn nor CTAP 2.1 requires low-S
-/// for ES256.  Call `Signature::normalize_s` before encoding if a low-S
-/// signature is ever required.
-///
-/// Returns [`CryptoError::KeyTypeMismatch`] when `alg` and the key variant
-/// disagree, [`CryptoError::UnsupportedAlgorithm`] for an algorithm with no
-/// ML-DSA parameter set, and [`CryptoError::MlDsa`] / [`CryptoError::SigningFailed`]
+/// Returns [`CryptoError::KeyTypeMismatch`] when `alg` signs with another
+/// type of key, and [`CryptoError::MlDsa`] / [`CryptoError::SigningFailed`]
 /// when the underlying signature operation fails.  None of these abort.
 pub fn try_sign_challenge(
     alg: CoseAlg,
@@ -102,18 +97,15 @@ pub fn try_sign_challenge(
     let mut msg = Vec::with_capacity(auth_data.len() + client_data_hash.len());
     msg.extend_from_slice(auth_data);
     msg.extend_from_slice(client_data_hash);
-    match (alg, sk) {
-        (CoseAlg::ES256, CredentialSecretKey::P256(sk)) => {
-            let signature: P256EcdsaSignature = with_scrubbed_stack(|| sk.try_sign(&msg))
-                .map_err(|_| CryptoError::SigningFailed)?;
-            Ok(signature.to_der().as_bytes().to_vec())
-        }
-        (CoseAlg::ES256, _) => Err(CryptoError::KeyTypeMismatch),
-        (_, CredentialSecretKey::MlDsa(seed)) => {
-            let ps = mldsa_paramset_from_alg(alg).ok_or(CryptoError::UnsupportedAlgorithm)?;
-            Ok(try_sign_from_seed(ps, seed.as_bytes(), &msg)?)
-        }
-        (_, _) => Err(CryptoError::KeyTypeMismatch),
+    match sk {
+        CredentialSecretKey::P256(key) => match alg.scheme() {
+            Scheme::EcdsaP256Sha256 => ecdsa_p256::sign(key, &msg),
+            Scheme::MlDsa(_) => Err(CryptoError::KeyTypeMismatch),
+        },
+        CredentialSecretKey::MlDsa(seed) => match alg.scheme() {
+            Scheme::MlDsa(param_set) => mldsa::sign(param_set, seed, &msg),
+            Scheme::EcdsaP256Sha256 => Err(CryptoError::KeyTypeMismatch),
+        },
     }
 }
 
@@ -121,10 +113,12 @@ pub fn try_sign_challenge(
 mod tests {
     use super::*;
     use crate::crypto::cose::LABEL_AKP_PUB;
+    use crate::crypto::mldsa::mldsa_paramset_from_alg;
     use crate::store::{CredentialRecord, PrivateKeyMaterial};
     use ciborium::{de::from_reader, value::Integer, value::Value};
+    use p256::ecdsa::Signature as P256EcdsaSignature;
     use p256::ecdsa::signature::hazmat::PrehashVerifier;
-    use pqkey_mldsa::{PublicKey, verify};
+    use pqkey_mldsa::{PublicKey, SEED_LEN, verify};
     use sha2::{Digest, Sha256};
 
     /// A new credential's COSE public key and signing key, made as the

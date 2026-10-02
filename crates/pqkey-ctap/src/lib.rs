@@ -17,7 +17,7 @@ pub mod store;
 pub use crypto::CryptoError;
 pub use crypto::alg::{CoseAlg, UnsupportedCoseAlg};
 pub use crypto::credential_key::{
-    CredentialSecretKey, try_credential_secret_from_bytes, try_sign_challenge,
+    CredentialSecretKey, try_cose_public_key, try_credential_secret_from_bytes, try_sign_challenge,
 };
 pub use crypto::mldsa::{MlDsaSeed, mldsa_paramset_from_alg};
 pub use crypto::pin_uv::{

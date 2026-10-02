@@ -13,14 +13,13 @@ use core::fmt;
 
 use p256::ecdsa::SigningKey as P256SigningKey;
 use p256::elliptic_curve::Generate;
-use pqkey_mldsa::{SEED_LEN, try_public_key_from_seed};
+use pqkey_mldsa::SEED_LEN;
 use rand_core::TryCryptoRng;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::crypto::{ecdsa_p256, mldsa};
 use crate::{
-    CoseAlg, CredentialSecretKey, CryptoError, MlDsaSeed, mldsa_paramset_from_alg,
+    CoseAlg, CredentialSecretKey, CryptoError, try_cose_public_key,
     try_credential_secret_from_bytes,
 };
 
@@ -218,42 +217,25 @@ impl CredentialRecord {
     /// disagree, and [`CryptoError::InvalidKey`] for an out-of-range P-256
     /// scalar.  Records loaded from a store have already been checked for both.
     pub fn keypair(&self) -> Result<(CredentialSecretKey, Vec<u8>), CryptoError> {
+        let secret = self.secret_key()?;
+        let public_key = try_cose_public_key(self.alg, &secret)?;
+        Ok((secret, public_key))
+    }
+
+    /// Materialise the signing key, ready for [`crate::try_sign_challenge`]
+    /// with this record's `alg`.  No public key is derived: signing expands
+    /// an ML-DSA seed itself.
+    ///
+    /// Errors as [`Self::keypair`] does.
+    pub fn secret_key(&self) -> Result<CredentialSecretKey, CryptoError> {
         if !self.private_key.matches(self.alg) {
             return Err(CryptoError::KeyTypeMismatch);
         }
         match &self.private_key {
-            PrivateKeyMaterial::Es256 { scalar } => {
-                let secret = try_credential_secret_from_bytes(CoseAlg::ES256, scalar)?;
-                let CredentialSecretKey::P256(signing_key) = &secret else {
-                    return Err(CryptoError::KeyTypeMismatch);
-                };
-                let point = signing_key.verifying_key().to_sec1_point(false);
-                let cose = ecdsa_p256::try_cose_key(self.alg, &point)?;
-                Ok((secret, cose))
+            PrivateKeyMaterial::Es256 { scalar: bytes }
+            | PrivateKeyMaterial::MlDsa { seed: bytes } => {
+                try_credential_secret_from_bytes(self.alg, bytes)
             }
-            PrivateKeyMaterial::MlDsa { seed } => {
-                let param_set =
-                    mldsa_paramset_from_alg(self.alg).ok_or(CryptoError::KeyTypeMismatch)?;
-                let public_key = try_public_key_from_seed(param_set, seed)?;
-                let cose = mldsa::try_cose_key(self.alg, &public_key)?;
-                Ok((CredentialSecretKey::MlDsa(MlDsaSeed::new(*seed)), cose))
-            }
-        }
-    }
-
-    /// Materialise the signing key, ready for [`crate::try_sign_challenge`]
-    /// with this record's `alg`.
-    ///
-    /// Errors as [`Self::keypair`] does.
-    pub fn secret_key(&self) -> Result<CredentialSecretKey, CryptoError> {
-        match &self.private_key {
-            // Signing expands the seed itself; deriving the unused public key
-            // here would be a second key generation.
-            PrivateKeyMaterial::MlDsa { seed } if self.private_key.matches(self.alg) => {
-                mldsa_paramset_from_alg(self.alg).ok_or(CryptoError::KeyTypeMismatch)?;
-                Ok(CredentialSecretKey::MlDsa(MlDsaSeed::new(*seed)))
-            }
-            _ => self.keypair().map(|(secret, _)| secret),
         }
     }
 
@@ -452,7 +434,8 @@ impl fmt::Debug for CertificateSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::try_sign_challenge;
+    use crate::crypto::{ecdsa_p256, mldsa};
+    use crate::{mldsa_paramset_from_alg, try_sign_challenge};
     use ciborium::value::{Integer, Value};
     use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
     use pqkey_mldsa::{ParamSet, PublicKey, try_keypair_from_seed, verify};
