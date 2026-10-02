@@ -70,21 +70,22 @@ it, the daemon logs a warning once a client first opens the key (by then udev
 has set the node's mode), and keeps serving it.
 
 `/dev/uhid` itself is opened by the daemon. The rules give the `plugdev` group
-access to it. Anyone who can open `/dev/uhid` can create any HID device,
-including a keyboard that types into the active session, so membership in that
-group is a privilege in its own right. On Ubuntu the user created at
-installation is a member already, so installing the rules grants it to them.
+access to it, and `pqkey setup` adds you to the group if you are not a member,
+with an ACL on `/dev/uhid` for you until your next login applies the group.
+Anyone who can open `/dev/uhid` can create any HID device, including a
+keyboard that types into the active session, so membership in that group is a
+privilege in its own right. On Ubuntu the user created at installation is a
+member already, so installing the rules grants it to them.
 
 ### The encrypted credential store
 
 Each record is a separate file encrypted and authenticated with
 XChaCha20-Poly1305 under keys derived from two 32-byte root keys. By default
 the root keys are files in `keys/` inside the same state directory as the data.
-Non-discoverable credentials are not stored at all (except ones created
-before this scheme, whose IDs start with 0x00): each credential ID holds
+Non-discoverable credentials are not stored at all: each credential ID holds
 its private key and the seed of its `hmac-secret` values, sealed the same way
-under a key derived from the credential
-root key and bound to its relying party. Credential IDs are not secret, since a
+under a key derived from the credential root key and bound to its relying
+party. Credential IDs are not secret, since a
 relying party hands them to anyone who starts a sign-in, so those private keys
 are exactly as safe as the credential root key.
 The full format is in [docs/architecture.md](docs/architecture.md#credential-store)
@@ -161,8 +162,8 @@ It fails closed. The request is **denied** if there is no session bus, no
 notification server, a server without the `actions` capability (buttons) or
 the `body` capability (the prompt's text), or any error talking to it. There
 is no fallback prompt: a notification server that cannot show the question and
-its buttons cannot ask it. Deny, dismissing the notification, or closing it any other way
-denies the request. If nobody answers within 30 seconds (the hidden
+its buttons cannot ask it. Deny, dismissing the notification, or closing it
+any other way denies the request. If nobody answers within 30 seconds (the hidden
 `--presence-timeout` option changes this for tests), or the server lets the
 notification expire, the request times out. If the client cancels the
 request, the notification is withdrawn.
@@ -178,8 +179,8 @@ Its limits:
   names come from the request, not from a verified origin. They are sanitised
   before they are shown (every Unicode 16.0 default-ignorable and format
   character removed, such as bidirectional overrides, zero-width and tag
-  characters, control
-  characters and runs of whitespace turned into single spaces, relying party
+  characters, control characters and runs of whitespace turned into single
+  spaces, relying party
   IDs cut to their last 80 characters and user names to 64, markup escaped
   where the server interprets it), which limits spoofing through odd characters
   but cannot make a lying client honest. Browsers check the relying party ID
@@ -281,8 +282,9 @@ validated module either.
   format, record encoding and key derivation are pinned to values computed
   with independent implementations.
 - End-to-end tests run the release daemon on GitHub Actions Ubuntu runners,
-  x86_64 and arm64, and talk to the real hidraw node with libfido2 and python-fido2, including the
-  notification prompt against a fake notification server.
+  x86_64 and arm64, and talk to the real hidraw node with libfido2 and
+  python-fido2, including the notification prompt against a fake notification
+  server.
 - libFuzzer targets cover CTAPHID packet handling, single CTAP requests (raw and
   structure-aware), stateful request sequences, and parsing and signing with
   arbitrary stored key bytes. The engine targets run over the in-memory store,
