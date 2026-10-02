@@ -21,7 +21,11 @@ seconds=${2:-30}
 if [ $# -ge 1 ]; then
   targets=("$1")
 else
-  mapfile -t targets < <(cd fuzz && cargo +nightly fuzz list)
+  # A read loop rather than mapfile, which macOS's bash 3.2 lacks.
+  targets=()
+  while IFS= read -r target; do
+    targets+=("$target")
+  done < <(cd fuzz && cargo +nightly fuzz list)
 fi
 host=$(rustc +nightly -vV | sed -n 's/^host: //p')
 
