@@ -58,3 +58,13 @@ impl fmt::Debug for MlDsaSeed {
         f.write_str("MlDsaSeed(<redacted>)")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn es256_has_no_ml_dsa_parameter_set() {
+        assert!(mldsa_paramset_from_alg(CoseAlg::ES256).is_none());
+    }
+}

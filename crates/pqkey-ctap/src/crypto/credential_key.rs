@@ -157,7 +157,6 @@ pub fn try_sign_challenge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::alg::UnsupportedCoseAlg;
     use crate::crypto::cose::COSE_KEY_PARAM_AKP_KEY;
     use ciborium::{de::from_reader, value::Integer, value::Value};
     use p256::ecdsa::signature::hazmat::PrehashVerifier;
@@ -344,24 +343,6 @@ mod tests {
         assert_eq!(err(&[0x00; 32]), CryptoError::InvalidKey);
         // Correct length but above the group order.
         assert_eq!(err(&[0xFF; 32]), CryptoError::InvalidKey);
-    }
-
-    #[test]
-    fn try_create_credential_rejects_unsupported_algorithm() {
-        // `CoseAlg` only carries supported identifiers, so exercise the parse
-        // boundary that feeds it as well.
-        assert_eq!(CoseAlg::try_from(-257), Err(UnsupportedCoseAlg(-257)));
-        assert_eq!(CoseAlg::try_from(-8), Err(UnsupportedCoseAlg(-8)));
-        assert_eq!(CoseAlg::try_from(-7), Ok(CoseAlg::ES256));
-        assert_eq!(CoseAlg::try_from(-48), Ok(CoseAlg::MLDSA44));
-        assert_eq!(CoseAlg::try_from(-49), Ok(CoseAlg::MLDSA65));
-        assert_eq!(CoseAlg::try_from(-50), Ok(CoseAlg::MLDSA87));
-        assert_eq!(
-            UnsupportedCoseAlg(-257).to_string(),
-            "unsupported COSE algorithm -257"
-        );
-        // ES256 has no ML-DSA parameter set.
-        assert!(mldsa_paramset_from_alg(CoseAlg::ES256).is_none());
     }
 
     // ---------------------------------------------------------------------

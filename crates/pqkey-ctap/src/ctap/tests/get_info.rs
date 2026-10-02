@@ -43,20 +43,15 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
     let extensions = Value::Array(vec![text("credProtect"), text("hmac-secret")]);
 
     let algorithms = Value::Array(
-        [
-            CoseAlg::ES256,
-            CoseAlg::MLDSA44,
-            CoseAlg::MLDSA65,
-            CoseAlg::MLDSA87,
-        ]
-        .into_iter()
-        .map(|alg| {
-            canonical_map(vec![
-                (text("type"), text("public-key")),
-                (text("alg"), Value::Integer(Integer::from(alg as i32))),
-            ])
-        })
-        .collect(),
+        [-7, -48, -49, -50]
+            .into_iter()
+            .map(|alg: i32| {
+                canonical_map(vec![
+                    (text("type"), text("public-key")),
+                    (text("alg"), Value::Integer(Integer::from(alg))),
+                ])
+            })
+            .collect(),
     );
 
     let expected_map = canonical_map(vec![
@@ -118,6 +113,30 @@ fn get_info_response_encoding_is_canonical_with_pin_set() {
     insert_owned(&mut app, es256_credential("example.com", &[0x01]));
 
     assert_get_info_response(&mut app, aaguid, true, 4);
+}
+
+/// algorithms lists every algorithm of the table, in the order of
+/// `CoseAlg::ALL`, each as a "public-key" credential parameter.
+#[test]
+fn algorithms_are_the_table_in_order() {
+    let mut app = test_app([0xAB; 16]);
+    let response = app.handle_get_info().expect("getInfo succeeds");
+    let Value::Map(map) = from_reader(&response[1..]).expect("decode getInfo") else {
+        panic!("getInfo must be a map");
+    };
+    let listed = map
+        .into_iter()
+        .find_map(|(key, value)| (key == uint(10)).then_some(value));
+    let expected = CoseAlg::ALL
+        .into_iter()
+        .map(|alg| {
+            canonical_map(vec![
+                (text("type"), text("public-key")),
+                (text("alg"), Value::Integer(Integer::from(alg.identifier()))),
+            ])
+        })
+        .collect();
+    assert_eq!(listed, Some(Value::Array(expected)));
 }
 
 /// clientPin: "If present and set to false, it indicates that the device is

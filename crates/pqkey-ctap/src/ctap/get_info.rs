@@ -96,20 +96,15 @@ impl CtapApp<'_> {
         let transports = Value::Array(vec![text("usb")]);
         map.push((uint(9), transports));
 
-        let algorithms = [
-            CoseAlg::ES256,
-            CoseAlg::MLDSA44,
-            CoseAlg::MLDSA65,
-            CoseAlg::MLDSA87,
-        ]
-        .into_iter()
-        .map(|alg| {
-            canonical_map(vec![
-                (text("type"), text("public-key")),
-                (text("alg"), Value::Integer(Integer::from(alg as i32))),
-            ])
-        })
-        .collect();
+        let algorithms = CoseAlg::ALL
+            .into_iter()
+            .map(|alg| {
+                canonical_map(vec![
+                    (text("type"), text("public-key")),
+                    (text("alg"), Value::Integer(Integer::from(alg.identifier()))),
+                ])
+            })
+            .collect();
         map.push((uint(10), Value::Array(algorithms)));
 
         map.push((uint(13), uint(PinState::MIN_PIN_LENGTH as u64)));

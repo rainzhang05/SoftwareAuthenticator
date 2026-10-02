@@ -575,13 +575,12 @@ fn user(passkey: &Passkey) -> String {
 }
 
 fn algorithm(alg: Option<i64>) -> String {
-    match alg.map(|alg| i32::try_from(alg).map(CoseAlg::try_from)) {
-        Some(Ok(Ok(CoseAlg::ES256))) => "ES256".into(),
-        Some(Ok(Ok(CoseAlg::MLDSA44))) => "ML-DSA-44".into(),
-        Some(Ok(Ok(CoseAlg::MLDSA65))) => "ML-DSA-65".into(),
-        Some(Ok(Ok(CoseAlg::MLDSA87))) => "ML-DSA-87".into(),
-        Some(_) => format!("COSE {}", alg.unwrap_or_default()),
-        None => "-".into(),
+    let Some(alg) = alg else {
+        return "-".into();
+    };
+    match i32::try_from(alg).ok().map(CoseAlg::try_from) {
+        Some(Ok(alg)) => alg.name().into(),
+        Some(Err(_)) | None => format!("COSE {alg}"),
     }
 }
 
@@ -933,7 +932,14 @@ mod tests {
         for line in &table {
             assert!(!line.chars().any(char::is_control), "{line:?}");
         }
-        assert_eq!(algorithm(Some(-7)), "ES256");
+        for (alg, name) in [
+            (-7, "ES256"),
+            (-48, "ML-DSA-44"),
+            (-49, "ML-DSA-65"),
+            (-50, "ML-DSA-87"),
+        ] {
+            assert_eq!(algorithm(Some(alg)), name);
+        }
         assert_eq!(algorithm(Some(-8)), "COSE -8");
         assert_eq!(algorithm(None), "-");
     }

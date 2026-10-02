@@ -1,4 +1,6 @@
-//! The COSE algorithms the authenticator signs with.
+//! The COSE algorithms the authenticator signs with, and what it knows about
+//! each of them: one table, [`CoseAlg::properties`], with a row per
+//! algorithm, and [`CoseAlg::ALL`], the order getInfo lists them in.
 
 use core::fmt;
 
@@ -6,10 +8,8 @@ use core::fmt;
 /// and the three ML-DSA parameter sets, which RFC 9964 §8.1 registered in the
 /// IANA "COSE Algorithms" registry as -48, -49 and -50.
 ///
-/// * -7 -> ES256
-/// * -48 -> ML-DSA-44
-/// * -49 -> ML-DSA-65
-/// * -50 -> ML-DSA-87
+/// Each variant's discriminant is its identifier, which
+/// [`CoseAlg::identifier`] returns; [`CoseAlg::ALL`] lists every variant.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum CoseAlg {
     /// ECDSA with P-256 and SHA-256.
@@ -20,6 +20,43 @@ pub enum CoseAlg {
     MLDSA65 = -49,
     /// ML-DSA-87.
     MLDSA87 = -50,
+}
+
+/// What the authenticator knows about an algorithm: its row in the table.
+struct Properties {
+    /// The algorithm's name, as `pqkey passkeys` prints it.
+    name: &'static str,
+}
+
+impl CoseAlg {
+    /// Every algorithm, in the order authenticatorGetInfo lists them (CTAP 2.3
+    /// §6.4, `algorithms`).
+    pub const ALL: [CoseAlg; 4] = [
+        CoseAlg::ES256,
+        CoseAlg::MLDSA44,
+        CoseAlg::MLDSA65,
+        CoseAlg::MLDSA87,
+    ];
+
+    /// The table: what the authenticator knows about each algorithm.
+    const fn properties(self) -> Properties {
+        match self {
+            CoseAlg::ES256 => Properties { name: "ES256" },
+            CoseAlg::MLDSA44 => Properties { name: "ML-DSA-44" },
+            CoseAlg::MLDSA65 => Properties { name: "ML-DSA-65" },
+            CoseAlg::MLDSA87 => Properties { name: "ML-DSA-87" },
+        }
+    }
+
+    /// The algorithm's COSE identifier.
+    pub const fn identifier(self) -> i32 {
+        self as i32
+    }
+
+    /// The algorithm's name, such as "ML-DSA-65".
+    pub const fn name(self) -> &'static str {
+        self.properties().name
+    }
 }
 
 /// A COSE algorithm identifier that is not one of the [`CoseAlg`] values; it
@@ -38,12 +75,52 @@ impl std::error::Error for UnsupportedCoseAlg {}
 impl TryFrom<i32> for CoseAlg {
     type Error = UnsupportedCoseAlg;
     fn try_from(value: i32) -> Result<Self, Self::Error> {
-        match value {
-            -7 => Ok(CoseAlg::ES256),
-            -48 => Ok(CoseAlg::MLDSA44),
-            -49 => Ok(CoseAlg::MLDSA65),
-            -50 => Ok(CoseAlg::MLDSA87),
-            _ => Err(UnsupportedCoseAlg(value)),
+        CoseAlg::ALL
+            .into_iter()
+            .find(|alg| alg.identifier() == value)
+            .ok_or(UnsupportedCoseAlg(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The identifiers are IANA's and the names are what `pqkey passkeys`
+    /// prints, so both are spelled out here rather than read from the table.
+    #[test]
+    fn the_table_holds_the_registered_identifiers_and_the_printed_names() {
+        let table: Vec<(i32, &str)> = CoseAlg::ALL
+            .into_iter()
+            .map(|alg| (alg.identifier(), alg.name()))
+            .collect();
+        assert_eq!(
+            table,
+            [
+                (-7, "ES256"),
+                (-48, "ML-DSA-44"),
+                (-49, "ML-DSA-65"),
+                (-50, "ML-DSA-87"),
+            ]
+        );
+    }
+
+    /// Exactly the identifiers of the table parse.  `CoseAlg` only carries
+    /// supported identifiers, so this is the boundary that keeps others out.
+    #[test]
+    fn only_the_identifiers_of_the_table_parse() {
+        for alg in CoseAlg::ALL {
+            assert_eq!(CoseAlg::try_from(alg.identifier()), Ok(alg));
         }
+        assert_eq!(CoseAlg::try_from(-257), Err(UnsupportedCoseAlg(-257)));
+        assert_eq!(CoseAlg::try_from(-8), Err(UnsupportedCoseAlg(-8)));
+        assert_eq!(CoseAlg::try_from(-7), Ok(CoseAlg::ES256));
+        assert_eq!(CoseAlg::try_from(-48), Ok(CoseAlg::MLDSA44));
+        assert_eq!(CoseAlg::try_from(-49), Ok(CoseAlg::MLDSA65));
+        assert_eq!(CoseAlg::try_from(-50), Ok(CoseAlg::MLDSA87));
+        assert_eq!(
+            UnsupportedCoseAlg(-257).to_string(),
+            "unsupported COSE algorithm -257"
+        );
     }
 }
