@@ -18,9 +18,10 @@ use rand_core::TryCryptoRng;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::crypto::{ecdsa_p256, mldsa};
 use crate::{
     CoseAlg, CredentialSecretKey, CryptoError, MlDsaSeed, mldsa_paramset_from_alg,
-    try_cose_es256_public_key, try_cose_public_key, try_credential_secret_from_bytes,
+    try_credential_secret_from_bytes,
 };
 
 /// The private key of a credential, in its most compact form.
@@ -227,14 +228,14 @@ impl CredentialRecord {
                     return Err(CryptoError::KeyTypeMismatch);
                 };
                 let point = signing_key.verifying_key().to_sec1_point(false);
-                let cose = try_cose_es256_public_key(&point)?;
+                let cose = ecdsa_p256::try_cose_key(self.alg, &point)?;
                 Ok((secret, cose))
             }
             PrivateKeyMaterial::MlDsa { seed } => {
                 let param_set =
                     mldsa_paramset_from_alg(self.alg).ok_or(CryptoError::KeyTypeMismatch)?;
                 let public_key = try_public_key_from_seed(param_set, seed)?;
-                let cose = try_cose_public_key(param_set, &public_key)?;
+                let cose = mldsa::try_cose_key(self.alg, &public_key)?;
                 Ok((CredentialSecretKey::MlDsaSeed(MlDsaSeed::new(*seed)), cose))
             }
         }
@@ -632,7 +633,7 @@ mod tests {
                 panic!("ML-DSA record must hold a seed");
             };
             let (public_key, _) = try_keypair_from_seed(param_set, seed).unwrap();
-            let expected = try_cose_public_key(param_set, &public_key).unwrap();
+            let expected = mldsa::try_cose_key(alg, &public_key).unwrap();
             assert_eq!(record.cose_public_key().unwrap(), expected, "{alg:?}");
         }
     }
@@ -647,7 +648,7 @@ mod tests {
         let point = signing_key.verifying_key().to_sec1_point(false);
         assert_eq!(
             record.cose_public_key().unwrap(),
-            try_cose_es256_public_key(&point).unwrap()
+            ecdsa_p256::try_cose_key(CoseAlg::ES256, &point).unwrap()
         );
     }
 

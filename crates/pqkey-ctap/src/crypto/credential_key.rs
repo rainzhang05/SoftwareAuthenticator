@@ -11,9 +11,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::CryptoError;
 use super::alg::CoseAlg;
-use super::ecdsa_p256::try_cose_es256_public_key;
-use super::mldsa::{MlDsaSeed, mldsa_paramset_from_alg, try_cose_public_key};
+use super::mldsa::{MlDsaSeed, mldsa_paramset_from_alg};
 use super::scrub::with_scrubbed_stack;
+use super::{ecdsa_p256, mldsa};
 
 /// Credential secret key variants supported by the authenticator.
 #[derive(Debug)]
@@ -94,7 +94,7 @@ pub fn try_create_credential(alg: CoseAlg) -> Result<(Vec<u8>, CredentialSecretK
                 with_scrubbed_stack(|| P256SigningKey::try_generate_from_rng(&mut SysRng))
                     .map_err(|_| CryptoError::Randomness)?;
             let public_key = signing_key.verifying_key().to_sec1_point(false);
-            let cose = try_cose_es256_public_key(&public_key)?;
+            let cose = ecdsa_p256::try_cose_key(alg, &public_key)?;
             Ok((cose, CredentialSecretKey::Es256(signing_key)))
         }
         _ => {
@@ -106,7 +106,7 @@ pub fn try_create_credential(alg: CoseAlg) -> Result<(Vec<u8>, CredentialSecretK
             let key = MlDsaSeed::new(seed);
             seed.zeroize();
             let pk = try_public_key_from_seed(ps, key.as_bytes())?;
-            let cose = try_cose_public_key(ps, &pk)?;
+            let cose = mldsa::try_cose_key(alg, &pk)?;
             Ok((cose, CredentialSecretKey::MlDsaSeed(key)))
         }
     }
@@ -157,7 +157,7 @@ pub fn try_sign_challenge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::cose::COSE_KEY_PARAM_AKP_KEY;
+    use crate::crypto::cose::LABEL_AKP_PUB;
     use ciborium::{de::from_reader, value::Integer, value::Value};
     use p256::ecdsa::signature::hazmat::PrehashVerifier;
     use pqkey_mldsa::{PublicKey, verify};
@@ -275,7 +275,7 @@ mod tests {
         let value: Value = from_reader(cbor).expect("valid CBOR");
         if let Value::Map(map) = value {
             for (k, v) in map {
-                if k == Value::Integer(Integer::from(COSE_KEY_PARAM_AKP_KEY))
+                if k == Value::Integer(Integer::from(LABEL_AKP_PUB))
                     && let Value::Bytes(bytes) = v
                 {
                     return bytes;

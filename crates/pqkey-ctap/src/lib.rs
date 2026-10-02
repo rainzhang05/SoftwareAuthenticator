@@ -16,15 +16,11 @@ pub mod store;
 
 pub use crypto::CryptoError;
 pub use crypto::alg::{CoseAlg, UnsupportedCoseAlg};
-pub use crypto::cose::{
-    COSE_KEY_LABEL_ALG, COSE_KEY_LABEL_KTY, COSE_KEY_PARAM_AKP_KEY, COSE_KEY_TYPE_AKP,
-};
 pub use crypto::credential_key::{
     CredentialSecretKey, try_create_credential, try_credential_secret_from_bytes,
     try_sign_challenge,
 };
-pub use crypto::ecdsa_p256::try_cose_es256_public_key;
-pub use crypto::mldsa::{MlDsaSeed, mldsa_paramset_from_alg, try_cose_public_key};
+pub use crypto::mldsa::{MlDsaSeed, mldsa_paramset_from_alg};
 pub use crypto::pin_uv::{
     ClassicPinProtocol, PinUvSessionKeys, decrypt_classic_pin_block,
     derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
