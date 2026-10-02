@@ -1,5 +1,5 @@
-//! ECDSA on P-521 ([`Curve::P521`]) with SHA-512, the scheme of ES512: keys
-//! kept as a seed the scalar is derived from ([`derive_scalar`]).
+//! ECDSA on P-521 ([`Curve::P521`]) with SHA-512, the scheme of ES512 and
+//! ESP512: keys kept as a seed the scalar is derived from ([`derive_scalar`]).
 
 use p521::NistP521;
 use p521::ecdsa::{DerSignature, SigningKey, signature::Signer};

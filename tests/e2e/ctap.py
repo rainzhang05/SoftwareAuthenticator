@@ -33,6 +33,7 @@ ESP256 = -9
 ES384 = -35
 ESP384 = -51
 ES512 = -36
+ESP512 = -52
 
 COSE_KTY_EC2 = 2
 COSE_KTY_AKP = 7
@@ -199,6 +200,7 @@ ALGORITHMS = (
     Algorithm(ES384, "ES384", _check_ec2(COSE_CRV_P384, 48), _verify_ecdsa(ec.SECP384R1(), hashes.SHA384())),
     Algorithm(ESP384, "ESP384", _check_ec2(COSE_CRV_P384, 48), _verify_ecdsa(ec.SECP384R1(), hashes.SHA384())),
     Algorithm(ES512, "ES512", _check_ec2(COSE_CRV_P521, 66), _verify_ecdsa(ec.SECP521R1(), hashes.SHA512())),
+    Algorithm(ESP512, "ESP512", _check_ec2(COSE_CRV_P521, 66), _verify_ecdsa(ec.SECP521R1(), hashes.SHA512())),
 )
 BY_IDENTIFIER = {algorithm.identifier: algorithm for algorithm in ALGORITHMS}
 NAMES = {algorithm.identifier: algorithm.name for algorithm in ALGORITHMS}

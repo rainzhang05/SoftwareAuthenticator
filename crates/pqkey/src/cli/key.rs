@@ -941,6 +941,7 @@ mod tests {
             (-35, "ES384"),
             (-51, "ESP384"),
             (-36, "ES512"),
+            (-52, "ESP512"),
         ] {
             assert_eq!(algorithm(Some(alg)), name);
         }

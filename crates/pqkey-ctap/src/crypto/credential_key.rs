@@ -27,7 +27,8 @@ pub enum CredentialSecretKey {
     /// scalar anew.
     P384(Seed),
     /// An ECDSA key on P-521 held as the seed its scalar is derived from, the
-    /// form stored credentials use: ES512.  Each use derives the scalar anew.
+    /// form stored credentials use: ES512 and ESP512.  Each use derives the
+    /// scalar anew.
     P521(Seed),
 }
 
@@ -158,10 +159,10 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
 /// Sign `auth_data || client_data_hash` as `alg` signs, and return the
 /// signature in the encoding WebAuthn requires for `alg`:
 ///
-/// * **ES256**, **ESP256**, **ES384**, **ESP384** and **ES512**: ECDSA over
-///   the algorithm's curve with its hash, P-256 with SHA-256, P-384 with
-///   SHA-384 or P-521 with SHA-512, and an RFC 6979 nonce, as an ASN.1 DER
-///   `Ecdsa-Sig-Value` (WebAuthn Level 3 §6.5.5).
+/// * **ES256**, **ESP256**, **ES384**, **ESP384**, **ES512** and **ESP512**:
+///   ECDSA over the algorithm's curve with its hash, P-256 with SHA-256,
+///   P-384 with SHA-384 or P-521 with SHA-512, and an RFC 6979 nonce, as an
+///   ASN.1 DER `Ecdsa-Sig-Value` (WebAuthn Level 3 §6.5.5).
 /// * **ML-DSA-44/65/87**: the raw FIPS 204 signature bytes.
 ///
 /// Returns [`CryptoError::KeyTypeMismatch`] when `alg` signs with another
@@ -363,6 +364,7 @@ mod tests {
             (CoseAlg::ES384, 2, 48),
             (CoseAlg::ESP384, 2, 48),
             (CoseAlg::ES512, 3, 66),
+            (CoseAlg::ESP512, 3, 66),
         ];
         let ecdsa: Vec<CoseAlg> = CoseAlg::ALL
             .into_iter()
@@ -390,14 +392,15 @@ mod tests {
     }
 
     /// A fully specified identifier names its curve's algorithm under
-    /// another identifier: the same key, an ESP256 scalar or an ESP384 seed,
-    /// gives the same COSE_Key as under ES256 or ES384 but for its alg.  The
-    /// key a seed derives belongs to the curve.
+    /// another identifier: the same key, an ESP256 scalar or an ESP384 or
+    /// ESP512 seed, gives the same COSE_Key as under ES256, ES384 or ES512 but
+    /// for its alg.  The key a seed derives belongs to the curve.
     #[test]
     fn a_fully_specified_algorithm_has_its_curves_keys_but_for_its_alg() {
         for (alg, fully_specified) in [
             (CoseAlg::ES256, CoseAlg::ESP256),
             (CoseAlg::ES384, CoseAlg::ESP384),
+            (CoseAlg::ES512, CoseAlg::ESP512),
         ] {
             let key = [0x42; 32];
             let cose_key = |alg| {

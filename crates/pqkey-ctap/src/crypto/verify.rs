@@ -69,8 +69,8 @@ enum Hash {
 
 /// The COSE identifier of `alg` and what its keys and signatures are.  The
 /// identifiers are IANA's (RFC 9053 §2.1 for ES256, ES384 and ES512, RFC 9864
-/// §2.1 for ESP256 and ESP384, RFC 9964 §8.1 for ML-DSA), and so are the
-/// curves (RFC 9053 §7.1).  An ECDSA coordinate is as long as the curve's
+/// §2.1 for ESP256, ESP384 and ESP512, RFC 9964 §8.1 for ML-DSA), and so are
+/// the curves (RFC 9053 §7.1).  An ECDSA coordinate is as long as the curve's
 /// field elements, an ML-DSA public key as FIPS 204's Table 2 says.
 fn expected(alg: CoseAlg) -> (i64, Expected) {
     let p256_sha256 = Expected::Ecdsa {
@@ -85,20 +85,19 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
         curve: EcCurve::P384,
         hash: Hash::Sha384,
     };
+    let p521_sha512 = Expected::Ecdsa {
+        crv: 3,
+        length: 66,
+        curve: EcCurve::P521,
+        hash: Hash::Sha512,
+    };
     match alg {
         CoseAlg::ES256 => (-7, p256_sha256),
         CoseAlg::ESP256 => (-9, p256_sha256),
         CoseAlg::ES384 => (-35, p384_sha384),
         CoseAlg::ESP384 => (-51, p384_sha384),
-        CoseAlg::ES512 => (
-            -36,
-            Expected::Ecdsa {
-                crv: 3,
-                length: 66,
-                curve: EcCurve::P521,
-                hash: Hash::Sha512,
-            },
-        ),
+        CoseAlg::ES512 => (-36, p521_sha512),
+        CoseAlg::ESP512 => (-52, p521_sha512),
         CoseAlg::MLDSA44 => (
             -48,
             Expected::MlDsa {
@@ -136,8 +135,10 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
 /// parameter and MUST NOT use the compressed point form.  Keys with algorithm
 /// -51 (ESP384) MUST NOT use the compressed point form.  Keys with algorithm
 /// -36 (ES512) MUST specify 3 (P-521) as the crv parameter and MUST NOT use
+/// the compressed point form.  Keys with algorithm -52 (ESP512) MUST NOT use
 /// the compressed point form." (§5.8.5)  ESP256 is "ECDSA using P-256 curve
-/// and SHA-256", and ESP384 the same with P-384 and SHA-384 (RFC 9864 §2.1).
+/// and SHA-256", and ESP384 and ESP512 the same with P-384 and SHA-384 and
+/// with P-521 and SHA-512 (RFC 9864 §2.1).
 /// So x and y are as long as the curve's field elements and form a point on
 /// it, and "the sig value MUST be encoded as an ASN.1 DER Ecdsa-Sig-Value"
 /// (§6.5.5) over the message's digest with the algorithm's hash, which this

@@ -30,8 +30,8 @@ pub(crate) enum Curve {
     /// P-384 with SHA-384: ES384 and ESP384.  Keys are kept as a seed the
     /// scalar is derived from ([`derive_scalar`]).
     P384,
-    /// P-521 with SHA-512: ES512.  Keys are kept as a seed the scalar is
-    /// derived from ([`derive_scalar`]).
+    /// P-521 with SHA-512: ES512 and ESP512.  Keys are kept as a seed the
+    /// scalar is derived from ([`derive_scalar`]).
     P521,
 }
 
