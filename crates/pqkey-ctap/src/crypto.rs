@@ -1,5 +1,6 @@
 //! The cryptography the CTAP engine and the credential store share: the
-//! PIN/UV auth protocols' key derivation and encryption, HKDF, and the stack
+//! signature algorithms, COSE keys, credential keys and signing, the PIN/UV
+//! auth protocols' key derivation and encryption, HKDF, and the stack
 //! scrubbing around secret-dependent arithmetic.
 
 use core::fmt;
@@ -7,7 +8,12 @@ use getrandom::SysRng;
 use pqkey_mldsa::MlDsaError;
 use rand_core::UnwrapErr;
 
+pub(crate) mod alg;
+pub(crate) mod cose;
+pub(crate) mod credential_key;
+pub(crate) mod ecdsa_p256;
 pub(crate) mod hkdf;
+pub(crate) mod mldsa;
 pub(crate) mod pin_uv;
 pub(crate) mod scrub;
 
