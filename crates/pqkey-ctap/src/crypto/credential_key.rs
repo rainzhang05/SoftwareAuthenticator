@@ -1,19 +1,15 @@
 //! Credential keys: generating them, reading them back and signing with them.
 
-use getrandom::SysRng;
 use p256::ecdsa::{
     Signature as P256EcdsaSignature, SigningKey as P256SigningKey, signature::Signer,
 };
-use p256::elliptic_curve::Generate;
-use pqkey_mldsa::{SEED_LEN, try_public_key_from_seed, try_sign_from_seed};
-use rand_core::TryRng;
+use pqkey_mldsa::{SEED_LEN, try_sign_from_seed};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::CryptoError;
 use super::alg::CoseAlg;
 use super::mldsa::{MlDsaSeed, mldsa_paramset_from_alg};
 use super::scrub::with_scrubbed_stack;
-use super::{ecdsa_p256, mldsa};
 
 /// A credential's signing key, named by its key type: algorithms that share
 /// a key type share a variant.
@@ -79,40 +75,6 @@ pub fn try_credential_secret_from_bytes(
     }
 }
 
-/// Generate a new credential.
-///
-/// Returns the CBOR COSE_Key for the new public key plus the secret key
-/// wrapper, for ML-DSA the seed.  Errors instead of panicking when `alg` names
-/// no supported algorithm ([`CryptoError::UnsupportedAlgorithm`]), when the
-/// operating system's random number generator fails
-/// ([`CryptoError::Randomness`]), when ML-DSA key generation fails
-/// ([`CryptoError::MlDsa`]), or when the generated P-256 point cannot be
-/// encoded ([`CryptoError::InvalidPublicKey`]).
-pub fn try_create_credential(alg: CoseAlg) -> Result<(Vec<u8>, CredentialSecretKey), CryptoError> {
-    match alg {
-        CoseAlg::ES256 => {
-            let signing_key =
-                with_scrubbed_stack(|| P256SigningKey::try_generate_from_rng(&mut SysRng))
-                    .map_err(|_| CryptoError::Randomness)?;
-            let public_key = signing_key.verifying_key().to_sec1_point(false);
-            let cose = ecdsa_p256::try_cose_key(alg, &public_key)?;
-            Ok((cose, CredentialSecretKey::P256(signing_key)))
-        }
-        _ => {
-            let ps = mldsa_paramset_from_alg(alg).ok_or(CryptoError::UnsupportedAlgorithm)?;
-            let mut seed = [0u8; SEED_LEN];
-            SysRng
-                .try_fill_bytes(&mut seed)
-                .map_err(|_| CryptoError::Randomness)?;
-            let key = MlDsaSeed::new(seed);
-            seed.zeroize();
-            let pk = try_public_key_from_seed(ps, key.as_bytes())?;
-            let cose = mldsa::try_cose_key(alg, &pk)?;
-            Ok((cose, CredentialSecretKey::MlDsa(key)))
-        }
-    }
-}
-
 /// Sign `auth_data || client_data_hash` and returns the encoded signature:
 ///
 /// * **ES256**: ECDSA over P-256 with SHA-256 (the message is hashed
@@ -159,16 +121,37 @@ pub fn try_sign_challenge(
 mod tests {
     use super::*;
     use crate::crypto::cose::LABEL_AKP_PUB;
+    use crate::store::{CredentialRecord, PrivateKeyMaterial};
     use ciborium::{de::from_reader, value::Integer, value::Value};
     use p256::ecdsa::signature::hazmat::PrehashVerifier;
     use pqkey_mldsa::{PublicKey, verify};
     use sha2::{Digest, Sha256};
 
+    /// A new credential's COSE public key and signing key, made as the
+    /// engine makes them: fresh key material, then the key pair.
+    fn generated(alg: CoseAlg) -> (Vec<u8>, CredentialSecretKey) {
+        let record = CredentialRecord {
+            credential_id: vec![0x01; 33],
+            rp_id: "example.com".into(),
+            user_id: vec![0x02; 16],
+            user_name: None,
+            user_display_name: None,
+            alg,
+            private_key: PrivateKeyMaterial::try_generate(alg).expect("generate key material"),
+            cred_random_with_uv: [0; 32],
+            cred_random_without_uv: [0; 32],
+            cred_protect: 1,
+            sign_count: 0,
+            created_at: 0,
+        };
+        let (secret_key, public_key) = record.keypair().expect("materialise key pair");
+        (public_key, secret_key)
+    }
+
     #[test]
     fn mldsa_roundtrip_signatures() {
         for alg in [CoseAlg::MLDSA44, CoseAlg::MLDSA65, CoseAlg::MLDSA87] {
-            let (public_key_cbor, secret_key) =
-                try_create_credential(alg).expect("create ML-DSA credential");
+            let (public_key_cbor, secret_key) = generated(alg);
             assert!(!public_key_cbor.is_empty());
             let auth_data = b"auth_data";
             let client_hash = b"client_data_hash";
@@ -213,8 +196,7 @@ mod tests {
 
     #[test]
     fn es256_credential_roundtrip() {
-        let (cose_key, secret_key) =
-            try_create_credential(CoseAlg::ES256).expect("create ES256 credential");
+        let (cose_key, secret_key) = generated(CoseAlg::ES256);
         assert_eq!(secret_key.secret_bytes().len(), 32);
 
         let value: Value = from_reader(cose_key.as_slice()).expect("decode ES256 COSE key");
@@ -292,8 +274,8 @@ mod tests {
 
     #[test]
     fn try_sign_challenge_rejects_mismatched_key_variant() {
-        let (_, ml_dsa_key) = try_create_credential(CoseAlg::MLDSA44).unwrap();
-        let (_, es256_key) = try_create_credential(CoseAlg::ES256).unwrap();
+        let (_, ml_dsa_key) = generated(CoseAlg::MLDSA44);
+        let (_, es256_key) = generated(CoseAlg::ES256);
 
         // Stored `alg` says ES256 but the key on disk is ML-DSA.
         assert_eq!(
@@ -357,7 +339,7 @@ mod tests {
     /// properties at once.
     #[test]
     fn es256_signature_is_der_over_sha256_of_auth_data_and_client_data_hash() {
-        let (_, secret_key) = try_create_credential(CoseAlg::ES256).unwrap();
+        let (_, secret_key) = generated(CoseAlg::ES256);
         let verifying_key = match &secret_key {
             CredentialSecretKey::P256(sk) => *sk.verifying_key(),
             _ => panic!("expected a P-256 key"),
