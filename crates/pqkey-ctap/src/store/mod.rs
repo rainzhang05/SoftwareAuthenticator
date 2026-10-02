@@ -307,17 +307,21 @@ pub(crate) fn validate_credential(record: &CredentialRecord) -> Result<(), Store
     if record.credential_id.is_empty() {
         return Err(StoreError::InvalidRecord("credential ID is empty"));
     }
-    if !record.private_key.matches(record.alg) {
+    if record.private_key.kind() != record.alg.key_kind() {
         return Err(StoreError::InvalidRecord(
             "alg does not match the private key material",
         ));
     }
-    if let PrivateKeyMaterial::Es256 { scalar } = &record.private_key
-        && p256::SecretKey::from_slice(scalar).is_err()
-    {
-        return Err(StoreError::InvalidRecord(
-            "ES256 private key is not a valid P-256 scalar",
-        ));
+    match &record.private_key {
+        PrivateKeyMaterial::P256Scalar { scalar } => {
+            if p256::SecretKey::from_slice(scalar).is_err() {
+                return Err(StoreError::InvalidRecord(
+                    "ES256 private key is not a valid P-256 scalar",
+                ));
+            }
+        }
+        // Every 32 bytes are a seed.
+        PrivateKeyMaterial::Seed { .. } => {}
     }
     if !(1..=3).contains(&record.cred_protect) {
         return Err(StoreError::InvalidRecord(

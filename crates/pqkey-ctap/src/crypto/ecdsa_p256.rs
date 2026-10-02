@@ -2,13 +2,29 @@
 //! ([`Scheme::EcdsaP256Sha256`](super::alg::Scheme::EcdsaP256Sha256)), the
 //! scheme of ES256.
 
-use p256::Sec1Point;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+use p256::elliptic_curve::Generate;
+use p256::{Sec1Point, SecretKey};
+use rand_core::TryCryptoRng;
+use zeroize::Zeroize;
 
 use super::CryptoError;
 use super::alg::CoseAlg;
 use super::cose::{CRV_P256, try_ec2_key};
 use super::scrub::with_scrubbed_stack;
+
+/// Write a fresh scalar from `rng` into `scalar`, big-endian.  `SecretKey`
+/// generation only yields scalars in [1, n), so it is valid by construction.
+pub(super) fn generate_scalar<R: TryCryptoRng + ?Sized>(
+    rng: &mut R,
+    scalar: &mut [u8; 32],
+) -> Result<(), R::Error> {
+    let secret = SecretKey::try_generate_from_rng(rng)?;
+    let mut encoded = secret.to_bytes();
+    scalar.copy_from_slice(&encoded);
+    encoded.as_mut_slice().zeroize();
+    Ok(())
+}
 
 /// The signing key whose big-endian scalar is `bytes`.
 ///
@@ -68,7 +84,6 @@ pub(crate) fn try_cose_key(alg: CoseAlg, point: &Sec1Point) -> Result<Vec<u8>, C
 mod tests {
     use super::*;
     use crate::crypto::os_rng;
-    use p256::elliptic_curve::Generate;
 
     #[test]
     fn try_cose_key_rejects_identity_point() {

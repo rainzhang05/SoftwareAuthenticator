@@ -23,6 +23,19 @@ pub enum CoseAlg {
     MLDSA87 = -50,
 }
 
+/// The kind of private key material a credential keeps.  Each algorithm
+/// keeps one kind, [`CoseAlg::key_kind`]; algorithms with the same signature
+/// scheme keep the same kind.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum KeyKind {
+    /// A P-256 private scalar: 32 bytes, big-endian, non-zero and below the
+    /// group order.
+    P256Scalar,
+    /// A 32-byte seed from which the credential's algorithm derives its key:
+    /// for ML-DSA, the FIPS 204 key-generation seed `ξ`.
+    Seed,
+}
+
 /// The signature scheme behind an algorithm.  It picks the family that reads
 /// the key, derives the public key and signs: [`super::ecdsa_p256`] or
 /// [`super::mldsa`].  Algorithms that differ only in their identifier share a
@@ -33,6 +46,16 @@ pub(crate) enum Scheme {
     EcdsaP256Sha256,
     /// ML-DSA with this parameter set (FIPS 204).
     MlDsa(ParamSet),
+}
+
+impl Scheme {
+    /// The kind of key material the scheme's keys are kept as.
+    const fn key_kind(self) -> KeyKind {
+        match self {
+            Scheme::EcdsaP256Sha256 => KeyKind::P256Scalar,
+            Scheme::MlDsa(_) => KeyKind::Seed,
+        }
+    }
 }
 
 /// What the authenticator knows about an algorithm: its row in the table.
@@ -88,6 +111,11 @@ impl CoseAlg {
     /// How the algorithm signs.
     pub(crate) const fn scheme(self) -> Scheme {
         self.properties().scheme
+    }
+
+    /// The kind of private key material the algorithm's credentials keep.
+    pub const fn key_kind(self) -> KeyKind {
+        self.scheme().key_kind()
     }
 }
 
@@ -149,6 +177,22 @@ mod tests {
                 Scheme::MlDsa(ParamSet::MLDSA44),
                 Scheme::MlDsa(ParamSet::MLDSA65),
                 Scheme::MlDsa(ParamSet::MLDSA87),
+            ]
+        );
+    }
+
+    /// ES256 keeps the P-256 scalar and ML-DSA the seed `ξ`: what the store
+    /// and sealed credential IDs hold.
+    #[test]
+    fn each_algorithm_keeps_its_kind_of_key() {
+        let kinds: Vec<KeyKind> = CoseAlg::ALL.into_iter().map(CoseAlg::key_kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                KeyKind::P256Scalar,
+                KeyKind::Seed,
+                KeyKind::Seed,
+                KeyKind::Seed,
             ]
         );
     }

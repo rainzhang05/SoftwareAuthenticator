@@ -15,7 +15,7 @@ pub mod platform;
 pub mod store;
 
 pub use crypto::CryptoError;
-pub use crypto::alg::{CoseAlg, UnsupportedCoseAlg};
+pub use crypto::alg::{CoseAlg, KeyKind, UnsupportedCoseAlg};
 pub use crypto::credential_key::{
     CredentialSecretKey, try_cose_public_key, try_credential_secret_from_bytes, try_sign_challenge,
 };

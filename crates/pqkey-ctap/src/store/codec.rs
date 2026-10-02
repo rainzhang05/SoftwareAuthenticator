@@ -10,8 +10,8 @@
 //!    3  user_id                 byte string
 //!    4  user_name               text string, omitted when absent
 //!    5  user_display_name       text string, omitted when absent
-//!    6  alg                     integer: COSE algorithm identifier (-7, -48, -49, -50)
-//!    7  private key type        unsigned integer: 1 = P-256 scalar, 2 = ML-DSA seed
+//!    6  alg                     integer: COSE algorithm identifier, one of CoseAlg's
+//!    7  private key type        unsigned integer: 1 = P-256 scalar, 2 = seed (ML-DSA's ξ)
 //!    8  private key             byte string, 32 bytes
 //!    9  cred_random_with_uv     byte string, 32 bytes
 //!   10  cred_random_without_uv  byte string, 32 bytes
@@ -52,20 +52,24 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKeyMaterial};
 use super::{Corruption, StoreError, validate_attestation, validate_credential};
-use crate::CoseAlg;
+use crate::{CoseAlg, KeyKind};
 
-const KEY_TYPE_ES256_SCALAR: u64 = 1;
-const KEY_TYPE_MLDSA_SEED: u64 = 2;
+/// Private key type 1: a P-256 scalar ([`KeyKind::P256Scalar`]).
+const KEY_TYPE_P256_SCALAR: u64 = 1;
+/// Private key type 2: a seed the record's `alg` derives its key from
+/// ([`KeyKind::Seed`]), for ML-DSA the FIPS 204 seed `ξ`.
+const KEY_TYPE_SEED: u64 = 2;
 
 /// Encode a credential record with the given creation order.
 pub(crate) fn encode_credential(
     record: &CredentialRecord,
     created_at: u64,
 ) -> Result<Zeroizing<Vec<u8>>, StoreError> {
-    let (key_type, key) = match &record.private_key {
-        PrivateKeyMaterial::Es256 { scalar } => (KEY_TYPE_ES256_SCALAR, scalar),
-        PrivateKeyMaterial::MlDsa { seed } => (KEY_TYPE_MLDSA_SEED, seed),
+    let key_type = match record.private_key.kind() {
+        KeyKind::P256Scalar => KEY_TYPE_P256_SCALAR,
+        KeyKind::Seed => KEY_TYPE_SEED,
     };
+    let key = record.private_key.as_bytes();
     let mut entries = vec![
         (1, Value::Bytes(record.credential_id.clone())),
         (2, Value::Text(record.rp_id.clone())),
@@ -96,11 +100,12 @@ pub(crate) fn decode_credential(bytes: &[u8]) -> Result<CredentialRecord, Corrup
     let alg = CoseAlg::try_from(fields.int::<i32>(6)?).map_err(|_| Corruption::Encoding)?;
     let key_type = fields.uint::<u64>(7)?;
     let key = Zeroizing::new(fields.array::<32>(8)?);
-    let private_key = match key_type {
-        KEY_TYPE_ES256_SCALAR => PrivateKeyMaterial::Es256 { scalar: *key },
-        KEY_TYPE_MLDSA_SEED => PrivateKeyMaterial::MlDsa { seed: *key },
+    let kind = match key_type {
+        KEY_TYPE_P256_SCALAR => KeyKind::P256Scalar,
+        KEY_TYPE_SEED => KeyKind::Seed,
         _ => return Err(Corruption::Encoding),
     };
+    let private_key = PrivateKeyMaterial::from_bytes(kind, &key);
     let record = CredentialRecord {
         credential_id: fields.bytes(1)?,
         rp_id: fields.text(2)?,
@@ -395,7 +400,7 @@ mod tests {
             user_name: Some("alice".into()),
             user_display_name: None,
             alg: CoseAlg::MLDSA44,
-            private_key: PrivateKeyMaterial::MlDsa {
+            private_key: PrivateKeyMaterial::Seed {
                 seed: core::array::from_fn(|i| 0x20 + i as u8),
             },
             cred_random_with_uv: [0xaa; 32],
@@ -514,7 +519,7 @@ mod tests {
     fn an_es256_credential_matches_the_documented_format() {
         let mut record = credential();
         record.alg = CoseAlg::ES256;
-        record.private_key = PrivateKeyMaterial::Es256 {
+        record.private_key = PrivateKeyMaterial::P256Scalar {
             scalar: core::array::from_fn(|i| 0x40 + i as u8),
         };
         let encoded = encode_credential(&record, 70_000).unwrap();

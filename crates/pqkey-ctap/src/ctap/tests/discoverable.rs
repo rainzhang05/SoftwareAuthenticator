@@ -197,8 +197,8 @@ fn a_non_discoverable_credential_is_sealed_into_its_id() {
             .expect("open")
             .expect("sealed for the relying party");
         let key = match &credential.private_key {
-            PrivateKeyMaterial::Es256 { scalar } => scalar,
-            PrivateKeyMaterial::MlDsa { seed } => seed,
+            PrivateKeyMaterial::P256Scalar { scalar } => scalar,
+            PrivateKeyMaterial::Seed { seed } => seed,
         };
         assert_eq!(plaintext.len(), 66);
         assert_eq!(plaintext[0], alg.identifier() as i8 as u8, "{alg:?}");

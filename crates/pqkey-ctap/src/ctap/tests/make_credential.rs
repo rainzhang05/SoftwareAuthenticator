@@ -173,7 +173,7 @@ fn make_credential_supports_es256() {
     assert_eq!(credential.alg, CoseAlg::ES256);
     assert!(matches!(
         credential.private_key,
-        PrivateKeyMaterial::Es256 { .. }
+        PrivateKeyMaterial::P256Scalar { .. }
     ));
     let public_key = credential.cose_public_key().expect("derive public key");
 

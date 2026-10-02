@@ -1,12 +1,13 @@
-//! Credential keys: reading them back, deriving their public key and
-//! signing with them, each dispatched on the algorithm's [`Scheme`] to the
-//! family that implements it.
+//! Credential keys: generating them, by the kind of key material, and reading
+//! them back, deriving their public key and signing with them, each
+//! dispatched on the algorithm's [`Scheme`] to the family that implements it.
 
 use p256::ecdsa::SigningKey as P256SigningKey;
+use rand_core::TryCryptoRng;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::CryptoError;
-use super::alg::{CoseAlg, Scheme};
+use super::alg::{CoseAlg, KeyKind, Scheme};
 use super::mldsa::MlDsaSeed;
 use super::{ecdsa_p256, mldsa};
 
@@ -39,6 +40,20 @@ impl CredentialSecretKey {
             }
         }
     }
+}
+
+/// Fresh key material of `kind` from `rng`: a P-256 scalar, or 32 random
+/// bytes.
+pub(crate) fn try_generate_key<R: TryCryptoRng + ?Sized>(
+    kind: KeyKind,
+    rng: &mut R,
+) -> Result<Zeroizing<[u8; 32]>, R::Error> {
+    let mut key = Zeroizing::new([0u8; 32]);
+    match kind {
+        KeyKind::P256Scalar => ecdsa_p256::generate_scalar(rng, &mut key)?,
+        KeyKind::Seed => rng.try_fill_bytes(&mut key[..])?,
+    }
+    Ok(key)
 }
 
 /// Reconstruct a credential secret key from stored bytes.

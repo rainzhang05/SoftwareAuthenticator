@@ -458,10 +458,10 @@ fn inconsistent_records_are_rejected_and_not_stored<B: Backend>() {
     mldsa_with_scalar.private_key = PrivateKeyMaterial::generate(CoseAlg::ES256);
 
     let mut zero_scalar = new_record(CoseAlg::ES256);
-    zero_scalar.private_key = PrivateKeyMaterial::Es256 { scalar: [0; 32] };
+    zero_scalar.private_key = PrivateKeyMaterial::P256Scalar { scalar: [0; 32] };
 
     let mut scalar_above_order = new_record(CoseAlg::ES256);
-    scalar_above_order.private_key = PrivateKeyMaterial::Es256 { scalar: [0xff; 32] };
+    scalar_above_order.private_key = PrivateKeyMaterial::P256Scalar { scalar: [0xff; 32] };
 
     let mut cred_protect_zero = new_record(CoseAlg::ES256);
     cred_protect_zero.cred_protect = 0;

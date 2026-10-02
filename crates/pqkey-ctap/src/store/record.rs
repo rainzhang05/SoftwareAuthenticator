@@ -12,18 +12,19 @@
 use core::fmt;
 
 use p256::ecdsa::SigningKey as P256SigningKey;
-use p256::elliptic_curve::Generate;
-use pqkey_mldsa::SEED_LEN;
 use rand_core::TryCryptoRng;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::crypto::credential_key::try_generate_key;
 use crate::{
-    CoseAlg, CredentialSecretKey, CryptoError, try_cose_public_key,
+    CoseAlg, CredentialSecretKey, CryptoError, KeyKind, try_cose_public_key,
     try_credential_secret_from_bytes,
 };
 
-/// The private key of a credential, in its most compact form.
+/// The private key of a credential, in its most compact form: one variant
+/// per [`KeyKind`], and each algorithm keeps the kind [`CoseAlg::key_kind`]
+/// names.
 ///
 /// ML-DSA keys are kept as the 32-byte FIPS 204 key-generation seed `ξ`, not as
 /// the 2,560–4,896-byte expanded secret key.  The seed determines the whole key
@@ -39,16 +40,17 @@ use crate::{
 /// disagrees with its secret.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub enum PrivateKeyMaterial {
-    /// A P-256 private scalar, big-endian, for COSE algorithm ES256.
-    Es256 {
+    /// A P-256 private scalar, big-endian ([`KeyKind::P256Scalar`]).
+    P256Scalar {
         /// The scalar.  It must be non-zero and below the P-256 group order.
         scalar: [u8; 32],
     },
-    /// The FIPS 204 key-generation seed of an ML-DSA key.  The parameter set is
-    /// not part of the material; it comes from the owning record's `alg`.
-    MlDsa {
-        /// The seed `ξ`.
-        seed: [u8; SEED_LEN],
+    /// A seed from which the owning record's `alg` derives the key
+    /// ([`KeyKind::Seed`]): for ML-DSA, the FIPS 204 key-generation seed `ξ`,
+    /// which the parameter set of `alg` expands.
+    Seed {
+        /// The seed.
+        seed: [u8; 32],
     },
 }
 
@@ -77,23 +79,9 @@ impl PrivateKeyMaterial {
         alg: CoseAlg,
         rng: &mut R,
     ) -> Result<Self, R::Error> {
-        Ok(match alg {
-            CoseAlg::ES256 => {
-                // `SecretKey` generation only yields scalars in [1, n), so the
-                // material is valid by construction.
-                let secret = p256::SecretKey::try_generate_from_rng(rng)?;
-                let mut encoded = secret.to_bytes();
-                let mut scalar = [0u8; 32];
-                scalar.copy_from_slice(&encoded);
-                encoded.as_mut_slice().zeroize();
-                PrivateKeyMaterial::Es256 { scalar }
-            }
-            CoseAlg::MLDSA44 | CoseAlg::MLDSA65 | CoseAlg::MLDSA87 => {
-                let mut seed = [0u8; SEED_LEN];
-                rng.try_fill_bytes(&mut seed)?;
-                PrivateKeyMaterial::MlDsa { seed }
-            }
-        })
+        let kind = alg.key_kind();
+        let key = try_generate_key(kind, rng)?;
+        Ok(Self::from_bytes(kind, &key))
     }
 
     /// [`Self::try_generate`] for tests and tools that cannot go on without a
@@ -107,31 +95,37 @@ impl PrivateKeyMaterial {
         Self::try_generate(alg).expect("the operating system's random number generator failed")
     }
 
-    /// Whether this material is the right kind of key for `alg`.
-    pub(crate) fn matches(&self, alg: CoseAlg) -> bool {
-        matches!(
-            (alg, self),
-            (CoseAlg::ES256, PrivateKeyMaterial::Es256 { .. })
-                | (
-                    CoseAlg::MLDSA44 | CoseAlg::MLDSA65 | CoseAlg::MLDSA87,
-                    PrivateKeyMaterial::MlDsa { .. }
-                )
-        )
+    /// The kind of key material this is.
+    pub fn kind(&self) -> KeyKind {
+        match self {
+            PrivateKeyMaterial::P256Scalar { .. } => KeyKind::P256Scalar,
+            PrivateKeyMaterial::Seed { .. } => KeyKind::Seed,
+        }
+    }
+
+    /// Key material of `kind` holding `bytes`.  The bytes are not checked
+    /// here: an out-of-range P-256 scalar is found where a record is
+    /// validated.
+    pub(crate) fn from_bytes(kind: KeyKind, bytes: &[u8; 32]) -> Self {
+        match kind {
+            KeyKind::P256Scalar => PrivateKeyMaterial::P256Scalar { scalar: *bytes },
+            KeyKind::Seed => PrivateKeyMaterial::Seed { seed: *bytes },
+        }
+    }
+
+    /// The key bytes, whatever their kind.
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        match self {
+            PrivateKeyMaterial::P256Scalar { scalar } => scalar,
+            PrivateKeyMaterial::Seed { seed } => seed,
+        }
     }
 }
 
 /// Constant-time with respect to the key bytes.
 impl PartialEq for PrivateKeyMaterial {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (PrivateKeyMaterial::Es256 { scalar: a }, PrivateKeyMaterial::Es256 { scalar: b }) => {
-                bool::from(a[..].ct_eq(&b[..]))
-            }
-            (PrivateKeyMaterial::MlDsa { seed: a }, PrivateKeyMaterial::MlDsa { seed: b }) => {
-                bool::from(a[..].ct_eq(&b[..]))
-            }
-            _ => false,
-        }
+        self.kind() == other.kind() && bool::from(self.as_bytes()[..].ct_eq(&other.as_bytes()[..]))
     }
 }
 
@@ -141,11 +135,12 @@ impl Eq for PrivateKeyMaterial {}
 impl fmt::Debug for PrivateKeyMaterial {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PrivateKeyMaterial::Es256 { .. } => {
-                f.debug_struct("Es256").field("scalar", &Redacted).finish()
-            }
-            PrivateKeyMaterial::MlDsa { .. } => {
-                f.debug_struct("MlDsa").field("seed", &Redacted).finish()
+            PrivateKeyMaterial::P256Scalar { .. } => f
+                .debug_struct("P256Scalar")
+                .field("scalar", &Redacted)
+                .finish(),
+            PrivateKeyMaterial::Seed { .. } => {
+                f.debug_struct("Seed").field("seed", &Redacted).finish()
             }
         }
     }
@@ -228,15 +223,10 @@ impl CredentialRecord {
     ///
     /// Errors as [`Self::keypair`] does.
     pub fn secret_key(&self) -> Result<CredentialSecretKey, CryptoError> {
-        if !self.private_key.matches(self.alg) {
+        if self.private_key.kind() != self.alg.key_kind() {
             return Err(CryptoError::KeyTypeMismatch);
         }
-        match &self.private_key {
-            PrivateKeyMaterial::Es256 { scalar: bytes }
-            | PrivateKeyMaterial::MlDsa { seed: bytes } => {
-                try_credential_secret_from_bytes(self.alg, bytes)
-            }
-        }
+        try_credential_secret_from_bytes(self.alg, self.private_key.as_bytes())
     }
 
     /// Derive the CBOR-encoded COSE_Key of the credential's public key from
@@ -569,12 +559,16 @@ mod tests {
     fn generated_material_matches_its_algorithm() {
         for alg in ALL_ALGS {
             let material = PrivateKeyMaterial::generate(alg);
-            assert!(material.matches(alg), "{alg:?}");
+            assert_eq!(material.kind(), alg.key_kind(), "{alg:?}");
             for other in ALL_ALGS {
                 let same_family = (alg == CoseAlg::ES256) == (other == CoseAlg::ES256);
-                assert_eq!(material.matches(other), same_family, "{alg:?} vs {other:?}");
+                assert_eq!(
+                    material.kind() == other.key_kind(),
+                    same_family,
+                    "{alg:?} vs {other:?}"
+                );
             }
-            if let PrivateKeyMaterial::Es256 { scalar } = &material {
+            if let PrivateKeyMaterial::P256Scalar { scalar } = &material {
                 assert!(p256::SecretKey::from_slice(scalar).is_ok());
             }
         }
@@ -612,7 +606,7 @@ mod tests {
             (CoseAlg::MLDSA87, ParamSet::MLDSA87),
         ] {
             let record = record(alg);
-            let PrivateKeyMaterial::MlDsa { seed } = &record.private_key else {
+            let PrivateKeyMaterial::Seed { seed } = &record.private_key else {
                 panic!("ML-DSA record must hold a seed");
             };
             let (public_key, _) = try_keypair_from_seed(param_set, seed).unwrap();
@@ -624,7 +618,7 @@ mod tests {
     #[test]
     fn es256_material_is_the_raw_scalar() {
         let record = record(CoseAlg::ES256);
-        let PrivateKeyMaterial::Es256 { scalar } = &record.private_key else {
+        let PrivateKeyMaterial::P256Scalar { scalar } = &record.private_key else {
             panic!("ES256 record must hold a scalar");
         };
         let signing_key = P256SigningKey::from_slice(scalar).unwrap();
@@ -658,7 +652,7 @@ mod tests {
     fn out_of_range_es256_scalar_is_rejected() {
         for scalar in [[0u8; 32], [0xff; 32]] {
             let mut record = record(CoseAlg::ES256);
-            record.private_key = PrivateKeyMaterial::Es256 { scalar };
+            record.private_key = PrivateKeyMaterial::P256Scalar { scalar };
             assert_eq!(record.keypair().err(), Some(CryptoError::InvalidKey));
         }
     }
@@ -688,8 +682,8 @@ mod tests {
         changed.user_display_name = None;
         assert_ne!(original, changed);
 
-        let es256 = PrivateKeyMaterial::Es256 { scalar: [1; 32] };
-        let mldsa = PrivateKeyMaterial::MlDsa { seed: [1; 32] };
+        let es256 = PrivateKeyMaterial::P256Scalar { scalar: [1; 32] };
+        let mldsa = PrivateKeyMaterial::Seed { seed: [1; 32] };
         assert_ne!(es256, mldsa, "same bytes, different key types");
     }
 
@@ -704,7 +698,7 @@ mod tests {
             user_name: None,
             user_display_name: None,
             alg: CoseAlg::ES256,
-            private_key: PrivateKeyMaterial::Es256 {
+            private_key: PrivateKeyMaterial::P256Scalar {
                 scalar: [secret; 32],
             },
             cred_random_with_uv: [secret; 32],

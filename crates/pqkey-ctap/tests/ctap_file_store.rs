@@ -345,7 +345,8 @@ fn self_attestation_verifies_with_the_credential_key() {
 /// A fixed-size placeholder certificate; the engine returns the chain as
 /// stored and never parses it.
 fn attestation_record(certificate_len: usize) -> (AttestationRecord, VerifyingKey) {
-    let PrivateKeyMaterial::Es256 { scalar } = PrivateKeyMaterial::generate(CoseAlg::ES256) else {
+    let PrivateKeyMaterial::P256Scalar { scalar } = PrivateKeyMaterial::generate(CoseAlg::ES256)
+    else {
         unreachable!()
     };
     let verifying_key = *SigningKey::from_slice(&scalar).unwrap().verifying_key();

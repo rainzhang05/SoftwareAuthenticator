@@ -34,7 +34,7 @@ impl CtapApp<'_> {
         let mut plaintext = Zeroizing::new([0u8; SEALED_PLAINTEXT_LENGTH]);
         plaintext[0] = alg as u8;
         plaintext[1] = record.cred_protect;
-        plaintext[2..34].copy_from_slice(private_key_bytes(&record.private_key));
+        plaintext[2..34].copy_from_slice(record.private_key.as_bytes());
         plaintext[34..].copy_from_slice(&seed[..]);
         let sealed = self
             .store
@@ -95,7 +95,7 @@ const NON_DISCOVERABLE_MARKER: u8 = 0x00;
 const SEALED_MARKER: u8 = 0x02;
 
 /// What a sealed credential ID holds: the COSE algorithm as a signed byte, the
-/// credProtect level, the 32-byte private key (a P-256 scalar or an ML-DSA
+/// credProtect level, the 32-byte private key material (a P-256 scalar or a
 /// seed), and the 32-byte random seed of its hmac-secret CredRandom values
 /// (see [`derive_sealed_cred_randoms`]).
 const SEALED_PLAINTEXT_LENGTH: usize = 66;
@@ -124,13 +124,6 @@ fn sealed_associated_data(rp_id: &str) -> Vec<u8> {
     associated_data.extend_from_slice(SEALED_ID_CONTEXT);
     associated_data.extend_from_slice(&Sha256::digest(rp_id.as_bytes()));
     associated_data
-}
-
-fn private_key_bytes(private_key: &PrivateKeyMaterial) -> &[u8; 32] {
-    match private_key {
-        PrivateKeyMaterial::Es256 { scalar } => scalar,
-        PrivateKeyMaterial::MlDsa { seed } => seed,
-    }
 }
 
 /// Derive a sealed credential's hmac-secret CredRandom values from the random
@@ -177,18 +170,9 @@ fn sealed_credential(
     }
     let (key, seed) = rest.split_at(32);
     let seed: &[u8; 32] = seed.try_into().ok()?;
+    let key: &[u8; 32] = key.try_into().ok()?;
     let alg = CoseAlg::try_from(i32::from(*alg as i8)).ok()?;
-    let mut private_key = match alg {
-        CoseAlg::ES256 => PrivateKeyMaterial::Es256 { scalar: [0; 32] },
-        CoseAlg::MLDSA44 | CoseAlg::MLDSA65 | CoseAlg::MLDSA87 => {
-            PrivateKeyMaterial::MlDsa { seed: [0; 32] }
-        }
-    };
-    match &mut private_key {
-        PrivateKeyMaterial::Es256 { scalar: bytes } | PrivateKeyMaterial::MlDsa { seed: bytes } => {
-            bytes.copy_from_slice(key);
-        }
-    }
+    let private_key = PrivateKeyMaterial::from_bytes(alg.key_kind(), key);
     let mut credential = CredentialRecord {
         credential_id: credential_id.to_vec(),
         rp_id: rp_id.to_owned(),

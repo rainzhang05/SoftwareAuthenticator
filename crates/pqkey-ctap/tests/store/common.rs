@@ -83,8 +83,8 @@ pub fn with_created_at(record: &CredentialRecord, created_at: u64) -> Credential
 pub fn attestation_record(certificates: &[usize]) -> AttestationRecord {
     AttestationRecord {
         private_key: match PrivateKeyMaterial::generate(CoseAlg::ES256) {
-            PrivateKeyMaterial::Es256 { scalar } => scalar,
-            PrivateKeyMaterial::MlDsa { .. } => unreachable!(),
+            PrivateKeyMaterial::P256Scalar { scalar } => scalar,
+            PrivateKeyMaterial::Seed { .. } => unreachable!(),
         },
         certificate_chain: certificates
             .iter()
