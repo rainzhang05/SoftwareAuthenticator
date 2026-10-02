@@ -2,13 +2,13 @@
 //! them back, deriving their public key and signing with them, each
 //! dispatched on the algorithm's [`Scheme`] to the family that implements it.
 
+use core::fmt;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use rand_core::TryCryptoRng;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::CryptoError;
 use super::alg::{CoseAlg, KeyKind, Scheme};
-use super::mldsa::MlDsaSeed;
 use super::{ecdsa_p256, mldsa};
 
 /// A credential's signing key, named by its key type: algorithms that share
@@ -18,7 +18,7 @@ pub enum CredentialSecretKey {
     /// An ML-DSA key held as its 32-byte FIPS 204 seed `ξ`, the form stored
     /// credentials use.  Signing expands the seed directly, so no expanded
     /// secret key encoding is produced or decoded.
-    MlDsa(MlDsaSeed),
+    MlDsa(Seed),
     /// A P-256 private key, for ECDSA.
     P256(P256SigningKey),
 }
@@ -40,6 +40,43 @@ impl CredentialSecretKey {
             }
         }
     }
+}
+
+/// The 32-byte seed a credential key is kept as ([`KeyKind::Seed`]), from
+/// which its algorithm derives the key: for ML-DSA, the FIPS 204
+/// key-generation seed `ξ`.
+///
+/// Zeroized on drop; its `Debug` output is redacted.
+pub struct Seed(Zeroizing<[u8; 32]>);
+
+impl Seed {
+    /// Wrap a seed.  The caller remains responsible for zeroizing `seed`'s
+    /// own copy.
+    pub fn new(seed: [u8; 32]) -> Self {
+        Seed(Zeroizing::new(seed))
+    }
+
+    /// Borrow the seed bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Seed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Seed(<redacted>)")
+    }
+}
+
+/// The seed whose bytes are `bytes`.  Stored keys of [`KeyKind::Seed`] are
+/// seeds; an expanded secret key is never stored, so it is not accepted
+/// either.
+///
+/// Returns [`CryptoError::InvalidKey`] unless `bytes` is exactly 32 bytes.
+fn seed(bytes: &[u8]) -> Result<Seed, CryptoError> {
+    <[u8; 32]>::try_from(bytes)
+        .map(Seed::new)
+        .map_err(|_| CryptoError::InvalidKey)
 }
 
 /// Fresh key material of `kind` from `rng`: a P-256 scalar, or 32 random
@@ -70,7 +107,7 @@ pub fn try_credential_secret_from_bytes(
 ) -> Result<CredentialSecretKey, CryptoError> {
     match alg.scheme() {
         Scheme::EcdsaP256Sha256 => ecdsa_p256::signing_key(bytes).map(CredentialSecretKey::P256),
-        Scheme::MlDsa(_) => mldsa::seed(bytes).map(CredentialSecretKey::MlDsa),
+        Scheme::MlDsa(_) => seed(bytes).map(CredentialSecretKey::MlDsa),
     }
 }
 
@@ -193,7 +230,7 @@ mod tests {
             let seed = [0x3c; SEED_LEN];
             let (pk, _) = pqkey_mldsa::try_keypair_from_seed(ps, &seed).expect("keygen");
 
-            let key = CredentialSecretKey::MlDsa(MlDsaSeed::new(seed));
+            let key = CredentialSecretKey::MlDsa(Seed::new(seed));
             assert_eq!(key.secret_bytes().as_slice(), &seed[..]);
             let rendered = format!("{key:?}");
             assert!(
