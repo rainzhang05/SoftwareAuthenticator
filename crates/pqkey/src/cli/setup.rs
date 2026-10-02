@@ -214,8 +214,8 @@ fn check_caller(state_dir: &Path) -> io::Result<()> {
     if unistd::geteuid().is_root() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "run `pqkey setup` as the user who uses the key, not as root; it prints the one \
-             command that needs root",
+            "run `pqkey setup` as the user who uses the key, not as root; it asks for sudo \
+             when it needs root",
         ));
     }
     if state_dir != default_state_dir() {
