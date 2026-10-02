@@ -2,7 +2,7 @@
 # Install pqkey from this clone and set it up, in one go:
 #
 #   ./install.sh          asks once, then does everything
-#   ./install.sh --yes    does not ask (it still offers to set a PIN)
+#   ./install.sh --yes    does not ask to go ahead (a PIN it still asks for)
 #
 # 1. Installs what building needs and is missing: a C linker and curl, with
 #    the system's package manager (sudo), and Rust, with rustup.
@@ -10,7 +10,7 @@
 #    where every shell finds it, this one included.
 # 3. Runs `pqkey setup`: the udev rules and the uhid module (sudo), and a
 #    systemd user service that starts the key with your session. It ends by
-#    offering to set the key's PIN.
+#    setting the key's PIN.
 #
 # Nothing needs a new terminal or a new login afterwards. Run it again after
 # `git pull` to update: it rebuilds pqkey and restarts the key with it.
@@ -33,10 +33,13 @@ fail() {
   exit 1
 }
 
+[ "$(uname -s)" = Linux ] || fail "pqkey runs on Linux only"
+[ "$(id -u)" != 0 ] || fail "run it as the user who will use the key, not as root; it asks for sudo when it needs to"
+
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-  green=$'\e[1;32m' red=$'\e[1;31m' reset=$'\e[0m'
+  bold=$'\e[1m' green=$'\e[1;32m' red=$'\e[1;31m' reset=$'\e[0m'
 else
-  green='' red='' reset=''
+  bold='' green='' red='' reset=''
 fi
 
 # What the commands print goes here, and is shown only when one fails.
@@ -73,9 +76,6 @@ quietly() {
   fi
 }
 
-[ "$(uname -s)" = Linux ] || fail "pqkey runs on Linux only"
-[ "$(id -u)" != 0 ] || fail "run it as the user who will use the key, not as root; it asks for sudo when it needs to"
-
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 pqkey=/usr/local/bin/pqkey
 have_rust() { command -v cargo >/dev/null || [ -x "$cargo_home/bin/cargo" ]; }
@@ -84,15 +84,19 @@ missing=()
 command -v cc >/dev/null || missing+=(linker)
 have_rust || command -v curl >/dev/null || missing+=(curl)
 
-echo "This installs pqkey, a FIDO2 security key in software, for $(id -un):"
-[ ${#missing[@]} = 0 ] || echo "  - with your package manager (sudo): ${missing[*]/linker/a C linker}"
-have_rust || echo "  - Rust, with rustup (https://rustup.rs), in $cargo_home"
-echo "  - pqkey, built from this clone (a few minutes), in $pqkey (sudo)"
-echo "  - if not done yet, with sudo: udev rules for the key, and the uhid module at boot"
-echo "  - a systemd user service that starts the key with your session"
+tools=("${missing[@]/linker/a C linker}")
+have_rust || tools+=("Rust (rustup)")
+printf '\n%spqkey%s, a FIDO2 security key in software\n\n' "$bold" "$reset"
+echo "This sets it up for $(id -un):"
+[ ${#tools[@]} = 0 ] || echo "  - what building needs: $(printf '%s, ' "${tools[@]}" | sed 's/, $//')"
+echo "  - pqkey, built from this clone, in $(dirname "$pqkey")"
+echo "  - access to /dev/uhid for the key: udev rules and the uhid module"
+echo "  - the key, started now and with every login, and its PIN"
+echo
+echo "It needs your password once, for sudo."
 if ! $yes; then
   [ -t 0 ] || fail "no terminal to ask on; run it with --yes"
-  read -r -p "Go ahead? [Y/n] " answer
+  read -r -p "Continue? [Y/n] " answer
   case $answer in [Nn]*) exit 0 ;; esac
 fi
 
