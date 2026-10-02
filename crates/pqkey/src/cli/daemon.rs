@@ -378,7 +378,7 @@ fn warn_group_membership() {
     #[cfg(target_os = "linux")]
     let groups = unistd::getgroups().unwrap_or_default();
     #[cfg(not(target_os = "linux"))]
-    let groups: Vec<nix::unistd::Gid> = Vec::new();
+    let groups: Vec<unistd::Gid> = Vec::new();
     let in_group = plugdev_gid.is_some_and(|gid| groups.contains(&gid) || unistd::getegid() == gid);
     if in_group {
         errln!(
