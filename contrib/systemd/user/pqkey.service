@@ -1,49 +1,20 @@
 # systemd user unit for pqkey, the ML-DSA software authenticator.
 #
-# The authenticator is a security key for your own desktop session: your
-# browser uses it, and its credentials live in your home directory, so it runs
-# under your user service manager rather than as a system service. It uses the
-# same state directory as the pqkey CLI does by default, $XDG_DATA_HOME/pqkey,
-# or ~/.local/share/pqkey when XDG_DATA_HOME is unset. If you set
-# XDG_DATA_HOME in your shell, set it for the user manager as well (see
-# environment.d(5)), or the two will use different directories.
+# install.sh, through "pqkey setup", installs this unit with ExecStart naming
+# the installed binary, and starts it. It runs under your user service manager:
+# the key belongs to your desktop session, and its state lives in
+# $XDG_DATA_HOME/pqkey (~/.local/share/pqkey). If you set XDG_DATA_HOME in
+# your shell, set it for the user manager too (environment.d(5)).
 #
-# Setup: install.sh, through "pqkey setup", installs this unit, with ExecStart
-# naming the pqkey binary it runs from, and starts it. By hand:
-#   1. Install contrib/udev/70-pqkey.rules as described in that file, add
-#      yourself to its group, and log in again.
-#   2. Install the binary where this unit expects it:
-#        sudo install -m 755 target/release/pqkey /usr/local/bin/pqkey
-#   3. Install and start the unit:
-#        install -D -m 644 pqkey.service ~/.config/systemd/user/pqkey.service
-#        systemctl --user daemon-reload
-#        systemctl --user enable --now pqkey.service
-#
-# User presence: every registration, sign-in and reset shows a desktop
-# notification with Approve and Deny buttons, sent to the notification server
-# of your desktop over the D-Bus session bus. The service needs nothing extra
-# for that:
-#   - It finds the session bus through DBUS_SESSION_BUS_ADDRESS, which the user
-#     service manager passes to its services where the session bus is the
-#     per-user bus at $XDG_RUNTIME_DIR/bus (dbus-user-session or dbus-broker,
-#     the default on current distributions), and without it at
-#     $XDG_RUNTIME_DIR/bus itself. Where the desktop instead starts a bus of
-#     its own per login (dbus-launch), import its address into the user
-#     manager from the desktop session, before a request comes in:
-#        systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS
-#   - It connects anew for each request, so it may start before the desktop
-#     does and keeps working across logging out and in again.
-#   - The notification server must support action buttons, as GNOME Shell,
-#     KDE Plasma and dunst do.
-# Without a session bus or a suitable notification server every request is
-# denied, never approved, and the log says why:
-#   journalctl --user -u pqkey
-# Do not add --presence auto-approve here: it approves everything without
-# asking, so any program running as you could use your passkeys unnoticed.
-#
-# Once the unit is installed, "pqkey start" and "pqkey stop" start and stop
-# it, "pqkey status" reports it, and "pqkey pin", "pqkey passkeys" and
-# "pqkey reset" manage the running key over CTAP.
+# Every registration, sign-in and reset is approved in a desktop notification,
+# sent over the D-Bus session bus. The user manager passes the bus's address
+# where it is the per-user bus, as on current distributions. Where the desktop
+# starts a bus of its own per login, import its address from the session:
+#   systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS
+# Without a bus or a notification server with buttons, every request is
+# denied, and `journalctl --user -u pqkey` says why. Never add
+# --presence auto-approve here: it lets any program running as you use your
+# passkeys unnoticed.
 
 [Unit]
 Description=pqkey ML-DSA software authenticator (virtual FIDO security key)
