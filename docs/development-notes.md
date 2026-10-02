@@ -60,15 +60,18 @@ else has to change.
    `crypto/ecdsa.rs` and `crypto/mldsa.rs` are. ECDSA on a new curve needs a
    `Curve` variant, a module for the curve next to `crypto/ecdsa_p384.rs`, a
    case in `tests/residue.rs` and, for keys kept as a seed, known answers in
-   `crypto/ecdsa.rs`. A new type of key needs a `CredentialSecretKey` variant. Keys kept in a new form need a `KeyKind`, a
-   `PrivateKeyMaterial` variant and a key type in `store/codec.rs`.
+   `crypto/ecdsa.rs`. A new type of key needs a `CredentialSecretKey`
+   variant. Keys kept in a new form need a `KeyKind`, a `PrivateKeyMaterial`
+   variant and a key type in `store/codec.rs`.
 3. Build and run clippy, and handle every match they point to, among them
    the test verifier in `crypto/verify.rs`, which pqkey's tests and the fuzz
    targets reach through pqkey-ctap's `test-support` feature. A check at
    compile time says if the algorithm does not fit a sealed credential ID.
 4. Run the tests. The table-driven ones cover the new algorithm, and the
    known-answer tests of the table, of getInfo and of the CLI say what to
-   add to them.
+   add to them. If `UNSUPPORTED_ALGORITHMS` in `fuzz/src/requests.rs` lists
+   the algorithm, the fuzz crate's tests fail: replace it there with an
+   identifier the key does not support.
 5. Outside Rust, add it to `ALGORITHMS` in `tests/e2e/ctap.py` and to
    `test_get_info.py`, to `NAMES` in `tests/browser/q.py` and
    `tests/browser/index.html`, to the `fido2-token -I` line that
