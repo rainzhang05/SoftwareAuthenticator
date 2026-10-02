@@ -70,7 +70,7 @@ enum Kept {
     Seed(&'static str),
 }
 
-const CASES: [Case; 3] = [
+const CASES: [Case; 4] = [
     Case {
         alg: CoseAlg::ES256,
         order: "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
@@ -116,6 +116,18 @@ const CASES: [Case; 3] = [
         },
         kept: Kept::Seed("P-521"),
         key: [0xA5; 32],
+    },
+    Case {
+        alg: CoseAlg::ES256K,
+        order: "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+        digest: digest::<Sha256>,
+        hmac: hmac::<Sha256>,
+        multiply: |scalar| {
+            let secret = k256::SecretKey::from_slice(scalar).expect("a scalar below n");
+            coordinates(secret.public_key().to_sec1_point(false).as_bytes())
+        },
+        kept: Kept::Seed("secp256k1"),
+        key: [0xC3; 32],
     },
 ];
 

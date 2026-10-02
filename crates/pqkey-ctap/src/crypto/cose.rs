@@ -28,6 +28,8 @@ pub(crate) const CRV_P256: i32 = 1;
 pub(crate) const CRV_P384: i32 = 2;
 /// Curve 3, P-521 (RFC 9053 §7.1).
 pub(crate) const CRV_P521: i32 = 3;
+/// Curve 8, secp256k1 (RFC 8812 §3.1).
+pub(crate) const CRV_SECP256K1: i32 = 8;
 
 /// Key type 7, AKP: an Algorithm Key Pair, whose algorithm determines its
 /// format (RFC 9964).

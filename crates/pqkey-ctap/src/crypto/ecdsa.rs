@@ -5,8 +5,8 @@
 //! Ecdsa-Sig-Value" (WebAuthn Level 3 §6.5.5).
 //!
 //! Each curve's own types live in a module of its own,
-//! [`super::ecdsa_p256`], [`super::ecdsa_p384`] and [`super::ecdsa_p521`];
-//! this one holds what the curves share.
+//! [`super::ecdsa_p256`], [`super::ecdsa_p384`], [`super::ecdsa_p521`] and
+//! [`super::ecdsa_secp256k1`]; this one holds what the curves share.
 
 use p256::elliptic_curve::bigint::{NonZero, U640, Uint};
 use p256::elliptic_curve::sec1::{Coordinates, ModulusSize};
@@ -16,13 +16,13 @@ use zeroize::Zeroizing;
 
 use super::CryptoError;
 use super::alg::CoseAlg;
-use super::cose::{CRV_P256, CRV_P384, CRV_P521, try_ec2_key};
+use super::cose::{CRV_P256, CRV_P384, CRV_P521, CRV_SECP256K1, try_ec2_key};
 use super::credential_key::Seed;
 
 /// The curves the authenticator signs ECDSA over.  Each is used with one
 /// hash only: "SHA-256 be used only with curve P-256, SHA-384 be used only
 /// with curve P-384, and SHA-512 be used only with curve P-521" (RFC 9053
-/// §2.1).
+/// §2.1), and secp256k1 with SHA-256, as ES256K (RFC 8812 §3.2).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum Curve {
     /// P-256 with SHA-256: ES256 and ESP256.  Keys are kept as their scalar.
@@ -33,6 +33,9 @@ pub(crate) enum Curve {
     /// P-521 with SHA-512: ES512 and ESP512.  Keys are kept as a seed the
     /// scalar is derived from ([`derive_scalar`]).
     P521,
+    /// secp256k1 with SHA-256: ES256K.  Keys are kept as a seed the scalar is
+    /// derived from ([`derive_scalar`]).
+    Secp256k1,
 }
 
 impl Curve {
@@ -43,6 +46,7 @@ impl Curve {
             Curve::P256 => CRV_P256,
             Curve::P384 => CRV_P384,
             Curve::P521 => CRV_P521,
+            Curve::Secp256k1 => CRV_SECP256K1,
         }
     }
 }
@@ -58,7 +62,8 @@ const DERIVATION_CONTEXT: &[u8] = b"pqkey/v1/ecdsa-key/";
 ///
 /// * returned_bits are the first L = ⌈(N + 64) / 8⌉ bytes of
 ///   SHAKE256("pqkey/v1/ecdsa-key/" ‖ `curve_name` ‖ `seed`), where N is the
-///   bit length of the group order n: 56 bytes for P-384 and 74 for P-521.
+///   bit length of the group order n: 56 bytes for P-384, 74 for P-521 and
+///   40 for secp256k1.
 ///   The standard asks for N + 64 bits, which whole bytes round up to: P-521
 ///   takes 592 bits, 7 more than its 585, which only bring d closer still to
 ///   uniform.
@@ -128,7 +133,7 @@ pub(crate) fn try_cose_key<Size: ModulusSize>(
 mod tests {
     use super::*;
     use crate::crypto::os_rng;
-    use crate::crypto::{ecdsa_p384, ecdsa_p521};
+    use crate::crypto::{ecdsa_p384, ecdsa_p521, ecdsa_secp256k1};
     use crate::{try_cose_public_key, try_credential_secret_from_bytes};
     use ciborium::value::{Integer, Value};
     use p256::Sec1Point;
@@ -156,6 +161,8 @@ mod tests {
     ///         "01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     ///         "fa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409",
     ///         16)),
+    ///     "secp256k1": (ec.SECP256K1(), int(
+    ///         "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 16)),
     /// }
     /// for name, (curve, n) in CURVES.items():
     ///     for seed in (bytes(range(32)), b"\xff" * 32):
@@ -177,6 +184,10 @@ mod tests {
         };
         let p521: Scalar = |seed| {
             let key = ecdsa_p521::signing_key(seed).expect("a key");
+            key.to_bytes().to_vec()
+        };
+        let secp256k1: Scalar = |seed| {
+            let key = ecdsa_secp256k1::signing_key(seed).expect("a key");
             key.to_bytes().to_vec()
         };
         let low: [u8; 32] = core::array::from_fn(|i| i as u8);
@@ -212,6 +223,22 @@ mod tests {
                 "0101686d78af55fa464edd47c619b8e9ed430a1d0dd8c0d98625b0fcedbedd4882316da2f8875fe1906afbedbb67867b7ce5b98baf048643edb01fbd972976f6a152",
                 "01d7dfd079e91f3e73eba8a44bcc240c9c756d3d91aadc1f87a760550687334ffc9cf788f004a2a81e153137b551032c388f9879b0f74ed6d7cd24491fca83a51ee3",
                 "003ed01a131b47f3ca6ba624861973892a1fa5ef7654d0575583dd04002b8b37262e9b35f36d8307ee0aedd5727208b33aafdd75618acfcd66c9787b2e2f612b902b",
+            ),
+            (
+                CoseAlg::ES256K,
+                secp256k1,
+                low,
+                "63169330aa84589e10b9ccfeaa26d0fae51697298616efe973071c83dfeda532",
+                "a66e3920ca909e2bf2f76f36aee686c0f140102f556acc3f464ec1495c3c116e",
+                "74544c936f37312d66f018f8de67a6232183635c805bd8df059f5de3ae9811c1",
+            ),
+            (
+                CoseAlg::ES256K,
+                secp256k1,
+                [0xff; 32],
+                "41ff7944657b55e7e24f373a1a85019b745088c3f38c9f12ab1664ad61289d22",
+                "1cb22ad377e2960d66996c81247f0d1a4f6c83d1ad7ecbedfda3c825fc6f6374",
+                "3bbb57e604dd56538844c7085660af3f15ed2eb6212d6d7240ec791610ce9f16",
             ),
         ] {
             assert_eq!(hex(&scalar(&Seed::new(seed))), d, "{alg:?}: d");

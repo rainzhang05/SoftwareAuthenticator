@@ -34,12 +34,14 @@ ES384 = -35
 ESP384 = -51
 ES512 = -36
 ESP512 = -52
+ES256K = -47
 
 COSE_KTY_EC2 = 2
 COSE_KTY_AKP = 7
 COSE_CRV_P256 = 1
 COSE_CRV_P384 = 2
 COSE_CRV_P521 = 3
+COSE_CRV_SECP256K1 = 8
 
 # The AAGUID pqkey uses unless --aaguid is given.
 DEFAULT_AAGUID = bytes.fromhex("5931e805a1664eb7845a7f6aa93d9cd8")
@@ -125,7 +127,8 @@ class AuthData:
 
 def _check_ec2(crv: int, coordinate_size: int) -> Callable[[Mapping[int, Any]], None]:
     """An EC2 key on curve `crv` with both coordinates, each
-    `coordinate_size` bytes (WebAuthn Level 3, 5.8.5)."""
+    `coordinate_size` bytes (WebAuthn Level 3, 5.8.5; RFC 8812, 3.1 for
+    secp256k1)."""
 
     def check(cose_key: Mapping[int, Any]) -> None:
         assert cose_key.get(1) == COSE_KTY_EC2
@@ -201,6 +204,7 @@ ALGORITHMS = (
     Algorithm(ESP384, "ESP384", _check_ec2(COSE_CRV_P384, 48), _verify_ecdsa(ec.SECP384R1(), hashes.SHA384())),
     Algorithm(ES512, "ES512", _check_ec2(COSE_CRV_P521, 66), _verify_ecdsa(ec.SECP521R1(), hashes.SHA512())),
     Algorithm(ESP512, "ESP512", _check_ec2(COSE_CRV_P521, 66), _verify_ecdsa(ec.SECP521R1(), hashes.SHA512())),
+    Algorithm(ES256K, "ES256K", _check_ec2(COSE_CRV_SECP256K1, 32), _verify_ecdsa(ec.SECP256K1(), hashes.SHA256())),
 )
 BY_IDENTIFIER = {algorithm.identifier: algorithm for algorithm in ALGORITHMS}
 NAMES = {algorithm.identifier: algorithm.name for algorithm in ALGORITHMS}

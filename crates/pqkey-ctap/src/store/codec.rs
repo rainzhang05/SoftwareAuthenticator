@@ -12,7 +12,8 @@
 //!    5  user_display_name       text string, omitted when absent
 //!    6  alg                     integer: COSE algorithm identifier, one of CoseAlg's
 //!    7  private key type        unsigned integer: 1 = P-256 scalar, 2 = seed (ML-DSA's ξ,
-//!                               or an ECDSA key's seed on P-384 or P-521)
+//!                               or an ECDSA key's seed on P-384, P-521 or
+//!                               secp256k1)
 //!    8  private key             byte string, 32 bytes
 //!    9  cred_random_with_uv     byte string, 32 bytes
 //!   10  cred_random_without_uv  byte string, 32 bytes
@@ -59,7 +60,7 @@ use crate::{CoseAlg, KeyKind};
 const KEY_TYPE_P256_SCALAR: u64 = 1;
 /// Private key type 2: a seed the record's `alg` derives its key from
 /// ([`KeyKind::Seed`]), for ML-DSA the FIPS 204 seed `ξ` and for ECDSA on
-/// P-384 and P-521 the seed its scalar is derived from.
+/// P-384, P-521 and secp256k1 the seed its scalar is derived from.
 const KEY_TYPE_SEED: u64 = 2;
 
 /// Encode a credential record with the given creation order.

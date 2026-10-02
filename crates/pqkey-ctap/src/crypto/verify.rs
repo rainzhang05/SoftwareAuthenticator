@@ -58,6 +58,7 @@ enum EcCurve {
     P256,
     P384,
     P521,
+    Secp256k1,
 }
 
 /// The hashes ECDSA signs a message's digest of.
@@ -69,8 +70,9 @@ enum Hash {
 
 /// The COSE identifier of `alg` and what its keys and signatures are.  The
 /// identifiers are IANA's (RFC 9053 §2.1 for ES256, ES384 and ES512, RFC 9864
-/// §2.1 for ESP256, ESP384 and ESP512, RFC 9964 §8.1 for ML-DSA), and so are
-/// the curves (RFC 9053 §7.1).  An ECDSA coordinate is as long as the curve's
+/// §2.1 for ESP256, ESP384 and ESP512, RFC 8812 §3.2 for ES256K, RFC 9964
+/// §8.1 for ML-DSA), and so are the curves (RFC 9053 §7.1, RFC 8812 §3.1 for
+/// secp256k1).  An ECDSA coordinate is as long as the curve's
 /// field elements, an ML-DSA public key as FIPS 204's Table 2 says.
 fn expected(alg: CoseAlg) -> (i64, Expected) {
     let p256_sha256 = Expected::Ecdsa {
@@ -98,6 +100,15 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
         CoseAlg::ESP384 => (-51, p384_sha384),
         CoseAlg::ES512 => (-36, p521_sha512),
         CoseAlg::ESP512 => (-52, p521_sha512),
+        CoseAlg::ES256K => (
+            -47,
+            Expected::Ecdsa {
+                crv: 8,
+                length: 32,
+                curve: EcCurve::Secp256k1,
+                hash: Hash::Sha256,
+            },
+        ),
         CoseAlg::MLDSA44 => (
             -48,
             Expected::MlDsa {
@@ -138,7 +149,10 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
 /// the compressed point form.  Keys with algorithm -52 (ESP512) MUST NOT use
 /// the compressed point form." (§5.8.5)  ESP256 is "ECDSA using P-256 curve
 /// and SHA-256", and ESP384 and ESP512 the same with P-384 and SHA-384 and
-/// with P-521 and SHA-512 (RFC 9864 §2.1).
+/// with P-521 and SHA-512 (RFC 9864 §2.1).  ES256K is ECDSA using secp256k1
+/// and SHA-256, and "Implementations need to check that the key type is
+/// "EC" for JOSE or "EC2" (2) for COSE and that the curve of the key is
+/// secp256k1 when creating or verifying a signature." (RFC 8812 §3.2)
 /// So x and y are as long as the curve's field elements and form a point on
 /// it, and "the sig value MUST be encoded as an ASN.1 DER Ecdsa-Sig-Value"
 /// (§6.5.5) over the message's digest with the algorithm's hash, which this
@@ -213,6 +227,15 @@ fn verify_ecdsa(
                 .map_err(|_| malformed("x and y are not a point on P-521".into()))?;
             p521::ecdsa::Signature::from_der(signature)
                 .is_ok_and(|signature| key.verify_prehash(digest, &signature).is_ok())
+        }
+        // `k256` accepts only signatures whose s is in the lower half of the
+        // group order, a rule of Bitcoin's that ECDSA does not have, so s is
+        // normalized first.
+        EcCurve::Secp256k1 => {
+            let key = k256::ecdsa::VerifyingKey::from_sec1_bytes(point)
+                .map_err(|_| malformed("x and y are not a point on secp256k1".into()))?;
+            k256::ecdsa::Signature::from_der(signature)
+                .is_ok_and(|signature| key.verify_prehash(digest, &signature.normalize_s()).is_ok())
         }
     };
     if verified {

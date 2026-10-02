@@ -10,7 +10,7 @@ use zeroize::{Zeroize, Zeroizing};
 use super::CryptoError;
 use super::alg::{CoseAlg, KeyKind, Scheme};
 use super::ecdsa::Curve;
-use super::{ecdsa_p256, ecdsa_p384, ecdsa_p521, mldsa};
+use super::{ecdsa_p256, ecdsa_p384, ecdsa_p521, ecdsa_secp256k1, mldsa};
 
 /// A credential's signing key, named by its key type: algorithms that share
 /// a key type share a variant.
@@ -30,6 +30,10 @@ pub enum CredentialSecretKey {
     /// form stored credentials use: ES512 and ESP512.  Each use derives the
     /// scalar anew.
     P521(Seed),
+    /// An ECDSA key on secp256k1 held as the seed its scalar is derived
+    /// from, the form stored credentials use: ES256K.  Each use derives the
+    /// scalar anew.
+    Secp256k1(Seed),
 }
 
 impl CredentialSecretKey {
@@ -42,7 +46,8 @@ impl CredentialSecretKey {
         match self {
             CredentialSecretKey::MlDsa(seed)
             | CredentialSecretKey::P384(seed)
-            | CredentialSecretKey::P521(seed) => Zeroizing::new(seed.as_bytes().to_vec()),
+            | CredentialSecretKey::P521(seed)
+            | CredentialSecretKey::Secp256k1(seed) => Zeroizing::new(seed.as_bytes().to_vec()),
             CredentialSecretKey::P256(sk) => {
                 let mut scalar = sk.to_bytes();
                 let out = Zeroizing::new(scalar.to_vec());
@@ -121,6 +126,7 @@ pub fn try_credential_secret_from_bytes(
         Scheme::Ecdsa(Curve::P256) => ecdsa_p256::signing_key(bytes).map(CredentialSecretKey::P256),
         Scheme::Ecdsa(Curve::P384) => seed(bytes).map(CredentialSecretKey::P384),
         Scheme::Ecdsa(Curve::P521) => seed(bytes).map(CredentialSecretKey::P521),
+        Scheme::Ecdsa(Curve::Secp256k1) => seed(bytes).map(CredentialSecretKey::Secp256k1),
         Scheme::MlDsa(_) => seed(bytes).map(CredentialSecretKey::MlDsa),
     }
 }
@@ -142,6 +148,9 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
         (CredentialSecretKey::P521(seed), Scheme::Ecdsa(Curve::P521)) => {
             ecdsa_p521::cose_public_key(alg, seed)
         }
+        (CredentialSecretKey::Secp256k1(seed), Scheme::Ecdsa(Curve::Secp256k1)) => {
+            ecdsa_secp256k1::cose_public_key(alg, seed)
+        }
         (CredentialSecretKey::MlDsa(seed), Scheme::MlDsa(param_set)) => {
             mldsa::cose_public_key(alg, param_set, seed)
         }
@@ -150,6 +159,7 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
             CredentialSecretKey::P256(_)
             | CredentialSecretKey::P384(_)
             | CredentialSecretKey::P521(_)
+            | CredentialSecretKey::Secp256k1(_)
             | CredentialSecretKey::MlDsa(_),
             Scheme::Ecdsa(_) | Scheme::MlDsa(_),
         ) => Err(CryptoError::KeyTypeMismatch),
@@ -159,10 +169,11 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
 /// Sign `auth_data || client_data_hash` as `alg` signs, and return the
 /// signature in the encoding WebAuthn requires for `alg`:
 ///
-/// * **ES256**, **ESP256**, **ES384**, **ESP384**, **ES512** and **ESP512**:
-///   ECDSA over the algorithm's curve with its hash, P-256 with SHA-256,
-///   P-384 with SHA-384 or P-521 with SHA-512, and an RFC 6979 nonce, as an
-///   ASN.1 DER `Ecdsa-Sig-Value` (WebAuthn Level 3 §6.5.5).
+/// * **ES256**, **ESP256**, **ES384**, **ESP384**, **ES512**, **ESP512** and
+///   **ES256K**: ECDSA over the algorithm's curve with its hash, P-256 with
+///   SHA-256, P-384 with SHA-384, P-521 with SHA-512 or secp256k1 with
+///   SHA-256, and an RFC 6979 nonce, as an ASN.1 DER `Ecdsa-Sig-Value`
+///   (WebAuthn Level 3 §6.5.5).
 /// * **ML-DSA-44/65/87**: the raw FIPS 204 signature bytes.
 ///
 /// Returns [`CryptoError::KeyTypeMismatch`] when `alg` signs with another
@@ -185,6 +196,9 @@ pub fn try_sign_challenge(
         (CredentialSecretKey::P521(seed), Scheme::Ecdsa(Curve::P521)) => {
             ecdsa_p521::sign(seed, &msg)
         }
+        (CredentialSecretKey::Secp256k1(seed), Scheme::Ecdsa(Curve::Secp256k1)) => {
+            ecdsa_secp256k1::sign(seed, &msg)
+        }
         (CredentialSecretKey::MlDsa(seed), Scheme::MlDsa(param_set)) => {
             mldsa::sign(param_set, seed, &msg)
         }
@@ -193,6 +207,7 @@ pub fn try_sign_challenge(
             CredentialSecretKey::P256(_)
             | CredentialSecretKey::P384(_)
             | CredentialSecretKey::P521(_)
+            | CredentialSecretKey::Secp256k1(_)
             | CredentialSecretKey::MlDsa(_),
             Scheme::Ecdsa(_) | Scheme::MlDsa(_),
         ) => Err(CryptoError::KeyTypeMismatch),
@@ -365,6 +380,7 @@ mod tests {
             (CoseAlg::ESP384, 2, 48),
             (CoseAlg::ES512, 3, 66),
             (CoseAlg::ESP512, 3, 66),
+            (CoseAlg::ES256K, 8, 32),
         ];
         let ecdsa: Vec<CoseAlg> = CoseAlg::ALL
             .into_iter()
@@ -588,6 +604,32 @@ mod tests {
         }
     }
 
+    /// ECDSA does not ask for low-S signatures, though `k256` makes and
+    /// accepts only those: the verifier takes an ES256K signature with either
+    /// s.
+    #[test]
+    fn the_verifier_accepts_es256k_signatures_with_a_high_s() {
+        let (cose_key, secret_key) = generated(CoseAlg::ES256K);
+        let signature =
+            try_sign_challenge(CoseAlg::ES256K, &secret_key, b"auth", b"hash").expect("sign");
+        let low = k256::ecdsa::Signature::from_der(&signature).expect("DER");
+        let (r, s) = low.split_scalars();
+        let high = k256::ecdsa::Signature::from_scalars(r, -s).expect("a signature");
+        assert_ne!(high, low);
+        assert_eq!(high.normalize_s(), low);
+        for signature in [low, high] {
+            assert_eq!(
+                verify_signature(
+                    CoseAlg::ES256K,
+                    &cose_key,
+                    b"authhash",
+                    signature.to_der().as_bytes()
+                ),
+                Ok(())
+            );
+        }
+    }
+
     /// A key that is not of its algorithm's shape is malformed, whatever the
     /// signature.
     #[test]
@@ -597,6 +639,7 @@ mod tests {
         let (esp256, _) = generated(CoseAlg::ESP256);
         let (es384, _) = generated(CoseAlg::ES384);
         let (es512, _) = generated(CoseAlg::ES512);
+        let (es256k, _) = generated(CoseAlg::ES256K);
         let (mldsa65, _) = generated(CoseAlg::MLDSA65);
         let mut not_a_map = Vec::new();
         into_writer(&Value::Array(Vec::new()), &mut not_a_map).expect("encode");
@@ -657,6 +700,16 @@ mod tests {
                 CoseAlg::ES512,
                 "a 65-byte x",
                 with_label(&es512, -2, Value::Bytes(vec![0x01; 65])),
+            ),
+            (
+                CoseAlg::ES256K,
+                "crv P-256",
+                with_label(&es256k, -1, int(1)),
+            ),
+            (
+                CoseAlg::ES256K,
+                "a point off the curve",
+                with_label(&es256k, -3, Value::Bytes(vec![0; 32])),
             ),
             (CoseAlg::MLDSA65, "kty EC2", with_label(&mldsa65, 1, int(2))),
             (

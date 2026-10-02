@@ -907,6 +907,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "k256"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93f50113171a713f4a4231ef82eb26703607139b35dcb56241f0ceab2ae1f7d8"
+dependencies = [
+ "cpubits",
+ "ecdsa",
+ "elliptic-curve",
+ "primeorder",
+ "sha2",
+ "signature",
+ "wnaf",
+]
+
+[[package]]
 name = "keccak"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1183,6 +1198,7 @@ dependencies = [
  "ciborium",
  "getrandom",
  "hmac",
+ "k256",
  "log",
  "p256",
  "p384",
