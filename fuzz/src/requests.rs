@@ -537,3 +537,18 @@ fn sha2_256(data: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     sha2::Sha256::digest(data).into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every algorithm offered as unsupported is one the authenticator does
+    /// not support, so requests offering only those have none to choose.
+    #[test]
+    fn unsupported_algorithms_do_not_parse() {
+        for alg in UNSUPPORTED_ALGORITHMS {
+            let parsed = i32::try_from(alg).map(CoseAlg::try_from);
+            assert!(!matches!(parsed, Ok(Ok(_))), "{alg} is supported");
+        }
+    }
+}
