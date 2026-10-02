@@ -16,9 +16,9 @@ use pqkey::{
     attestation::IdentityConfig,
     service::{AttestationConfig, IdentityStrings, open_credential_store},
 };
-use pqkey_ctap::CoseAlg;
 use pqkey_ctap::ctap::{AttestationMode, CtapApp, InterruptFlag, presence::AutoApprove};
 use pqkey_ctap::store::{CredentialStore, FileStore};
+use pqkey_ctap::{CoseAlg, verify_signature};
 use x509_parser::{certificate::X509Certificate, prelude::FromDer};
 
 /// An identity as `--manufacturer`, `--product`, `--country` and `--aaguid`
@@ -253,16 +253,17 @@ fn a_provisioned_certificate_is_only_used_when_selected() {
     // The credential public key from the attested credential data.
     let length = usize::from(u16::from_be_bytes([auth_data[53], auth_data[54]]));
     let cose_key: Value = ciborium::de::from_reader(&auth_data[55 + length..]).unwrap();
-    let mut sec1 = vec![0x04];
-    sec1.extend(bytes(get(&cose_key, &int(-2))));
-    sec1.extend(bytes(get(&cose_key, &int(-3))));
-    let public_key = VerifyingKey::from_sec1_bytes(&sec1).unwrap();
+    let mut cose_key_bytes = Vec::new();
+    ciborium::ser::into_writer(&cose_key, &mut cose_key_bytes).unwrap();
     let mut signed = auth_data;
     signed.extend_from_slice(&client_data_hash);
-    let signature = Signature::from_der(&bytes(get(&att_stmt, &text("sig")))).unwrap();
-    public_key
-        .verify(&signed, &signature)
-        .expect("self attestation verifies with the credential key");
+    verify_signature(
+        CoseAlg::ES256,
+        &cose_key_bytes,
+        &signed,
+        &bytes(get(&att_stmt, &text("sig"))),
+    )
+    .expect("self attestation verifies with the credential key");
 
     drop(app);
     assert_eq!(

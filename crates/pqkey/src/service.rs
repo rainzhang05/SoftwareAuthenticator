@@ -448,10 +448,8 @@ mod tests {
     use super::*;
     use crate::{test_support::TempDir, tests::socket_device, uhid, uhid::CTAPHID_FRAME_LEN};
     use ciborium::value::{Integer, Value};
-    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
-    use pqkey_ctap::CoseAlg;
     use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest};
-    use pqkey_mldsa::{ParamSet, PublicKey};
+    use pqkey_ctap::{CoseAlg, verify_signature};
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,
@@ -769,24 +767,10 @@ mod tests {
         signature: &[u8],
     ) {
         let message = [auth_data, client_data_hash].concat();
-        match alg {
-            CoseAlg::ES256 => {
-                let mut sec1 = vec![0x04];
-                sec1.extend(bytes(get(public_key, int(-2))));
-                sec1.extend(bytes(get(public_key, int(-3))));
-                let key = VerifyingKey::from_sec1_bytes(&sec1).unwrap();
-                let signature = Signature::from_der(signature).unwrap();
-                key.verify(&message, &signature).expect("ES256 signature");
-            }
-            CoseAlg::MLDSA87 => {
-                let key = PublicKey(bytes(get(public_key, int(-1))));
-                assert!(
-                    pqkey_mldsa::verify(ParamSet::MLDSA87, &key, &message, signature),
-                    "ML-DSA-87 signature"
-                );
-            }
-            other => panic!("no verifier for {other:?}"),
-        }
+        let mut cose_key = Vec::new();
+        ciborium::into_writer(public_key, &mut cose_key).unwrap();
+        verify_signature(alg, &cose_key, &message, signature)
+            .unwrap_or_else(|err| panic!("{alg:?}: {err}"));
     }
 
     /// Registration and authentication through the whole stack: uhid events,

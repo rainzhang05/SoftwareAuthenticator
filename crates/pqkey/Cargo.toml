@@ -22,7 +22,7 @@ clap = { version = "4", features = ["derive", "env"] }
 clap-num = "1.0"
 log.workspace = true
 env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
-pqkey-ctap = { path = "../pqkey-ctap" }
+pqkey-ctap.workspace = true
 # CTAP2 requests and responses of the command line's client for the running
 # key.
 ciborium.workspace = true
@@ -48,6 +48,9 @@ futures-lite = { version = "2", default-features = false, features = ["std"] }
 async-io = "2"
 
 [dev-dependencies]
+# The test verifier, which checks the signatures of the full-stack and
+# attestation tests.
+pqkey-ctap = { workspace = true, features = ["test-support"] }
 # CBOR requests and responses in the CTAP-level tests.
 # Reads the attestation certificate back independently of rcgen, which wrote it.
 x509-parser = "0.18"
