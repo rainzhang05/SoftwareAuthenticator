@@ -776,8 +776,9 @@ mod tests {
     /// Registration and authentication with every algorithm through the
     /// whole stack: uhid events, CTAPHID messages of several packets each way,
     /// the worker thread, the engine and its file store. ML-DSA-87 has the
-    /// longest responses there are. Every signature must verify with the public key the registration
-    /// returned, and the assertion must name the credential it created.
+    /// longest responses there are. Every signature must verify with the
+    /// public key the registration returned, and the assertion must name the
+    /// credential it created.
     #[test]
     fn registers_and_authenticates_through_the_whole_stack() {
         let dir = TempDir::new("full-stack");
