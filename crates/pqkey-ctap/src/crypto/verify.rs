@@ -11,8 +11,9 @@
 use core::fmt;
 
 use ciborium::value::Value;
-use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+use p256::ecdsa::signature::hazmat::PrehashVerifier;
 use pqkey_mldsa::{ParamSet, PublicKey};
+use sha2::{Digest, Sha256, Sha384};
 
 use crate::CoseAlg;
 
@@ -38,21 +39,56 @@ impl std::error::Error for VerificationError {}
 
 /// The public key and signatures of an algorithm.
 enum Expected {
-    /// An EC2 key (kty 2) on P-256 (crv 1) with 32-byte x and y coordinates,
-    /// and ECDSA signatures with SHA-256, DER-encoded.
-    EcdsaP256,
+    /// An EC2 key (kty 2) on curve `crv`, whose x and y coordinates are
+    /// `length` bytes each, and ECDSA signatures over the message's `hash`,
+    /// DER-encoded, which `curve` checks.
+    Ecdsa {
+        crv: i64,
+        length: usize,
+        curve: EcCurve,
+        hash: Hash,
+    },
     /// An AKP key (kty 7) whose `pub` is an ML-DSA public key of `length`
     /// bytes, and ML-DSA signatures with `param_set` and an empty context.
     MlDsa { param_set: ParamSet, length: usize },
 }
 
+/// The elliptic curves of the ECDSA algorithms.
+enum EcCurve {
+    P256,
+    P384,
+}
+
+/// The hashes ECDSA signs a message's digest of.
+enum Hash {
+    Sha256,
+    Sha384,
+}
+
 /// The COSE identifier of `alg` and what its keys and signatures are.  The
-/// identifiers are IANA's (RFC 9864 §2.1 for ESP256, RFC 9964 §8.1 for
-/// ML-DSA), the ML-DSA public key lengths FIPS 204's, Table 2.
+/// identifiers are IANA's (RFC 9053 §2.1 for ES256 and ES384, RFC 9864 §2.1
+/// for ESP256, RFC 9964 §8.1 for ML-DSA), and so are the curves (RFC 9053
+/// §7.1).  An ECDSA coordinate is as long as the curve's field elements, an
+/// ML-DSA public key as FIPS 204's Table 2 says.
 fn expected(alg: CoseAlg) -> (i64, Expected) {
+    let p256_sha256 = Expected::Ecdsa {
+        crv: 1,
+        length: 32,
+        curve: EcCurve::P256,
+        hash: Hash::Sha256,
+    };
     match alg {
-        CoseAlg::ES256 => (-7, Expected::EcdsaP256),
-        CoseAlg::ESP256 => (-9, Expected::EcdsaP256),
+        CoseAlg::ES256 => (-7, p256_sha256),
+        CoseAlg::ESP256 => (-9, p256_sha256),
+        CoseAlg::ES384 => (
+            -35,
+            Expected::Ecdsa {
+                crv: 2,
+                length: 48,
+                curve: EcCurve::P384,
+                hash: Hash::Sha384,
+            },
+        ),
         CoseAlg::MLDSA44 => (
             -48,
             Expected::MlDsa {
@@ -83,13 +119,17 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
 /// The key must have the labels its key type requires and no others: "The
 /// COSE_Key-encoded credential public key MUST contain the "alg" parameter
 /// and MUST NOT contain any other OPTIONAL parameters." (WebAuthn Level 3
-/// §6.5.1)  For ES256, "Keys with algorithm -7 (ES256) MUST specify 1
-/// (P-256) as the crv parameter and MUST NOT use the compressed point form."
-/// (§5.8.5)  ESP256 is "ECDSA using P-256 curve and SHA-256" (RFC 9864
-/// §2.1), and "Keys with algorithm -9 (ESP256) MUST NOT use the compressed
-/// point form." (§5.8.5): x and y are 32 bytes each and form a point on the
-/// curve.  For ML-DSA, `pub` has the length of the parameter set's public
-/// key.
+/// §6.5.1)  For ECDSA, "Keys with algorithm -7 (ES256) MUST specify 1
+/// (P-256) as the crv parameter and MUST NOT use the compressed point form.
+/// Keys with algorithm -9 (ESP256) MUST NOT use the compressed point form.
+/// Keys with algorithm -35 (ES384) MUST specify 2 (P-384) as the crv
+/// parameter and MUST NOT use the compressed point form." (§5.8.5)  ESP256
+/// is "ECDSA using P-256 curve and SHA-256" (RFC 9864 §2.1).  So x and y are
+/// as long as the curve's field elements and form a point on it, and "the
+/// sig value MUST be encoded as an ASN.1 DER Ecdsa-Sig-Value" (§6.5.5) over
+/// the message's digest with the algorithm's hash, which this verifier
+/// computes itself.  For ML-DSA, `pub` has the length of the parameter set's
+/// public key.
 pub fn verify_signature(
     alg: CoseAlg,
     cose_key: &[u8],
@@ -99,21 +139,24 @@ pub fn verify_signature(
     let (identifier, expected) = expected(alg);
     let key = Labels::decode(cose_key)?;
     match expected {
-        Expected::EcdsaP256 => {
+        Expected::Ecdsa {
+            crv,
+            length,
+            curve,
+            hash,
+        } => {
             key.exactly(&[1, 3, -1, -2, -3])?;
             key.integer(1, 2)?;
             key.integer(3, identifier)?;
-            key.integer(-1, 1)?;
+            key.integer(-1, crv)?;
             let mut point = vec![0x04];
-            point.extend_from_slice(key.bytes(-2, 32)?);
-            point.extend_from_slice(key.bytes(-3, 32)?);
-            let verifying_key = VerifyingKey::from_sec1_bytes(&point)
-                .map_err(|_| malformed("x and y are not a point on P-256".into()))?;
-            let signature =
-                Signature::from_der(signature).map_err(|_| VerificationError::BadSignature)?;
-            verifying_key
-                .verify(message, &signature)
-                .map_err(|_| VerificationError::BadSignature)
+            point.extend_from_slice(key.bytes(-2, length)?);
+            point.extend_from_slice(key.bytes(-3, length)?);
+            let digest = match hash {
+                Hash::Sha256 => Sha256::digest(message).to_vec(),
+                Hash::Sha384 => Sha384::digest(message).to_vec(),
+            };
+            verify_ecdsa(curve, &point, &digest, signature)
         }
         Expected::MlDsa { param_set, length } => {
             key.exactly(&[1, 3, -1])?;
@@ -126,6 +169,35 @@ pub fn verify_signature(
                 Err(VerificationError::BadSignature)
             }
         }
+    }
+}
+
+/// Check the DER `signature` over `digest` under the SEC1 `point` on
+/// `curve`.  A point off the curve is a malformed key.
+fn verify_ecdsa(
+    curve: EcCurve,
+    point: &[u8],
+    digest: &[u8],
+    signature: &[u8],
+) -> Result<(), VerificationError> {
+    let verified = match curve {
+        EcCurve::P256 => {
+            let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(point)
+                .map_err(|_| malformed("x and y are not a point on P-256".into()))?;
+            p256::ecdsa::Signature::from_der(signature)
+                .is_ok_and(|signature| key.verify_prehash(digest, &signature).is_ok())
+        }
+        EcCurve::P384 => {
+            let key = p384::ecdsa::VerifyingKey::from_sec1_bytes(point)
+                .map_err(|_| malformed("x and y are not a point on P-384".into()))?;
+            p384::ecdsa::Signature::from_der(signature)
+                .is_ok_and(|signature| key.verify_prehash(digest, &signature).is_ok())
+        }
+    };
+    if verified {
+        Ok(())
+    } else {
+        Err(VerificationError::BadSignature)
     }
 }
 

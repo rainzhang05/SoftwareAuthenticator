@@ -4,12 +4,15 @@
 //! `k` must not outlive the signature any more than the key does.  RustCrypto's
 //! `ecdsa` leaves the RFC 6979 nonce in plain locals.  For each curve, this
 //! test recomputes `k` independently (RFC 6979 §3.2 with HMAC over the curve's
-//! hash) and checks that `k`·G gives the signature's r, and that `d`·G is the
-//! public key, so that it looks for the real secrets.  It reads the key,
-//! derives its public key and signs through the engine's public entry points,
-//! then scans the dead stack below the caller for `k`, for the private scalar
-//! `d`, and for a control value nobody computed: each as big-endian bytes and
-//! reversed, the order of crypto-bigint's little-endian limbs.
+//! hash), and for a key kept as a seed it derives the private scalar `d` and
+//! the SHAKE256 output it came from (FIPS 186-5 Appendix A.2.1, as
+//! pqkey-ctap's `ecdsa::derive_scalar` documents).  It checks that `k`·G
+//! gives the signature's r, and that `d`·G is the public key, so that it
+//! looks for the real secrets.  It reads the key, derives its public key and
+//! signs through the engine's public entry points, then scans the dead stack
+//! below the caller for `k`, for `d`, for the SHAKE256 output, and for a
+//! control value nobody computed: each as big-endian bytes and reversed, the
+//! order of crypto-bigint's little-endian limbs.
 //!
 //! It does not look for a newly generated private key: a key returned by
 //! value can leave copies in the frames it passes through on its way to the
@@ -29,7 +32,8 @@ use p256::elliptic_curve::sec1::ToSec1Point;
 use pqkey_ctap::{
     CoseAlg, try_cose_public_key, try_credential_secret_from_bytes, try_sign_challenge,
 };
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha384};
+use shake::{ExtendableOutput, Shake256, Update, XofReader};
 
 const SCAN: usize = 2 * 1024 * 1024;
 
@@ -51,25 +55,53 @@ struct Case {
     /// The affine x and y of the given scalar times the base point, from the
     /// curve's crate.
     multiply: fn(&[u8]) -> Point,
-    /// The key the credential keeps: the private scalar.
+    /// What the credential keeps.
+    kept: Kept,
+    /// The key the credential keeps.
     key: [u8; 32],
 }
 
-const CASES: [Case; 1] = [Case {
-    alg: CoseAlg::ES256,
-    order: "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
-    digest: digest::<Sha256>,
-    hmac: hmac::<Sha256>,
-    multiply: |scalar| {
-        let secret = p256::SecretKey::from_slice(scalar).expect("a scalar below n");
-        coordinates(secret.public_key().to_sec1_point(false).as_bytes())
+/// The form a credential keeps its key in.
+enum Kept {
+    /// The private scalar.
+    Scalar,
+    /// A seed the scalar is derived from, on the curve of this name.
+    Seed(&'static str),
+}
+
+const CASES: [Case; 2] = [
+    Case {
+        alg: CoseAlg::ES256,
+        order: "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+        digest: digest::<Sha256>,
+        hmac: hmac::<Sha256>,
+        multiply: |scalar| {
+            let secret = p256::SecretKey::from_slice(scalar).expect("a scalar below n");
+            coordinates(secret.public_key().to_sec1_point(false).as_bytes())
+        },
+        kept: Kept::Scalar,
+        key: [
+            0x3C, 0xBA, 0x9D, 0xF0, 0xD3, 0x36, 0x09, 0x6C, 0x4F, 0xA2, 0x85, 0x98, 0xFB, 0xDE,
+            0x31, 0x14, 0x77, 0x4A, 0xAD, 0x80, 0xE3, 0xC6, 0xD9, 0x3C, 0x1F, 0x72, 0x55, 0xA8,
+            0x8B, 0xEE, 0xC1, 0x24,
+        ],
     },
-    key: [
-        0x3C, 0xBA, 0x9D, 0xF0, 0xD3, 0x36, 0x09, 0x6C, 0x4F, 0xA2, 0x85, 0x98, 0xFB, 0xDE, 0x31,
-        0x14, 0x77, 0x4A, 0xAD, 0x80, 0xE3, 0xC6, 0xD9, 0x3C, 0x1F, 0x72, 0x55, 0xA8, 0x8B, 0xEE,
-        0xC1, 0x24,
-    ],
-}];
+    Case {
+        alg: CoseAlg::ES384,
+        order: concat!(
+            "ffffffffffffffffffffffffffffffffffffffffffffffff",
+            "c7634d81f4372ddf581a0db248b0a77aecec196accc52973"
+        ),
+        digest: digest::<Sha384>,
+        hmac: hmac::<Sha384>,
+        multiply: |scalar| {
+            let secret = p384::SecretKey::from_slice(scalar).expect("a scalar below n");
+            coordinates(secret.public_key().to_sec1_point(false).as_bytes())
+        },
+        kept: Kept::Seed("P-384"),
+        key: [0x5A; 32],
+    },
+];
 
 #[inline(never)]
 fn wipe() {
@@ -112,7 +144,7 @@ where
 {
     let mut mac = <Hmac<D> as KeyInit>::new_from_slice(key).expect("any key length");
     for part in parts {
-        mac.update(part);
+        Mac::update(&mut mac, part);
     }
     mac.finalize().into_bytes().to_vec()
 }
@@ -136,15 +168,43 @@ fn strip(bytes: &[u8]) -> &[u8] {
     &bytes[zeros..]
 }
 
+/// The big-endian `bytes` as an integer.
+fn integer(bytes: &[u8]) -> U640 {
+    let mut padded = [0u8; U640::BYTES];
+    padded[U640::BYTES - bytes.len()..].copy_from_slice(bytes);
+    U640::from_be_slice(&padded)
+}
+
+/// `value` mod `modulus`.
+fn modulo(value: &U640, modulus: &U640) -> U640 {
+    value.rem_vartime(&NonZero::new(*modulus).expect("a modulus is not zero"))
+}
+
 /// `x` mod `n`, both big-endian, without leading zeros.
 fn reduce(x: &[u8], n: &[u8]) -> Vec<u8> {
-    let wide = |bytes: &[u8]| {
-        let mut padded = [0u8; U640::BYTES];
-        padded[U640::BYTES - bytes.len()..].copy_from_slice(bytes);
-        U640::from_be_slice(&padded)
+    strip(&modulo(&integer(x), &integer(n)).to_be_bytes()).to_vec()
+}
+
+/// The private scalar d of `case`'s key on a curve of order `n`, as long as
+/// `n`, and for a key kept as a seed the SHAKE256 output d was derived from:
+/// the first ⌈(N + 64) / 8⌉ bytes of SHAKE256("pqkey/v1/ecdsa-key/" ‖ curve
+/// ‖ seed), N the bit length of `n`, read as an integer c, and
+/// d = (c mod (n − 1)) + 1.
+fn private_scalar(case: &Case, n: &[u8]) -> (Vec<u8>, Option<Vec<u8>>) {
+    let Kept::Seed(curve) = case.kept else {
+        return (case.key.to_vec(), None);
     };
-    let n = NonZero::new(wide(n)).expect("n is not zero");
-    strip(&wide(x).rem_vartime(&n).to_be_bytes()).to_vec()
+    let bits = n.len() * 8 - n[0].leading_zeros() as usize;
+    let mut returned_bits = vec![0; (bits + 64).div_ceil(8)];
+    let mut shake = Shake256::default();
+    shake.update(b"pqkey/v1/ecdsa-key/");
+    shake.update(curve.as_bytes());
+    shake.update(&case.key);
+    shake.finalize_xof().read(&mut returned_bits);
+    let n_minus_one = integer(n).wrapping_sub(&U640::ONE);
+    let d = modulo(&integer(&returned_bits), &n_minus_one).wrapping_add(&U640::ONE);
+    let d = d.to_be_bytes().as_ref()[U640::BYTES - n.len()..].to_vec();
+    (d, Some(returned_bits))
 }
 
 /// The r of the DER `Ecdsa-Sig-Value` `signature`, without leading zeros.
@@ -226,7 +286,7 @@ fn rfc6979_k(case: &Case, q: &[u8], x: &[u8], h1: &[u8]) -> Vec<u8> {
 fn check(case: &Case) -> Vec<String> {
     let alg = case.alg;
     let order = unhex(case.order);
-    let d = case.key.to_vec();
+    let (d, returned_bits) = private_scalar(case, &order);
     let (auth_data, client_data_hash) = ([0x11u8; 37], [0x22u8; 32]);
     let message = [&auth_data[..], &client_data_hash[..]].concat();
     let k = rfc6979_k(case, &order, &d, &(case.digest)(&message));
@@ -237,6 +297,7 @@ fn check(case: &Case) -> Vec<String> {
     // nothing behind that a scan would find.
     let needles: Vec<(&str, Vec<u8>, Vec<u8>)> = [("k", k), ("d", d), ("control", control)]
         .into_iter()
+        .chain(returned_bits.map(|bytes| ("SHAKE256 output", bytes)))
         .map(|(name, bytes)| (name, bytes.iter().rev().copied().collect(), bytes))
         .collect();
 

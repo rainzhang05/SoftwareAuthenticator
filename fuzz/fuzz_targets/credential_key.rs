@@ -5,7 +5,7 @@
 //! The bytes come from the credential store, which the engine treats as
 //! untrusted: "a corrupted or truncated record must produce an error, never a
 //! panic".  Invariants: no panic, and a signature verifies under the public
-//! key of the key that made it (which for ES256 includes that it is DER
+//! key of the key that made it (which for ECDSA includes that it is DER
 //! encoded).
 //!
 //! Input layout: the algorithm the key is read for (byte 0) and the algorithm

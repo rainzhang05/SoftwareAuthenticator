@@ -20,6 +20,7 @@ pub(crate) mod cose;
 pub(crate) mod credential_key;
 pub(crate) mod ecdsa;
 pub(crate) mod ecdsa_p256;
+pub(crate) mod ecdsa_p384;
 pub(crate) mod hkdf;
 pub(crate) mod mldsa;
 pub(crate) mod pin_uv;
@@ -53,7 +54,8 @@ pub enum CryptoError {
     InvalidPublicKey,
     /// The COSE_Key structure could not be serialized to CBOR.
     CborEncoding,
-    /// Key derivation (HKDF) failed.
+    /// Key derivation failed: HKDF, or the derivation of an ECDSA key's scalar
+    /// from its seed.
     KeyDerivation,
     /// Signature generation failed.
     SigningFailed,

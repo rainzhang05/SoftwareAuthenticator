@@ -10,7 +10,7 @@ use zeroize::{Zeroize, Zeroizing};
 use super::CryptoError;
 use super::alg::{CoseAlg, KeyKind, Scheme};
 use super::ecdsa::Curve;
-use super::{ecdsa_p256, mldsa};
+use super::{ecdsa_p256, ecdsa_p384, mldsa};
 
 /// A credential's signing key, named by its key type: algorithms that share
 /// a key type share a variant.
@@ -20,19 +20,25 @@ pub enum CredentialSecretKey {
     /// credentials use.  Signing expands the seed directly, so no expanded
     /// secret key encoding is produced or decoded.
     MlDsa(Seed),
-    /// A P-256 private key, for ECDSA.
+    /// A P-256 private key, for ECDSA: ES256 and ESP256.
     P256(P256SigningKey),
+    /// An ECDSA key on P-384 held as the seed its scalar is derived from, the
+    /// form stored credentials use: ES384.  Each use derives the scalar
+    /// anew.
+    P384(Seed),
 }
 
 impl CredentialSecretKey {
     /// Serialize the secret key into a byte buffer suitable for storage.
     ///
     /// The returned buffer is wrapped in [`Zeroizing`], so the copy is wiped
-    /// when the caller drops it.  An ML-DSA key serializes to its 32-byte
-    /// seed, which [`try_credential_secret_from_bytes`] accepts back.
+    /// when the caller drops it.  A key held as a seed serializes to its 32
+    /// bytes, which [`try_credential_secret_from_bytes`] accepts back.
     pub fn secret_bytes(&self) -> Zeroizing<Vec<u8>> {
         match self {
-            CredentialSecretKey::MlDsa(seed) => Zeroizing::new(seed.as_bytes().to_vec()),
+            CredentialSecretKey::MlDsa(seed) | CredentialSecretKey::P384(seed) => {
+                Zeroizing::new(seed.as_bytes().to_vec())
+            }
             CredentialSecretKey::P256(sk) => {
                 let mut scalar = sk.to_bytes();
                 let out = Zeroizing::new(scalar.to_vec());
@@ -45,7 +51,8 @@ impl CredentialSecretKey {
 
 /// The 32-byte seed a credential key is kept as ([`KeyKind::Seed`]), from
 /// which its algorithm derives the key: for ML-DSA, the FIPS 204
-/// key-generation seed `ξ`.
+/// key-generation seed `ξ`, and for ECDSA, the seed its scalar is derived
+/// from.
 ///
 /// Zeroized on drop; its `Debug` output is redacted.
 pub struct Seed(Zeroizing<[u8; 32]>);
@@ -101,13 +108,14 @@ pub(crate) fn try_generate_key<R: TryCryptoRng + ?Sized>(
 ///
 /// Returns [`CryptoError::InvalidKey`] when the bytes are not a valid key for
 /// the requested algorithm: a P-256 scalar (non-zero and below the group
-/// order) or a 32-byte ML-DSA seed.
+/// order) or a 32-byte seed.
 pub fn try_credential_secret_from_bytes(
     alg: CoseAlg,
     bytes: &[u8],
 ) -> Result<CredentialSecretKey, CryptoError> {
     match alg.scheme() {
         Scheme::Ecdsa(Curve::P256) => ecdsa_p256::signing_key(bytes).map(CredentialSecretKey::P256),
+        Scheme::Ecdsa(Curve::P384) => seed(bytes).map(CredentialSecretKey::P384),
         Scheme::MlDsa(_) => seed(bytes).map(CredentialSecretKey::MlDsa),
     }
 }
@@ -123,12 +131,17 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
         (CredentialSecretKey::P256(key), Scheme::Ecdsa(Curve::P256)) => {
             ecdsa_p256::cose_public_key(alg, key)
         }
+        (CredentialSecretKey::P384(seed), Scheme::Ecdsa(Curve::P384)) => {
+            ecdsa_p384::cose_public_key(alg, seed)
+        }
         (CredentialSecretKey::MlDsa(seed), Scheme::MlDsa(param_set)) => {
             mldsa::cose_public_key(alg, param_set, seed)
         }
         // `alg` signs with another type of key.
         (
-            CredentialSecretKey::P256(_) | CredentialSecretKey::MlDsa(_),
+            CredentialSecretKey::P256(_)
+            | CredentialSecretKey::P384(_)
+            | CredentialSecretKey::MlDsa(_),
             Scheme::Ecdsa(_) | Scheme::MlDsa(_),
         ) => Err(CryptoError::KeyTypeMismatch),
     }
@@ -137,7 +150,8 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
 /// Sign `auth_data || client_data_hash` as `alg` signs, and return the
 /// signature in the encoding WebAuthn requires for `alg`:
 ///
-/// * **ES256** and **ESP256**: ECDSA over P-256 with SHA-256 and an RFC 6979
+/// * **ES256**, **ESP256** and **ES384**: ECDSA over the algorithm's curve
+///   with its hash, P-256 with SHA-256 or P-384 with SHA-384, and an RFC 6979
 ///   nonce, as an ASN.1 DER `Ecdsa-Sig-Value` (WebAuthn Level 3 §6.5.5).
 /// * **ML-DSA-44/65/87**: the raw FIPS 204 signature bytes.
 ///
@@ -155,12 +169,17 @@ pub fn try_sign_challenge(
     msg.extend_from_slice(client_data_hash);
     match (sk, alg.scheme()) {
         (CredentialSecretKey::P256(key), Scheme::Ecdsa(Curve::P256)) => ecdsa_p256::sign(key, &msg),
+        (CredentialSecretKey::P384(seed), Scheme::Ecdsa(Curve::P384)) => {
+            ecdsa_p384::sign(seed, &msg)
+        }
         (CredentialSecretKey::MlDsa(seed), Scheme::MlDsa(param_set)) => {
             mldsa::sign(param_set, seed, &msg)
         }
         // `alg` signs with another type of key.
         (
-            CredentialSecretKey::P256(_) | CredentialSecretKey::MlDsa(_),
+            CredentialSecretKey::P256(_)
+            | CredentialSecretKey::P384(_)
+            | CredentialSecretKey::MlDsa(_),
             Scheme::Ecdsa(_) | Scheme::MlDsa(_),
         ) => Err(CryptoError::KeyTypeMismatch),
     }
@@ -172,6 +191,7 @@ mod tests {
     use crate::crypto::verify::{VerificationError, verify_signature};
     use crate::store::{CredentialRecord, PrivateKeyMaterial};
     use ciborium::{de::from_reader, ser::into_writer, value::Integer, value::Value};
+    use core::mem;
     use p256::ecdsa::Signature as P256EcdsaSignature;
     use p256::ecdsa::signature::hazmat::PrehashVerifier;
     use pqkey_mldsa::{SEED_LEN, verify};
@@ -317,9 +337,42 @@ mod tests {
         };
     }
 
-    // ---------------------------------------------------------------------
-    // Fallible APIs return errors rather than panicking
-    // ---------------------------------------------------------------------
+    /// Every ECDSA public key is an EC2 COSE_Key with exactly kty, alg, crv,
+    /// x and y: the curve's crv, and coordinates as long as the curve's field
+    /// elements (RFC 9053 §7.1; WebAuthn Level 3 §5.8.5).  The key reads back
+    /// from what it serializes to.
+    #[test]
+    fn every_ecdsa_key_is_an_ec2_key_on_its_curve() {
+        let int = |value: i64| Value::Integer(Integer::from(value));
+        let curves = [
+            (CoseAlg::ES256, 1, 32),
+            (CoseAlg::ESP256, 1, 32),
+            (CoseAlg::ES384, 2, 48),
+        ];
+        let ecdsa: Vec<CoseAlg> = CoseAlg::ALL
+            .into_iter()
+            .filter(|alg| matches!(alg.scheme(), Scheme::Ecdsa(_)))
+            .collect();
+        assert_eq!(curves.map(|(alg, ..)| alg).as_slice(), ecdsa.as_slice());
+        for (alg, crv, length) in curves {
+            let (cose_key, secret_key) = generated(alg);
+            let Value::Map(entries) = from_reader(cose_key.as_slice()).expect("a COSE_Key") else {
+                panic!("{alg:?}: a COSE_Key is a map");
+            };
+            let labels: Vec<&Value> = entries.iter().map(|(label, _)| label).collect();
+            assert_eq!(labels, [&int(1), &int(3), &int(-1), &int(-2), &int(-3)]);
+            assert_eq!(entries[0].1, int(2), "{alg:?}: kty EC2");
+            assert_eq!(entries[1].1, int(alg.identifier().into()), "{alg:?}");
+            assert_eq!(entries[2].1, int(crv), "{alg:?}: crv");
+            for (_, coordinate) in &entries[3..] {
+                assert_eq!(coordinate.as_bytes().map(Vec::len), Some(length), "{alg:?}");
+            }
+            assert_eq!(secret_key.secret_bytes().len(), 32, "{alg:?}");
+            let reread =
+                try_credential_secret_from_bytes(alg, &secret_key.secret_bytes()).expect("reread");
+            assert_eq!(try_cose_public_key(alg, &reread), Ok(cose_key), "{alg:?}");
+        }
+    }
 
     /// ESP256 is ES256 under its fully specified identifier: the same scalar
     /// gives the same COSE_Key but for its alg.
@@ -341,23 +394,31 @@ mod tests {
         assert_eq!(relabelled, cose_key(CoseAlg::ESP256));
     }
 
+    // ---------------------------------------------------------------------
+    // Fallible APIs return errors rather than panicking
+    // ---------------------------------------------------------------------
+
     #[test]
     fn try_sign_challenge_rejects_mismatched_key_variant() {
         // A stored `alg` that names another type of key than the one on disk,
-        // such as ES256 with an ML-DSA seed or ML-DSA with a P-256 scalar.
-        for alg in CoseAlg::ALL {
-            let (_, key) = generated(alg);
-            for other in CoseAlg::ALL {
-                if other.key_kind() == alg.key_kind() {
+        // such as ES256 with an ML-DSA seed, ML-DSA with a P-256 scalar, or
+        // ES384 with an ML-DSA seed, which is a seed all the same.
+        let keys: Vec<(CoseAlg, CredentialSecretKey)> = CoseAlg::ALL
+            .into_iter()
+            .map(|alg| (alg, generated(alg).1))
+            .collect();
+        for (alg, key) in &keys {
+            for (other, other_key) in &keys {
+                if mem::discriminant(key) == mem::discriminant(other_key) {
                     continue;
                 }
                 assert_eq!(
-                    try_sign_challenge(other, &key, b"auth", b"hash"),
+                    try_sign_challenge(*other, key, b"auth", b"hash"),
                     Err(CryptoError::KeyTypeMismatch),
                     "{alg:?} key, {other:?}"
                 );
                 assert_eq!(
-                    try_cose_public_key(other, &key),
+                    try_cose_public_key(*other, key),
                     Err(CryptoError::KeyTypeMismatch),
                     "{alg:?} key, {other:?}"
                 );
@@ -365,10 +426,11 @@ mod tests {
         }
     }
 
-    /// A stored ML-DSA key is its 32-byte seed. Anything else, a truncated
-    /// or corrupted record or an expanded secret key, is not a key.
+    /// A stored key kept as a seed is its 32 bytes.  Anything else, a
+    /// truncated or corrupted record or an expanded ML-DSA secret key, is not
+    /// a key.
     #[test]
-    fn try_credential_secret_from_bytes_accepts_only_ml_dsa_seeds() {
+    fn try_credential_secret_from_bytes_accepts_only_32_byte_seeds() {
         for alg in CoseAlg::ALL {
             match alg.key_kind() {
                 KeyKind::Seed => {}
@@ -508,6 +570,7 @@ mod tests {
         let int = |value: i64| Value::Integer(Integer::from(value));
         let (es256, _) = generated(CoseAlg::ES256);
         let (esp256, _) = generated(CoseAlg::ESP256);
+        let (es384, _) = generated(CoseAlg::ES384);
         let (mldsa65, _) = generated(CoseAlg::MLDSA65);
         let mut not_a_map = Vec::new();
         into_writer(&Value::Array(Vec::new()), &mut not_a_map).expect("encode");
@@ -551,6 +614,17 @@ mod tests {
                 CoseAlg::ESP256,
                 "crv P-384",
                 with_label(&esp256, -1, int(2)),
+            ),
+            (CoseAlg::ES384, "crv P-256", with_label(&es384, -1, int(1))),
+            (
+                CoseAlg::ES384,
+                "a 47-byte x",
+                with_label(&es384, -2, Value::Bytes(vec![0x11; 47])),
+            ),
+            (
+                CoseAlg::ES384,
+                "a point off the curve",
+                with_label(&es384, -3, Value::Bytes(vec![0; 48])),
             ),
             (CoseAlg::MLDSA65, "kty EC2", with_label(&mldsa65, 1, int(2))),
             (

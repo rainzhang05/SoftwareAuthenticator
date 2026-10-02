@@ -11,7 +11,7 @@
 #
 # python-fido2: CTAPHID transport, CTAP2 commands and the PIN/UV protocols.
 fido2==2.2.1
-# cryptography: independent verification of ES256 and ML-DSA signatures. ML-DSA
+# cryptography: independent verification of ECDSA and ML-DSA signatures. ML-DSA
 # needs 48.0.0 or later, whose wheels are built with OpenSSL's implementation.
 cryptography==50.0.1
 pytest==9.1.1

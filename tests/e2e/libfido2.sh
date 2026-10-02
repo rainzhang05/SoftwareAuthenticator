@@ -6,7 +6,8 @@
 #
 # libfido2 only knows ES256, ES384, RS256 and EdDSA credentials, so ML-DSA and
 # ESP256 are covered by the Python suite instead; `fido2-token -I` prints them
-# as "unknown", and the Python suite checks their exact COSE IDs.
+# as "unknown", and the Python suite checks their exact COSE IDs. ES256 and
+# ES384 credentials are registered and asserted here too.
 # The tests do not reset the authenticator: each registers a non-discoverable
 # credential and asserts with that credential's ID in the allow list, so they do
 # not depend on anything else stored on the key.
@@ -66,25 +67,28 @@ test_token_info() {
   # libfido2 names only the algorithms it implements (print_algorithms in
   # libfido2's tools/token.c); the three ML-DSA parameter sets and ESP256 show
   # up as unknown public-key algorithms.
-  local expected='algorithms: es256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key)'
+  local expected='algorithms: es256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), es384 (public-key)'
   grep -qxF "$expected" <<<"$info" || fail "expected '$expected'"
   grep -qE '^aaguid: 5931e805a1664eb7845a7f6aa93d9cd8$' <<<"$info" || fail "unexpected AAGUID"
   grep -qE '^pin protocols: .*\b1\b' <<<"$info" || fail "PIN/UV auth protocol 1 is not advertised"
   grep -qE '^pin protocols: .*\b2\b' <<<"$info" || fail "PIN/UV auth protocol 2 is not advertised"
 }
 
-test_es256_register_and_assert() {
+# Register a credential of libfido2 type $1 (es256 or es384) and assert with
+# it.
+test_register_and_assert() {
+  local type=$1
   local rp=libfido2.e2e.example
   local cred="$work/cred" pubkey="$work/pubkey.pem" assertion="$work/assertion"
 
   printf '%s\n%s\n%s\n%s\n' "$(random_b64 32)" "$rp" alice "$(random_b64 16)" \
-    | fido2-cred -M -q "$device" es256 >"$cred"
+    | fido2-cred -M -q "$device" "$type" >"$cred"
   cat "$cred"
 
   # Verifies the packed attestation signature (with the x5c certificate if
   # there is one, else as self attestation with the credential key), the
   # RP ID hash and the UP flag, and extracts the credential public key.
-  fido2-cred -V -o "$work/verified" es256 <"$cred"
+  fido2-cred -V -o "$work/verified" "$type" <"$cred"
   sed -n 1p "$work/verified" | cmp -s - <(sed -n 5p "$cred") \
     || fail "fido2-cred -V returned a different credential ID"
   sed -n '2,$p' "$work/verified" >"$pubkey"
@@ -98,18 +102,19 @@ test_es256_register_and_assert() {
 
   # Checks the signature over authData || clientDataHash, the RP ID hash and
   # the UP flag.
-  fido2-assert -V -p "$pubkey" es256 <"$assertion"
+  fido2-assert -V -p "$pubkey" "$type" <"$assertion"
 
   # A different client data hash must not verify with the same signature.
   { printf '%s\n' "$(random_b64 32)"; sed -n '2,4p' "$assertion"; } >"$work/tampered"
-  if fido2-assert -V -p "$pubkey" es256 <"$work/tampered" 2>/dev/null; then
+  if fido2-assert -V -p "$pubkey" "$type" <"$work/tampered" 2>/dev/null; then
     fail "fido2-assert -V accepted a signature over a different client data hash"
   fi
 }
 
 run_test "fido2-token -L lists the virtual key" test_token_list
 run_test "fido2-token -I reports FIDO 2.1, every algorithm and both PIN protocols" test_token_info
-run_test "ES256 fido2-cred -M / -V and fido2-assert -G / -V" test_es256_register_and_assert
+run_test "ES256 fido2-cred -M / -V and fido2-assert -G / -V" test_register_and_assert es256
+run_test "ES384 fido2-cred -M / -V and fido2-assert -G / -V" test_register_and_assert es384
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures libfido2 test(s) failed"

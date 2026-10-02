@@ -42,6 +42,10 @@ use crate::{
 /// sensitive as the expanded key and gets the same protection: it is zeroized
 /// on drop, redacted from `Debug`, and compared in constant time.
 ///
+/// ECDSA keys on P-384 are kept as a 32-byte seed too, from which each use
+/// derives the scalar (FIPS 186-5 Appendix A.2.1), so that their records hold
+/// 32 bytes of key like every other.
+///
 /// The public key is never stored: [`CredentialRecord::cose_public_key`]
 /// derives it from this material, so a record cannot carry a public key that
 /// disagrees with its secret.
@@ -54,7 +58,8 @@ pub enum PrivateKeyMaterial {
     },
     /// A seed from which the owning record's `alg` derives the key
     /// ([`KeyKind::Seed`]): for ML-DSA, the FIPS 204 key-generation seed `ξ`,
-    /// which the parameter set of `alg` expands.
+    /// which the parameter set of `alg` expands, and for ECDSA on P-384, the
+    /// seed the scalar is derived from.
     Seed {
         /// The seed.
         seed: [u8; 32],
@@ -66,7 +71,8 @@ impl PrivateKeyMaterial {
     /// random number generator, getrandom(2) on Linux.
     ///
     /// For ML-DSA this draws only the 32-byte seed `ξ`; the expensive
-    /// expansion happens when the key is first used.  getrandom(2) is a
+    /// expansion happens when the key is first used.  ECDSA on P-384 draws a
+    /// seed as well.  getrandom(2) is a
     /// cryptographically secure generator, but not a random bit generator
     /// approved under NIST SP 800-90A, which FIPS 204 §3.6.1 asks a validated
     /// implementation to use for `ξ` and for hedged signing's `rnd`; that
@@ -186,7 +192,8 @@ pub struct CredentialRecord {
     /// `user.displayName`, if the relying party supplied one.
     pub user_display_name: Option<String>,
     /// The COSE algorithm of the credential key.  It selects the ML-DSA
-    /// parameter set and must agree with the variant of `private_key`.
+    /// parameter set or the ECDSA curve, and must agree with the variant of
+    /// `private_key`.
     #[zeroize(skip)]
     pub alg: CoseAlg,
     /// The credential's private key.
@@ -212,9 +219,9 @@ impl CredentialRecord {
     ///
     /// Prefer this over calling [`Self::secret_key`] and
     /// [`Self::cose_public_key`] separately when both are needed: for a
-    /// P-256 key each of those derives the public key.  (An ML-DSA signing
-    /// key is the seed itself: deriving the public key expands it, and so
-    /// does signing.)
+    /// P-256 key each of those derives the public key.  (A key kept as a seed
+    /// is the seed itself: deriving the public key expands it into the key,
+    /// and so does signing.)
     ///
     /// Returns [`CryptoError::KeyTypeMismatch`] when `alg` and the key material
     /// disagree, and [`CryptoError::InvalidKey`] for an out-of-range P-256
@@ -227,7 +234,7 @@ impl CredentialRecord {
 
     /// Materialise the signing key, ready for [`crate::try_sign_challenge`]
     /// with this record's `alg`.  No public key is derived: signing expands
-    /// an ML-DSA seed itself.
+    /// a seed itself.
     ///
     /// Errors as [`Self::keypair`] does.
     pub fn secret_key(&self) -> Result<CredentialSecretKey, CryptoError> {

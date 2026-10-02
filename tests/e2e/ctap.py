@@ -30,10 +30,12 @@ ML_DSA_44 = -48
 ML_DSA_65 = -49
 ML_DSA_87 = -50
 ESP256 = -9
+ES384 = -35
 
 COSE_KTY_EC2 = 2
 COSE_KTY_AKP = 7
 COSE_CRV_P256 = 1
+COSE_CRV_P384 = 2
 
 # The AAGUID pqkey uses unless --aaguid is given.
 DEFAULT_AAGUID = bytes.fromhex("5931e805a1664eb7845a7f6aa93d9cd8")
@@ -117,20 +119,33 @@ class AuthData:
         assert not self.flags & 0x3A, f"reserved or backup flags set in {self.flags:#04x}"
 
 
-def _check_ec2_p256(cose_key: Mapping[int, Any]) -> None:
-    """An EC2 key on P-256 with both coordinates (WebAuthn Level 3, 5.8.5)."""
-    assert cose_key.get(1) == COSE_KTY_EC2
-    assert cose_key.get(-1) == COSE_CRV_P256
-    assert len(cose_key.get(-2, b"")) == 32 and len(cose_key.get(-3, b"")) == 32
-    assert set(cose_key) == {1, 3, -1, -2, -3}, f"unexpected labels {set(cose_key)}"
+def _check_ec2(crv: int, coordinate_size: int) -> Callable[[Mapping[int, Any]], None]:
+    """An EC2 key on curve `crv` with both coordinates, each
+    `coordinate_size` bytes (WebAuthn Level 3, 5.8.5)."""
+
+    def check(cose_key: Mapping[int, Any]) -> None:
+        assert cose_key.get(1) == COSE_KTY_EC2
+        assert cose_key.get(-1) == crv, f"crv {cose_key.get(-1)} != {crv}"
+        assert len(cose_key.get(-2, b"")) == coordinate_size
+        assert len(cose_key.get(-3, b"")) == coordinate_size
+        assert set(cose_key) == {1, 3, -1, -2, -3}, f"unexpected labels {set(cose_key)}"
+
+    return check
 
 
-def _verify_es256(cose_key: Mapping[int, Any], message: bytes, signature: bytes) -> None:
-    """ECDSA P-256/SHA-256 with a DER signature."""
-    x = int.from_bytes(cose_key[-2], "big")
-    y = int.from_bytes(cose_key[-3], "big")
-    key = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key()
-    key.verify(signature, message, ec.ECDSA(hashes.SHA256()))
+def _verify_ecdsa(
+    curve: ec.EllipticCurve, hash_algorithm: hashes.HashAlgorithm
+) -> Callable[[Mapping[int, Any], bytes, bytes], None]:
+    """ECDSA on `curve` over the message's `hash_algorithm` digest, the
+    signature DER-encoded (WebAuthn Level 3, 6.5.5)."""
+
+    def verify(cose_key: Mapping[int, Any], message: bytes, signature: bytes) -> None:
+        x = int.from_bytes(cose_key[-2], "big")
+        y = int.from_bytes(cose_key[-3], "big")
+        key = ec.EllipticCurvePublicNumbers(x, y, curve).public_key()
+        key.verify(signature, message, ec.ECDSA(hash_algorithm))
+
+    return verify
 
 
 def _check_akp(public_key_size: int) -> Callable[[Mapping[int, Any]], None]:
@@ -170,13 +185,15 @@ class Algorithm:
 
 # Every signature algorithm the key supports, in the order getInfo lists them:
 # the key's own table is CoseAlg in crates/pqkey-ctap/src/crypto/alg.rs. The
-# ML-DSA public key and signature sizes are FIPS 204's, table 2.
+# ML-DSA public key and signature sizes are FIPS 204's, table 2; each ECDSA
+# curve's coordinates are as long as its field elements.
 ALGORITHMS = (
-    Algorithm(ES256, "ES256", _check_ec2_p256, _verify_es256),
+    Algorithm(ES256, "ES256", _check_ec2(COSE_CRV_P256, 32), _verify_ecdsa(ec.SECP256R1(), hashes.SHA256())),
     Algorithm(ML_DSA_44, "ML-DSA-44", _check_akp(1312), _verify_mldsa(mldsa.MLDSA44PublicKey, 2420)),
     Algorithm(ML_DSA_65, "ML-DSA-65", _check_akp(1952), _verify_mldsa(mldsa.MLDSA65PublicKey, 3309)),
     Algorithm(ML_DSA_87, "ML-DSA-87", _check_akp(2592), _verify_mldsa(mldsa.MLDSA87PublicKey, 4627)),
-    Algorithm(ESP256, "ESP256", _check_ec2_p256, _verify_es256),
+    Algorithm(ESP256, "ESP256", _check_ec2(COSE_CRV_P256, 32), _verify_ecdsa(ec.SECP256R1(), hashes.SHA256())),
+    Algorithm(ES384, "ES384", _check_ec2(COSE_CRV_P384, 48), _verify_ecdsa(ec.SECP384R1(), hashes.SHA384())),
 )
 BY_IDENTIFIER = {algorithm.identifier: algorithm for algorithm in ALGORITHMS}
 NAMES = {algorithm.identifier: algorithm.name for algorithm in ALGORITHMS}

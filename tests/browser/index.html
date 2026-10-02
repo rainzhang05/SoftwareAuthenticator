@@ -107,7 +107,7 @@
 const $ = (id) => document.getElementById(id);
 $('ua').textContent = navigator.userAgent;
 // The names of the algorithms, as in ALGORITHMS in tests/e2e/ctap.py.
-const NAMES = {'-7':'ES256','-48':'ML-DSA-44','-49':'ML-DSA-65','-50':'ML-DSA-87','-9':'ESP256'};
+const NAMES = {'-7':'ES256','-48':'ML-DSA-44','-49':'ML-DSA-65','-50':'ML-DSA-87','-9':'ESP256','-35':'ES384'};
 
 const PRESETS = [
   // registrations
@@ -132,6 +132,7 @@ const PRESETS = [
   {id:'R19', kind:'reg', label:'credProtect 3 (UVRequired), enforce', username:'cp3', algs:'-7', rk:'required', credProtect:'userVerificationRequired', enforce:true},
   {id:'R20', kind:'reg', label:'attestation "direct", ES256 non-discoverable', username:'att', algs:'-7', rk:'discouraged', att:'direct'},
   {id:'R21', kind:'reg', label:'ESP256 alone, non-discoverable', username:'alice', algs:'-9', rk:'discouraged'},
+  {id:'R22', kind:'reg', label:'ES384 alone, non-discoverable', username:'alice', algs:'-35', rk:'discouraged'},
   // sign-ins
   {id:'L1', kind:'login', label:'alice: allowCredentials = all hers, UV discouraged', username:'alice', allow:'user', uv:'discouraged'},
   {id:'L2', kind:'login', label:'Discoverable: empty allowCredentials (account picker)', username:'', allow:'empty', uv:'discouraged'},

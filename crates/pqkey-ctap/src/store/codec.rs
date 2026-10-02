@@ -11,7 +11,8 @@
 //!    4  user_name               text string, omitted when absent
 //!    5  user_display_name       text string, omitted when absent
 //!    6  alg                     integer: COSE algorithm identifier, one of CoseAlg's
-//!    7  private key type        unsigned integer: 1 = P-256 scalar, 2 = seed (ML-DSA's ξ)
+//!    7  private key type        unsigned integer: 1 = P-256 scalar, 2 = seed (ML-DSA's ξ,
+//!                               or an ECDSA key's seed on P-384)
 //!    8  private key             byte string, 32 bytes
 //!    9  cred_random_with_uv     byte string, 32 bytes
 //!   10  cred_random_without_uv  byte string, 32 bytes
@@ -57,7 +58,8 @@ use crate::{CoseAlg, KeyKind};
 /// Private key type 1: a P-256 scalar ([`KeyKind::P256Scalar`]).
 const KEY_TYPE_P256_SCALAR: u64 = 1;
 /// Private key type 2: a seed the record's `alg` derives its key from
-/// ([`KeyKind::Seed`]), for ML-DSA the FIPS 204 seed `ξ`.
+/// ([`KeyKind::Seed`]), for ML-DSA the FIPS 204 seed `ξ` and for ECDSA on
+/// P-384 the seed its scalar is derived from.
 const KEY_TYPE_SEED: u64 = 2;
 
 /// Encode a credential record with the given creation order.
@@ -541,6 +543,39 @@ mod tests {
             "0701",                                 // 7: key type, P-256 scalar
             // 8: the 32-byte scalar
             "085820404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+            // 9: cred_random_with_uv
+            "095820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            // 10: cred_random_without_uv
+            "0a5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "0b02",         // 11: cred_protect 2
+            "0c19012c",     // 12: sign_count 300
+            "0d1a00011170", // 13: created_at 70000
+        ));
+        assert_eq!(encoded.as_slice(), expected.as_slice());
+        assert_eq!(decode_credential(&expected).unwrap(), record);
+    }
+
+    /// An ES384 credential: alg -35 and private key type 2, the seed its
+    /// scalar is derived from.  Only those fields and the key differ from the
+    /// ES256 credential above.
+    #[test]
+    fn an_es384_credential_matches_the_documented_format() {
+        let mut record = credential();
+        record.alg = CoseAlg::ES384;
+        record.private_key = PrivateKeyMaterial::Seed {
+            seed: core::array::from_fn(|i| 0x60 + i as u8),
+        };
+        let encoded = encode_credential(&record, 70_000).unwrap();
+        let expected = unhex(concat!(
+            "ac",                                   // map with 12 entries
+            "0150000102030405060708090a0b0c0d0e0f", // 1: credential_id
+            "026b6578616d706c652e636f6d",           // 2: rp_id "example.com"
+            "03420102",                             // 3: user_id
+            "0465616c696365",                       // 4: user_name "alice"
+            "063822",                               // 6: alg -35
+            "0702",                                 // 7: key type, seed
+            // 8: the 32-byte seed
+            "085820606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
             // 9: cred_random_with_uv
             "095820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             // 10: cred_random_without_uv
