@@ -27,7 +27,7 @@ use super::output::{self, outln};
 use crate::state::default_state_dir;
 
 /// The systemd user unit this version ships, with `ExecStart` for
-/// `~/.local/bin/pqkey`.
+/// `/usr/local/bin/pqkey`.
 const UNIT_TEMPLATE: &str = include_str!("../../../../contrib/systemd/user/pqkey.service");
 
 /// Where the user's systemd units live.

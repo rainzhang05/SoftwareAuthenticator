@@ -8,12 +8,12 @@
 # XDG_DATA_HOME in your shell, set it for the user manager as well (see
 # environment.d(5)), or the two will use different directories.
 #
-# Setup: "pqkey setup" installs this unit, with ExecStart naming the pqkey
-# binary it runs from, and starts it. By hand:
+# Setup: install.sh, through "pqkey setup", installs this unit, with ExecStart
+# naming the pqkey binary it runs from, and starts it. By hand:
 #   1. Install contrib/udev/70-pqkey.rules as described in that file, add
 #      yourself to its group, and log in again.
 #   2. Install the binary where this unit expects it:
-#        install -D -m 755 target/release/pqkey ~/.local/bin/pqkey
+#        sudo install -m 755 target/release/pqkey /usr/local/bin/pqkey
 #   3. Install and start the unit:
 #        install -D -m 644 pqkey.service ~/.config/systemd/user/pqkey.service
 #        systemctl --user daemon-reload
@@ -54,7 +54,7 @@ StartLimitBurst=5
 
 [Service]
 Type=exec
-ExecStart=%h/.local/bin/pqkey run
+ExecStart=/usr/local/bin/pqkey run
 Environment=RUST_LOG=info
 # On SIGTERM the daemon removes the virtual device and exits with status 0, so
 # stopping the service is not a failure and does not trigger a restart.
