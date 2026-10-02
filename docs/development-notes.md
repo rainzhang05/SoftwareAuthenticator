@@ -34,7 +34,8 @@ Ctrl-C stops it, and `pqkey start` brings the service back.
 
 GitHub Actions runs these workflows:
 
-- **CI** runs the checks of `scripts/check.sh` on x86_64 and arm64.
+- **CI** runs the checks of `scripts/check.sh` on x86_64 and arm64, and the
+  lints and tests on macOS too.
 - **E2E** runs `scripts/e2e.sh`'s tests.
 - **Security** runs `cargo audit` and `cargo deny`.
 - **Fuzz** runs each target for 30 seconds on changes and for 30 minutes

@@ -1,9 +1,10 @@
 name: CI
 
-# The whole workspace builds and runs its unit tests on macOS too, but the
-# daemon only works on Linux (it creates the virtual key through /dev/uhid).
-# ubuntu-latest is therefore the platform that matters, and this workflow is the
-# authoritative gate for the project rather than a convenience.
+# The whole workspace builds and runs its unit tests on macOS too (the
+# test-macos job keeps it so), but the daemon only works on Linux (it creates
+# the virtual key through /dev/uhid). ubuntu-latest is therefore the platform
+# that matters, and this workflow is the authoritative gate for the project
+# rather than a convenience.
 
 on:
   push:
@@ -175,6 +176,26 @@ jobs:
             cargo report future-incompatibilities 2>&1 || echo 'No report was generated for this build.'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The workspace on macOS: lints and tests, so code gated to Linux keeps
+  # compiling there and macOS development machines can run every unit test.
+  # The daemon itself cannot run on macOS yet; nothing here creates a device.
+  test-macos:
+    name: test (macOS)
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked --all-targets
+      - run: cargo test --workspace --locked --doc
 
   # The root Cargo.toml declares the minimum supported Rust version under
   # [workspace.package]. This job is what makes that declaration true: it reads
