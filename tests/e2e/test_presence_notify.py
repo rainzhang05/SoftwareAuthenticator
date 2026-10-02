@@ -63,12 +63,11 @@ def notify_ctap(notify_device, notifications) -> Ctap2:
 
 
 def test_approve_registers_and_signs_in_with_user_presence(notify_ctap, notifications):
-    credential = client.register(
-        notify_ctap, RP_ID, client.ES256, user=client.user_entity("alice"), options={"rk": True}
-    )
+    # Not discoverable: the relying party keeps the credential, nothing is stored on the key.
+    credential = client.register(notify_ctap, RP_ID, client.ES256, user=client.user_entity("alice"))
     shown = notifications.wait_for_shown(1)
-    assert shown.summary == "Create a passkey"
-    assert shown.body == f"Create a passkey for {RP_ID} as alice (Alice)?"
+    assert shown.summary == "Register a security key"
+    assert shown.body == f"Register this security key with {RP_ID} as alice (Alice)?"
     assert shown.actions == ACTIONS
     assert shown.hints.get("urgency") == ("y", 2)
     assert shown.id in notifications.close_requests
@@ -82,7 +81,9 @@ def test_approve_registers_and_signs_in_with_user_presence(notify_ctap, notifica
 
 def test_signing_in_with_the_only_discoverable_credential_names_its_account(notify_ctap, notifications):
     credential = client.register(notify_ctap, RP_ID, client.ES256, user=client.user_entity("frank"), options={"rk": True})
-    notifications.wait_for_shown(1)
+    shown = notifications.wait_for_shown(1)
+    assert shown.summary == "Create a passkey"
+    assert shown.body == f"Create a passkey for {RP_ID} as frank (Frank)?"
 
     response, _ = client.authenticate(notify_ctap, credential, allow_list=False)
     shown = notifications.wait_for_shown(2)
