@@ -507,6 +507,39 @@ mod tests {
         );
     }
 
+    /// An ES256 credential: alg -7 and private key type 1, the P-256
+    /// scalar.  Written out by hand like the vectors above; only those
+    /// fields and the key differ from the ML-DSA credential there.
+    #[test]
+    fn an_es256_credential_matches_the_documented_format() {
+        let mut record = credential();
+        record.alg = CoseAlg::ES256;
+        record.private_key = PrivateKeyMaterial::Es256 {
+            scalar: core::array::from_fn(|i| 0x40 + i as u8),
+        };
+        let encoded = encode_credential(&record, 70_000).unwrap();
+        let expected = unhex(concat!(
+            "ac",                                   // map with 12 entries
+            "0150000102030405060708090a0b0c0d0e0f", // 1: credential_id
+            "026b6578616d706c652e636f6d",           // 2: rp_id "example.com"
+            "03420102",                             // 3: user_id
+            "0465616c696365",                       // 4: user_name "alice"
+            "0626",                                 // 6: alg -7
+            "0701",                                 // 7: key type, P-256 scalar
+            // 8: the 32-byte scalar
+            "085820404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+            // 9: cred_random_with_uv
+            "095820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            // 10: cred_random_without_uv
+            "0a5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "0b02",         // 11: cred_protect 2
+            "0c19012c",     // 12: sign_count 300
+            "0d1a00011170", // 13: created_at 70000
+        ));
+        assert_eq!(encoded.as_slice(), expected.as_slice());
+        assert_eq!(decode_credential(&expected).unwrap(), record);
+    }
+
     #[test]
     fn records_round_trip() {
         let mut record = credential();
