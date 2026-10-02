@@ -3,9 +3,7 @@
 //! `println!` panicked in both cases (exit status 101).
 
 use std::{
-    env, fs,
-    fs::File,
-    io,
+    env, fs, io,
     path::PathBuf,
     process::{Command, Output, Stdio},
 };
@@ -41,8 +39,10 @@ fn closed_pipe() -> Stdio {
     writer.into()
 }
 
+/// /dev/full, where every write fails with ENOSPC. macOS has no such device.
+#[cfg(target_os = "linux")]
 fn full_device() -> Stdio {
-    File::options()
+    fs::File::options()
         .write(true)
         .open("/dev/full")
         .expect("open /dev/full")
@@ -56,6 +56,7 @@ fn a_closed_standard_output_ends_pqkey_quietly() {
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_failing_standard_output_is_an_error() {
     let output = pqkey(&["status"], "full", full_device(), None);
@@ -67,6 +68,7 @@ fn a_failing_standard_output_is_an_error() {
 }
 
 /// An error that cannot be reported still ends pqkey with status 1.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_failing_standard_error_is_no_panic() {
     let output = pqkey(&["pin"], "stderr", Stdio::piped(), Some(full_device()));

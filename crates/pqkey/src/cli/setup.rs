@@ -525,6 +525,8 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
     }
 
+    // It reads /proc, which only Linux has.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_service_running_a_replaced_binary_is_restarted() {
         let me = unistd::Pid::this();
