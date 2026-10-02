@@ -6,13 +6,14 @@
 #
 # 1. Installs what building needs and is missing: a C linker and curl, with
 #    the system's package manager (sudo), and Rust, with rustup.
-# 2. Builds pqkey from this clone and installs it in ~/.cargo/bin.
+# 2. Builds pqkey from this clone and installs it in /usr/local/bin (sudo),
+#    where every shell finds it, this one included.
 # 3. Runs `pqkey setup`: the udev rules and the uhid module (sudo), and a
 #    systemd user service that starts the key with your session. It ends by
 #    offering to set the key's PIN.
 #
-# Run it again after `git pull` to update: it rebuilds pqkey and restarts the
-# key with the new binary.
+# Nothing needs a new terminal or a new login afterwards. Run it again after
+# `git pull` to update: it rebuilds pqkey and restarts the key with it.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -37,7 +38,7 @@ step() { printf '\n==> %s\n' "$*"; }
 [ "$(id -u)" != 0 ] || fail "run it as the user who will use the key, not as root; it asks for sudo when it needs to"
 
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
-original_path=$PATH
+pqkey=/usr/local/bin/pqkey
 have_rust() { command -v cargo >/dev/null || [ -x "$cargo_home/bin/cargo" ]; }
 
 missing=()
@@ -47,7 +48,7 @@ have_rust || command -v curl >/dev/null || missing+=(curl)
 echo "This installs pqkey, a FIDO2 security key in software, for $(id -un):"
 [ ${#missing[@]} = 0 ] || echo "  - with your package manager (sudo): ${missing[*]/linker/a C linker}"
 have_rust || echo "  - Rust, with rustup (https://rustup.rs), in $cargo_home"
-echo "  - pqkey, built from this clone, in ${CARGO_INSTALL_ROOT:-$cargo_home}/bin (a few minutes)"
+echo "  - pqkey, built from this clone (a few minutes), in $pqkey (sudo)"
 echo "  - if not done yet, with sudo: udev rules for the key, and the uhid module at boot"
 echo "  - a systemd user service that starts the key with your session"
 if ! $yes; then
@@ -104,20 +105,25 @@ if ! command -v rustup >/dev/null; then
 fi
 
 step "Building pqkey"
+cargo=(cargo)
 if command -v rustup >/dev/null; then
-  # The stable toolchain, named rather than taken from rust-toolchain.toml,
-  # which `cargo install` would warn about.
+  # The stable toolchain, without the components rust-toolchain.toml adds
+  # for development.
   rustup toolchain list | grep -q '^stable' || rustup toolchain install stable --profile minimal
-  cargo +stable install --locked --path crates/pqkey
-else
-  cargo install --locked --path crates/pqkey
+  cargo=(cargo +stable)
 fi
-pqkey=${CARGO_INSTALL_ROOT:-$cargo_home}/bin/pqkey
+"${cargo[@]}" build --release --locked -p pqkey --target-dir target
+
+step "Installing $pqkey"
+sudo install -D -m 755 target/release/pqkey "$pqkey"
+# An earlier install.sh installed pqkey with `cargo install`, in a directory
+# that comes first on the PATH. A link in its place keeps a shell that
+# remembers that path working.
+old=${CARGO_INSTALL_ROOT:-$cargo_home}/bin/pqkey
+if [ -f "$old" ] && [ ! -L "$old" ]; then
+  "${cargo[@]}" uninstall -q pqkey 2>/dev/null || rm -f "$old"
+  ln -sf "$pqkey" "$old"
+fi
 
 step "Setting up pqkey"
 "$pqkey" setup --yes
-
-case ":$original_path:" in
-  *":$(dirname "$pqkey"):"*) ;;
-  *) printf '\nOpen a new terminal to use the pqkey command (or run: . "%s/env").\n' "$cargo_home" ;;
-esac
