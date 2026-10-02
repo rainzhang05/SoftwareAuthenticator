@@ -507,9 +507,20 @@ pub(crate) mod tests {
         .unwrap_err();
         assert_eq!(err.to_string(), "the CTAP app panicked");
 
-        let mut event = Vec::new();
-        device_side.read_to_end(&mut event).unwrap();
-        assert_eq!(event_type(&event), uhid::UHID_EVENT_TYPE_DESTROY);
+        // Keepalives may go out while the app works on the request: a panic
+        // that prints a backtrace can take longer than KEEPALIVE_INTERVAL_MS.
+        // Then the device is destroyed.
+        let mut events = Vec::new();
+        device_side.read_to_end(&mut events).unwrap();
+        assert_eq!(events.len() % uhid::UHID_EVENT_SIZE, 0);
+        let events: Vec<&[u8]> = events.chunks(uhid::UHID_EVENT_SIZE).collect();
+        let (last, keepalives) = events.split_last().unwrap();
+        assert_eq!(event_type(last), uhid::UHID_EVENT_TYPE_DESTROY);
+        for event in keepalives {
+            let report = uhid::input_report(event).expect("an input report");
+            assert_eq!(report[..4], 0x0102_0304u32.to_be_bytes());
+            assert_eq!(report[4], Command::KeepAlive.into_u8() | 0x80);
+        }
     }
 
     #[test]
