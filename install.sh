@@ -57,6 +57,14 @@ if ! $yes; then
   case $answer in [Nn]*) exit 0 ;; esac
 fi
 
+# The sudo password once, now, kept fresh until the script ends: the steps
+# below that need root then never stop to ask, not even after a long build.
+command -v sudo >/dev/null || fail "installing pqkey needs sudo"
+sudo -v -p "Password for sudo (%p): " || fail "installing pqkey needs sudo"
+while sleep 60; do sudo -n -v 2>/dev/null || exit; done &
+sudo_keeper=$!
+trap 'kill "$sudo_keeper" 2>/dev/null || true' EXIT
+
 if [ ${#missing[@]} != 0 ]; then
   step "Installing ${missing[*]/linker/a C linker}"
   packages() { # packages LINKER_PACKAGE: the packages for what is missing
