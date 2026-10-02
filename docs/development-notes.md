@@ -77,7 +77,8 @@ else has to change.
 
 Then run `scripts/check.sh`, regenerate the fuzz seeds with `cargo run
 --release --manifest-path fuzz/Cargo.toml --example seeds` (the
-`credential_key` seeds pick algorithms by their place in `CoseAlg::ALL`), run
+`credential_key` seeds pick algorithms by their place in `CoseAlg::ALL`, so
+give a new one layouts in `fuzz/examples/seeds.rs` first), run
 `scripts/fuzz.sh`, and run `scripts/e2e.sh` on Linux.
 
 ## Clients

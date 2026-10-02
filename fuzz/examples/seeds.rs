@@ -644,6 +644,21 @@ fn credential_key(dir: &Path) {
         layout(3, 0, &[0x44; 32]),
         layout(1, 1, &[0x55; 2560]),
         layout(3, 3, &[0x66; 100]),
+        // The ECDSA algorithms after ML-DSA: each signing, each key under
+        // the other identifier of its curve, keys of one type used as
+        // another, and a P-521 scalar where a seed belongs.
+        layout(4, 4, &[0x77; 32]),
+        layout(4, 0, &[0x77; 32]),
+        layout(5, 5, &[0x88; 32]),
+        layout(5, 6, &[0x88; 32]),
+        layout(6, 6, &[0x99; 32]),
+        layout(7, 7, &[0xAA; 32]),
+        layout(7, 8, &[0xAA; 32]),
+        layout(8, 8, &[0xBB; 32]),
+        layout(9, 9, &[0xCC; 32]),
+        layout(5, 1, &[0x88; 32]),
+        layout(9, 0, &[0xCC; 32]),
+        layout(7, 7, &[0xAA; 66]),
     ];
     write_all(dir, &seeds);
 }
