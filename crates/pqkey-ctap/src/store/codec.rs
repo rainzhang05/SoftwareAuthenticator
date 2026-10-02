@@ -61,6 +61,10 @@ const KEY_TYPE_P256_SCALAR: u64 = 1;
 const KEY_TYPE_SEED: u64 = 2;
 
 /// Encode a credential record with the given creation order.
+#[deny(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
 pub(crate) fn encode_credential(
     record: &CredentialRecord,
     created_at: u64,
@@ -95,6 +99,10 @@ pub(crate) fn encode_credential(
 }
 
 /// Decode and validate a credential record.
+#[deny(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
 pub(crate) fn decode_credential(bytes: &[u8]) -> Result<CredentialRecord, Corruption> {
     let mut fields = Fields::parse(bytes)?;
     let alg = CoseAlg::try_from(fields.int::<i32>(6)?).map_err(|_| Corruption::Encoding)?;

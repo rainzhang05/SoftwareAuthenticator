@@ -3,6 +3,13 @@
 //! auth protocols' key derivation and encryption, HKDF, and the stack
 //! scrubbing around secret-dependent arithmetic.
 
+// A new algorithm, key kind or key type must be handled at every match on
+// one: no arm may catch it unseen.
+#![deny(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
+
 use core::fmt;
 use getrandom::SysRng;
 use pqkey_mldsa::MlDsaError;

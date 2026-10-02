@@ -191,7 +191,9 @@ mod tests {
             );
 
             let reloaded = try_credential_secret_from_bytes(alg, &key.secret_bytes()).unwrap();
-            assert!(matches!(reloaded, CredentialSecretKey::MlDsa(_)));
+            let CredentialSecretKey::MlDsa(_) = reloaded else {
+                panic!("{alg:?}: the seed reads back as {reloaded:?}");
+            };
             for key in [&key, &reloaded] {
                 let signature = try_sign_challenge(alg, key, b"auth", b"hash").expect("sign");
                 assert!(verify(ps, &pk, b"authhash", &signature));
@@ -257,10 +259,9 @@ mod tests {
         let reconstructed =
             try_credential_secret_from_bytes(CoseAlg::ES256, &secret_key.secret_bytes())
                 .expect("reconstruct P-256 secret");
-        match reconstructed {
-            CredentialSecretKey::P256(_) => {}
-            _ => panic!("unexpected key variant"),
-        }
+        let CredentialSecretKey::P256(_) = reconstructed else {
+            panic!("unexpected key variant");
+        };
     }
 
     // ---------------------------------------------------------------------
@@ -335,10 +336,10 @@ mod tests {
     #[test]
     fn es256_signature_is_der_over_sha256_of_auth_data_and_client_data_hash() {
         let (_, secret_key) = generated(CoseAlg::ES256);
-        let verifying_key = match &secret_key {
-            CredentialSecretKey::P256(sk) => *sk.verifying_key(),
-            _ => panic!("expected a P-256 key"),
+        let CredentialSecretKey::P256(sk) = &secret_key else {
+            panic!("expected a P-256 key");
         };
+        let verifying_key = *sk.verifying_key();
 
         let auth_data = [0x11u8; 37];
         let client_data_hash = [0x22u8; 32];

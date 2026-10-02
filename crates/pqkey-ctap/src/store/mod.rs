@@ -303,6 +303,10 @@ impl std::error::Error for StoreError {
 }
 
 /// Check the invariants every stored credential satisfies.
+#[deny(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
 pub(crate) fn validate_credential(record: &CredentialRecord) -> Result<(), StoreError> {
     if record.credential_id.is_empty() {
         return Err(StoreError::InvalidRecord("credential ID is empty"));

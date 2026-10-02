@@ -9,6 +9,13 @@
 //! Rust is a bitwise copy, so the stores avoid needless moves of records (such
 //! as vector reallocation) but cannot rule out every stale copy.
 
+// A new algorithm, key kind or key type must be handled at every match on
+// one: no arm may catch it unseen.
+#![deny(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
+
 use core::fmt;
 
 use p256::ecdsa::SigningKey as P256SigningKey;
@@ -522,8 +529,11 @@ mod tests {
                     "{alg:?} vs {other:?}"
                 );
             }
-            if let PrivateKeyMaterial::P256Scalar { scalar } = &material {
-                assert!(p256::SecretKey::from_slice(scalar).is_ok());
+            match &material {
+                PrivateKeyMaterial::P256Scalar { scalar } => {
+                    assert!(p256::SecretKey::from_slice(scalar).is_ok());
+                }
+                PrivateKeyMaterial::Seed { .. } => {}
             }
         }
         assert_ne!(

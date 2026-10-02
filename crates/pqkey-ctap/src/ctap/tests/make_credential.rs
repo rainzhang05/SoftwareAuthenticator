@@ -231,10 +231,9 @@ fn make_credential_supports_es256() {
     let reconstructed = credential
         .secret_key()
         .expect("reconstruct ES256 secret key");
-    match reconstructed {
-        CredentialSecretKey::P256(_) => {}
-        _ => panic!("expected ES256 secret key variant"),
-    }
+    let CredentialSecretKey::P256(_) = reconstructed else {
+        panic!("expected ES256 secret key variant");
+    };
 }
 
 #[test]

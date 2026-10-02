@@ -2,6 +2,13 @@
 //! discoverable credential names a stored record, and a non-discoverable
 //! credential is sealed into its own ID; see [`is_discoverable`].
 
+// A new algorithm, key kind or key type must be handled at every match on
+// one: no arm may catch it unseen.
+#![deny(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
+
 use super::CtapApp;
 use super::storage::store_status;
 use crate::CoseAlg;
