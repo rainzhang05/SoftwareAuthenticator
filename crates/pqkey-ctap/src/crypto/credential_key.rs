@@ -23,8 +23,8 @@ pub enum CredentialSecretKey {
     /// A P-256 private key, for ECDSA: ES256 and ESP256.
     P256(P256SigningKey),
     /// An ECDSA key on P-384 held as the seed its scalar is derived from, the
-    /// form stored credentials use: ES384.  Each use derives the scalar
-    /// anew.
+    /// form stored credentials use: ES384 and ESP384.  Each use derives the
+    /// scalar anew.
     P384(Seed),
 }
 
@@ -150,9 +150,10 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
 /// Sign `auth_data || client_data_hash` as `alg` signs, and return the
 /// signature in the encoding WebAuthn requires for `alg`:
 ///
-/// * **ES256**, **ESP256** and **ES384**: ECDSA over the algorithm's curve
-///   with its hash, P-256 with SHA-256 or P-384 with SHA-384, and an RFC 6979
-///   nonce, as an ASN.1 DER `Ecdsa-Sig-Value` (WebAuthn Level 3 §6.5.5).
+/// * **ES256**, **ESP256**, **ES384** and **ESP384**: ECDSA over the
+///   algorithm's curve with its hash, P-256 with SHA-256 or P-384 with
+///   SHA-384, and an RFC 6979 nonce, as an ASN.1 DER `Ecdsa-Sig-Value`
+///   (WebAuthn Level 3 §6.5.5).
 /// * **ML-DSA-44/65/87**: the raw FIPS 204 signature bytes.
 ///
 /// Returns [`CryptoError::KeyTypeMismatch`] when `alg` signs with another
@@ -348,6 +349,7 @@ mod tests {
             (CoseAlg::ES256, 1, 32),
             (CoseAlg::ESP256, 1, 32),
             (CoseAlg::ES384, 2, 48),
+            (CoseAlg::ESP384, 2, 48),
         ];
         let ecdsa: Vec<CoseAlg> = CoseAlg::ALL
             .into_iter()
@@ -374,24 +376,31 @@ mod tests {
         }
     }
 
-    /// ESP256 is ES256 under its fully specified identifier: the same scalar
-    /// gives the same COSE_Key but for its alg.
+    /// A fully specified identifier names its curve's algorithm under
+    /// another identifier: the same key, an ESP256 scalar or an ESP384 seed,
+    /// gives the same COSE_Key as under ES256 or ES384 but for its alg.  The
+    /// key a seed derives belongs to the curve.
     #[test]
-    fn an_esp256_key_is_the_es256_key_but_for_its_alg() {
-        let scalar = [0x42; 32];
-        let cose_key = |alg| {
-            let secret = try_credential_secret_from_bytes(alg, &scalar).expect("a key");
-            try_cose_public_key(alg, &secret).expect("a COSE_Key")
-        };
-        let relabelled = edited(&cose_key(CoseAlg::ES256), |entries| {
-            for (label, value) in entries.iter_mut() {
-                if *label == Value::Integer(Integer::from(3)) {
-                    *value = Value::Integer(Integer::from(-9));
+    fn a_fully_specified_algorithm_has_its_curves_keys_but_for_its_alg() {
+        for (alg, fully_specified) in [
+            (CoseAlg::ES256, CoseAlg::ESP256),
+            (CoseAlg::ES384, CoseAlg::ESP384),
+        ] {
+            let key = [0x42; 32];
+            let cose_key = |alg| {
+                let secret = try_credential_secret_from_bytes(alg, &key).expect("a key");
+                try_cose_public_key(alg, &secret).expect("a COSE_Key")
+            };
+            let relabelled = edited(&cose_key(alg), |entries| {
+                for (label, value) in entries.iter_mut() {
+                    if *label == Value::Integer(Integer::from(3)) {
+                        *value = Value::Integer(Integer::from(fully_specified.identifier()));
+                    }
                 }
-            }
-        });
-        assert_ne!(cose_key(CoseAlg::ES256), cose_key(CoseAlg::ESP256));
-        assert_eq!(relabelled, cose_key(CoseAlg::ESP256));
+            });
+            assert_ne!(cose_key(alg), cose_key(fully_specified), "{alg:?}");
+            assert_eq!(relabelled, cose_key(fully_specified), "{alg:?}");
+        }
     }
 
     // ---------------------------------------------------------------------

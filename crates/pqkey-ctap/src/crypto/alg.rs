@@ -10,8 +10,9 @@ use super::ecdsa::Curve;
 /// The COSE algorithm identifiers this authenticator signs with: ES256 (-7,
 /// RFC 9053 §2.1); the three ML-DSA parameter sets, which RFC 9964 §8.1
 /// registered in the IANA "COSE Algorithms" registry as -48, -49 and -50;
-/// ESP256 (-9), the fully specified identifier of ECDSA using P-256 and
-/// SHA-256 (RFC 9864 §2.1); and ES384 (-35, RFC 9053 §2.1).
+/// ES384 (-35, RFC 9053 §2.1); and ESP256 (-9) and ESP384 (-51), the fully
+/// specified identifiers of ECDSA using P-256 and SHA-256 and using P-384
+/// and SHA-384 (RFC 9864 §2.1).
 ///
 /// Each variant's discriminant is its identifier, which
 /// [`CoseAlg::identifier`] returns; [`CoseAlg::ALL`] lists every variant.
@@ -30,6 +31,9 @@ pub enum CoseAlg {
     ESP256 = -9,
     /// ECDSA with P-384 and SHA-384.
     ES384 = -35,
+    /// ECDSA with P-384 and SHA-384, as ES384, under its fully specified
+    /// identifier.
+    ESP384 = -51,
 }
 
 /// The kind of private key material a credential keeps.  Each algorithm
@@ -81,13 +85,14 @@ struct Properties {
 impl CoseAlg {
     /// Every algorithm, in the order authenticatorGetInfo lists them (CTAP 2.3
     /// §6.4, `algorithms`).
-    pub const ALL: [CoseAlg; 6] = [
+    pub const ALL: [CoseAlg; 7] = [
         CoseAlg::ES256,
         CoseAlg::MLDSA44,
         CoseAlg::MLDSA65,
         CoseAlg::MLDSA87,
         CoseAlg::ESP256,
         CoseAlg::ES384,
+        CoseAlg::ESP384,
     ];
 
     /// The table: what the authenticator knows about each algorithm.
@@ -115,6 +120,10 @@ impl CoseAlg {
             },
             CoseAlg::ES384 => Properties {
                 name: "ES384",
+                scheme: Scheme::Ecdsa(Curve::P384),
+            },
+            CoseAlg::ESP384 => Properties {
+                name: "ESP384",
                 scheme: Scheme::Ecdsa(Curve::P384),
             },
         }
@@ -185,13 +194,14 @@ mod tests {
                 (-50, "ML-DSA-87"),
                 (-9, "ESP256"),
                 (-35, "ES384"),
+                (-51, "ESP384"),
             ]
         );
     }
 
-    /// ES256 and ESP256 are ECDSA over P-256 with SHA-256 (RFC 9864 §2.1) and
-    /// ES384 over P-384 with SHA-384 (RFC 9053 §2.1), and each ML-DSA
-    /// identifier names its own parameter set (RFC 9964 §8.1).
+    /// ES256 and ESP256 are ECDSA over P-256 with SHA-256, and ES384 and
+    /// ESP384 over P-384 with SHA-384 (RFC 9053 §2.1, RFC 9864 §2.1), and each
+    /// ML-DSA identifier names its own parameter set (RFC 9964 §8.1).
     #[test]
     fn each_algorithm_signs_with_its_scheme() {
         let schemes: Vec<Scheme> = CoseAlg::ALL.into_iter().map(CoseAlg::scheme).collect();
@@ -204,13 +214,14 @@ mod tests {
                 Scheme::MlDsa(ParamSet::MLDSA87),
                 Scheme::Ecdsa(Curve::P256),
                 Scheme::Ecdsa(Curve::P384),
+                Scheme::Ecdsa(Curve::P384),
             ]
         );
     }
 
     /// ES256 and ESP256 keep the P-256 scalar, ML-DSA the seed `ξ`, and ES384
-    /// the seed its scalar is derived from: what the store and sealed
-    /// credential IDs hold.
+    /// and ESP384 the seed their scalar is derived from: what the store and
+    /// sealed credential IDs hold.
     #[test]
     fn each_algorithm_keeps_its_kind_of_key() {
         let kinds: Vec<KeyKind> = CoseAlg::ALL.into_iter().map(CoseAlg::key_kind).collect();
@@ -222,6 +233,7 @@ mod tests {
                 KeyKind::Seed,
                 KeyKind::Seed,
                 KeyKind::P256Scalar,
+                KeyKind::Seed,
                 KeyKind::Seed,
             ]
         );
@@ -242,6 +254,7 @@ mod tests {
         assert_eq!(CoseAlg::try_from(-50), Ok(CoseAlg::MLDSA87));
         assert_eq!(CoseAlg::try_from(-9), Ok(CoseAlg::ESP256));
         assert_eq!(CoseAlg::try_from(-35), Ok(CoseAlg::ES384));
+        assert_eq!(CoseAlg::try_from(-51), Ok(CoseAlg::ESP384));
         assert_eq!(
             UnsupportedCoseAlg(-257).to_string(),
             "unsupported COSE algorithm -257"

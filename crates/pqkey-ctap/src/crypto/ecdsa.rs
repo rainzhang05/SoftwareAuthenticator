@@ -27,8 +27,8 @@ use super::credential_key::Seed;
 pub(crate) enum Curve {
     /// P-256 with SHA-256: ES256 and ESP256.  Keys are kept as their scalar.
     P256,
-    /// P-384 with SHA-384: ES384.  Keys are kept as a seed the scalar is
-    /// derived from ([`derive_scalar`]).
+    /// P-384 with SHA-384: ES384 and ESP384.  Keys are kept as a seed the
+    /// scalar is derived from ([`derive_scalar`]).
     P384,
 }
 

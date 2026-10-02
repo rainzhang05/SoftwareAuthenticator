@@ -31,6 +31,7 @@ ML_DSA_65 = -49
 ML_DSA_87 = -50
 ESP256 = -9
 ES384 = -35
+ESP384 = -51
 
 COSE_KTY_EC2 = 2
 COSE_KTY_AKP = 7
@@ -194,6 +195,7 @@ ALGORITHMS = (
     Algorithm(ML_DSA_87, "ML-DSA-87", _check_akp(2592), _verify_mldsa(mldsa.MLDSA87PublicKey, 4627)),
     Algorithm(ESP256, "ESP256", _check_ec2(COSE_CRV_P256, 32), _verify_ecdsa(ec.SECP256R1(), hashes.SHA256())),
     Algorithm(ES384, "ES384", _check_ec2(COSE_CRV_P384, 48), _verify_ecdsa(ec.SECP384R1(), hashes.SHA384())),
+    Algorithm(ESP384, "ESP384", _check_ec2(COSE_CRV_P384, 48), _verify_ecdsa(ec.SECP384R1(), hashes.SHA384())),
 )
 BY_IDENTIFIER = {algorithm.identifier: algorithm for algorithm in ALGORITHMS}
 NAMES = {algorithm.identifier: algorithm.name for algorithm in ALGORITHMS}

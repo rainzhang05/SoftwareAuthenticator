@@ -1,5 +1,5 @@
-//! ECDSA on P-384 ([`Curve::P384`]) with SHA-384, the scheme of ES384: keys
-//! kept as a seed the scalar is derived from ([`derive_scalar`]).
+//! ECDSA on P-384 ([`Curve::P384`]) with SHA-384, the scheme of ES384 and
+//! ESP384: keys kept as a seed the scalar is derived from ([`derive_scalar`]).
 
 use p384::NistP384;
 use p384::ecdsa::{DerSignature, SigningKey, signature::Signer};
