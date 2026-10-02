@@ -219,14 +219,9 @@ Signature counters only grow, which is all relying parties may assume
 (WebAuthn Level 3 §6.1.1): a discoverable credential's counter also counts
 assertions without user presence, which Firefox and python-fido2 send before
 a sign-in to find the credential, so one sign-in can add 2. The counters
-saturate at 2³²−1 rather than wrap.
-75-byte sealed IDs of the earlier format, which derived them from the key,
-are no longer recognised. Non-discoverable credentials stored before they were sealed
-(IDs starting with 0x00) keep working until a reset and count towards the
-limit; stored IDs without a marker, from before non-discoverable credentials
-existed, are discoverable. Private keys are a P-256
-scalar or an ML-DSA seed. Extensions: `credProtect` (levels 1 to 3) and
-`hmac-secret` (`CredRandom` with and without user verification).
+saturate at 2³²−1 rather than wrap. Private keys are a P-256 scalar or an
+ML-DSA seed. Extensions: `credProtect` (levels 1 to 3) and `hmac-secret`
+(`CredRandom` with and without user verification).
 
 **Assertions.** Without an allowList the most recently created credential
 comes first; further ones are fetched with authenticatorGetNextAssertion, whose
@@ -325,7 +320,7 @@ is never silently regenerated: operations that need it fail, and a reset is the
 way out. Key files are created race-free (written to a flushed temporary file,
 then hard-linked to their name), so concurrent first starts agree on one key.
 
-The `ftsa` prefix is historical and part of the format.
+The `ftsa` prefix is part of the format.
 
 ### Envelope
 
@@ -392,7 +387,8 @@ What this does and does not protect is in
 The engine never decides on its own that a user is present. For registration,
 assertion with `up`, reset, and selection (including the zero-length
 pinUvAuthParam probe) it builds a `PresenceRequest` (operation, relying party
-ID, user names, timeout) and asks its `UserPresence` implementation, which
+ID, user names, whether a registration stores a passkey, timeout) and asks its
+`UserPresence` implementation, which
 answers Approved, Denied, TimedOut or Cancelled. The default timeout is 30
 seconds.
 
@@ -402,7 +398,9 @@ The implementations the daemon chooses from with `--presence`:
   `crates/pqkey/src/presence/`). For each request it connects to the session
   bus anew, calls `GetCapabilities` and requires `actions` and `body`, subscribes to
   `ActionInvoked` and `NotificationClosed` from the server's unique bus name,
-  and calls `Notify` with Approve and Deny actions and critical urgency.
+  and calls `Notify` with Approve and Deny actions and critical urgency. A
+  registration asks to "Create a passkey" when the key stores the credential,
+  and to "Register a security key" when the relying party keeps it.
   Approve approves; Deny or closing the notification denies; expiry or the
   request timeout times out; cancellation withdraws the notification. Whatever
   the answer, a notification the server has not closed itself is withdrawn with
@@ -482,17 +480,18 @@ credential's. Certificate attestation is meant for testing relying parties
 - **`stop`** stops the unit with `systemctl --user` if it runs the key, and
   otherwise sends SIGTERM; it waits up to 10 seconds for the lock to be
   released.
-- **`setup`** installs the systemd user unit (the shipped file, embedded in
-  the binary, with `ExecStart` naming the canonical path of the running
-  binary), enables and starts it, and offers to set a PIN. What needs root
-  (the embedded udev rules into `/etc/udev/rules.d`, `uhid` in
-  `/etc/modules-load.d/pqkey.conf`, `modprobe uhid`, joining `plugdev`) goes
-  into a script in `$XDG_RUNTIME_DIR`, created with mode 0600, which setup
-  prints in full and, on a terminal and once the user agrees, runs with `sudo
-  sh`; otherwise it prints that command. pqkey itself never runs as root. If
-  the script added the user to `plugdev`, setup enables the unit without
-  starting it, so the key starts at the next login, which brings the group.
-  `--uninstall` stops and removes the unit and prints the root undo.
+- **`setup`**, which `install.sh` runs, installs the systemd user unit (the
+  shipped file, embedded in the binary, with `ExecStart` naming the canonical
+  path of the running binary), enables and starts it (or restarts it on a new
+  binary), and asks for a PIN if the key has none. What needs root (the
+  embedded udev rules into `/etc/udev/rules.d`, `uhid` in
+  `/etc/modules-load.d/pqkey.conf`, `modprobe uhid` while its misc device is
+  missing, joining `plugdev` with an ACL on `/dev/uhid` until the next login)
+  goes into a script in `$XDG_RUNTIME_DIR`, created with mode 0600. Setup lists
+  what it sets up and runs it with `sudo sh` once the user agrees, or at once
+  with `--yes`; otherwise it prints that command. pqkey itself never runs as
+  root. `--uninstall` stops and removes the unit and prints the command that
+  undoes the root part, which also removes `/usr/local/bin/pqkey`.
 - **`status`** also reports every problem it finds with its fix: missing or
   outdated udev rules, `uhid` not loaded (now or at boot), no access to
   `/dev/uhid` (not in `plugdev`, or in it since after this session started),
