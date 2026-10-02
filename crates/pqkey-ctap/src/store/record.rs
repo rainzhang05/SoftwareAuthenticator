@@ -424,11 +424,11 @@ impl fmt::Debug for CertificateSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::verify::verify_signature;
     use crate::crypto::{ecdsa_p256, mldsa};
-    use crate::{mldsa_paramset_from_alg, try_sign_challenge};
-    use ciborium::value::{Integer, Value};
-    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
-    use pqkey_mldsa::{ParamSet, PublicKey, try_keypair_from_seed, verify};
+    use crate::try_sign_challenge;
+    use p256::ecdsa::{Signature, signature::Verifier};
+    use pqkey_mldsa::{ParamSet, try_keypair_from_seed};
 
     const ALL_ALGS: [CoseAlg; 4] = [
         CoseAlg::ES256,
@@ -495,28 +495,8 @@ mod tests {
         }
     }
 
-    fn cose_map(cose: &[u8]) -> Vec<(i128, Value)> {
-        let Value::Map(entries) = ciborium::de::from_reader(cose).expect("COSE_Key is CBOR") else {
-            panic!("COSE_Key must be a map");
-        };
-        entries
-            .into_iter()
-            .map(|(label, value)| match label {
-                Value::Integer(label) => (i128::from(label), value),
-                other => panic!("unexpected COSE label {other:?}"),
-            })
-            .collect()
-    }
-
-    fn cose_bytes(map: &[(i128, Value)], label: i128) -> Vec<u8> {
-        match map.iter().find(|(l, _)| *l == label) {
-            Some((_, Value::Bytes(bytes))) => bytes.clone(),
-            other => panic!("COSE label {label} is not a byte string: {other:?}"),
-        }
-    }
-
     /// Sign with the materialised key and verify with the derived public key,
-    /// using verifiers that do not go through the record helpers.
+    /// using the test verifier, which does not go through the record helpers.
     fn assert_signature_verifies(record: &CredentialRecord) {
         let (secret, cose) = record.keypair().expect("materialise key pair");
         let auth_data = b"authenticator data";
@@ -525,34 +505,8 @@ mod tests {
             .expect("sign challenge");
         let mut message = auth_data.to_vec();
         message.extend_from_slice(&client_data_hash);
-
-        let map = cose_map(&cose);
-        let alg = map
-            .iter()
-            .find(|(label, _)| *label == 3)
-            .map(|(_, value)| value.clone());
-        assert_eq!(
-            alg,
-            Some(Value::Integer(Integer::from(record.alg.identifier()))),
-            "COSE alg must match the record"
-        );
-        match record.alg {
-            CoseAlg::ES256 => {
-                let mut sec1 = vec![0x04];
-                sec1.extend_from_slice(&cose_bytes(&map, -2));
-                sec1.extend_from_slice(&cose_bytes(&map, -3));
-                let verifying_key = VerifyingKey::from_sec1_bytes(&sec1).expect("P-256 point");
-                let signature = Signature::from_der(&signature).expect("DER signature");
-                verifying_key
-                    .verify(&message, &signature)
-                    .expect("ES256 signature verifies");
-            }
-            alg => {
-                let param_set = mldsa_paramset_from_alg(alg).expect("ML-DSA alg");
-                let public_key = PublicKey::new(cose_bytes(&map, -1));
-                assert!(verify(param_set, &public_key, &message, &signature));
-            }
-        }
+        verify_signature(record.alg, &cose, &message, &signature)
+            .expect("the signature verifies under the derived public key");
     }
 
     #[test]

@@ -4,11 +4,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ciborium::value::Value;
-use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use pqkey_ctap::store::{AttestationRecord, CredentialRecord, PrivateKeyMaterial};
-use pqkey_ctap::{CoseAlg, mldsa_paramset_from_alg, try_sign_challenge};
-use pqkey_mldsa::PublicKey;
+use pqkey_ctap::{CoseAlg, try_sign_challenge};
+
+use crate::verify::verify_signature;
 
 pub const ALL_ALGS: [CoseAlg; 4] = [
     CoseAlg::ES256,
@@ -106,7 +105,7 @@ pub fn ids(records: &[CredentialRecord]) -> Vec<Vec<u8>> {
 
 /// Materialise the signing key from `record`, sign an assertion-shaped
 /// message, and verify the signature against the public key derived from the
-/// record, using verifiers that do not go through the store.
+/// record, with the test verifier, which does not go through the store.
 pub fn assert_signature_verifies(record: &CredentialRecord) {
     let (secret_key, cose_public_key) = record.keypair().expect("materialise key pair");
     assert_eq!(
@@ -119,45 +118,8 @@ pub fn assert_signature_verifies(record: &CredentialRecord) {
         .expect("sign with the materialised key");
     let mut message = auth_data.to_vec();
     message.extend_from_slice(&client_data_hash);
-
-    let Value::Map(entries) = ciborium::de::from_reader(cose_public_key.as_slice()).unwrap() else {
-        panic!("COSE_Key must be a map");
-    };
-    let label = |wanted: i128| {
-        entries
-            .iter()
-            .find(|(label, _)| matches!(label, Value::Integer(l) if i128::from(*l) == wanted))
-            .map(|(_, value)| value.clone())
-            .unwrap_or_else(|| panic!("COSE_Key lacks label {wanted}"))
-    };
-    let bytes = |wanted: i128| match label(wanted) {
-        Value::Bytes(bytes) => bytes,
-        other => panic!("COSE label {wanted} is {other:?}"),
-    };
-    assert_eq!(
-        label(3),
-        Value::Integer(record.alg.identifier().into()),
-        "COSE alg"
-    );
-    match record.alg {
-        CoseAlg::ES256 => {
-            let mut sec1 = vec![0x04];
-            sec1.extend(bytes(-2));
-            sec1.extend(bytes(-3));
-            let verifying_key = VerifyingKey::from_sec1_bytes(&sec1).expect("P-256 public key");
-            let signature = Signature::from_der(&signature).expect("DER ECDSA signature");
-            verifying_key
-                .verify(&message, &signature)
-                .expect("ES256 signature verifies under the derived public key");
-        }
-        alg => {
-            let param_set = mldsa_paramset_from_alg(alg).expect("ML-DSA parameter set");
-            assert!(
-                pqkey_mldsa::verify(param_set, &PublicKey::new(bytes(-1)), &message, &signature),
-                "{alg:?} signature verifies under the derived public key"
-            );
-        }
-    }
+    verify_signature(record.alg, &cose_public_key, &message, &signature)
+        .unwrap_or_else(|err| panic!("{:?}: {err}", record.alg));
 }
 
 /// Captures warnings logged anywhere in this test binary.

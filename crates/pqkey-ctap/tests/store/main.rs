@@ -9,3 +9,9 @@
 mod common;
 mod conformance;
 mod file_store;
+// The library's test verifier, which it builds only for its unit tests and
+// the test-support feature.  It names the algorithm as `crate::CoseAlg`.
+#[path = "../../src/crypto/verify.rs"]
+mod verify;
+
+use pqkey_ctap::CoseAlg;

@@ -127,13 +127,12 @@ pub fn try_sign_challenge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::cose::LABEL_AKP_PUB;
-    use crate::crypto::mldsa::mldsa_paramset_from_alg;
+    use crate::crypto::verify::{VerificationError, verify_signature};
     use crate::store::{CredentialRecord, PrivateKeyMaterial};
-    use ciborium::{de::from_reader, value::Integer, value::Value};
+    use ciborium::{de::from_reader, ser::into_writer, value::Integer, value::Value};
     use p256::ecdsa::Signature as P256EcdsaSignature;
     use p256::ecdsa::signature::hazmat::PrehashVerifier;
-    use pqkey_mldsa::{PublicKey, SEED_LEN, verify};
+    use pqkey_mldsa::{SEED_LEN, verify};
     use sha2::{Digest, Sha256};
 
     /// A new credential's COSE public key and signing key, made as the
@@ -166,10 +165,9 @@ mod tests {
             let client_hash = b"client_data_hash";
             let signature = try_sign_challenge(alg, &secret_key, auth_data, client_hash)
                 .expect("ML-DSA signature");
-            let ps = mldsa_paramset_from_alg(alg).expect("ML-DSA param set");
             let message: Vec<u8> = auth_data.iter().chain(client_hash).cloned().collect();
-            let pk = PublicKey(public_key_from_cose(&public_key_cbor));
-            assert!(verify(ps, &pk, &message, &signature));
+            verify_signature(alg, &public_key_cbor, &message, &signature)
+                .expect("the signature verifies");
         }
     }
 
@@ -178,7 +176,9 @@ mod tests {
     #[test]
     fn mldsa_seed_key_signs_and_round_trips() {
         for alg in [CoseAlg::MLDSA44, CoseAlg::MLDSA65, CoseAlg::MLDSA87] {
-            let ps = mldsa_paramset_from_alg(alg).expect("ML-DSA param set");
+            let Scheme::MlDsa(ps) = alg.scheme() else {
+                panic!("{alg:?} is not ML-DSA");
+            };
             let seed = [0x3c; SEED_LEN];
             let (pk, _) = pqkey_mldsa::try_keypair_from_seed(ps, &seed).expect("keygen");
 
@@ -261,20 +261,6 @@ mod tests {
             CredentialSecretKey::P256(_) => {}
             _ => panic!("unexpected key variant"),
         }
-    }
-
-    fn public_key_from_cose(cbor: &[u8]) -> Vec<u8> {
-        let value: Value = from_reader(cbor).expect("valid CBOR");
-        if let Value::Map(map) = value {
-            for (k, v) in map {
-                if k == Value::Integer(Integer::from(LABEL_AKP_PUB))
-                    && let Value::Bytes(bytes) = v
-                {
-                    return bytes;
-                }
-            }
-        }
-        panic!("COSE key missing public key bytes");
     }
 
     // ---------------------------------------------------------------------
@@ -375,5 +361,127 @@ mod tests {
         // A different message must not verify.
         let other = Sha256::digest(b"something else");
         assert!(verifying_key.verify_prehash(&other, &signature).is_err());
+    }
+
+    // ---------------------------------------------------------------------
+    // The test verifier
+    // ---------------------------------------------------------------------
+
+    /// `cose_key` with its entries changed by `edit`.
+    fn edited(cose_key: &[u8], edit: impl FnOnce(&mut Vec<(Value, Value)>)) -> Vec<u8> {
+        let Value::Map(mut entries) = from_reader(cose_key).expect("a COSE_Key") else {
+            panic!("a COSE_Key is a map");
+        };
+        edit(&mut entries);
+        let mut out = Vec::new();
+        into_writer(&Value::Map(entries), &mut out).expect("encode");
+        out
+    }
+
+    /// `cose_key` with label `label` set to `value`.
+    fn with_label(cose_key: &[u8], label: i64, value: Value) -> Vec<u8> {
+        edited(cose_key, |entries| {
+            let label = Value::Integer(Integer::from(label));
+            entries.retain(|(found, _)| *found != label);
+            entries.push((label, value));
+        })
+    }
+
+    /// The verifier accepts a signature under the key that made it, and
+    /// nothing else: not over another message, not under another key, and
+    /// not as another algorithm's.
+    #[test]
+    fn the_verifier_accepts_only_a_signature_under_its_key() {
+        for alg in CoseAlg::ALL {
+            let (cose_key, secret_key) = generated(alg);
+            let signature = try_sign_challenge(alg, &secret_key, b"auth", b"hash").expect("sign");
+            assert_eq!(
+                verify_signature(alg, &cose_key, b"authhash", &signature),
+                Ok(()),
+                "{alg:?}"
+            );
+            assert_eq!(
+                verify_signature(alg, &cose_key, b"authhasH", &signature),
+                Err(VerificationError::BadSignature),
+                "{alg:?}: another message"
+            );
+            let (other_key, _) = generated(alg);
+            assert_eq!(
+                verify_signature(alg, &other_key, b"authhash", &signature),
+                Err(VerificationError::BadSignature),
+                "{alg:?}: another key"
+            );
+            for other in CoseAlg::ALL.into_iter().filter(|other| *other != alg) {
+                assert!(
+                    matches!(
+                        verify_signature(other, &cose_key, b"authhash", &signature),
+                        Err(VerificationError::MalformedKey(_))
+                    ),
+                    "{alg:?} as {other:?}"
+                );
+            }
+        }
+    }
+
+    /// A key that is not of its algorithm's shape is malformed, whatever the
+    /// signature.
+    #[test]
+    fn the_verifier_rejects_keys_of_another_shape() {
+        let int = |value: i64| Value::Integer(Integer::from(value));
+        let (es256, _) = generated(CoseAlg::ES256);
+        let (mldsa65, _) = generated(CoseAlg::MLDSA65);
+        let mut not_a_map = Vec::new();
+        into_writer(&Value::Array(Vec::new()), &mut not_a_map).expect("encode");
+        for (alg, name, cose_key) in [
+            (CoseAlg::ES256, "kty OKP", with_label(&es256, 1, int(1))),
+            (CoseAlg::ES256, "crv P-384", with_label(&es256, -1, int(2))),
+            (
+                CoseAlg::ES256,
+                "the compressed point form",
+                with_label(&es256, -3, Value::Bool(true)),
+            ),
+            (
+                CoseAlg::ES256,
+                "a 31-byte x",
+                with_label(&es256, -2, Value::Bytes(vec![0x11; 31])),
+            ),
+            (
+                CoseAlg::ES256,
+                "a point off the curve",
+                with_label(&es256, -3, Value::Bytes(vec![0; 32])),
+            ),
+            (
+                CoseAlg::ES256,
+                "a private key",
+                with_label(&es256, -4, Value::Bytes(vec![0x11; 32])),
+            ),
+            (
+                CoseAlg::ES256,
+                "no crv",
+                edited(&es256, |entries| {
+                    entries.retain(|(label, _)| *label != int(-1))
+                }),
+            ),
+            (
+                CoseAlg::ES256,
+                "a trailing byte",
+                [es256.clone(), vec![0]].concat(),
+            ),
+            (CoseAlg::ES256, "not a map", not_a_map),
+            (CoseAlg::MLDSA65, "kty EC2", with_label(&mldsa65, 1, int(2))),
+            (
+                CoseAlg::MLDSA65,
+                "an ML-DSA-44 sized pub",
+                with_label(&mldsa65, -1, Value::Bytes(vec![0x11; 1312])),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    verify_signature(alg, &cose_key, b"message", b"signature"),
+                    Err(VerificationError::MalformedKey(_))
+                ),
+                "{name}"
+            );
+        }
     }
 }

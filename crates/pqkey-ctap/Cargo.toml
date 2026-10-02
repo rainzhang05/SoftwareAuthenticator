@@ -46,3 +46,8 @@ pqkey-mldsa = { workspace = true, features = ["mldsa44", "mldsa65", "mldsa87", "
 [[test]]
 name = "residue"
 harness = false
+
+[features]
+# `verify_signature`, the signature verifier that the tests of pqkey and the
+# fuzz targets check signatures with.  The daemon leaves it out.
+test-support = []

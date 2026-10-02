@@ -7,10 +7,11 @@ use super::support::{
     install_pin_uv_auth_token, request_classic_key_agreement, token_pin_auth,
 };
 use super::support::{credential, insert, stored, stored_by_id};
+use crate::crypto::verify::verify_signature;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::{HmacSha256, PIN_UV_AUTH_PROTOCOL_CLASSIC};
-use crate::{ClassicPinProtocol, CoseAlg, CredentialSecretKey};
+use crate::{ClassicPinProtocol, CoseAlg};
 
 use ciborium::{
     de::from_reader,
@@ -18,10 +19,7 @@ use ciborium::{
     value::{Integer, Value},
 };
 use hmac::{KeyInit, Mac};
-use p256::{
-    SecretKey as P256SecretKey,
-    ecdsa::{Signature as P256EcdsaSignature, signature::Verifier},
-};
+use p256::SecretKey as P256SecretKey;
 use sha2::{Digest, Sha256};
 
 use crate::ctap::constants::*;
@@ -352,10 +350,7 @@ fn get_assertion_es256_signature_verifies() {
 
     let record = credential(rp_id, &[0x01], &[0xA1, 0xB2], CoseAlg::ES256);
     insert(&mut app, &record);
-    let verifying_key = match record.secret_key().expect("ES256 key") {
-        CredentialSecretKey::P256(sk) => *sk.verifying_key(),
-        _ => panic!("expected ES256 secret key"),
-    };
+    let public_key = record.cose_public_key().expect("ES256 public key");
 
     let request = canonical_map(vec![
         (
@@ -401,10 +396,7 @@ fn get_assertion_es256_signature_verifies() {
     message.extend_from_slice(&auth_data_bytes);
     message.extend_from_slice(&client_hash);
 
-    let signature =
-        P256EcdsaSignature::from_der(&signature_bytes).expect("signature must be valid DER");
-    verifying_key
-        .verify(&message, &signature)
+    verify_signature(CoseAlg::ES256, &public_key, &message, &signature_bytes)
         .expect("ES256 signature verifies");
 }
 

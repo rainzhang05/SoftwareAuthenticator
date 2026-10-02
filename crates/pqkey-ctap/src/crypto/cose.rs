@@ -29,7 +29,7 @@ pub(crate) const CRV_P256: i32 = 1;
 /// format (RFC 9964).
 const KTY_AKP: i32 = 7;
 /// AKP label -1, `pub`: the public key bytes (RFC 9964).
-pub(crate) const LABEL_AKP_PUB: i32 = -1;
+const LABEL_AKP_PUB: i32 = -1;
 
 /// The COSE_Key map of the EC2 public key (`x`, `y`) on curve `crv` for
 /// `alg`, in canonical order.

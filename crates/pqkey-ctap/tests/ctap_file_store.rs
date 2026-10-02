@@ -12,10 +12,15 @@ use std::path::{Path, PathBuf};
 
 use ciborium::value::{Integer, Value};
 use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::Verifier};
+use pqkey_ctap::CoseAlg;
 use pqkey_ctap::ctap::presence::AutoApprove;
 use pqkey_ctap::ctap::{AttestationMode, CtapApp, InterruptFlag};
 use pqkey_ctap::store::{AttestationRecord, CredentialStore, FileStore, PrivateKeyMaterial};
-use pqkey_ctap::{CoseAlg, mldsa_paramset_from_alg};
+
+// The library's test verifier, which it builds only for its unit tests and
+// the test-support feature.  It names the algorithm as `crate::CoseAlg`.
+#[path = "../src/crypto/verify.rs"]
+mod verify;
 
 /// CTAPHID's largest message: 64 - 7 + 128 * (64 - 5) bytes (CTAP 2.3
 /// §11.2.4).
@@ -175,6 +180,7 @@ fn get_assertion_request(client_data_hash: &[u8], allow: Option<&[u8]>) -> Value
 
 /// What a relying party keeps from a registration.
 struct Registration {
+    alg: CoseAlg,
     credential_id: Vec<u8>,
     public_key: Value,
     response: Value,
@@ -214,38 +220,20 @@ fn register_rk(app: &mut CtapApp<'static>, user_id: &[u8], alg: CoseAlg, rk: boo
         "COSE alg"
     );
     Registration {
+        alg,
         credential_id,
         public_key,
         response,
     }
 }
 
-/// Verify `signature` over `message` with a COSE public key, independently
-/// of the engine's signing code.
-fn verify(public_key: &Value, message: &[u8], signature: &[u8]) {
-    let alg = match get(public_key, &int(3)) {
-        Value::Integer(alg) => CoseAlg::try_from(i128::from(alg) as i32).expect("known alg"),
-        other => panic!("COSE alg {other:?}"),
-    };
-    match alg {
-        CoseAlg::ES256 => {
-            let mut sec1 = vec![0x04];
-            sec1.extend(bytes(get(public_key, &int(-2))));
-            sec1.extend(bytes(get(public_key, &int(-3))));
-            let key = VerifyingKey::from_sec1_bytes(&sec1).expect("P-256 key");
-            let signature = Signature::from_der(signature).expect("DER signature");
-            key.verify(message, &signature)
-                .expect("ES256 signature verifies");
-        }
-        alg => {
-            let param_set = mldsa_paramset_from_alg(alg).expect("ML-DSA");
-            let key = pqkey_mldsa::PublicKey(bytes(get(public_key, &int(-1))));
-            assert!(
-                pqkey_mldsa::verify(param_set, &key, message, signature),
-                "{alg:?} signature verifies"
-            );
-        }
-    }
+/// Verify `signature` over `message` with `alg`'s COSE public key, with the
+/// test verifier, independently of the engine's signing code.
+fn verify(alg: CoseAlg, public_key: &Value, message: &[u8], signature: &[u8]) {
+    let mut cose_key = Vec::new();
+    ciborium::ser::into_writer(public_key, &mut cose_key).expect("encode COSE key");
+    verify::verify_signature(alg, &cose_key, message, signature)
+        .unwrap_or_else(|err| panic!("{alg:?}: {err}"));
 }
 
 /// Assert with `credential`, check the signature and return the counter.
@@ -264,7 +252,12 @@ fn authenticate(app: &mut CtapApp<'static>, registration: &Registration) -> u32 
     let signature = bytes(get(&response, &int(3)));
     let mut message = auth_data.clone();
     message.extend_from_slice(&client_data_hash);
-    verify(&registration.public_key, &message, &signature);
+    verify(
+        registration.alg,
+        &registration.public_key,
+        &message,
+        &signature,
+    );
     u32::from_be_bytes(auth_data[33..37].try_into().unwrap())
 }
 
@@ -338,7 +331,12 @@ fn self_attestation_verifies_with_the_credential_key() {
         assert!(matches!(&att_stmt, Value::Map(entries) if entries.len() == 2));
         let mut message = auth_data;
         message.extend_from_slice(&client_data_hash);
-        verify(&public_key, &message, &bytes(get(&att_stmt, &text("sig"))));
+        verify(
+            alg,
+            &public_key,
+            &message,
+            &bytes(get(&att_stmt, &text("sig"))),
+        );
     }
 }
 
@@ -402,7 +400,12 @@ fn self_attestation_is_the_default_even_with_a_provisioned_certificate() {
         let (_, public_key) = attested_credential(&auth_data);
         let mut message = auth_data;
         message.extend_from_slice(&client_data_hash);
-        verify(&public_key, &message, &bytes(get(&att_stmt, &text("sig"))));
+        verify(
+            alg,
+            &public_key,
+            &message,
+            &bytes(get(&att_stmt, &text("sig"))),
+        );
     }
 }
 
@@ -502,6 +505,7 @@ fn many_ml_dsa_87_credentials_persist_without_a_size_cap() {
         let mut message = bytes(get(response, &int(2)));
         message.extend_from_slice(&client_data_hash);
         verify(
+            registration.alg,
             &registration.public_key,
             &message,
             &bytes(get(response, &int(3))),

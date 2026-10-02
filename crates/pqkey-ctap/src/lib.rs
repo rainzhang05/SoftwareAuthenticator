@@ -19,9 +19,11 @@ pub use crypto::alg::{CoseAlg, KeyKind, UnsupportedCoseAlg};
 pub use crypto::credential_key::{
     CredentialSecretKey, try_cose_public_key, try_credential_secret_from_bytes, try_sign_challenge,
 };
-pub use crypto::mldsa::{MlDsaSeed, mldsa_paramset_from_alg};
+pub use crypto::mldsa::MlDsaSeed;
 pub use crypto::pin_uv::{
     ClassicPinProtocol, PinUvSessionKeys, decrypt_classic_pin_block,
     derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
     try_derive_classic_pin_uv_session_keys,
 };
+#[cfg(feature = "test-support")]
+pub use crypto::verify::{VerificationError, verify_signature};

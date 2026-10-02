@@ -1,21 +1,14 @@
-//! The ML-DSA family (FIPS 204, [`Scheme::MlDsa`]): keys kept as their
-//! 32-byte seed `ξ`, which the parameter set expands.
+//! The ML-DSA family (FIPS 204,
+//! [`Scheme::MlDsa`](super::alg::Scheme::MlDsa)): keys kept as their 32-byte
+//! seed `ξ`, which the parameter set expands.
 
 use core::fmt;
 use pqkey_mldsa::{ParamSet, PublicKey, SEED_LEN, try_public_key_from_seed, try_sign_from_seed};
 use zeroize::Zeroizing;
 
 use super::CryptoError;
-use super::alg::{CoseAlg, Scheme};
+use super::alg::CoseAlg;
 use super::cose::try_akp_key;
-
-/// Map a COSE algorithm identifier to the corresponding ML-DSA parameter set.
-pub fn mldsa_paramset_from_alg(alg: CoseAlg) -> Option<ParamSet> {
-    match alg.scheme() {
-        Scheme::MlDsa(param_set) => Some(param_set),
-        Scheme::EcdsaP256Sha256 => None,
-    }
-}
 
 /// The key whose seed is `bytes`.  Stored ML-DSA keys are seeds; an expanded
 /// secret key is never stored, so it is not accepted either.
@@ -78,15 +71,5 @@ impl MlDsaSeed {
 impl fmt::Debug for MlDsaSeed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("MlDsaSeed(<redacted>)")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn es256_has_no_ml_dsa_parameter_set() {
-        assert!(mldsa_paramset_from_alg(CoseAlg::ES256).is_none());
     }
 }

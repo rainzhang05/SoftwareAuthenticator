@@ -16,6 +16,8 @@ pub(crate) mod hkdf;
 pub(crate) mod mldsa;
 pub(crate) mod pin_uv;
 pub(crate) mod scrub;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod verify;
 
 /// The operating system's random number generator, for the infallible
 /// `rand_core::Rng` interface.  Like `rand_core` 0.6's `OsRng`, it panics if the
