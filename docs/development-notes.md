@@ -56,9 +56,10 @@ else has to change.
    `CoseAlg::ALL`, the order getInfo lists the algorithms in. An algorithm
    that differs from another only in its identifier, as ESP256 does from
    ES256, shares its scheme and needs nothing more in Rust.
-2. A new scheme needs a `Scheme` variant and a module for its family next to
-   `crypto/ecdsa_p256.rs` and `crypto/mldsa.rs`, and a new type of key a
-   `CredentialSecretKey` variant. Keys kept in a new form need a `KeyKind`, a
+2. A new scheme needs a `Scheme` variant and a module for its family, as
+   `crypto/ecdsa.rs` and `crypto/mldsa.rs` are. ECDSA on a new curve needs a
+   `Curve` variant and a module for the curve next to `crypto/ecdsa_p256.rs`.
+   A new type of key needs a `CredentialSecretKey` variant. Keys kept in a new form need a `KeyKind`, a
    `PrivateKeyMaterial` variant and a key type in `store/codec.rs`.
 3. Build and run clippy, and handle every match they point to, among them
    the test verifier in `crypto/verify.rs`, which pqkey's tests and the fuzz

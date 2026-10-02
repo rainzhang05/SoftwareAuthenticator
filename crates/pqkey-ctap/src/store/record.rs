@@ -432,8 +432,9 @@ impl fmt::Debug for CertificateSummary {
 mod tests {
     use super::*;
     use crate::crypto::alg::Scheme;
+    use crate::crypto::ecdsa::{self, Curve};
+    use crate::crypto::mldsa;
     use crate::crypto::verify::verify_signature;
-    use crate::crypto::{ecdsa_p256, mldsa};
     use crate::try_sign_challenge;
     use p256::ecdsa::{Signature, signature::Verifier};
     use pqkey_mldsa::try_keypair_from_seed;
@@ -561,7 +562,7 @@ mod tests {
         for alg in CoseAlg::ALL {
             let param_set = match alg.scheme() {
                 Scheme::MlDsa(param_set) => param_set,
-                Scheme::EcdsaP256Sha256 => continue,
+                Scheme::Ecdsa(_) => continue,
             };
             let record = record(alg);
             let PrivateKeyMaterial::Seed { seed } = &record.private_key else {
@@ -583,7 +584,7 @@ mod tests {
         let point = signing_key.verifying_key().to_sec1_point(false);
         assert_eq!(
             record.cose_public_key().unwrap(),
-            ecdsa_p256::try_cose_key(CoseAlg::ES256, &point).unwrap()
+            ecdsa::try_cose_key(CoseAlg::ES256, Curve::P256, point.coordinates()).unwrap()
         );
     }
 

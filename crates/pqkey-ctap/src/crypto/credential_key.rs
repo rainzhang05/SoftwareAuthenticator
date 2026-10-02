@@ -9,6 +9,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::CryptoError;
 use super::alg::{CoseAlg, KeyKind, Scheme};
+use super::ecdsa::Curve;
 use super::{ecdsa_p256, mldsa};
 
 /// A credential's signing key, named by its key type: algorithms that share
@@ -106,7 +107,7 @@ pub fn try_credential_secret_from_bytes(
     bytes: &[u8],
 ) -> Result<CredentialSecretKey, CryptoError> {
     match alg.scheme() {
-        Scheme::EcdsaP256Sha256 => ecdsa_p256::signing_key(bytes).map(CredentialSecretKey::P256),
+        Scheme::Ecdsa(Curve::P256) => ecdsa_p256::signing_key(bytes).map(CredentialSecretKey::P256),
         Scheme::MlDsa(_) => seed(bytes).map(CredentialSecretKey::MlDsa),
     }
 }
@@ -118,15 +119,18 @@ pub fn try_credential_secret_from_bytes(
 /// expanded, and [`CryptoError::CborEncoding`] when the key cannot be
 /// encoded.  None of these abort.
 pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec<u8>, CryptoError> {
-    match sk {
-        CredentialSecretKey::P256(key) => match alg.scheme() {
-            Scheme::EcdsaP256Sha256 => ecdsa_p256::cose_public_key(alg, key),
-            Scheme::MlDsa(_) => Err(CryptoError::KeyTypeMismatch),
-        },
-        CredentialSecretKey::MlDsa(seed) => match alg.scheme() {
-            Scheme::MlDsa(param_set) => mldsa::cose_public_key(alg, param_set, seed),
-            Scheme::EcdsaP256Sha256 => Err(CryptoError::KeyTypeMismatch),
-        },
+    match (sk, alg.scheme()) {
+        (CredentialSecretKey::P256(key), Scheme::Ecdsa(Curve::P256)) => {
+            ecdsa_p256::cose_public_key(alg, key)
+        }
+        (CredentialSecretKey::MlDsa(seed), Scheme::MlDsa(param_set)) => {
+            mldsa::cose_public_key(alg, param_set, seed)
+        }
+        // `alg` signs with another type of key.
+        (
+            CredentialSecretKey::P256(_) | CredentialSecretKey::MlDsa(_),
+            Scheme::Ecdsa(_) | Scheme::MlDsa(_),
+        ) => Err(CryptoError::KeyTypeMismatch),
     }
 }
 
@@ -149,15 +153,16 @@ pub fn try_sign_challenge(
     let mut msg = Vec::with_capacity(auth_data.len() + client_data_hash.len());
     msg.extend_from_slice(auth_data);
     msg.extend_from_slice(client_data_hash);
-    match sk {
-        CredentialSecretKey::P256(key) => match alg.scheme() {
-            Scheme::EcdsaP256Sha256 => ecdsa_p256::sign(key, &msg),
-            Scheme::MlDsa(_) => Err(CryptoError::KeyTypeMismatch),
-        },
-        CredentialSecretKey::MlDsa(seed) => match alg.scheme() {
-            Scheme::MlDsa(param_set) => mldsa::sign(param_set, seed, &msg),
-            Scheme::EcdsaP256Sha256 => Err(CryptoError::KeyTypeMismatch),
-        },
+    match (sk, alg.scheme()) {
+        (CredentialSecretKey::P256(key), Scheme::Ecdsa(Curve::P256)) => ecdsa_p256::sign(key, &msg),
+        (CredentialSecretKey::MlDsa(seed), Scheme::MlDsa(param_set)) => {
+            mldsa::sign(param_set, seed, &msg)
+        }
+        // `alg` signs with another type of key.
+        (
+            CredentialSecretKey::P256(_) | CredentialSecretKey::MlDsa(_),
+            Scheme::Ecdsa(_) | Scheme::MlDsa(_),
+        ) => Err(CryptoError::KeyTypeMismatch),
     }
 }
 
@@ -225,7 +230,7 @@ mod tests {
         for alg in CoseAlg::ALL {
             let ps = match alg.scheme() {
                 Scheme::MlDsa(ps) => ps,
-                Scheme::EcdsaP256Sha256 => continue,
+                Scheme::Ecdsa(_) => continue,
             };
             let seed = [0x3c; SEED_LEN];
             let (pk, _) = pqkey_mldsa::try_keypair_from_seed(ps, &seed).expect("keygen");

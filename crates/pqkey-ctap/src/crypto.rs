@@ -18,6 +18,7 @@ use rand_core::UnwrapErr;
 pub(crate) mod alg;
 pub(crate) mod cose;
 pub(crate) mod credential_key;
+pub(crate) mod ecdsa;
 pub(crate) mod ecdsa_p256;
 pub(crate) mod hkdf;
 pub(crate) mod mldsa;
@@ -47,8 +48,8 @@ pub enum CryptoError {
     KeyTypeMismatch,
     /// The key bytes could not be parsed as a key for the requested algorithm.
     InvalidKey,
-    /// A P-256 public key is the point at infinity, or otherwise carries no
-    /// usable affine coordinates.
+    /// An elliptic curve public key is the point at infinity, or otherwise
+    /// carries no usable affine coordinates.
     InvalidPublicKey,
     /// The COSE_Key structure could not be serialized to CBOR.
     CborEncoding,

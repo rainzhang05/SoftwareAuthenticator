@@ -5,6 +5,8 @@
 use core::fmt;
 use pqkey_mldsa::ParamSet;
 
+use super::ecdsa::Curve;
+
 /// The COSE algorithm identifiers this authenticator signs with: ES256 (-7)
 /// and the three ML-DSA parameter sets, which RFC 9964 §8.1 registered in the
 /// IANA "COSE Algorithms" registry as -48, -49 and -50.
@@ -37,13 +39,14 @@ pub enum KeyKind {
 }
 
 /// The signature scheme behind an algorithm.  It picks the family that reads
-/// the key, derives the public key and signs: [`super::ecdsa_p256`] or
+/// the key, derives the public key and signs: [`super::ecdsa`] or
 /// [`super::mldsa`].  Algorithms that differ only in their identifier share a
 /// scheme.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum Scheme {
-    /// ECDSA over P-256 with SHA-256, the signature DER-encoded.
-    EcdsaP256Sha256,
+    /// ECDSA over this curve with the curve's hash, the signature
+    /// DER-encoded.
+    Ecdsa(Curve),
     /// ML-DSA with this parameter set (FIPS 204).
     MlDsa(ParamSet),
 }
@@ -52,7 +55,7 @@ impl Scheme {
     /// The kind of key material the scheme's keys are kept as.
     const fn key_kind(self) -> KeyKind {
         match self {
-            Scheme::EcdsaP256Sha256 => KeyKind::P256Scalar,
+            Scheme::Ecdsa(Curve::P256) => KeyKind::P256Scalar,
             Scheme::MlDsa(_) => KeyKind::Seed,
         }
     }
@@ -81,7 +84,7 @@ impl CoseAlg {
         match self {
             CoseAlg::ES256 => Properties {
                 name: "ES256",
-                scheme: Scheme::EcdsaP256Sha256,
+                scheme: Scheme::Ecdsa(Curve::P256),
             },
             CoseAlg::MLDSA44 => Properties {
                 name: "ML-DSA-44",
@@ -173,7 +176,7 @@ mod tests {
         assert_eq!(
             schemes,
             [
-                Scheme::EcdsaP256Sha256,
+                Scheme::Ecdsa(Curve::P256),
                 Scheme::MlDsa(ParamSet::MLDSA44),
                 Scheme::MlDsa(ParamSet::MLDSA65),
                 Scheme::MlDsa(ParamSet::MLDSA87),
