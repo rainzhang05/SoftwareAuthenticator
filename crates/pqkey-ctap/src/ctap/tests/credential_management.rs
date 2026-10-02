@@ -6,6 +6,7 @@ use super::support::{
     TestStore, encode, es256_credential, get_pin_uv_auth_token, install_pin_uv_auth_token, int,
     pin_hash, token_pin_auth,
 };
+use crate::crypto::verify::verify_signature;
 use crate::ctap::CtapApp;
 use crate::ctap::cbor::canonical_map;
 use crate::ctap::credential_management::truncated_rp_id;
@@ -13,7 +14,7 @@ use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA};
 use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
 use crate::ctap::pin::token::{MAX_USAGE_TIME_PERIOD, ManualClock};
 use crate::store::CredentialStore;
-use crate::{ClassicPinProtocol, CoseAlg};
+use crate::{ClassicPinProtocol, CoseAlg, try_sign_challenge};
 
 use ciborium::{
     de::from_reader,
@@ -564,6 +565,38 @@ fn app_with_cm_token(aaguid: u8) -> (TestApp, TestStore, [u8; 32]) {
         None,
     );
     (app, store, token)
+}
+
+/// enumerateCredentials returns each credential's publicKey (CTAP 2.3
+/// §6.8.4): the COSE_Key of the stored credential, under which its
+/// signatures verify, for every algorithm.
+#[test]
+fn enumerated_credentials_carry_their_public_key() {
+    for alg in CoseAlg::ALL {
+        let (mut app, _, token) = app_with_cm_token(0x3A);
+        let record = credential("example.com", &[0x01], &[0xC1], alg);
+        insert(&mut app, &record);
+        let response = credential_management(
+            &mut app,
+            &token,
+            0x04,
+            Some(rp_id_hash_params("example.com")),
+        )
+        .expect("enumerateCredentialsBegin succeeds");
+        let public_key = response_map(&response)
+            .into_iter()
+            .find_map(|(key, value)| (key == Value::Integer(Integer::from(8))).then_some(value))
+            .expect("publicKey present");
+        let mut public_key_bytes = Vec::new();
+        into_writer(&public_key, &mut public_key_bytes).expect("encode publicKey");
+        let (secret_key, cose_key) = record.keypair().expect("materialise key pair");
+        assert_eq!(public_key_bytes, cose_key, "{alg:?}");
+
+        let signature =
+            try_sign_challenge(alg, &secret_key, b"auth", b"hash").expect("sign with the key");
+        verify_signature(alg, &public_key_bytes, b"authhash", &signature)
+            .unwrap_or_else(|err| panic!("{alg:?}: {err}"));
+    }
 }
 
 /// "Platform sends authenticatorCredentialManagement command with following

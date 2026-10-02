@@ -342,62 +342,67 @@ fn get_assertion_with_invalid_pin_uv_auth_param_fails() {
     assert_eq!(result, Err(CTAP2_ERR_PIN_AUTH_INVALID));
 }
 
+/// Every algorithm's assertion signature verifies under the credential's
+/// public key.
 #[test]
-fn get_assertion_es256_signature_verifies() {
-    let mut app = new_app(TestStore::new(), [0x02; 16]);
-    let rp_id = "example.com";
-    let client_hash = vec![0x99; 32];
+fn get_assertion_signatures_verify() {
+    for alg in CoseAlg::ALL {
+        let mut app = new_app(TestStore::new(), [0x02; 16]);
+        let rp_id = "example.com";
+        let client_hash = vec![0x99; 32];
 
-    let record = credential(rp_id, &[0x01], &[0xA1, 0xB2], CoseAlg::ES256);
-    insert(&mut app, &record);
-    let public_key = record.cose_public_key().expect("ES256 public key");
+        let record = credential(rp_id, &[0x01], &[0xA1, 0xB2], alg);
+        insert(&mut app, &record);
+        let public_key = record.cose_public_key().expect("public key");
 
-    let request = canonical_map(vec![
-        (
-            Value::Integer(Integer::from(1)),
-            Value::Text(rp_id.to_string()),
-        ),
-        (
-            Value::Integer(Integer::from(2)),
-            Value::Bytes(client_hash.clone()),
-        ),
-    ]);
+        let request = canonical_map(vec![
+            (
+                Value::Integer(Integer::from(1)),
+                Value::Text(rp_id.to_string()),
+            ),
+            (
+                Value::Integer(Integer::from(2)),
+                Value::Bytes(client_hash.clone()),
+            ),
+        ]);
 
-    let mut payload = Vec::new();
-    into_writer(&request, &mut payload).expect("serialize getAssertion request");
-    let response = app
-        .handle_get_assertion(&payload)
-        .expect("getAssertion succeeds");
-    assert_eq!(response[0], CTAP2_OK);
+        let mut payload = Vec::new();
+        into_writer(&request, &mut payload).expect("serialize getAssertion request");
+        let response = app
+            .handle_get_assertion(&payload)
+            .expect("getAssertion succeeds");
+        assert_eq!(response[0], CTAP2_OK);
 
-    let Value::Map(entries) = from_reader(&response[1..]).expect("decode getAssertion response")
-    else {
-        panic!("response must be a map");
-    };
+        let Value::Map(entries) =
+            from_reader(&response[1..]).expect("decode getAssertion response")
+        else {
+            panic!("response must be a map");
+        };
 
-    let mut auth_data_bytes = None;
-    let mut signature_bytes = None;
-    for (key, value) in entries {
-        if key == Value::Integer(Integer::from(2)) {
-            if let Value::Bytes(bytes) = value {
-                auth_data_bytes = Some(bytes);
+        let mut auth_data_bytes = None;
+        let mut signature_bytes = None;
+        for (key, value) in entries {
+            if key == Value::Integer(Integer::from(2)) {
+                if let Value::Bytes(bytes) = value {
+                    auth_data_bytes = Some(bytes);
+                }
+            } else if key == Value::Integer(Integer::from(3))
+                && let Value::Bytes(bytes) = value
+            {
+                signature_bytes = Some(bytes);
             }
-        } else if key == Value::Integer(Integer::from(3))
-            && let Value::Bytes(bytes) = value
-        {
-            signature_bytes = Some(bytes);
         }
+
+        let auth_data_bytes = auth_data_bytes.expect("authData present");
+        let signature_bytes = signature_bytes.expect("signature present");
+
+        let mut message = Vec::new();
+        message.extend_from_slice(&auth_data_bytes);
+        message.extend_from_slice(&client_hash);
+
+        verify_signature(alg, &public_key, &message, &signature_bytes)
+            .unwrap_or_else(|err| panic!("{alg:?}: {err}"));
     }
-
-    let auth_data_bytes = auth_data_bytes.expect("authData present");
-    let signature_bytes = signature_bytes.expect("signature present");
-
-    let mut message = Vec::new();
-    message.extend_from_slice(&auth_data_bytes);
-    message.extend_from_slice(&client_hash);
-
-    verify_signature(CoseAlg::ES256, &public_key, &message, &signature_bytes)
-        .expect("ES256 signature verifies");
 }
 
 #[test]

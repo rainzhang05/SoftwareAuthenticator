@@ -161,7 +161,7 @@ fn a_discoverable_registration_replaces_only_discoverable_credentials() {
 /// party.
 #[test]
 fn a_non_discoverable_credential_is_sealed_into_its_id() {
-    for alg in [CoseAlg::ES256, CoseAlg::MLDSA87] {
+    for alg in CoseAlg::ALL {
         let mut app = test_app([0x66; 16]);
         let entries = vec![
             (int(1), Value::Bytes(vec![0x11; 32])),

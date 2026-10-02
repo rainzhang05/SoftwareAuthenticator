@@ -431,18 +431,12 @@ impl fmt::Debug for CertificateSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::alg::Scheme;
     use crate::crypto::verify::verify_signature;
     use crate::crypto::{ecdsa_p256, mldsa};
     use crate::try_sign_challenge;
     use p256::ecdsa::{Signature, signature::Verifier};
-    use pqkey_mldsa::{ParamSet, try_keypair_from_seed};
-
-    const ALL_ALGS: [CoseAlg; 4] = [
-        CoseAlg::ES256,
-        CoseAlg::MLDSA44,
-        CoseAlg::MLDSA65,
-        CoseAlg::MLDSA87,
-    ];
+    use pqkey_mldsa::try_keypair_from_seed;
 
     /// A random number generator that always fails.
     struct FailingRng;
@@ -476,7 +470,7 @@ mod tests {
     /// A failing generator is reported, never a panic or a key of zeros.
     #[test]
     fn key_generation_reports_a_failing_generator() {
-        for alg in ALL_ALGS {
+        for alg in CoseAlg::ALL {
             assert!(
                 PrivateKeyMaterial::try_generate_from_rng(alg, &mut FailingRng).is_err(),
                 "{alg:?}"
@@ -518,10 +512,10 @@ mod tests {
 
     #[test]
     fn generated_material_matches_its_algorithm() {
-        for alg in ALL_ALGS {
+        for alg in CoseAlg::ALL {
             let material = PrivateKeyMaterial::generate(alg);
             assert_eq!(material.kind(), alg.key_kind(), "{alg:?}");
-            for other in ALL_ALGS {
+            for other in CoseAlg::ALL {
                 let same_family = (alg == CoseAlg::ES256) == (other == CoseAlg::ES256);
                 assert_eq!(
                     material.kind() == other.key_kind(),
@@ -545,14 +539,14 @@ mod tests {
 
     #[test]
     fn every_algorithm_signs_and_verifies_with_the_derived_public_key() {
-        for alg in ALL_ALGS {
+        for alg in CoseAlg::ALL {
             assert_signature_verifies(&record(alg));
         }
     }
 
     #[test]
     fn helpers_agree_and_are_deterministic() {
-        for alg in ALL_ALGS {
+        for alg in CoseAlg::ALL {
             let record = record(alg);
             let (_, from_keypair) = record.keypair().unwrap();
             assert_eq!(record.cose_public_key().unwrap(), from_keypair, "{alg:?}");
@@ -564,11 +558,11 @@ mod tests {
     /// The stored seed is FIPS 204 `ξ` itself, not some wrapped form of it.
     #[test]
     fn mldsa_material_is_the_fips204_seed() {
-        for (alg, param_set) in [
-            (CoseAlg::MLDSA44, ParamSet::MLDSA44),
-            (CoseAlg::MLDSA65, ParamSet::MLDSA65),
-            (CoseAlg::MLDSA87, ParamSet::MLDSA87),
-        ] {
+        for alg in CoseAlg::ALL {
+            let param_set = match alg.scheme() {
+                Scheme::MlDsa(param_set) => param_set,
+                Scheme::EcdsaP256Sha256 => continue,
+            };
             let record = record(alg);
             let PrivateKeyMaterial::Seed { seed } = &record.private_key else {
                 panic!("ML-DSA record must hold a seed");
