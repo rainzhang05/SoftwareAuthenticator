@@ -84,12 +84,31 @@ missing=()
 command -v cc >/dev/null || missing+=(linker)
 have_rust || command -v curl >/dev/null || missing+=(curl)
 
+# Disk space in MB, as measured on Ubuntu: the build tools, Rust with rustup,
+# and the build (about 400 in target/, 100 of crate sources in ~/.cargo).
+mb_tools=0 mb_rust=0 mb_build=500
+case " ${missing[*]} " in *" linker "*) mb_tools=250 ;; *" curl "*) mb_tools=5 ;; esac
+have_rust || mb_rust=500
+[ ! -x target/release/pqkey ] || mb_build=50 # an update reuses the build
+mb_needed=$((mb_tools + mb_rust + mb_build))
+mb_free=$(df -Pm "$PWD" "$HOME" | awk 'NR > 1 { print $4 }' | sort -n | head -n 1)
+size() { # size MB: MB, readably
+  if [ "$1" -ge 1000 ]; then
+    printf '%d.%d GB' $(($1 / 1000)) $(($1 % 1000 / 100))
+  else
+    printf '%d MB' "$1"
+  fi
+}
+[ "$mb_free" -ge "$mb_needed" ] ||
+  fail "pqkey needs about $(size "$mb_needed") of disk space, but only $(size "$mb_free") is free"
+
 tools=("${missing[@]/linker/a C linker}")
-have_rust || tools+=("Rust (rustup)")
+have_rust || tools+=("Rust")
 printf '\n%spqkey%s, a FIDO2 security key in software\n\n' "$bold" "$reset"
-echo "This sets it up for $(id -un):"
-[ ${#tools[@]} = 0 ] || echo "  - what building needs: $(printf '%s, ' "${tools[@]}" | sed 's/, $//')"
-echo "  - pqkey, built from this clone, in $(dirname "$pqkey")"
+echo "This sets it up for $(id -un), using about $(size "$mb_needed") of disk ($(size "$mb_free") free):"
+[ ${#tools[@]} = 0 ] ||
+  echo "  - what building needs: $(printf '%s, ' "${tools[@]}" | sed 's/, $//') (about $(size $((mb_tools + mb_rust))))"
+echo "  - pqkey, built in this clone (about $(size "$mb_build")) and installed in $(dirname "$pqkey")"
 echo "  - access to /dev/uhid for the key: udev rules and the uhid module"
 echo "  - the key, started now and with every login, and its PIN"
 echo
