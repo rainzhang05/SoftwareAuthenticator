@@ -113,6 +113,12 @@ jobs:
         if: ${{ !cancelled() && steps.fuzz-lockfile.outcome == 'success' }}
         run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- ${{ env.CLIPPY_FLAGS }}
 
+      # The fuzz crate's own unit tests, such as the check that the algorithms
+      # its requests offer as unsupported really are. Nothing else runs them.
+      - name: Test the fuzz crate
+        if: ${{ !cancelled() && steps.fuzz-lockfile.outcome == 'success' }}
+        run: cargo test --manifest-path fuzz/Cargo.toml --lib
+
   # The main correctness gate: the full workspace on Linux, the platform where
   # the pqkey daemon actually runs, on x86_64 and on arm64. Nothing here is
   # architecture-specific by design, but the uhid event layout, stack residue

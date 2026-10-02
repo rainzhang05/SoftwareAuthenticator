@@ -26,6 +26,7 @@ step "Formatting" sh -c 'cargo fmt --all -- --check && cargo fmt --manifest-path
 step "Lints" cargo clippy --workspace --all-targets --locked -- -D warnings
 step "Lints of the fuzz crate" cargo clippy "${fuzz[@]}" --all-targets -- -D warnings
 step "Tests" cargo test --workspace --locked --all-targets
+step "Tests of the fuzz crate" cargo test "${fuzz[@]}" --lib
 step "Doctests" cargo test --workspace --locked --doc
 
 if ! $quick; then
