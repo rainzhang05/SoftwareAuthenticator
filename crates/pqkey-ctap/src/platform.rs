@@ -36,9 +36,10 @@ use p256::{
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::crypto::scrub::with_scrubbed_stack;
 use crate::{
     ClassicPinProtocol, CryptoError, PinUvSessionKeys, decrypt_classic_pin_block,
-    derive_classic_pin_uv_session_keys, encrypt_classic_pin_block, with_scrubbed_stack,
+    derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
 };
 
 /// The secret of a platform key agreement key: a P-256 scalar, zeroized on

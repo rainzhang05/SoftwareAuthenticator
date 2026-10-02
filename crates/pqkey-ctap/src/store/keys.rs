@@ -301,7 +301,7 @@ pub(crate) struct SubKey([u8; KEY_LEN]);
 impl SubKey {
     fn derive(root: &RootKey, domain: KeyDomain, info: &[u8]) -> Result<Self, StoreError> {
         let mut subkey = Self([0; KEY_LEN]);
-        crate::hkdf_sha256(root.expose(), info, &mut subkey.0).map_err(|_| {
+        crate::crypto::hkdf::hkdf_sha256(root.expose(), info, &mut subkey.0).map_err(|_| {
             StoreError::KeyUnavailable {
                 domain,
                 detail: "HKDF key derivation failed".into(),

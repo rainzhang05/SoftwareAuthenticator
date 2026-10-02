@@ -8,11 +8,12 @@
 
 use super::CtapApp;
 use super::pin::state::{PersistentPinState, PinState};
+use crate::CoseAlg;
+use crate::crypto::hkdf::hkdf_sha256;
 use crate::store::{
     AttestationRecord, CredentialRecord, CredentialStore, PinStateRecord, PrivateKeyMaterial,
     SEALED_ID_OVERHEAD, StoreError, validate_credential,
 };
-use crate::{CoseAlg, hkdf_sha256};
 
 use rand_core::Rng;
 use sha2::{Digest, Sha256};

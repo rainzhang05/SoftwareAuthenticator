@@ -66,7 +66,7 @@ impl PrivateKeyMaterial {
     /// Fails with [`CryptoError::Randomness`] if the generator fails, so a
     /// registration fails instead of the process.
     pub fn try_generate(alg: CoseAlg) -> Result<Self, CryptoError> {
-        crate::with_scrubbed_stack(|| {
+        crate::crypto::scrub::with_scrubbed_stack(|| {
             Self::try_generate_from_rng(alg, &mut getrandom::SysRng)
                 .map_err(|_| CryptoError::Randomness)
         })

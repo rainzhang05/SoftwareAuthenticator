@@ -220,7 +220,7 @@ impl<'interrupt> CtapApp<'interrupt> {
         interrupt: &'interrupt InterruptFlag,
         aaguid: [u8; 16],
     ) -> Self {
-        Self::new(store, crate::os_rng(), presence, interrupt, aaguid)
+        Self::new(store, crate::crypto::os_rng(), presence, interrupt, aaguid)
     }
 
     /// Call `callback` with `true` when the engine starts waiting for the

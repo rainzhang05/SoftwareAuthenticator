@@ -18,7 +18,7 @@ pub(crate) struct TempDir(PathBuf);
 impl TempDir {
     pub(crate) fn new() -> Self {
         let mut random = [0u8; 16];
-        crate::os_rng().fill_bytes(&mut random);
+        crate::crypto::os_rng().fill_bytes(&mut random);
         let path = std::env::temp_dir().join(format!("authenticator-store-{}", hex(&random)));
         fs::create_dir(&path).expect("create temporary directory");
         Self(path)

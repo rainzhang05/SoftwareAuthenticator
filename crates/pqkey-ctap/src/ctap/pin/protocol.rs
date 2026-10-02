@@ -243,7 +243,7 @@ impl KeyAgreementKey {
 
         let peer_public = P256PublicKey::from_sec1_bytes(&peer_encoded)
             .map_err(|_| CTAP1_ERR_INVALID_PARAMETER)?;
-        let shared = crate::with_scrubbed_stack(|| {
+        let shared = crate::crypto::scrub::with_scrubbed_stack(|| {
             diffie_hellman(self.secret_key.to_nonzero_scalar(), peer_public.as_affine())
         });
 
