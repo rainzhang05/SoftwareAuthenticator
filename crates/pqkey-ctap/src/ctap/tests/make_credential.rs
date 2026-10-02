@@ -232,7 +232,7 @@ fn make_credential_supports_es256() {
         .secret_key()
         .expect("reconstruct ES256 secret key");
     match reconstructed {
-        CredentialSecretKey::Es256(_) => {}
+        CredentialSecretKey::P256(_) => {}
         _ => panic!("expected ES256 secret key variant"),
     }
 }

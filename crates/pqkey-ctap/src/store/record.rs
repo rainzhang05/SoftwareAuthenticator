@@ -224,7 +224,7 @@ impl CredentialRecord {
         match &self.private_key {
             PrivateKeyMaterial::Es256 { scalar } => {
                 let secret = try_credential_secret_from_bytes(CoseAlg::ES256, scalar)?;
-                let CredentialSecretKey::Es256(signing_key) = &secret else {
+                let CredentialSecretKey::P256(signing_key) = &secret else {
                     return Err(CryptoError::KeyTypeMismatch);
                 };
                 let point = signing_key.verifying_key().to_sec1_point(false);
@@ -236,7 +236,7 @@ impl CredentialRecord {
                     mldsa_paramset_from_alg(self.alg).ok_or(CryptoError::KeyTypeMismatch)?;
                 let public_key = try_public_key_from_seed(param_set, seed)?;
                 let cose = mldsa::try_cose_key(self.alg, &public_key)?;
-                Ok((CredentialSecretKey::MlDsaSeed(MlDsaSeed::new(*seed)), cose))
+                Ok((CredentialSecretKey::MlDsa(MlDsaSeed::new(*seed)), cose))
             }
         }
     }
@@ -251,7 +251,7 @@ impl CredentialRecord {
             // here would be a second key generation.
             PrivateKeyMaterial::MlDsa { seed } if self.private_key.matches(self.alg) => {
                 mldsa_paramset_from_alg(self.alg).ok_or(CryptoError::KeyTypeMismatch)?;
-                Ok(CredentialSecretKey::MlDsaSeed(MlDsaSeed::new(*seed)))
+                Ok(CredentialSecretKey::MlDsa(MlDsaSeed::new(*seed)))
             }
             _ => self.keypair().map(|(secret, _)| secret),
         }

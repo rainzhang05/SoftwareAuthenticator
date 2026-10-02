@@ -353,7 +353,7 @@ fn get_assertion_es256_signature_verifies() {
     let record = credential(rp_id, &[0x01], &[0xA1, 0xB2], CoseAlg::ES256);
     insert(&mut app, &record);
     let verifying_key = match record.secret_key().expect("ES256 key") {
-        CredentialSecretKey::Es256(sk) => *sk.verifying_key(),
+        CredentialSecretKey::P256(sk) => *sk.verifying_key(),
         _ => panic!("expected ES256 secret key"),
     };
 

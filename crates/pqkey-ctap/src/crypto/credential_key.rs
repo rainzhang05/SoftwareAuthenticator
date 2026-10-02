@@ -15,15 +15,16 @@ use super::mldsa::{MlDsaSeed, mldsa_paramset_from_alg};
 use super::scrub::with_scrubbed_stack;
 use super::{ecdsa_p256, mldsa};
 
-/// Credential secret key variants supported by the authenticator.
+/// A credential's signing key, named by its key type: algorithms that share
+/// a key type share a variant.
 #[derive(Debug)]
 pub enum CredentialSecretKey {
     /// An ML-DSA key held as its 32-byte FIPS 204 seed `ξ`, the form stored
     /// credentials use.  Signing expands the seed directly, so no expanded
     /// secret key encoding is produced or decoded.
-    MlDsaSeed(MlDsaSeed),
-    /// A P-256 private key, for ES256.
-    Es256(P256SigningKey),
+    MlDsa(MlDsaSeed),
+    /// A P-256 private key, for ECDSA.
+    P256(P256SigningKey),
 }
 
 impl CredentialSecretKey {
@@ -34,8 +35,8 @@ impl CredentialSecretKey {
     /// seed, which [`try_credential_secret_from_bytes`] accepts back.
     pub fn secret_bytes(&self) -> Zeroizing<Vec<u8>> {
         match self {
-            CredentialSecretKey::MlDsaSeed(seed) => Zeroizing::new(seed.as_bytes().to_vec()),
-            CredentialSecretKey::Es256(sk) => {
+            CredentialSecretKey::MlDsa(seed) => Zeroizing::new(seed.as_bytes().to_vec()),
+            CredentialSecretKey::P256(sk) => {
                 let mut scalar = sk.to_bytes();
                 let out = Zeroizing::new(scalar.to_vec());
                 scalar.zeroize();
@@ -68,12 +69,12 @@ pub fn try_credential_secret_from_bytes(
                 <&p256::FieldBytes>::try_from(bytes).map_err(|_| CryptoError::InvalidKey)?;
             let signing_key =
                 P256SigningKey::from_bytes(scalar).map_err(|_| CryptoError::InvalidKey)?;
-            Ok(CredentialSecretKey::Es256(signing_key))
+            Ok(CredentialSecretKey::P256(signing_key))
         }
         // Stored ML-DSA keys are seeds; an expanded secret key is never
         // stored, so it is not accepted either.
         CoseAlg::MLDSA44 | CoseAlg::MLDSA65 | CoseAlg::MLDSA87 => <[u8; SEED_LEN]>::try_from(bytes)
-            .map(|seed| CredentialSecretKey::MlDsaSeed(MlDsaSeed::new(seed)))
+            .map(|seed| CredentialSecretKey::MlDsa(MlDsaSeed::new(seed)))
             .map_err(|_| CryptoError::InvalidKey),
     }
 }
@@ -95,7 +96,7 @@ pub fn try_create_credential(alg: CoseAlg) -> Result<(Vec<u8>, CredentialSecretK
                     .map_err(|_| CryptoError::Randomness)?;
             let public_key = signing_key.verifying_key().to_sec1_point(false);
             let cose = ecdsa_p256::try_cose_key(alg, &public_key)?;
-            Ok((cose, CredentialSecretKey::Es256(signing_key)))
+            Ok((cose, CredentialSecretKey::P256(signing_key)))
         }
         _ => {
             let ps = mldsa_paramset_from_alg(alg).ok_or(CryptoError::UnsupportedAlgorithm)?;
@@ -107,7 +108,7 @@ pub fn try_create_credential(alg: CoseAlg) -> Result<(Vec<u8>, CredentialSecretK
             seed.zeroize();
             let pk = try_public_key_from_seed(ps, key.as_bytes())?;
             let cose = mldsa::try_cose_key(alg, &pk)?;
-            Ok((cose, CredentialSecretKey::MlDsaSeed(key)))
+            Ok((cose, CredentialSecretKey::MlDsa(key)))
         }
     }
 }
@@ -140,13 +141,13 @@ pub fn try_sign_challenge(
     msg.extend_from_slice(auth_data);
     msg.extend_from_slice(client_data_hash);
     match (alg, sk) {
-        (CoseAlg::ES256, CredentialSecretKey::Es256(sk)) => {
+        (CoseAlg::ES256, CredentialSecretKey::P256(sk)) => {
             let signature: P256EcdsaSignature = with_scrubbed_stack(|| sk.try_sign(&msg))
                 .map_err(|_| CryptoError::SigningFailed)?;
             Ok(signature.to_der().as_bytes().to_vec())
         }
         (CoseAlg::ES256, _) => Err(CryptoError::KeyTypeMismatch),
-        (_, CredentialSecretKey::MlDsaSeed(seed)) => {
+        (_, CredentialSecretKey::MlDsa(seed)) => {
             let ps = mldsa_paramset_from_alg(alg).ok_or(CryptoError::UnsupportedAlgorithm)?;
             Ok(try_sign_from_seed(ps, seed.as_bytes(), &msg)?)
         }
@@ -189,7 +190,7 @@ mod tests {
             let seed = [0x3c; SEED_LEN];
             let (pk, _) = pqkey_mldsa::try_keypair_from_seed(ps, &seed).expect("keygen");
 
-            let key = CredentialSecretKey::MlDsaSeed(MlDsaSeed::new(seed));
+            let key = CredentialSecretKey::MlDsa(MlDsaSeed::new(seed));
             assert_eq!(key.secret_bytes().as_slice(), &seed[..]);
             let rendered = format!("{key:?}");
             assert!(
@@ -198,7 +199,7 @@ mod tests {
             );
 
             let reloaded = try_credential_secret_from_bytes(alg, &key.secret_bytes()).unwrap();
-            assert!(matches!(reloaded, CredentialSecretKey::MlDsaSeed(_)));
+            assert!(matches!(reloaded, CredentialSecretKey::MlDsa(_)));
             for key in [&key, &reloaded] {
                 let signature = try_sign_challenge(alg, key, b"auth", b"hash").expect("sign");
                 assert!(verify(ps, &pk, b"authhash", &signature));
@@ -266,7 +267,7 @@ mod tests {
             try_credential_secret_from_bytes(CoseAlg::ES256, &secret_key.secret_bytes())
                 .expect("reconstruct P-256 secret");
         match reconstructed {
-            CredentialSecretKey::Es256(_) => {}
+            CredentialSecretKey::P256(_) => {}
             _ => panic!("unexpected key variant"),
         }
     }
@@ -358,7 +359,7 @@ mod tests {
     fn es256_signature_is_der_over_sha256_of_auth_data_and_client_data_hash() {
         let (_, secret_key) = try_create_credential(CoseAlg::ES256).unwrap();
         let verifying_key = match &secret_key {
-            CredentialSecretKey::Es256(sk) => *sk.verifying_key(),
+            CredentialSecretKey::P256(sk) => *sk.verifying_key(),
             _ => panic!("expected a P-256 key"),
         };
 
