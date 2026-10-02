@@ -54,5 +54,3 @@ pqkey-ctap = { workspace = true, features = ["test-support"] }
 # CBOR requests and responses in the CTAP-level tests.
 # Reads the attestation certificate back independently of rcgen, which wrote it.
 x509-parser = "0.18"
-# Verifies the ML-DSA signatures of the full-stack test.
-pqkey-mldsa.workspace = true
