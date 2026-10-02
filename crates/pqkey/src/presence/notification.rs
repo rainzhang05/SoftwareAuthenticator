@@ -1223,17 +1223,21 @@ mod tests {
     /// On GNOME Shell a prompt that waits is nudged every interval, between
     /// showing it and withdrawing it, and the request still times out when
     /// its own timeout says.
+    ///
+    /// The prompt waits a second, many nudge intervals, because a loaded
+    /// machine can oversleep each wait several times over (GitHub's macOS
+    /// runners take about 100 ms for a 20 ms sleep).
     #[test]
     fn an_unanswered_prompt_is_nudged_on_gnome() {
         let server = FakeServer::named("gnome-shell");
         let started = Instant::now();
         assert_eq!(
-            confirm_nudging(&server, &short(PresenceOperation::Register, 200)),
+            confirm_nudging(&server, &short(PresenceOperation::Register, 1_000)),
             PresenceOutcome::TimedOut
         );
         let elapsed = started.elapsed();
         assert!(
-            elapsed >= Duration::from_millis(200) && elapsed < Duration::from_millis(400),
+            elapsed >= Duration::from_millis(1_000) && elapsed < Duration::from_millis(1_400),
             "the deadline moved: {elapsed:?}"
         );
         let calls = server.calls();
