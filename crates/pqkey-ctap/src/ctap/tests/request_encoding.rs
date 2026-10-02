@@ -297,7 +297,7 @@ mod parameter_types {
                 (
                     int(4),
                     Value::Array(vec![canonical_map(vec![
-                        (text("alg"), int(CoseAlg::ES256 as i64)),
+                        (text("alg"), int(i64::from(CoseAlg::ES256.identifier()))),
                         (text("type"), text("public-key")),
                     ])]),
                 ),

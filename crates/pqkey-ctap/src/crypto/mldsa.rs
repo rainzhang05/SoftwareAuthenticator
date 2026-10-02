@@ -25,9 +25,9 @@ pub fn mldsa_paramset_from_alg(alg: CoseAlg) -> Option<ParamSet> {
 /// fails.
 pub fn try_cose_public_key(ps: ParamSet, pk: &PublicKey) -> Result<Vec<u8>, CryptoError> {
     let alg_id = match ps {
-        ParamSet::MLDSA44 => CoseAlg::MLDSA44 as i32,
-        ParamSet::MLDSA65 => CoseAlg::MLDSA65 as i32,
-        ParamSet::MLDSA87 => CoseAlg::MLDSA87 as i32,
+        ParamSet::MLDSA44 => CoseAlg::MLDSA44.identifier(),
+        ParamSet::MLDSA65 => CoseAlg::MLDSA65.identifier(),
+        ParamSet::MLDSA87 => CoseAlg::MLDSA87.identifier(),
     };
     let mut out = Vec::new();
     let map = cose_akp_key_map(alg_id, &pk.0);

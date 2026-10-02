@@ -8,6 +8,7 @@ use super::presence::{PresenceOperation, PresenceRequest};
 use super::request;
 use super::storage::store_status;
 use super::{AttestationMode, CtapApp};
+use crate::CoseAlg;
 use crate::store::{AttestationRecord, CredentialRecord, StoreError};
 use crate::try_sign_challenge;
 
@@ -19,8 +20,6 @@ use p256::ecdsa::{Signature as P256EcdsaSignature, signature::Signer};
 use sha2::{Digest, Sha256};
 
 use crate::ctap::constants::*;
-
-pub(super) const COSE_ALG_ES256: i32 = -7;
 
 /// The attestation statements makeCredential can return, in order of
 /// preference.
@@ -420,7 +419,7 @@ impl CtapApp<'_> {
                     let statement = canonical_map(vec![
                         (
                             Value::Text("alg".into()),
-                            Value::Integer(Integer::from(COSE_ALG_ES256)),
+                            Value::Integer(Integer::from(CoseAlg::ES256.identifier())),
                         ),
                         (
                             Value::Text("sig".into()),
@@ -450,7 +449,7 @@ impl CtapApp<'_> {
                     let statement = canonical_map(vec![
                         (
                             Value::Text("alg".into()),
-                            Value::Integer(Integer::from(alg as i32)),
+                            Value::Integer(Integer::from(alg.identifier())),
                         ),
                         (Value::Text("sig".into()), Value::Bytes(signature)),
                     ]);

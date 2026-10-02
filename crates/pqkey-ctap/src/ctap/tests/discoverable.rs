@@ -50,7 +50,7 @@ fn register_with(
             int(4),
             Value::Array(vec![canonical_map(vec![
                 (text("type"), text("public-key")),
-                (text("alg"), int(CoseAlg::ES256 as i64)),
+                (text("alg"), int(i64::from(CoseAlg::ES256.identifier()))),
             ])]),
         ),
     ];
@@ -174,7 +174,7 @@ fn a_non_discoverable_credential_is_sealed_into_its_id() {
                 int(4),
                 Value::Array(vec![canonical_map(vec![
                     (text("type"), text("public-key")),
-                    (text("alg"), int(alg as i64)),
+                    (text("alg"), int(i64::from(alg.identifier()))),
                 ])]),
             ),
             (int(6), canonical_map(vec![(text("credProtect"), int(2))])),
@@ -201,7 +201,7 @@ fn a_non_discoverable_credential_is_sealed_into_its_id() {
             PrivateKeyMaterial::MlDsa { seed } => seed,
         };
         assert_eq!(plaintext.len(), 66);
-        assert_eq!(plaintext[0], alg as i32 as i8 as u8, "{alg:?}");
+        assert_eq!(plaintext[0], alg.identifier() as i8 as u8, "{alg:?}");
         assert_eq!(plaintext[1], 2, "credProtect");
         assert_eq!(&plaintext[2..34], key.as_slice());
         assert_eq!(credential.cred_protect, 2);
@@ -249,7 +249,7 @@ fn every_sealed_credential_has_its_own_cred_random_seed() {
 #[test]
 fn sealed_ids_of_the_earlier_format_are_not_credentials() {
     let mut app = test_app([0x6B; 16]);
-    let mut plaintext = vec![CoseAlg::ES256 as i32 as i8 as u8, 1];
+    let mut plaintext = vec![CoseAlg::ES256.identifier() as i8 as u8, 1];
     plaintext.extend_from_slice(&[0x5A; 32]);
     let mut associated_data = b"pqkey/v1/sealed-credential-id".to_vec();
     associated_data.extend_from_slice(&Sha256::digest(RP_ID.as_bytes()));
@@ -367,7 +367,7 @@ fn a_full_store_still_registers_non_discoverable_credentials() {
             int(4),
             Value::Array(vec![canonical_map(vec![
                 (text("type"), text("public-key")),
-                (text("alg"), int(CoseAlg::ES256 as i64)),
+                (text("alg"), int(i64::from(CoseAlg::ES256.identifier()))),
             ])]),
         ),
         (int(7), rk(true).expect("options")),

@@ -50,7 +50,7 @@ mod tests {
         let decoded: Value = from_reader(cose.as_slice()).expect("valid COSE public key");
         assert_eq!(
             decoded,
-            cose_akp_key_map(CoseAlg::MLDSA44 as i32, &pk_bytes)
+            cose_akp_key_map(CoseAlg::MLDSA44.identifier(), &pk_bytes)
         );
     }
 }

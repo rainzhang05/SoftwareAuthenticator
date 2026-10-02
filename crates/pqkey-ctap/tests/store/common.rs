@@ -136,7 +136,7 @@ pub fn assert_signature_verifies(record: &CredentialRecord) {
     };
     assert_eq!(
         label(3),
-        Value::Integer((record.alg as i32).into()),
+        Value::Integer(record.alg.identifier().into()),
         "COSE alg"
     );
     match record.alg {

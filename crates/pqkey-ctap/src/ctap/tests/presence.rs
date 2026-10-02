@@ -53,7 +53,7 @@ fn registration_payload(discoverable: bool) -> Vec<u8> {
         (Value::Text("type".into()), Value::Text("public-key".into())),
         (
             Value::Text("alg".into()),
-            Value::Integer(Integer::from(CoseAlg::ES256 as i32)),
+            Value::Integer(Integer::from(CoseAlg::ES256.identifier())),
         ),
     ])]);
     let mut entries = vec![

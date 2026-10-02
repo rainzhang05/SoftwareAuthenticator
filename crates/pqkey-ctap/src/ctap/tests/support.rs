@@ -912,7 +912,10 @@ pub(super) fn make_credential_request_with(
             int(4),
             Value::Array(vec![canonical_map(vec![
                 (Value::Text("type".into()), Value::Text("public-key".into())),
-                (Value::Text("alg".into()), int(CoseAlg::ES256 as i64)),
+                (
+                    Value::Text("alg".into()),
+                    int(i64::from(CoseAlg::ES256.identifier())),
+                ),
             ])]),
         ),
     ];

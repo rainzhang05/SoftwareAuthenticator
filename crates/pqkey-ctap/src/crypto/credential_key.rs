@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(kty, Some(Value::Integer(Integer::from(2))), "kty present");
         assert_eq!(
             alg,
-            Some(Value::Integer(Integer::from(CoseAlg::ES256 as i32))),
+            Some(Value::Integer(Integer::from(CoseAlg::ES256.identifier()))),
             "alg present"
         );
         assert_eq!(crv, Some(Value::Integer(Integer::from(1))), "crv present");

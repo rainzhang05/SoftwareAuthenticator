@@ -443,7 +443,7 @@ fn get_assertion_produces_hmac_secret_output() {
         (Value::Text("type".into()), Value::Text("public-key".into())),
         (
             Value::Text("alg".into()),
-            Value::Integer(Integer::from(CoseAlg::MLDSA44 as i32)),
+            Value::Integer(Integer::from(CoseAlg::MLDSA44.identifier())),
         ),
     ])]);
     let extensions = canonical_map(vec![(Value::Text("hmac-secret".into()), Value::Bool(true))]);

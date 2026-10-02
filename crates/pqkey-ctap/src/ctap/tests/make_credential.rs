@@ -5,7 +5,6 @@ use super::support::{TestStore, install_pin_uv_auth_token, token_pin_auth};
 use super::support::{created_credential, stored};
 use crate::ctap::AttestationMode;
 use crate::ctap::cbor::canonical_map;
-use crate::ctap::make_credential::COSE_ALG_ES256;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC};
 use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
 use crate::store::{AttestationRecord, PrivateKeyMaterial};
@@ -47,7 +46,7 @@ fn make_credential_includes_extensions() {
         (Value::Text("type".into()), Value::Text("public-key".into())),
         (
             Value::Text("alg".into()),
-            Value::Integer(Integer::from(CoseAlg::MLDSA44 as i32)),
+            Value::Integer(Integer::from(CoseAlg::MLDSA44.identifier())),
         ),
     ])]);
     let extensions = canonical_map(vec![
@@ -149,7 +148,7 @@ fn make_credential_supports_es256() {
         (Value::Text("type".into()), Value::Text("public-key".into())),
         (
             Value::Text("alg".into()),
-            Value::Integer(Integer::from(CoseAlg::ES256 as i32)),
+            Value::Integer(Integer::from(CoseAlg::ES256.identifier())),
         ),
     ])]);
 
@@ -218,7 +217,7 @@ fn make_credential_supports_es256() {
     );
     assert_eq!(
         alg,
-        Some(Value::Integer(Integer::from(CoseAlg::ES256 as i32))),
+        Some(Value::Integer(Integer::from(CoseAlg::ES256.identifier()))),
         "alg must be ES256"
     );
     assert_eq!(
@@ -261,7 +260,7 @@ fn make_credential_uses_attestation_certificate_when_available() {
         (Value::Text("type".into()), Value::Text("public-key".into())),
         (
             Value::Text("alg".into()),
-            Value::Integer(Integer::from(CoseAlg::MLDSA44 as i32)),
+            Value::Integer(Integer::from(CoseAlg::MLDSA44.identifier())),
         ),
     ])]);
 
@@ -314,7 +313,7 @@ fn make_credential_uses_attestation_certificate_when_available() {
         })
         .expect("alg value present");
     let alg_i128: i128 = alg_value.into();
-    assert_eq!(alg_i128, i128::from(COSE_ALG_ES256));
+    assert_eq!(alg_i128, i128::from(CoseAlg::ES256.identifier()));
 
     let signature_bytes = att_stmt_entries
         .iter()
@@ -367,7 +366,7 @@ fn make_credential_self_attestation_without_attestation_key() {
         (Value::Text("type".into()), Value::Text("public-key".into())),
         (
             Value::Text("alg".into()),
-            Value::Integer(Integer::from(CoseAlg::MLDSA44 as i32)),
+            Value::Integer(Integer::from(CoseAlg::MLDSA44.identifier())),
         ),
     ])]);
 
@@ -429,7 +428,7 @@ fn make_credential_self_attestation_without_attestation_key() {
         })
         .expect("alg value present");
     let alg_i128: i128 = alg_value.into();
-    assert_eq!(alg_i128, i128::from(CoseAlg::MLDSA44 as i32));
+    assert_eq!(alg_i128, i128::from(CoseAlg::MLDSA44.identifier()));
 
     let signature_bytes = att_stmt_entries
         .iter()
@@ -460,7 +459,7 @@ fn make_credential_can_omit_attestation() {
         (Value::Text("type".into()), Value::Text("public-key".into())),
         (
             Value::Text("alg".into()),
-            Value::Integer(Integer::from(CoseAlg::MLDSA44 as i32)),
+            Value::Integer(Integer::from(CoseAlg::MLDSA44.identifier())),
         ),
     ])]);
 
@@ -540,7 +539,7 @@ fn make_credential_requires_mc_permission() {
         (Value::Text("type".into()), Value::Text("public-key".into())),
         (
             Value::Text("alg".into()),
-            Value::Integer(Integer::from(CoseAlg::MLDSA44 as i32)),
+            Value::Integer(Integer::from(CoseAlg::MLDSA44.identifier())),
         ),
     ])]);
 

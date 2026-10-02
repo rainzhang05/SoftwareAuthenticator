@@ -34,7 +34,7 @@ fn make_credential_payload(rp_id: &str, user_id: &[u8], rk: Option<bool>) -> Vec
         (Value::Text("type".into()), Value::Text("public-key".into())),
         (
             Value::Text("alg".into()),
-            Value::Integer(Integer::from(CoseAlg::ES256 as i32)),
+            Value::Integer(Integer::from(CoseAlg::ES256.identifier())),
         ),
     ])]);
     let mut entries = vec![
@@ -481,6 +481,6 @@ fn unreadable_attestation_falls_back_to_self_attestation() {
     );
     assert!(att_stmt.contains(&(
         Value::Text("alg".into()),
-        Value::Integer(Integer::from(CoseAlg::ES256 as i32))
+        Value::Integer(Integer::from(CoseAlg::ES256.identifier()))
     )));
 }

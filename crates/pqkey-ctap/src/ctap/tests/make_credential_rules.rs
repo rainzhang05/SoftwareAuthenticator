@@ -36,7 +36,7 @@ fn request(extra: Vec<(Value, Value)>) -> Vec<u8> {
             int(4),
             Value::Array(vec![canonical_map(vec![
                 (text("type"), text("public-key")),
-                (text("alg"), int(CoseAlg::ES256 as i64)),
+                (text("alg"), int(i64::from(CoseAlg::ES256.identifier()))),
             ])]),
         ),
     ];
@@ -355,7 +355,7 @@ fn request_for_user(user: Value) -> Vec<u8> {
             int(4),
             Value::Array(vec![canonical_map(vec![
                 (text("type"), text("public-key")),
-                (text("alg"), int(CoseAlg::ES256 as i64)),
+                (text("alg"), int(i64::from(CoseAlg::ES256.identifier()))),
             ])]),
         ),
         options(&[("rk", true)]),
@@ -464,7 +464,7 @@ fn malformed_entities_and_descriptors_are_unexpected_types() {
                 int(4),
                 Value::Array(vec![canonical_map(vec![
                     (text("type"), text("public-key")),
-                    (text("alg"), int(CoseAlg::ES256 as i64)),
+                    (text("alg"), int(i64::from(CoseAlg::ES256.identifier()))),
                 ])]),
             ),
         ];
@@ -504,7 +504,7 @@ fn a_client_data_hash_must_be_32_bytes() {
                     int(4),
                     Value::Array(vec![canonical_map(vec![
                         (text("type"), text("public-key")),
-                        (text("alg"), int(CoseAlg::ES256 as i64)),
+                        (text("alg"), int(i64::from(CoseAlg::ES256.identifier()))),
                     ])]),
                 ),
             ];

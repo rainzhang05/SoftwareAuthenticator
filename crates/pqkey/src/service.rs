@@ -823,7 +823,7 @@ mod tests {
                     (
                         int(4),
                         Value::Array(vec![Value::Map(vec![
-                            (text("alg"), int(alg as i64)),
+                            (text("alg"), int(i64::from(alg.identifier()))),
                             (text("type"), text("public-key")),
                         ])]),
                     ),
@@ -834,7 +834,10 @@ mod tests {
             assert_eq!(get(&registration, int(1)), text("packed"));
             let auth_data = bytes(get(&registration, int(2)));
             let statement = get(&registration, int(3));
-            assert_eq!(get(&statement, text("alg")), int(alg as i64));
+            assert_eq!(
+                get(&statement, text("alg")),
+                int(i64::from(alg.identifier()))
+            );
             // After the AAGUID: the credential ID's length, the ID, the key.
             let id_length = usize::from(u16::from_be_bytes([auth_data[53], auth_data[54]]));
             let credential_id = auth_data[55..55 + id_length].to_vec();

@@ -27,7 +27,7 @@ pub fn try_cose_es256_public_key(point: &Sec1Point) -> Result<Vec<u8>, CryptoErr
         ),
         (
             Value::Integer(Integer::from(COSE_KEY_LABEL_ALG)),
-            Value::Integer(Integer::from(CoseAlg::ES256 as i32)),
+            Value::Integer(Integer::from(CoseAlg::ES256.identifier())),
         ),
         (
             Value::Integer(Integer::from(-1)),

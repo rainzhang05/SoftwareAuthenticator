@@ -559,7 +559,7 @@ mod tests {
             .map(|(_, value)| value.clone());
         assert_eq!(
             alg,
-            Some(Value::Integer(Integer::from(record.alg as i32))),
+            Some(Value::Integer(Integer::from(record.alg.identifier()))),
             "COSE alg must match the record"
         );
         match record.alg {

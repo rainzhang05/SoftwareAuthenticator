@@ -57,7 +57,7 @@ fn make_credential(alg: CoseAlg, user_id: u8, extra: Vec<(Value, Value)>) -> Vec
             int(4),
             Value::Array(vec![canonical_map(vec![
                 (text("type"), text("public-key")),
-                (text("alg"), int(alg as i64)),
+                (text("alg"), int(i64::from(alg.identifier()))),
             ])]),
         ),
         (

@@ -148,7 +148,7 @@ fn make_credential_request_rk(
         (
             int(4),
             Value::Array(vec![map(vec![
-                (text("alg"), int(alg as i64)),
+                (text("alg"), int(i64::from(alg.identifier()))),
                 (text("type"), text("public-key")),
             ])]),
         ),
@@ -208,7 +208,11 @@ fn register_rk(app: &mut CtapApp<'static>, user_id: &[u8], alg: CoseAlg, rk: boo
     );
     let auth_data = bytes(get(&response, &int(2)));
     let (credential_id, public_key) = attested_credential(&auth_data);
-    assert_eq!(get(&public_key, &int(3)), int(alg as i64), "COSE alg");
+    assert_eq!(
+        get(&public_key, &int(3)),
+        int(i64::from(alg.identifier())),
+        "COSE alg"
+    );
     Registration {
         credential_id,
         public_key,
@@ -272,7 +276,10 @@ fn every_algorithm_registers_and_authenticates_across_restarts() {
         // Self attestation, since no attestation key is provisioned.
         let att_stmt = get(&registration.response, &int(3));
         assert_eq!(get(&registration.response, &int(1)), text("packed"));
-        assert_eq!(get(&att_stmt, &text("alg")), int(alg as i64));
+        assert_eq!(
+            get(&att_stmt, &text("alg")),
+            int(i64::from(alg.identifier()))
+        );
 
         assert_eq!(authenticate(&mut open_app(&dir.state()), &registration), 1);
         assert_eq!(
@@ -387,7 +394,10 @@ fn self_attestation_is_the_default_even_with_a_provisioned_certificate() {
         };
         let keys: Vec<&Value> = entries.iter().map(|(key, _)| key).collect();
         assert_eq!(keys, [&text("alg"), &text("sig")], "{alg:?}: no x5c");
-        assert_eq!(get(&att_stmt, &text("alg")), int(alg as i64));
+        assert_eq!(
+            get(&att_stmt, &text("alg")),
+            int(i64::from(alg.identifier()))
+        );
         let (_, public_key) = attested_credential(&auth_data);
         let mut message = auth_data;
         message.extend_from_slice(&client_data_hash);

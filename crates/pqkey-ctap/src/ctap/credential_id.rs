@@ -28,7 +28,7 @@ impl CtapApp<'_> {
     /// CredRandom values goes into the ID too, and `record` gets the values
     /// it derives.  See [`is_discoverable`].
     pub(super) fn seal_credential(&mut self, record: &mut CredentialRecord) -> Result<Vec<u8>, u8> {
-        let alg = i8::try_from(record.alg as i32).map_err(|_| CTAP2_ERR_PROCESSING)?;
+        let alg = i8::try_from(record.alg.identifier()).map_err(|_| CTAP2_ERR_PROCESSING)?;
         let seed = Zeroizing::new(self.random_array::<32>());
         derive_sealed_cred_randoms(record, &seed)?;
         let mut plaintext = Zeroizing::new([0u8; SEALED_PLAINTEXT_LENGTH]);

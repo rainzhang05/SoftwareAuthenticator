@@ -126,7 +126,7 @@ fn make_credential(app: &mut CtapApp<'static>, alg: CoseAlg, rk: bool) -> (usize
         (
             int(4),
             Value::Array(vec![Value::Map(vec![
-                (text("alg"), int(alg as i64)),
+                (text("alg"), int(i64::from(alg.identifier()))),
                 (text("type"), text("public-key")),
             ])]),
         ),
@@ -153,7 +153,10 @@ fn check_packed_attestation(response: &Value, client_data_hash: &[u8], aaguid: [
     assert_eq!(auth_data[37..53], aaguid, "authenticatorData AAGUID");
 
     let att_stmt = get(response, &int(3));
-    assert_eq!(get(&att_stmt, &text("alg")), int(CoseAlg::ES256 as i64));
+    assert_eq!(
+        get(&att_stmt, &text("alg")),
+        int(i64::from(CoseAlg::ES256.identifier()))
+    );
     let Value::Array(x5c) = get(&att_stmt, &text("x5c")) else {
         panic!("x5c is not an array");
     };
@@ -242,7 +245,10 @@ fn a_provisioned_certificate_is_only_used_when_selected() {
         panic!("attStmt is not a map");
     };
     assert!(entries.iter().all(|(key, _)| *key != text("x5c")));
-    assert_eq!(get(&att_stmt, &text("alg")), int(CoseAlg::ES256 as i64));
+    assert_eq!(
+        get(&att_stmt, &text("alg")),
+        int(i64::from(CoseAlg::ES256.identifier()))
+    );
 
     // The credential public key from the attested credential data.
     let length = usize::from(u16::from_be_bytes([auth_data[53], auth_data[54]]));

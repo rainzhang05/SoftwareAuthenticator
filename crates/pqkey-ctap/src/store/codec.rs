@@ -78,7 +78,7 @@ pub(crate) fn encode_credential(
         entries.push((5, Value::Text(user_display_name.clone())));
     }
     entries.extend([
-        (6, Value::Integer(Integer::from(record.alg as i32))),
+        (6, Value::Integer(Integer::from(record.alg.identifier()))),
         (7, Value::Integer(Integer::from(key_type))),
         (8, Value::Bytes(key.to_vec())),
         (9, Value::Bytes(record.cred_random_with_uv.to_vec())),
