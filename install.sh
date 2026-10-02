@@ -32,7 +32,46 @@ fail() {
   echo "install.sh: $*" >&2
   exit 1
 }
-step() { printf '\n==> %s\n' "$*"; }
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  green=$'\e[1;32m' red=$'\e[1;31m' reset=$'\e[0m'
+else
+  green='' red='' reset=''
+fi
+
+# What the commands print goes here, and is shown only when one fails.
+log=${XDG_CACHE_HOME:-$HOME/.cache}/pqkey/install.log
+mkdir -p "$(dirname "$log")"
+: >"$log"
+
+# quietly DOING DONE COMMAND...: run COMMAND, its output to the log, showing
+# DOING while it runs and DONE once it is done; if it fails, the end of the
+# log, and exit.
+quietly() {
+  local doing=$1 done=$2 start=$SECONDS took from
+  shift 2
+  [ -t 1 ] && printf '  … %s' "$doing"
+  printf '\n==> %s\n' "$doing" >>"$log"
+  from=$(($(wc -l <"$log") + 1))
+  if "$@" >>"$log" 2>&1; then
+    took=$((SECONDS - start))
+    if [ "$took" -ge 60 ]; then
+      took=" ($((took / 60))m $((took % 60))s)"
+    elif [ "$took" -ge 10 ]; then
+      took=" (${took}s)"
+    else
+      took=''
+    fi
+    [ -t 1 ] && printf '\r\e[K'
+    printf '  %s✓%s %s%s\n' "$green" "$reset" "$done" "$took"
+  else
+    [ -t 1 ] && printf '\r\e[K'
+    printf '  %s✗%s %s\n\n' "$red" "$reset" "$doing"
+    tail -n +"$from" "$log" | tail -n 20 | sed 's/^/    /'
+    printf '\nThat failed. The whole output is in %s\n' "$log"
+    exit 1
+  fi
+}
 
 [ "$(uname -s)" = Linux ] || fail "pqkey runs on Linux only"
 [ "$(id -u)" != 0 ] || fail "run it as the user who will use the key, not as root; it asks for sudo when it needs to"
@@ -65,8 +104,8 @@ while sleep 60; do sudo -n -v 2>/dev/null || exit; done &
 sudo_keeper=$!
 trap 'kill "$sudo_keeper" 2>/dev/null || true' EXIT
 
+echo
 if [ ${#missing[@]} != 0 ]; then
-  step "Installing ${missing[*]/linker/a C linker}"
   packages() { # packages LINKER_PACKAGE: the packages for what is missing
     for item in "${missing[@]}"; do
       case $item in
@@ -75,27 +114,33 @@ if [ ${#missing[@]} != 0 ]; then
       esac
     done
   }
-  if command -v apt-get >/dev/null; then
-    sudo apt-get update
-    # shellcheck disable=SC2046
-    sudo apt-get install -y $(packages build-essential)
-  elif command -v dnf >/dev/null; then
-    # shellcheck disable=SC2046
-    sudo dnf install -y $(packages gcc)
-  elif command -v pacman >/dev/null; then
-    # shellcheck disable=SC2046
-    sudo pacman -S --needed --noconfirm $(packages gcc)
-  elif command -v zypper >/dev/null; then
-    # shellcheck disable=SC2046
-    sudo zypper --non-interactive install $(packages gcc)
-  else
-    fail "install a C compiler and linker (cc) and curl, then run $0 again"
-  fi
+  install_packages() {
+    if command -v apt-get >/dev/null; then
+      sudo apt-get update
+      # shellcheck disable=SC2046
+      sudo apt-get install -y $(packages build-essential)
+    elif command -v dnf >/dev/null; then
+      # shellcheck disable=SC2046
+      sudo dnf install -y $(packages gcc)
+    elif command -v pacman >/dev/null; then
+      # shellcheck disable=SC2046
+      sudo pacman -S --needed --noconfirm $(packages gcc)
+    elif command -v zypper >/dev/null; then
+      # shellcheck disable=SC2046
+      sudo zypper --non-interactive install $(packages gcc)
+    else
+      echo "no apt-get, dnf, pacman or zypper: install a C compiler and linker (cc) and curl yourself"
+      return 1
+    fi
+  }
+  quietly "Installing the build tools" "Build tools installed" install_packages
 fi
 
 if ! have_rust; then
-  step "Installing Rust with rustup"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+  install_rust() {
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+  }
+  quietly "Installing Rust" "Rust installed" install_rust
 fi
 if [ -f "$cargo_home/env" ]; then
   # shellcheck source=/dev/null
@@ -112,18 +157,21 @@ if ! command -v rustup >/dev/null; then
   fi
 fi
 
-step "Building pqkey"
 cargo=(cargo)
 if command -v rustup >/dev/null; then
   # The stable toolchain, without the components rust-toolchain.toml adds
   # for development.
-  rustup toolchain list | grep -q '^stable' || rustup toolchain install stable --profile minimal
   cargo=(cargo +stable)
 fi
-"${cargo[@]}" build --release --locked -p pqkey --target-dir target
-
-step "Installing $pqkey"
-sudo install -D -m 755 target/release/pqkey "$pqkey"
+build() {
+  if command -v rustup >/dev/null && ! rustup toolchain list | grep -q '^stable'; then
+    rustup toolchain install stable --profile minimal
+  fi
+  "${cargo[@]}" build --release --locked -p pqkey --target-dir target
+}
+quietly "Building pqkey (a few minutes)" "pqkey built" build
+quietly "Installing $pqkey" "pqkey installed in $(dirname "$pqkey")" \
+  sudo install -D -m 755 target/release/pqkey "$pqkey"
 # An earlier install.sh installed pqkey with `cargo install`, in a directory
 # that comes first on the PATH. A link in its place keeps a shell that
 # remembers that path working.
@@ -133,5 +181,4 @@ if [ -f "$old" ] && [ ! -L "$old" ]; then
   ln -sf "$pqkey" "$old"
 fi
 
-step "Setting up pqkey"
 "$pqkey" setup --yes
