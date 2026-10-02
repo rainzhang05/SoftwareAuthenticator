@@ -652,6 +652,8 @@ mod tests {
         /// the given number of times since the previous one.
         events: VecDeque<Result<NotificationEvent, String>>,
         calls: Vec<Call>,
+        /// How many times `next_event` has been called.
+        polls: usize,
     }
 
     /// A notification server that follows a script and records the calls.
@@ -703,6 +705,10 @@ mod tests {
         fn calls(&self) -> Vec<Call> {
             self.script().calls.clone()
         }
+
+        fn polls(&self) -> usize {
+            self.script().polls
+        }
     }
 
     impl NotificationServer for FakeServer {
@@ -741,6 +747,7 @@ mod tests {
                 wait <= CANCELLATION_POLL,
                 "waited {wait:?} without looking at cancellation"
             );
+            self.script().polls += 1;
             let next = self.script().events.pop_front();
             match next {
                 Some(event) => event.map(Some),
@@ -918,26 +925,35 @@ mod tests {
         assert_eq!(&server.calls()[2..], [Call::Close(7), Call::Disconnect]);
     }
 
+    /// A cancelled request is noticed at the next poll for events at the
+    /// latest, and every poll waits at most [`CANCELLATION_POLL`] (the fake
+    /// server asserts that), so the notification is withdrawn within about
+    /// 20 ms.  Counting polls rather than timing them keeps the test exact on
+    /// a loaded machine that oversleeps.
     #[test]
-    fn cancellation_withdraws_the_notification_within_100_ms() {
+    fn cancellation_withdraws_the_notification_at_the_next_poll() {
         let server = FakeServer::working();
         let flag = working_flag();
         let mut presence = NotificationPresence::new(server.clone());
-        let (outcome, cancelled_at) = thread::scope(|scope| {
+        let (outcome, polls_when_cancelled) = thread::scope(|scope| {
             let canceller = scope.spawn(|| {
                 while !server.calls().iter().any(|c| matches!(c, Call::Notify(_))) {
                     thread::sleep(Duration::from_millis(1));
                 }
                 thread::sleep(Duration::from_millis(200));
                 flag.interrupt();
-                Instant::now()
+                server.polls()
             });
             let outcome = presence.confirm(&register(), Cancellation::new(&flag));
             (outcome, canceller.join().unwrap())
         });
-        let latency = cancelled_at.elapsed();
         assert_eq!(outcome, PresenceOutcome::Cancelled);
-        assert!(latency <= Duration::from_millis(100), "{latency:?}");
+        assert!(polls_when_cancelled > 0, "the prompt never waited");
+        assert!(
+            server.polls() <= polls_when_cancelled + 1,
+            "{} polls after the cancellation",
+            server.polls() - polls_when_cancelled
+        );
         assert_eq!(&server.calls()[2..], [Call::Close(7), Call::Disconnect]);
     }
 
