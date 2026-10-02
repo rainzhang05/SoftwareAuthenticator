@@ -118,4 +118,6 @@ in `~/.local/share/pqkey` until you delete that directory.
 
 ## License
 
-[MIT](LICENSE)
+pqkey is free software under the [MIT License](LICENSE): you may use, change
+and share it, as long as the copyright notice comes with it. It comes with no
+warranty.
