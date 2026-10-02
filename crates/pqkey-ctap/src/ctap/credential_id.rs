@@ -34,8 +34,9 @@ impl CtapApp<'_> {
         let mut plaintext = Zeroizing::new([0u8; SEALED_PLAINTEXT_LENGTH]);
         plaintext[0] = alg as u8;
         plaintext[1] = record.cred_protect;
-        plaintext[2..34].copy_from_slice(record.private_key.as_bytes());
-        plaintext[34..].copy_from_slice(&seed[..]);
+        let key: &[u8; SEALED_KEY_LENGTH] = record.private_key.as_bytes();
+        plaintext[2..2 + SEALED_KEY_LENGTH].copy_from_slice(key);
+        plaintext[2 + SEALED_KEY_LENGTH..].copy_from_slice(&seed[..]);
         let sealed = self
             .store
             .seal_credential_id(&plaintext[..], &sealed_associated_data(&record.rp_id))
@@ -98,7 +99,27 @@ const SEALED_MARKER: u8 = 0x02;
 /// credProtect level, the 32-byte private key material (a P-256 scalar or a
 /// seed), and the 32-byte random seed of its hmac-secret CredRandom values
 /// (see [`derive_sealed_cred_randoms`]).
-const SEALED_PLAINTEXT_LENGTH: usize = 66;
+const SEALED_PLAINTEXT_LENGTH: usize = 2 + SEALED_KEY_LENGTH + 32;
+
+/// The length of a sealed ID's private key field, which holds the key
+/// material of any kind.
+const SEALED_KEY_LENGTH: usize = 32;
+
+// Every algorithm of the table fits a sealed ID.  Its identifier is the
+// plaintext's first byte, a signed one.  Its key material fits the key field
+// by type: `PrivateKeyMaterial::as_bytes` is `[u8; SEALED_KEY_LENGTH]` for
+// every kind, or `seal_credential` does not compile.
+const _: () = {
+    let mut i = 0;
+    while i < CoseAlg::ALL.len() {
+        let identifier = CoseAlg::ALL[i].identifier();
+        assert!(
+            identifier >= i8::MIN as i32 && identifier <= i8::MAX as i32,
+            "a COSE algorithm identifier does not fit a sealed credential ID"
+        );
+        i += 1;
+    }
+};
 
 /// The length of a sealed credential ID: [`SEALED_MARKER`], then the sealed
 /// plaintext.
@@ -165,12 +186,12 @@ fn sealed_credential(
     let [alg, cred_protect, rest @ ..] = plaintext else {
         return None;
     };
-    if rest.len() != 64 {
+    if rest.len() != SEALED_KEY_LENGTH + 32 {
         return None;
     }
-    let (key, seed) = rest.split_at(32);
+    let (key, seed) = rest.split_at(SEALED_KEY_LENGTH);
     let seed: &[u8; 32] = seed.try_into().ok()?;
-    let key: &[u8; 32] = key.try_into().ok()?;
+    let key: &[u8; SEALED_KEY_LENGTH] = key.try_into().ok()?;
     let alg = CoseAlg::try_from(i32::from(*alg as i8)).ok()?;
     let private_key = PrivateKeyMaterial::from_bytes(alg.key_kind(), key);
     let mut credential = CredentialRecord {
