@@ -11,8 +11,7 @@ code is organised.
   and `clippy`. The minimum supported Rust version is 1.89 (`rust-version` in
   the root `Cargo.toml`), and CI checks the workspace builds with it.
 - **Linux** is needed to run the daemon: it creates the virtual key through
-  `/dev/uhid`. Set up device access as in the README's
-  [Install](../README.md#install) section.
+  `/dev/uhid`. [`install.sh`](../install.sh) sets up access to it.
 - **macOS** works for everything else: the whole workspace builds, and the
   unit and integration tests run.
 - No system libraries are needed to build. The end-to-end tests need
@@ -30,9 +29,9 @@ the same commit.
 
 ## Build and run the daemon with debug logs
 
-Set up `/dev/uhid` access once, with the shipped udev rules (the comments in
-[`contrib/udev/70-pqkey.rules`](../contrib/udev/70-pqkey.rules) explain them),
-exactly as in the README's [Install](../README.md#install) section:
+Set up `/dev/uhid` access once, with `./install.sh` or by hand with the shipped
+udev rules (the comments in
+[`contrib/udev/70-pqkey.rules`](../contrib/udev/70-pqkey.rules) explain them):
 
 ```bash
 sudo install -m 644 contrib/udev/70-pqkey.rules /etc/udev/rules.d/
@@ -335,10 +334,10 @@ changed the USB IDs with `--vendor-id` or `--product-id`.
 **Firefox or Chromium from the snap store never asks for the key.** A snap
 can only open devices udev tags for it, and snapd tags security keys by USB
 IDs, which a virtual key does not have, so pqkey's udev rules tag its device
-for the Firefox and Chromium snaps. Rules from before that, or a device
-created before the rules were installed, lack the tags: `pqkey status` says
-so, `pqkey setup` updates the rules, and `pqkey stop && pqkey start` creates
-the device again. For another browser snap, add its tag to the rule (see the
+for the Firefox and Chromium snaps. Outdated rules, or a device created
+before the rules were installed, lack the tags: `pqkey status` says so,
+`pqkey setup` updates the rules, and `pqkey stop && pqkey start` creates the
+device again. For another browser snap, add its tag to the rule (see the
 comment there).
 
 **`pqkey passkeys` lists nothing, although sites accepted the key.** It
