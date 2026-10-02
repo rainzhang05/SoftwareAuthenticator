@@ -89,8 +89,10 @@ These were tested on Ubuntu 26.04. Each client's limits are listed under
 
 ## Troubleshooting
 
-`pqkey status` names anything that is missing and how to fix it. For browser
-behaviour, see [Troubleshooting](docs/development-notes.md#troubleshooting).
+`pqkey status` names anything that is missing and how to fix it, and
+`scripts/diagnose.sh` shows the whole state of the key on your computer. For
+browser behaviour, see
+[Troubleshooting](docs/development-notes.md#troubleshooting).
 
 ## Uninstall
 
@@ -108,8 +110,9 @@ in `~/.local/share/pqkey` until you delete that directory.
   vulnerability
 - [Architecture](docs/architecture.md): how pqkey works, and what it supports
   of CTAP 2.3
-- [Development notes](docs/development-notes.md): building, testing, fuzzing
-  and troubleshooting
+- [Development notes](docs/development-notes.md): the scripts that run every
+  check and test (`scripts/check.sh`, `scripts/e2e.sh` and more), and
+  troubleshooting
 - [Browser test kit](tests/browser/README.md): a local relying party that
   checks everything the key returns
 
