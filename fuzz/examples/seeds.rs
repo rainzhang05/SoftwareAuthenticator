@@ -659,6 +659,16 @@ fn credential_key(dir: &Path) {
         layout(5, 1, &[0x88; 32]),
         layout(9, 0, &[0xCC; 32]),
         layout(7, 7, &[0xAA; 66]),
+        // The EdDSA algorithms after ECDSA: each signing, an Ed25519 key
+        // under the other identifier of its curve, keys of one type used as
+        // another, and a 57-byte Ed448 private key where its seed belongs.
+        layout(10, 10, &[0xDD; 32]),
+        layout(10, 11, &[0xDD; 32]),
+        layout(11, 11, &[0xEE; 32]),
+        layout(12, 12, &[0xF1; 32]),
+        layout(12, 10, &[0xF1; 32]),
+        layout(10, 9, &[0xDD; 32]),
+        layout(12, 12, &[0xF1; 57]),
     ];
     write_all(dir, &seeds);
 }
