@@ -20,9 +20,9 @@ pub const RP_IDS: &[&str] = &[
     "",
 ];
 
-/// COSE algorithms the authenticator does not support: EdDSA, Ed25519,
-/// RS256, Ed448 and the reserved 0.
-const UNSUPPORTED_ALGORITHMS: [i64; 5] = [-8, -19, -257, -53, 0];
+/// COSE algorithms the authenticator does not support: RS1, HSS-LMS, RS256,
+/// WalnutDSA and the reserved 0.
+const UNSUPPORTED_ALGORITHMS: [i64; 5] = [-65535, -46, -257, -260, 0];
 
 /// The COSE algorithms supported, in getInfo order, then some that are not.
 const ALGORITHMS: [i64; CoseAlg::ALL.len() + UNSUPPORTED_ALGORITHMS.len()] = {

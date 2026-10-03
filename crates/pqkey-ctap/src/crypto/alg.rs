@@ -284,7 +284,7 @@ mod tests {
             assert_eq!(CoseAlg::try_from(alg.identifier()), Ok(alg));
         }
         assert_eq!(CoseAlg::try_from(-257), Err(UnsupportedCoseAlg(-257)));
-        assert_eq!(CoseAlg::try_from(-8), Err(UnsupportedCoseAlg(-8)));
+        assert_eq!(CoseAlg::try_from(-46), Err(UnsupportedCoseAlg(-46)));
         assert_eq!(CoseAlg::try_from(-7), Ok(CoseAlg::ES256));
         assert_eq!(CoseAlg::try_from(-48), Ok(CoseAlg::MLDSA44));
         assert_eq!(CoseAlg::try_from(-49), Ok(CoseAlg::MLDSA65));

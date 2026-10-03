@@ -946,7 +946,7 @@ mod tests {
         ] {
             assert_eq!(algorithm(Some(alg)), name);
         }
-        assert_eq!(algorithm(Some(-8)), "COSE -8");
+        assert_eq!(algorithm(Some(-257)), "COSE -257");
         assert_eq!(algorithm(None), "-");
     }
 

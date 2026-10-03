@@ -618,7 +618,7 @@ fn request_with_params(pub_key_cred_params: Vec<Value>, exclude_list: Option<Val
 fn make_credential_chooses_the_first_supported_algorithm_in_rp_order() {
     for (params, expected) in [
         (
-            vec![public_key(-8), public_key(-49), public_key(-7)],
+            vec![public_key(-65535), public_key(-49), public_key(-7)],
             CoseAlg::MLDSA65,
         ),
         (
@@ -683,15 +683,14 @@ fn make_credential_chooses_between_es256_and_esp256_in_rp_order() {
 
 /// An alg outside `i32` whose low 32 bits read -7 is not ES256, an element of
 /// another credential type is not a supported algorithm, and neither is
-/// Ed25519 (-19), a fully specified identifier (RFC 9864 §2.2) the key does
-/// not implement.
+/// HSS-LMS (-46, RFC 8778), an algorithm the key does not implement.
 #[test]
 fn make_credential_rejects_algorithms_it_does_not_support() {
     for params in [
         vec![public_key((1_i64 << 32) - 7)],
         vec![public_key(-(1_i64 << 32) - 7)],
         vec![param("not-public-key", Value::Integer(Integer::from(-7)))],
-        vec![public_key(-19)],
+        vec![public_key(-46)],
         vec![],
     ] {
         let mut app = new_app(TestStore::new(), [0x72; 16]);

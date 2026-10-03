@@ -687,7 +687,7 @@ mod tests {
             ),
             (
                 "unknown alg",
-                edited(&valid, |e| set(e, 6, Value::Integer(Integer::from(-8)))),
+                edited(&valid, |e| set(e, 6, Value::Integer(Integer::from(-260)))),
             ),
             (
                 "unknown key type",
