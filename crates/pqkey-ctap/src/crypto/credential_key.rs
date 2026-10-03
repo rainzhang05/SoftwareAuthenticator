@@ -37,8 +37,8 @@ pub enum CredentialSecretKey {
     /// scalar anew.
     Secp256k1(Seed),
     /// An EdDSA key on Ed25519 held as its 32-byte RFC 8032 private key, the
-    /// seed itself: EdDSA.  Each use hashes it anew into the secret scalar
-    /// and prefix.
+    /// seed itself: EdDSA and Ed25519.  Each use hashes it anew into the
+    /// secret scalar and prefix.
     Ed25519(Seed),
 }
 
@@ -190,9 +190,9 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
 ///   SHA-256, P-384 with SHA-384, P-521 with SHA-512 or secp256k1 with
 ///   SHA-256, and an RFC 6979 nonce, as an ASN.1 DER `Ecdsa-Sig-Value`
 ///   (WebAuthn Level 3 §6.5.5).
-/// * **EdDSA**: pure Ed25519 (RFC 8032 §5.1), as the 64-byte signature RFC
-///   8032 encodes ("\[RFC8032\] describes the method of encoding the signature
-///   value.", RFC 9053 §2.2).
+/// * **EdDSA** and **Ed25519**: pure Ed25519 (RFC 8032 §5.1), as the 64-byte
+///   signature RFC 8032 encodes ("\[RFC8032\] describes the method of
+///   encoding the signature value.", RFC 9053 §2.2).
 /// * **ML-DSA-44/65/87**: the raw FIPS 204 signature bytes.
 ///
 /// Returns [`CryptoError::KeyTypeMismatch`] when `alg` signs with another
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn every_eddsa_key_is_an_okp_key_on_its_curve() {
         let int = |value: i64| Value::Integer(Integer::from(value));
-        let curves = [(CoseAlg::EdDSA, 6, 32)];
+        let curves = [(CoseAlg::EdDSA, 6, 32), (CoseAlg::Ed25519, 6, 32)];
         let eddsa: Vec<CoseAlg> = CoseAlg::ALL
             .into_iter()
             .filter(|alg| matches!(alg.scheme(), Scheme::EdDsa(_)))
@@ -466,15 +466,17 @@ mod tests {
     }
 
     /// A fully specified identifier names its curve's algorithm under
-    /// another identifier: the same key, an ESP256 scalar or an ESP384 or
-    /// ESP512 seed, gives the same COSE_Key as under ES256, ES384 or ES512 but
-    /// for its alg.  The key a seed derives belongs to the curve.
+    /// another identifier: the same key, an ESP256 scalar, an ESP384 or
+    /// ESP512 seed or an Ed25519 private key, gives the same COSE_Key as under
+    /// ES256, ES384, ES512 or EdDSA but for its alg.  The key a seed derives
+    /// belongs to the curve.
     #[test]
     fn a_fully_specified_algorithm_has_its_curves_keys_but_for_its_alg() {
         for (alg, fully_specified) in [
             (CoseAlg::ES256, CoseAlg::ESP256),
             (CoseAlg::ES384, CoseAlg::ESP384),
             (CoseAlg::ES512, CoseAlg::ESP512),
+            (CoseAlg::EdDSA, CoseAlg::Ed25519),
         ] {
             let key = [0x42; 32];
             let cose_key = |alg| {

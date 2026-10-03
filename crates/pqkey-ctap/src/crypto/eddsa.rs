@@ -16,8 +16,8 @@ use super::cose::{CRV_ED25519, try_okp_key};
 /// them (RFC 9053 §7.1).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum EdwardsCurve {
-    /// edwards25519 with Ed25519's parameters (RFC 8032 §5.1): EdDSA.  Keys
-    /// are kept as their 32-byte RFC 8032 private key.
+    /// edwards25519 with Ed25519's parameters (RFC 8032 §5.1): EdDSA and
+    /// Ed25519.  Keys are kept as their 32-byte RFC 8032 private key.
     Ed25519,
 }
 

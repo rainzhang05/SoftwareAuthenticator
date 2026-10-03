@@ -1,5 +1,6 @@
 //! EdDSA on Ed25519 ([`EdwardsCurve::Ed25519`], RFC 8032 §5.1), the scheme of
-//! EdDSA: keys kept as their 32-byte private key, the seed itself.
+//! EdDSA and Ed25519: keys kept as their 32-byte private key, the seed
+//! itself.
 
 use ed25519_dalek::{Signer, SigningKey};
 

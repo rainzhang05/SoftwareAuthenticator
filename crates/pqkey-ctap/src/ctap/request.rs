@@ -48,11 +48,12 @@ fn text_member<'a>(entries: &'a [(Value, Value)], name: &str) -> Result<&'a str,
 /// and its alg is exactly one of [`CoseAlg`]'s identifiers.  The identifier is
 /// compared as the full CBOR integer, so a value outside `i32` never aliases a
 /// supported one.  ES256 (-7) is always supported.  The fully specified
-/// ESP256 (-9), ESP384 (-51) and ESP512 (-52) are algorithms of their own
-/// rather than synonyms of ES256, ES384 and ES512: a credential made with one
-/// records its identifier, and its public key is labelled with it.  WebAuthn
-/// Level 3 §5.4 calls them "NOT RECOMMENDED in pubKeyCredParams", so a
-/// relying party that lists the other identifier first gets that.
+/// ESP256 (-9), ESP384 (-51), ESP512 (-52) and Ed25519 (-19) are algorithms of
+/// their own rather than synonyms of ES256, ES384, ES512 and EdDSA: a
+/// credential made with one records its identifier, and its public key is
+/// labelled with it.  WebAuthn Level 3 §5.4 calls them "NOT RECOMMENDED in
+/// pubKeyCredParams", so a relying party that lists the other identifier
+/// first gets that.
 pub(super) fn chosen_algorithm(pub_key_cred_params: &[Value]) -> Result<CoseAlg, u8> {
     let mut chosen = None;
     for element in pub_key_cred_params {

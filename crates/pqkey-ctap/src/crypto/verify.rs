@@ -82,12 +82,12 @@ enum Hash {
 
 /// The COSE identifier of `alg` and what its keys and signatures are.  The
 /// identifiers are IANA's (RFC 9053 §2.1 for ES256, ES384 and ES512, RFC 9864
-/// §2.1 for ESP256, ESP384 and ESP512, RFC 8812 §3.2 for ES256K, RFC 9053
-/// §2.2 for EdDSA, RFC 9964 §8.1 for ML-DSA), and so are the curves (RFC 9053
-/// §7.1, RFC 8812 §3.1 for secp256k1).  An ECDSA coordinate is as long as the
-/// curve's field elements, an EdDSA public key as RFC 8032 encodes it (32
-/// bytes for Ed25519, §5.1.5), an ML-DSA public key as FIPS 204's Table 2
-/// says.
+/// §2.1 for ESP256, ESP384 and ESP512, RFC 8812 §3.2 for ES256K, RFC 9053 §2.2
+/// for EdDSA, RFC 9864 §2.2 for Ed25519, RFC 9964 §8.1 for ML-DSA), and so are
+/// the curves (RFC 9053 §7.1, RFC 8812 §3.1 for secp256k1).  An ECDSA
+/// coordinate is as long as the curve's field elements, an EdDSA public key as
+/// RFC 8032 encodes it (32 bytes for Ed25519, §5.1.5), an ML-DSA public key as
+/// FIPS 204's Table 2 says.
 fn expected(alg: CoseAlg) -> (i64, Expected) {
     let p256_sha256 = Expected::Ecdsa {
         crv: 1,
@@ -107,6 +107,11 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
         curve: EcCurve::P521,
         hash: Hash::Sha512,
     };
+    let ed25519 = Expected::EdDsa {
+        crv: 6,
+        length: 32,
+        curve: EdCurve::Ed25519,
+    };
     match alg {
         CoseAlg::ES256 => (-7, p256_sha256),
         CoseAlg::ESP256 => (-9, p256_sha256),
@@ -123,14 +128,8 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
                 hash: Hash::Sha256,
             },
         ),
-        CoseAlg::EdDSA => (
-            -8,
-            Expected::EdDsa {
-                crv: 6,
-                length: 32,
-                curve: EdCurve::Ed25519,
-            },
-        ),
+        CoseAlg::EdDSA => (-8, ed25519),
+        CoseAlg::Ed25519 => (-19, ed25519),
         CoseAlg::MLDSA44 => (
             -48,
             Expected::MlDsa {
@@ -178,15 +177,18 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
 /// So x and y are as long as the curve's field elements and form a point on
 /// it, and "the sig value MUST be encoded as an ASN.1 DER Ecdsa-Sig-Value"
 /// (§6.5.5) over the message's digest with the algorithm's hash, which this
-/// verifier computes itself.  For EdDSA, "The "kty" field MUST be present,
-/// and it MUST be "OKP" (Octet Key Pair).  The "crv" field MUST be present,
-/// and it MUST be a curve defined for this signature algorithm." (RFC 9053
-/// §2.2), and "Keys with algorithm -8 (EdDSA) MUST specify 6 (Ed25519) as the
-/// crv parameter." (WebAuthn Level 3 §5.8.5)  An OKP key's "x" "contains the
-/// public key as defined by the algorithm" (RFC 9053 §7.2), so it is as long
-/// as RFC 8032 encodes the curve's public keys and decodes to a point on it,
-/// and "\[RFC8032\] describes the method of encoding the signature value."
-/// (RFC 9053 §2.2): the signature is RFC 8032's R ‖ S, never DER.  For
+/// verifier computes itself.  For EdDSA, "The "kty" field MUST be present, and
+/// it MUST be "OKP" (Octet Key Pair).  The "crv" field MUST be present, and it
+/// MUST be a curve defined for this signature algorithm." (RFC 9053 §2.2), and
+/// "Keys with algorithm -8 (EdDSA) MUST specify 6 (Ed25519) as the crv
+/// parameter." (WebAuthn Level 3 §5.8.5)  Ed25519 is "EdDSA using the Ed25519
+/// parameter set" (RFC 9864 §2.2), so its keys are on Ed25519 too: "Within
+/// WebAuthn, the values [...] -19 (Ed25519) represent the same thing
+/// respectively as [...] -8 (EdDSA)" (WebAuthn Level 3 §5.4).  An OKP key's "x"
+/// "contains the public key as defined by the algorithm" (RFC 9053 §7.2), so it
+/// is as long as RFC 8032 encodes the curve's public keys and decodes to a
+/// point on it, and "\[RFC8032\] describes the method of encoding the signature
+/// value." (RFC 9053 §2.2): the signature is RFC 8032's R ‖ S, never DER.  For
 /// ML-DSA, `pub` has the length of the parameter set's public key.
 pub fn verify_signature(
     alg: CoseAlg,

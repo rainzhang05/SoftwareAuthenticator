@@ -655,15 +655,19 @@ fn attested_alg(response: &[u8]) -> Value {
         .expect("the credential public key has an alg")
 }
 
-/// ESP256 (-9) is an algorithm of its own, not a synonym of ES256 (-7): the
-/// first of the two in the relying party's list is chosen (CTAP 2.3 §6.1.2
-/// step 3), and the credential public key names it.
+/// ESP256 (-9) is an algorithm of its own, not a synonym of ES256 (-7), and
+/// Ed25519 (-19) is not one of EdDSA (-8): the first of the two in the
+/// relying party's list is chosen (CTAP 2.3 §6.1.2 step 3), and the
+/// credential public key names it.
 #[test]
-fn make_credential_chooses_between_es256_and_esp256_in_rp_order() {
+fn make_credential_chooses_between_an_algorithm_and_its_fully_specified_one_in_rp_order() {
     for (params, expected) in [
         (vec![public_key(-9)], CoseAlg::ESP256),
         (vec![public_key(-7), public_key(-9)], CoseAlg::ES256),
         (vec![public_key(-9), public_key(-7)], CoseAlg::ESP256),
+        (vec![public_key(-19)], CoseAlg::Ed25519),
+        (vec![public_key(-8), public_key(-19)], CoseAlg::EdDSA),
+        (vec![public_key(-19), public_key(-8)], CoseAlg::Ed25519),
     ] {
         let mut app = new_app(TestStore::new(), [0x73; 16]);
         let response = app

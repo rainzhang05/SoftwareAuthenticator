@@ -107,7 +107,7 @@
 const $ = (id) => document.getElementById(id);
 $('ua').textContent = navigator.userAgent;
 // The names of the algorithms, as in ALGORITHMS in tests/e2e/ctap.py.
-const NAMES = {'-7':'ES256','-48':'ML-DSA-44','-49':'ML-DSA-65','-50':'ML-DSA-87','-9':'ESP256','-35':'ES384','-51':'ESP384','-36':'ES512','-52':'ESP512','-47':'ES256K','-8':'EdDSA'};
+const NAMES = {'-7':'ES256','-48':'ML-DSA-44','-49':'ML-DSA-65','-50':'ML-DSA-87','-9':'ESP256','-35':'ES384','-51':'ESP384','-36':'ES512','-52':'ESP512','-47':'ES256K','-8':'EdDSA','-19':'Ed25519'};
 
 const PRESETS = [
   // registrations
@@ -138,6 +138,7 @@ const PRESETS = [
   {id:'R25', kind:'reg', label:'ESP512 alone, non-discoverable', username:'alice', algs:'-52', rk:'discouraged'},
   {id:'R26', kind:'reg', label:'ES256K alone, non-discoverable', username:'alice', algs:'-47', rk:'discouraged'},
   {id:'R27', kind:'reg', label:'EdDSA alone, non-discoverable', username:'alice', algs:'-8', rk:'discouraged'},
+  {id:'R28', kind:'reg', label:'Ed25519 alone, non-discoverable', username:'alice', algs:'-19', rk:'discouraged'},
   // sign-ins
   {id:'L1', kind:'login', label:'alice: allowCredentials = all hers, UV discouraged', username:'alice', allow:'user', uv:'discouraged'},
   {id:'L2', kind:'login', label:'Discoverable: empty allowCredentials (account picker)', username:'', allow:'empty', uv:'discouraged'},
