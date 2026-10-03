@@ -4,8 +4,8 @@
 //! An ECDSA signature together with its nonce `k` reveals the private key, and
 //! so does an EdDSA signature together with its nonce `r`, so neither nonce
 //! may outlive the signature any more than the key does.  RustCrypto's `ecdsa`
-//! leaves the RFC 6979 nonce in plain locals, and ed25519-dalek leaves `r` and
-//! the hash of the private key in its own.
+//! leaves the RFC 6979 nonce in plain locals, and ed25519-dalek and
+//! ed448-goldilocks leave `r` and the hash of the private key in theirs.
 //!
 //! For each ECDSA curve, this test recomputes `k` independently (RFC 6979
 //! §3.2 with HMAC over the curve's hash), and for a key kept as a seed it
@@ -20,14 +20,17 @@
 //! big-endian bytes and reversed, the order of crypto-bigint's little-endian
 //! limbs.
 //!
-//! For each EdDSA curve, it follows RFC 8032 (§5.1.5 and §5.1.6): it hashes
-//! the private key with SHA-512, prunes the first half of the hash into the
-//! secret scalar `s` and keeps the second half as the prefix, and hashes the
-//! prefix and the message into `r`.  It checks that `s`·B is the public key
-//! and that `r`·B is the signature's R, then scans for the private key, both
-//! halves of its hash, `s` and `s` mod L (the scalar the signer computes
-//! with), `r` and the hash it was reduced from, and the control value: each
-//! as little-endian bytes, the order of RFC 8032's integers, and reversed.
+//! For each EdDSA curve, it follows RFC 8032 (§5.1.5 and §5.1.6, §5.2.5 and
+//! §5.2.6): for a key kept as a seed it derives the private key (as
+//! pqkey-ctap's `eddsa_ed448::private_key` documents), it hashes the private
+//! key (SHA-512 for Ed25519, SHAKE256 with 114 bytes of output for Ed448),
+//! prunes the first half of the hash into the secret scalar `s` and keeps the
+//! second half as the prefix, and hashes the prefix and the message into `r`.
+//! It checks that `s`·B is the public key and that `r`·B is the signature's
+//! R, then scans for the private key, both halves of its hash, `s` and `s`
+//! mod L (the scalar the signer computes with), `r` and the hash it was
+//! reduced from, and the control value: each as little-endian bytes, the
+//! order of RFC 8032's integers, and reversed.
 //!
 //! It does not look for a newly generated private key: a key returned by
 //! value can leave copies in the frames it passes through on its way to the
@@ -42,6 +45,7 @@ use core::mem::MaybeUninit;
 use core::ops::{Add, Mul};
 
 use ciborium::value::Value;
+use ed448_goldilocks::{EdwardsPoint, EdwardsScalar, EdwardsScalarBytes};
 use ed25519_dalek::VerifyingKey;
 use ed25519_dalek::hazmat::ExpandedSecretKey;
 use hmac::{EagerHash, Hmac, KeyInit, Mac};
@@ -81,9 +85,10 @@ struct EcdsaCase {
 
 /// The form a credential keeps its key in.
 enum Kept {
-    /// The private scalar.
-    Scalar,
-    /// A seed the scalar is derived from, on the curve of this name.
+    /// The private key itself: the scalar for ECDSA, the RFC 8032 private key
+    /// for EdDSA.
+    PrivateKey,
+    /// A seed the private key is derived from, on the curve of this name.
     Seed(&'static str),
 }
 
@@ -97,7 +102,7 @@ const ECDSA_CASES: [EcdsaCase; 4] = [
             let secret = p256::SecretKey::from_slice(scalar).expect("a scalar below n");
             coordinates(secret.public_key().to_sec1_point(false).as_bytes())
         },
-        kept: Kept::Scalar,
+        kept: Kept::PrivateKey,
         key: [
             0x3C, 0xBA, 0x9D, 0xF0, 0xD3, 0x36, 0x09, 0x6C, 0x4F, 0xA2, 0x85, 0x98, 0xFB, 0xDE,
             0x31, 0x14, 0x77, 0x4A, 0xAD, 0x80, 0xE3, 0xC6, 0xD9, 0x3C, 0x1F, 0x72, 0x55, 0xA8,
@@ -157,6 +162,9 @@ struct EdDsaCase {
     /// The length of the curve's private keys and encoded points, b/8 in RFC
     /// 8032.
     length: usize,
+    /// dom2(F, C) or dom4(F, C) for pure EdDSA with no context, which the
+    /// curve's hash starts with when it hashes the prefix and the message.
+    dom: &'static [u8],
     /// The curve's hash H, over the parts given: 2·b/8 bytes of output.
     hash: fn(&[&[u8]]) -> Vec<u8>,
     /// Prune the first half of the hash of the private key into the secret
@@ -165,32 +173,76 @@ struct EdDsaCase {
     /// The encoding of the given little-endian scalar times B, from the
     /// curve's crate.
     multiply: fn(&[u8]) -> Vec<u8>,
+    /// What the credential keeps.
+    kept: Kept,
     /// The key the credential keeps.
     key: [u8; 32],
 }
 
-const EDDSA_CASES: [EdDsaCase; 1] = [EdDsaCase {
-    alg: CoseAlg::EdDSA,
-    order: "1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed",
-    length: 32,
-    hash: |parts| Sha512::digest(parts.concat()).to_vec(),
-    // "The lowest three bits of the first octet are cleared, the highest bit
-    // of the last octet is cleared, and the second highest bit of the last
-    // octet is set." (RFC 8032 §5.1.5)
-    prune: |buffer| {
-        buffer[0] &= 0xf8;
-        buffer[31] &= 0x7f;
-        buffer[31] |= 0x40;
+const EDDSA_CASES: [EdDsaCase; 2] = [
+    EdDsaCase {
+        alg: CoseAlg::EdDSA,
+        order: "1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed",
+        length: 32,
+        // "The blank octet string when signing or verifying Ed25519." (RFC 8032
+        // §2)
+        dom: b"",
+        hash: |parts| Sha512::digest(parts.concat()).to_vec(),
+        // "The lowest three bits of the first octet are cleared, the highest
+        // bit of the last octet is cleared, and the second highest bit of the
+        // last octet is set." (RFC 8032 §5.1.5)
+        prune: |buffer| {
+            buffer[0] &= 0xf8;
+            buffer[31] &= 0x7f;
+            buffer[31] |= 0x40;
+        },
+        // ed25519-dalek multiplies B only by the scalar of an expanded secret
+        // key, which it reduces mod L.
+        multiply: |scalar| {
+            let mut expanded = ExpandedSecretKey::from_bytes(&[0; 64]);
+            expanded.scalar = scalar_like(&expanded.scalar, scalar);
+            VerifyingKey::from(&expanded).to_bytes().to_vec()
+        },
+        kept: Kept::PrivateKey,
+        key: [0x3E; 32],
     },
-    // ed25519-dalek multiplies B only by the scalar of an expanded secret
-    // key, which it reduces mod L.
-    multiply: |scalar| {
-        let mut expanded = ExpandedSecretKey::from_bytes(&[0; 64]);
-        expanded.scalar = scalar_like(&expanded.scalar, scalar);
-        VerifyingKey::from(&expanded).to_bytes().to_vec()
+    EdDsaCase {
+        alg: CoseAlg::Ed448,
+        order: concat!(
+            "3fffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "7cca23e9c44edb49aed63690216cc2728dc58f552378c292ab5844f3"
+        ),
+        length: 57,
+        // "SigEd448" ‖ octet(F) ‖ octet(OLEN(C)) ‖ C, F = 0 for Ed448 and C the
+        // empty context (RFC 8032 §2, §5.2).
+        dom: b"SigEd448\x00\x00",
+        hash: |parts| {
+            let mut shake = Shake256::default();
+            for part in parts {
+                shake.update(part);
+            }
+            let mut output = vec![0; 114];
+            shake.finalize_xof().read(&mut output);
+            output
+        },
+        // "The two least significant bits of the first octet are cleared,
+        // all eight bits the last octet are cleared, and the highest bit of
+        // the second to last octet is set." (RFC 8032 §5.2.5)
+        prune: |buffer| {
+            buffer[0] &= 0xfc;
+            buffer[56] = 0;
+            buffer[55] |= 0x80;
+        },
+        multiply: |scalar| {
+            let mut bytes = EdwardsScalarBytes::default();
+            bytes[..scalar.len()].copy_from_slice(scalar);
+            let point = EdwardsPoint::GENERATOR * EdwardsScalar::from_bytes_mod_order(&bytes);
+            point.to_affine().compress().0.to_vec()
+        },
+        kept: Kept::Seed("Ed448"),
+        key: [0x5D; 32],
     },
-    key: [0x3E; 32],
-}];
+];
 
 #[inline(never)]
 fn wipe() {
@@ -299,6 +351,22 @@ where
         low[..chunk.len()].copy_from_slice(chunk);
         high * two_to_the_64() * two_to_the_64() + S::from(u128::from_le_bytes(low))
     })
+}
+
+/// The RFC 8032 private key of `case`'s key, b/8 bytes long: the key
+/// itself, or for a key kept as a seed the first b/8 bytes of
+/// SHAKE256("pqkey/v1/eddsa-key/" ‖ curve ‖ seed).
+fn private_key(case: &EdDsaCase) -> Vec<u8> {
+    let Kept::Seed(curve) = case.kept else {
+        return case.key.to_vec();
+    };
+    let mut private_key = vec![0; case.length];
+    let mut shake = Shake256::default();
+    shake.update(b"pqkey/v1/eddsa-key/");
+    shake.update(curve.as_bytes());
+    shake.update(&case.key);
+    shake.finalize_xof().read(&mut private_key);
+    private_key
 }
 
 /// The private scalar d of `case`'s key on a curve of order `n`, as long as
@@ -444,7 +512,7 @@ fn check_ecdsa(case: &EcdsaCase) -> Vec<String> {
 fn check_eddsa(case: &EdDsaCase) -> Vec<String> {
     let alg = case.alg;
     let order = unhex(case.order);
-    let private_key = case.key.to_vec();
+    let private_key = private_key(case);
     let hash = (case.hash)(&[&private_key]);
     let (first_half, prefix) = hash.split_at(case.length);
     let mut s = first_half.to_vec();
@@ -453,7 +521,7 @@ fn check_eddsa(case: &EdDsaCase) -> Vec<String> {
     s.truncate(order.len());
     let s_mod_l = reduce_le(&s, &order);
     let message = [&AUTH_DATA[..], &CLIENT_DATA_HASH[..]].concat();
-    let r_hash = (case.hash)(&[prefix, &message]);
+    let r_hash = (case.hash)(&[case.dom, prefix, &message]);
     let r = reduce_le(&r_hash, &order);
     let public_key = (case.multiply)(&s);
     let big_r = (case.multiply)(&r);

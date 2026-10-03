@@ -28,11 +28,17 @@ p256 = { workspace = true, features = ["ecdh"] }
 p384 = { version = "0.14", features = ["ecdsa"] }
 p521 = { version = "0.14", features = ["ecdsa"] }
 k256 = { version = "0.14", features = ["ecdsa"] }
-# EdDSA on Ed25519 (EdDSA).  `zeroize`, a default feature, is named because
-# the keys rely on it: it wipes the private key and its hash on drop.
+# EdDSA on Ed25519 (EdDSA and Ed25519).  `zeroize`, a default feature, is
+# named because the keys rely on it: it wipes the private key and its hash on
+# drop.
 ed25519-dalek = { workspace = true, features = ["zeroize"] }
-# SHAKE256, from which ECDSA keys kept as a seed derive their scalar.
-# `zeroize` wipes the sponge states that held the seed and the scalar.
+# EdDSA on Ed448 (Ed448), from RustCrypto's only Ed448 crate, a pre-release
+# and so pinned exactly.  Its key types are zeroized on drop whatever its
+# features; its defaults would add `std`, `getrandom` and `pkcs8`.
+ed448-goldilocks = { version = "=0.14.0-pre.15", default-features = false, features = ["signing"] }
+# SHAKE256, from which keys kept as a seed derive their ECDSA scalar or Ed448
+# private key.  `zeroize` wipes the sponge states that held the seed and what
+# it derived.
 shake = { workspace = true, features = ["zeroize"] }
 rand_core.workspace = true
 # `SysRng`, the operating system RNG that key generation uses.

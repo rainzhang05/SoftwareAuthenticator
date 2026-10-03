@@ -46,7 +46,9 @@ use crate::{
 /// from which each use derives the scalar (FIPS 186-5 Appendix A.2.1), so
 /// that their records hold 32 bytes of key like every other.  An EdDSA key on
 /// Ed25519 is its 32-byte RFC 8032 private key, a seed by nature: random
-/// bytes that each use hashes into the secret scalar (§5.1.5).
+/// bytes that each use hashes into the secret scalar (§5.1.5).  One on Ed448
+/// is a 32-byte seed from which each use derives its 57-byte private key with
+/// SHAKE256.
 ///
 /// The public key is never stored: [`CredentialRecord::cose_public_key`]
 /// derives it from this material, so a record cannot carry a public key that
@@ -61,8 +63,9 @@ pub enum PrivateKeyMaterial {
     /// A seed from which the owning record's `alg` derives the key
     /// ([`KeyKind::Seed`]): for ML-DSA, the FIPS 204 key-generation seed `ξ`,
     /// which the parameter set of `alg` expands; for ECDSA on P-384, P-521
-    /// and secp256k1, the seed the scalar is derived from; and for EdDSA on
-    /// Ed25519, the RFC 8032 private key itself.
+    /// and secp256k1, the seed the scalar is derived from; and for EdDSA, the
+    /// RFC 8032 private key itself on Ed25519 and the seed it is derived from
+    /// on Ed448.
     Seed {
         /// The seed.
         seed: [u8; 32],

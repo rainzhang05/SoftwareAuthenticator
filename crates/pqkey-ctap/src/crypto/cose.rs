@@ -41,6 +41,8 @@ const LABEL_OKP_CRV: i32 = -1;
 const LABEL_OKP_X: i32 = -2;
 /// Curve 6, Ed25519, "for use w/ EdDSA only" (RFC 9053 §7.1).
 pub(crate) const CRV_ED25519: i32 = 6;
+/// Curve 7, Ed448, "for use w/ EdDSA only" (RFC 9053 §7.1).
+pub(crate) const CRV_ED448: i32 = 7;
 
 /// Key type 7, AKP: an Algorithm Key Pair, whose algorithm determines its
 /// format (RFC 9964).

@@ -13,7 +13,8 @@
 //!    6  alg                     integer: COSE algorithm identifier, one of CoseAlg's
 //!    7  private key type        unsigned integer: 1 = P-256 scalar, 2 = seed (ML-DSA's ξ,
 //!                               an ECDSA key's seed on P-384, P-521 or
-//!                               secp256k1, or an Ed25519 private key)
+//!                               secp256k1, an Ed25519 private key, or an
+//!                               Ed448 key's seed)
 //!    8  private key             byte string, 32 bytes
 //!    9  cred_random_with_uv     byte string, 32 bytes
 //!   10  cred_random_without_uv  byte string, 32 bytes
@@ -61,7 +62,8 @@ const KEY_TYPE_P256_SCALAR: u64 = 1;
 /// Private key type 2: a seed the record's `alg` derives its key from
 /// ([`KeyKind::Seed`]): for ML-DSA the FIPS 204 seed `ξ`, for ECDSA on
 /// P-384, P-521 and secp256k1 the seed its scalar is derived from, and for
-/// EdDSA on Ed25519 the RFC 8032 private key itself.
+/// EdDSA the RFC 8032 private key itself on Ed25519 and the seed it is
+/// derived from on Ed448.
 const KEY_TYPE_SEED: u64 = 2;
 
 /// Encode a credential record with the given creation order.
@@ -578,6 +580,39 @@ mod tests {
             "0702",                                 // 7: key type, seed
             // 8: the 32-byte seed
             "085820606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+            // 9: cred_random_with_uv
+            "095820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            // 10: cred_random_without_uv
+            "0a5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "0b02",         // 11: cred_protect 2
+            "0c19012c",     // 12: sign_count 300
+            "0d1a00011170", // 13: created_at 70000
+        ));
+        assert_eq!(encoded.as_slice(), expected.as_slice());
+        assert_eq!(decode_credential(&expected).unwrap(), record);
+    }
+
+    /// An Ed448 credential: alg -53 and private key type 2, the seed its
+    /// 57-byte private key is derived from.  Only those fields and the key
+    /// differ from the ES384 credential above.
+    #[test]
+    fn an_ed448_credential_matches_the_documented_format() {
+        let mut record = credential();
+        record.alg = CoseAlg::Ed448;
+        record.private_key = PrivateKeyMaterial::Seed {
+            seed: core::array::from_fn(|i| 0x80 + i as u8),
+        };
+        let encoded = encode_credential(&record, 70_000).unwrap();
+        let expected = unhex(concat!(
+            "ac",                                   // map with 12 entries
+            "0150000102030405060708090a0b0c0d0e0f", // 1: credential_id
+            "026b6578616d706c652e636f6d",           // 2: rp_id "example.com"
+            "03420102",                             // 3: user_id
+            "0465616c696365",                       // 4: user_name "alice"
+            "063834",                               // 6: alg -53
+            "0702",                                 // 7: key type, seed
+            // 8: the 32-byte seed
+            "085820808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
             // 9: cred_random_with_uv
             "095820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             // 10: cred_random_without_uv

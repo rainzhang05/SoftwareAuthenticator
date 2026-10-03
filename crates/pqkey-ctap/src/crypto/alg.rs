@@ -16,8 +16,9 @@ use super::eddsa::EdwardsCurve;
 /// SHA-256, P-384 and SHA-384, and P-521 and SHA-512 (RFC 9864 §2.1);
 /// ES256K (-47), ECDSA using secp256k1 and SHA-256 (RFC 8812 §3.2); EdDSA (-8,
 /// RFC 9053 §2.2), which WebAuthn signs with on Ed25519 only; and Ed25519
-/// (-19), the fully specified identifier of "EdDSA using the Ed25519
-/// parameter set in Section 5.1 of \[RFC8032\]" (RFC 9864 §2.2).
+/// (-19) and Ed448 (-53), the fully specified identifiers of "EdDSA using the
+/// Ed25519 parameter set in Section 5.1 of \[RFC8032\]" and "EdDSA using the
+/// Ed448 parameter set in Section 5.2 of \[RFC8032\]" (RFC 9864 §2.2).
 ///
 /// Each variant's discriminant is its identifier, which
 /// [`CoseAlg::identifier`] returns; [`CoseAlg::ALL`] lists every variant.
@@ -51,6 +52,8 @@ pub enum CoseAlg {
     EdDSA = -8,
     /// EdDSA on Ed25519, as EdDSA, under its fully specified identifier.
     Ed25519 = -19,
+    /// EdDSA on Ed448, with an empty context.
+    Ed448 = -53,
 }
 
 /// The kind of private key material a credential keeps.  Each algorithm
@@ -65,8 +68,9 @@ pub enum KeyKind {
     /// for ML-DSA, the FIPS 204 key-generation seed `ξ`; for ECDSA on P-384,
     /// P-521 and secp256k1, the seed its scalar is derived from by FIPS 186-5
     /// Appendix A.2.1, with SHAKE256 in place of the random bit generator;
-    /// and for EdDSA on Ed25519, the RFC 8032 private key itself, which is 32
-    /// random bytes (§5.1.5).
+    /// for EdDSA on Ed25519, the RFC 8032 private key itself, which is 32
+    /// random bytes (§5.1.5); and for EdDSA on Ed448, the seed its 57-byte
+    /// RFC 8032 private key is derived from with SHAKE256.
     Seed,
 }
 
@@ -92,7 +96,7 @@ impl Scheme {
         match self {
             Scheme::Ecdsa(Curve::P256) => KeyKind::P256Scalar,
             Scheme::Ecdsa(Curve::P384 | Curve::P521 | Curve::Secp256k1)
-            | Scheme::EdDsa(EdwardsCurve::Ed25519)
+            | Scheme::EdDsa(EdwardsCurve::Ed25519 | EdwardsCurve::Ed448)
             | Scheme::MlDsa(_) => KeyKind::Seed,
         }
     }
@@ -109,7 +113,7 @@ struct Properties {
 impl CoseAlg {
     /// Every algorithm, in the order authenticatorGetInfo lists them (CTAP 2.3
     /// §6.4, `algorithms`).
-    pub const ALL: [CoseAlg; 12] = [
+    pub const ALL: [CoseAlg; 13] = [
         CoseAlg::ES256,
         CoseAlg::MLDSA44,
         CoseAlg::MLDSA65,
@@ -122,6 +126,7 @@ impl CoseAlg {
         CoseAlg::ES256K,
         CoseAlg::EdDSA,
         CoseAlg::Ed25519,
+        CoseAlg::Ed448,
     ];
 
     /// The table: what the authenticator knows about each algorithm.
@@ -174,6 +179,10 @@ impl CoseAlg {
             CoseAlg::Ed25519 => Properties {
                 name: "Ed25519",
                 scheme: Scheme::EdDsa(EdwardsCurve::Ed25519),
+            },
+            CoseAlg::Ed448 => Properties {
+                name: "Ed448",
+                scheme: Scheme::EdDsa(EdwardsCurve::Ed448),
             },
         }
     }
@@ -249,6 +258,7 @@ mod tests {
                 (-47, "ES256K"),
                 (-8, "EdDSA"),
                 (-19, "Ed25519"),
+                (-53, "Ed448"),
             ]
         );
     }
@@ -257,8 +267,9 @@ mod tests {
     /// over P-384 with SHA-384, and ES512 and ESP512 over P-521 with SHA-512
     /// (RFC 9053 §2.1, RFC 9864 §2.1), ES256K over secp256k1 with SHA-256
     /// (RFC 8812 §3.2), EdDSA and Ed25519 over Ed25519 (RFC 9053 §2.2, RFC
-    /// 9864 §2.2, WebAuthn Level 3 §5.8.5), and each ML-DSA identifier names
-    /// its own parameter set (RFC 9964 §8.1).
+    /// 9864 §2.2, WebAuthn Level 3 §5.8.5), Ed448 over Ed448 (RFC 9864 §2.2),
+    /// and each ML-DSA identifier names its own parameter set (RFC 9964
+    /// §8.1).
     #[test]
     fn each_algorithm_signs_with_its_scheme() {
         let schemes: Vec<Scheme> = CoseAlg::ALL.into_iter().map(CoseAlg::scheme).collect();
@@ -277,14 +288,16 @@ mod tests {
                 Scheme::Ecdsa(Curve::Secp256k1),
                 Scheme::EdDsa(EdwardsCurve::Ed25519),
                 Scheme::EdDsa(EdwardsCurve::Ed25519),
+                Scheme::EdDsa(EdwardsCurve::Ed448),
             ]
         );
     }
 
     /// ES256 and ESP256 keep the P-256 scalar, ML-DSA the seed `ξ`, ES384,
     /// ESP384, ES512, ESP512 and ES256K the seed their scalar is derived from,
-    /// and EdDSA and Ed25519 their private key, a seed: what the store and
-    /// sealed credential IDs hold.
+    /// EdDSA and Ed25519 their private key, a seed, and Ed448 the seed its
+    /// private key is derived from: what the store and sealed credential IDs
+    /// hold.
     #[test]
     fn each_algorithm_keeps_its_kind_of_key() {
         let kinds: Vec<KeyKind> = CoseAlg::ALL.into_iter().map(CoseAlg::key_kind).collect();
@@ -296,6 +309,7 @@ mod tests {
                 KeyKind::Seed,
                 KeyKind::Seed,
                 KeyKind::P256Scalar,
+                KeyKind::Seed,
                 KeyKind::Seed,
                 KeyKind::Seed,
                 KeyKind::Seed,
@@ -328,6 +342,7 @@ mod tests {
         assert_eq!(CoseAlg::try_from(-47), Ok(CoseAlg::ES256K));
         assert_eq!(CoseAlg::try_from(-8), Ok(CoseAlg::EdDSA));
         assert_eq!(CoseAlg::try_from(-19), Ok(CoseAlg::Ed25519));
+        assert_eq!(CoseAlg::try_from(-53), Ok(CoseAlg::Ed448));
         assert_eq!(
             UnsupportedCoseAlg(-257).to_string(),
             "unsupported COSE algorithm -257"

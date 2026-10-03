@@ -5,11 +5,12 @@
 //! 9053 §2.2)
 //!
 //! Each curve's own types live in a module of its own,
-//! [`super::eddsa_ed25519`]; this one holds what the curves share.
+//! [`super::eddsa_ed25519`] and [`super::eddsa_ed448`]; this one holds what
+//! the curves share.
 
 use super::CryptoError;
 use super::alg::CoseAlg;
-use super::cose::{CRV_ED25519, try_okp_key};
+use super::cose::{CRV_ED448, CRV_ED25519, try_okp_key};
 
 /// The curves the authenticator signs EdDSA over, each with the parameter set
 /// RFC 8032 gives it, and named as the COSE "Elliptic Curves" registry names
@@ -19,6 +20,10 @@ pub(crate) enum EdwardsCurve {
     /// edwards25519 with Ed25519's parameters (RFC 8032 §5.1): EdDSA and
     /// Ed25519.  Keys are kept as their 32-byte RFC 8032 private key.
     Ed25519,
+    /// edwards448 with Ed448's parameters (RFC 8032 §5.2) and an empty
+    /// context: Ed448.  Keys are kept as a seed their 57-byte RFC 8032
+    /// private key is derived from.
+    Ed448,
 }
 
 impl EdwardsCurve {
@@ -27,6 +32,7 @@ impl EdwardsCurve {
     const fn crv(self) -> i32 {
         match self {
             EdwardsCurve::Ed25519 => CRV_ED25519,
+            EdwardsCurve::Ed448 => CRV_ED448,
         }
     }
 }
@@ -49,6 +55,8 @@ pub(crate) fn try_cose_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::credential_key::Seed;
+    use crate::crypto::eddsa_ed448;
     use crate::{try_cose_public_key, try_credential_secret_from_bytes, try_sign_challenge};
     use ciborium::value::{Integer, Value};
 
@@ -176,6 +184,272 @@ mod tests {
             let (auth_data, client_data_hash) = message.split_at(message.len() / 2);
             assert_eq!(
                 try_sign_challenge(alg, &key, auth_data, client_data_hash),
+                Ok(unhex(signature)),
+                "{name}: signature"
+            );
+        }
+    }
+
+    /// Known answers for Ed448 keys kept as a seed: the RFC 8032 private key
+    /// each of two seeds derives, and its public key.  They come from an
+    /// independent computation, Python's hashlib for the private key and
+    /// pyca/cryptography (OpenSSL) for the public key:
+    ///
+    /// ```python
+    /// import hashlib
+    /// from cryptography.hazmat.primitives.asymmetric.ed448 import Ed448PrivateKey
+    /// from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    ///
+    /// for seed in (bytes(range(32)), b"\xff" * 32):
+    ///     private = hashlib.shake_256(b"pqkey/v1/eddsa-key/Ed448" + seed).digest(57)
+    ///     public = Ed448PrivateKey.from_private_bytes(private).public_key()
+    ///     print(seed.hex(), private.hex(),
+    ///           public.public_bytes(Encoding.Raw, PublicFormat.Raw).hex())
+    /// ```
+    #[test]
+    fn ed448_keys_kept_as_a_seed_derive_the_known_answers() {
+        let low: [u8; 32] = core::array::from_fn(|i| i as u8);
+        for (seed, private_key, public_key) in [
+            (
+                low,
+                concat!(
+                    "244fd2c7a3c8a26ee32cc37b7d2b7184407428bd7b01af23e243b0ff79f23854",
+                    "7ee5c47f6601e99eea0be2e1338ab5814a2413e584ec79d4ca",
+                ),
+                concat!(
+                    "691943e8abb27598d87c875fdfc51569be45e39dc30d597c179f322a2db3f8ae",
+                    "32eb8886b56866c6c042d21d27a898b63f7cb48304910f5d00",
+                ),
+            ),
+            (
+                [0xff; 32],
+                concat!(
+                    "e197b8098004f9b8d0b595d04c783bb233d5300fff1f77e0d0a8b5f2b7ff210f",
+                    "528097616afba188e232914037f5f3efb7cbdd710fdee1d787",
+                ),
+                concat!(
+                    "ca74b7206a124739179f691ef135b6e6ecf7647fe47a363b237fe4f432d32a87",
+                    "9757abf71a7a25c17625179e131c78830a15957df9b6111180",
+                ),
+            ),
+        ] {
+            let derived = eddsa_ed448::private_key(&Seed::new(seed));
+            assert_eq!(derived.as_slice(), unhex(private_key), "{seed:02x?}");
+            let alg = CoseAlg::Ed448;
+            let key = try_credential_secret_from_bytes(alg, &seed).expect("a key");
+            let cose_key = try_cose_public_key(alg, &key).expect("a COSE_Key");
+            assert_eq!(x(&cose_key), unhex(public_key), "{seed:02x?}");
+        }
+    }
+
+    /// RFC 8032 §7.4's test vectors for Ed448 without a context, through the
+    /// family's module: the public key of a vector's private key, and the
+    /// signature of the vector's message with an empty context.  The vector
+    /// with the context "foo" is left out, as COSE signs with none.
+    #[test]
+    fn ed448_signs_rfc_8032s_test_vectors() {
+        let vectors: [(&str, &str, &str, &str, &str); 8] = [
+            (
+                "Blank",
+                concat!(
+                    "6c82a562cb808d10d632be89c8513ebf6c929f34ddfa8c9f63c9960ef6e348a3",
+                    "528c8a3fcc2f044e39a3fc5b94492f8f032e7549a20098f95b",
+                ),
+                concat!(
+                    "5fd7449b59b461fd2ce787ec616ad46a1da1342485a70e1f8a0ea75d80e96778",
+                    "edf124769b46c7061bd6783df1e50f6cd1fa1abeafe8256180",
+                ),
+                "",
+                concat!(
+                    "533a37f6bbe457251f023c0d88f976ae2dfb504a843e34d2074fd823d41a591f",
+                    "2b233f034f628281f2fd7a22ddd47d7828c59bd0a21bfd3980ff0d2028d4b18a",
+                    "9df63e006c5d1c2d345b925d8dc00b4104852db99ac5c7cdda8530a113a0f4db",
+                    "b61149f05a7363268c71d95808ff2e652600",
+                ),
+            ),
+            (
+                "1 octet",
+                concat!(
+                    "c4eab05d357007c632f3dbb48489924d552b08fe0c353a0d4a1f00acda2c463a",
+                    "fbea67c5e8d2877c5e3bc397a659949ef8021e954e0a12274e",
+                ),
+                concat!(
+                    "43ba28f430cdff456ae531545f7ecd0ac834a55d9358c0372bfa0c6c6798c086",
+                    "6aea01eb00742802b8438ea4cb82169c235160627b4c3a9480",
+                ),
+                "03",
+                concat!(
+                    "26b8f91727bd62897af15e41eb43c377efb9c610d48f2335cb0bd0087810f435",
+                    "2541b143c4b981b7e18f62de8ccdf633fc1bf037ab7cd779805e0dbcc0aae1cb",
+                    "cee1afb2e027df36bc04dcecbf154336c19f0af7e0a6472905e799f1953d2a0f",
+                    "f3348ab21aa4adafd1d234441cf807c03a00",
+                ),
+            ),
+            (
+                "11 octets",
+                concat!(
+                    "cd23d24f714274e744343237b93290f511f6425f98e64459ff203e8985083ffd",
+                    "f60500553abc0e05cd02184bdb89c4ccd67e187951267eb328",
+                ),
+                concat!(
+                    "dcea9e78f35a1bf3499a831b10b86c90aac01cd84b67a0109b55a36e9328b1e3",
+                    "65fce161d71ce7131a543ea4cb5f7e9f1d8b00696447001400",
+                ),
+                "0c3e544074ec63b0265e0c",
+                concat!(
+                    "1f0a8888ce25e8d458a21130879b840a9089d999aaba039eaf3e3afa090a09d3",
+                    "89dba82c4ff2ae8ac5cdfb7c55e94d5d961a29fe0109941e00b8dbdeea6d3b05",
+                    "1068df7254c0cdc129cbe62db2dc957dbb47b51fd3f213fb8698f064774250a5",
+                    "028961c9bf8ffd973fe5d5c206492b140e00",
+                ),
+            ),
+            (
+                "12 octets",
+                concat!(
+                    "258cdd4ada32ed9c9ff54e63756ae582fb8fab2ac721f2c8e676a72768513d93",
+                    "9f63dddb55609133f29adf86ec9929dccb52c1c5fd2ff7e21b",
+                ),
+                concat!(
+                    "3ba16da0c6f2cc1f30187740756f5e798d6bc5fc015d7c63cc9510ee3fd44adc",
+                    "24d8e968b6e46e6f94d19b945361726bd75e149ef09817f580",
+                ),
+                "64a65f3cdedcdd66811e2915",
+                concat!(
+                    "7eeeab7c4e50fb799b418ee5e3197ff6bf15d43a14c34389b59dd1a7b1b85b4a",
+                    "e90438aca634bea45e3a2695f1270f07fdcdf7c62b8efeaf00b45c2c96ba457e",
+                    "b1a8bf075a3db28e5c24f6b923ed4ad747c3c9e03c7079efb87cb110d3a99861",
+                    "e72003cbae6d6b8b827e4e6c143064ff3c00",
+                ),
+            ),
+            (
+                "13 octets",
+                concat!(
+                    "7ef4e84544236752fbb56b8f31a23a10e42814f5f55ca037cdcc11c64c9a3b29",
+                    "49c1bb60700314611732a6c2fea98eebc0266a11a93970100e",
+                ),
+                concat!(
+                    "b3da079b0aa493a5772029f0467baebee5a8112d9d3a22532361da294f7bb381",
+                    "5c5dc59e176b4d9f381ca0938e13c6c07b174be65dfa578e80",
+                ),
+                "64a65f3cdedcdd66811e2915e7",
+                concat!(
+                    "6a12066f55331b6c22acd5d5bfc5d71228fbda80ae8dec26bdd306743c5027cb",
+                    "4890810c162c027468675ecf645a83176c0d7323a2ccde2d80efe5a1268e8aca",
+                    "1d6fbc194d3f77c44986eb4ab4177919ad8bec33eb47bbb5fc6e28196fd1caf5",
+                    "6b4e7e0ba5519234d047155ac727a1053100",
+                ),
+            ),
+            (
+                "64 octets",
+                concat!(
+                    "d65df341ad13e008567688baedda8e9dcdc17dc024974ea5b4227b6530e339bf",
+                    "f21f99e68ca6968f3cca6dfe0fb9f4fab4fa135d5542ea3f01",
+                ),
+                concat!(
+                    "df9705f58edbab802c7f8363cfe5560ab1c6132c20a9f1dd163483a26f8ac53a",
+                    "39d6808bf4a1dfbd261b099bb03b3fb50906cb28bd8a081f00",
+                ),
+                concat!(
+                    "bd0f6a3747cd561bdddf4640a332461a4a30a12a434cd0bf40d766d9c6d458e5",
+                    "512204a30c17d1f50b5079631f64eb3112182da3005835461113718d1a5ef944",
+                ),
+                concat!(
+                    "554bc2480860b49eab8532d2a533b7d578ef473eeb58c98bb2d0e1ce488a98b1",
+                    "8dfde9b9b90775e67f47d4a1c3482058efc9f40d2ca033a0801b63d45b3b722e",
+                    "f552bad3b4ccb667da350192b61c508cf7b6b5adadc2c8d9a446ef003fb05cba",
+                    "5f30e88e36ec2703b349ca229c2670833900",
+                ),
+            ),
+            (
+                "256 octets",
+                concat!(
+                    "2ec5fe3c17045abdb136a5e6a913e32ab75ae68b53d2fc149b77e504132d3756",
+                    "9b7e766ba74a19bd6162343a21c8590aa9cebca9014c636df5",
+                ),
+                concat!(
+                    "79756f014dcfe2079f5dd9e718be4171e2ef2486a08f25186f6bff43a9936b9b",
+                    "fe12402b08ae65798a3d81e22e9ec80e7690862ef3d4ed3a00",
+                ),
+                concat!(
+                    "15777532b0bdd0d1389f636c5f6b9ba734c90af572877e2d272dd078aa1e567c",
+                    "fa80e12928bb542330e8409f3174504107ecd5efac61ae7504dabe2a602ede89",
+                    "e5cca6257a7c77e27a702b3ae39fc769fc54f2395ae6a1178cab4738e543072f",
+                    "c1c177fe71e92e25bf03e4ecb72f47b64d0465aaea4c7fad372536c8ba516a60",
+                    "39c3c2a39f0e4d832be432dfa9a706a6e5c7e19f397964ca4258002f7c0541b5",
+                    "90316dbc5622b6b2a6fe7a4abffd96105eca76ea7b98816af0748c10df048ce0",
+                    "12d901015a51f189f3888145c03650aa23ce894c3bd889e030d565071c59f409",
+                    "a9981b51878fd6fc110624dcbcde0bf7a69ccce38fabdf86f3bef6044819de11",
+                ),
+                concat!(
+                    "c650ddbb0601c19ca11439e1640dd931f43c518ea5bea70d3dcde5f4191fe53f",
+                    "00cf966546b72bcc7d58be2b9badef28743954e3a44a23f880e8d4f1cfce2d7a",
+                    "61452d26da05896f0a50da66a239a8a188b6d825b3305ad77b73fbac0836ecc6",
+                    "0987fd08527c1a8e80d5823e65cafe2a3d00",
+                ),
+            ),
+            (
+                "1023 octets",
+                concat!(
+                    "872d093780f5d3730df7c212664b37b8a0f24f56810daa8382cd4fa3f77634ec",
+                    "44dc54f1c2ed9bea86fafb7632d8be199ea165f5ad55dd9ce8",
+                ),
+                concat!(
+                    "a81b2e8a70a5ac94ffdbcc9badfc3feb0801f258578bb114ad44ece1ec0e799d",
+                    "a08effb81c5d685c0c56f64eecaef8cdf11cc38737838cf400",
+                ),
+                concat!(
+                    "6ddf802e1aae4986935f7f981ba3f0351d6273c0a0c22c9c0e8339168e675412",
+                    "a3debfaf435ed651558007db4384b650fcc07e3b586a27a4f7a00ac8a6fec2cd",
+                    "86ae4bf1570c41e6a40c931db27b2faa15a8cedd52cff7362c4e6e23daec0fbc",
+                    "3a79b6806e316efcc7b68119bf46bc76a26067a53f296dafdbdc11c77f7777e9",
+                    "72660cf4b6a9b369a6665f02e0cc9b6edfad136b4fabe723d2813db3136cfde9",
+                    "b6d044322fee2947952e031b73ab5c603349b307bdc27bc6cb8b8bbd7bd32321",
+                    "9b8033a581b59eadebb09b3c4f3d2277d4f0343624acc817804728b25ab79717",
+                    "2b4c5c21a22f9c7839d64300232eb66e53f31c723fa37fe387c7d3e50bdf9813",
+                    "a30e5bb12cf4cd930c40cfb4e1fc622592a49588794494d56d24ea4b40c89fc0",
+                    "596cc9ebb961c8cb10adde976a5d602b1c3f85b9b9a001ed3c6a4d3b1437f520",
+                    "96cd1956d042a597d561a596ecd3d1735a8d570ea0ec27225a2c4aaff26306d1",
+                    "526c1af3ca6d9cf5a2c98f47e1c46db9a33234cfd4d81f2c98538a09ebe76998",
+                    "d0d8fd25997c7d255c6d66ece6fa56f11144950f027795e653008f4bd7ca2dee",
+                    "85d8e90f3dc315130ce2a00375a318c7c3d97be2c8ce5b6db41a6254ff264fa6",
+                    "155baee3b0773c0f497c573f19bb4f4240281f0b1f4f7be857a4e59d416c06b4",
+                    "c50fa09e1810ddc6b1467baeac5a3668d11b6ecaa901440016f389f80acc4db9",
+                    "77025e7f5924388c7e340a732e554440e76570f8dd71b7d640b3450d1fd5f041",
+                    "0a18f9a3494f707c717b79b4bf75c98400b096b21653b5d217cf3565c9597456",
+                    "f70703497a078763829bc01bb1cbc8fa04eadc9a6e3f6699587a9e75c94e5bab",
+                    "0036e0b2e711392cff0047d0d6b05bd2a588bc109718954259f1d86678a579a3",
+                    "120f19cfb2963f177aeb70f2d4844826262e51b80271272068ef5b3856fa8535",
+                    "aa2a88b2d41f2a0e2fda7624c2850272ac4a2f561f8f2f7a318bfd5caf969614",
+                    "9e4ac824ad3460538fdc25421beec2cc6818162d06bbed0c40a387192349db67",
+                    "a118bada6cd5ab0140ee273204f628aad1c135f770279a651e24d8c14d75a605",
+                    "9d76b96a6fd857def5e0b354b27ab937a5815d16b5fae407ff18222c6d1ed263",
+                    "be68c95f32d908bd895cd76207ae726487567f9a67dad79abec316f683b17f2d",
+                    "02bf07e0ac8b5bc6162cf94697b3c27cd1fea49b27f23ba2901871962506520c",
+                    "392da8b6ad0d99f7013fbc06c2c17a569500c8a7696481c1cd33e9b14e40b82e",
+                    "79a5f5db82571ba97bae3ad3e0479515bb0e2b0f3bfcd1fd33034efc6245eddd",
+                    "7ee2086ddae2600d8ca73e214e8c2b0bdb2b047c6a464a562ed77b73d2d841c4",
+                    "b34973551257713b753632efba348169abc90a68f42611a40126d7cb21b58695",
+                    "568186f7e569d2ff0f9e745d0487dd2eb997cafc5abf9dd102e62ff66cba87",
+                ),
+                concat!(
+                    "e301345a41a39a4d72fff8df69c98075a0cc082b802fc9b2b6bc503f926b65bd",
+                    "df7f4c8f1cb49f6396afc8a70abe6d8aef0db478d4c6b2970076c6a0484fe76d",
+                    "76b3a97625d79f1ce240e7c576750d295528286f719b413de9ada3e8eb78ed57",
+                    "3603ce30d8bb761785dc30dbc320869e1a00",
+                ),
+            ),
+        ];
+        for (name, private_key, public_key, message, signature) in vectors {
+            let private_key = unhex(private_key);
+            let private_key =
+                ed448_goldilocks::SecretKey::try_from(private_key.as_slice()).expect("57 bytes");
+            assert_eq!(
+                eddsa_ed448::public_key(&private_key).as_slice(),
+                unhex(public_key),
+                "{name}: public key"
+            );
+            assert_eq!(
+                eddsa_ed448::sign_with(&private_key, &unhex(message)),
                 Ok(unhex(signature)),
                 "{name}: signature"
             );

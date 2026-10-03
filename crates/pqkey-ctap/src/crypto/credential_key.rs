@@ -12,7 +12,9 @@ use super::alg::{CoseAlg, KeyKind, Scheme};
 use super::ecdsa::Curve;
 use super::eddsa::EdwardsCurve;
 use super::scrub::with_scrubbed_stack;
-use super::{ecdsa_p256, ecdsa_p384, ecdsa_p521, ecdsa_secp256k1, eddsa_ed25519, mldsa};
+use super::{
+    ecdsa_p256, ecdsa_p384, ecdsa_p521, ecdsa_secp256k1, eddsa_ed448, eddsa_ed25519, mldsa,
+};
 
 /// A credential's signing key, named by its key type: algorithms that share
 /// a key type share a variant.
@@ -40,6 +42,10 @@ pub enum CredentialSecretKey {
     /// seed itself: EdDSA and Ed25519.  Each use hashes it anew into the
     /// secret scalar and prefix.
     Ed25519(Seed),
+    /// An EdDSA key on Ed448 held as the seed its 57-byte RFC 8032 private key
+    /// is derived from, the form stored credentials use: Ed448.  Each use
+    /// derives the private key anew.
+    Ed448(Seed),
 }
 
 impl CredentialSecretKey {
@@ -54,7 +60,8 @@ impl CredentialSecretKey {
             | CredentialSecretKey::P384(seed)
             | CredentialSecretKey::P521(seed)
             | CredentialSecretKey::Secp256k1(seed)
-            | CredentialSecretKey::Ed25519(seed) => Zeroizing::new(seed.as_bytes().to_vec()),
+            | CredentialSecretKey::Ed25519(seed)
+            | CredentialSecretKey::Ed448(seed) => Zeroizing::new(seed.as_bytes().to_vec()),
             CredentialSecretKey::P256(sk) => {
                 let mut scalar = sk.to_bytes();
                 let out = Zeroizing::new(scalar.to_vec());
@@ -68,7 +75,8 @@ impl CredentialSecretKey {
 /// The 32-byte seed a credential key is kept as ([`KeyKind::Seed`]), from
 /// which its algorithm derives the key: for ML-DSA, the FIPS 204
 /// key-generation seed `ξ`; for ECDSA, the seed its scalar is derived from;
-/// and for EdDSA on Ed25519, the RFC 8032 private key itself.
+/// and for EdDSA, the RFC 8032 private key itself on Ed25519 and the seed it
+/// is derived from on Ed448.
 ///
 /// Zeroized on drop; its `Debug` output is redacted.
 pub struct Seed(Zeroizing<[u8; 32]>);
@@ -139,6 +147,7 @@ pub fn try_credential_secret_from_bytes(
         Scheme::Ecdsa(Curve::P521) => seed(bytes).map(CredentialSecretKey::P521),
         Scheme::Ecdsa(Curve::Secp256k1) => seed(bytes).map(CredentialSecretKey::Secp256k1),
         Scheme::EdDsa(EdwardsCurve::Ed25519) => seed(bytes).map(CredentialSecretKey::Ed25519),
+        Scheme::EdDsa(EdwardsCurve::Ed448) => seed(bytes).map(CredentialSecretKey::Ed448),
         Scheme::MlDsa(_) => seed(bytes).map(CredentialSecretKey::MlDsa),
     })
 }
@@ -166,6 +175,9 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
         (CredentialSecretKey::Ed25519(seed), Scheme::EdDsa(EdwardsCurve::Ed25519)) => {
             eddsa_ed25519::cose_public_key(alg, seed)
         }
+        (CredentialSecretKey::Ed448(seed), Scheme::EdDsa(EdwardsCurve::Ed448)) => {
+            eddsa_ed448::cose_public_key(alg, seed)
+        }
         (CredentialSecretKey::MlDsa(seed), Scheme::MlDsa(param_set)) => {
             mldsa::cose_public_key(alg, param_set, seed)
         }
@@ -176,6 +188,7 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
             | CredentialSecretKey::P521(_)
             | CredentialSecretKey::Secp256k1(_)
             | CredentialSecretKey::Ed25519(_)
+            | CredentialSecretKey::Ed448(_)
             | CredentialSecretKey::MlDsa(_),
             Scheme::Ecdsa(_) | Scheme::EdDsa(_) | Scheme::MlDsa(_),
         ) => Err(CryptoError::KeyTypeMismatch),
@@ -193,6 +206,8 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
 /// * **EdDSA** and **Ed25519**: pure Ed25519 (RFC 8032 §5.1), as the 64-byte
 ///   signature RFC 8032 encodes ("\[RFC8032\] describes the method of
 ///   encoding the signature value.", RFC 9053 §2.2).
+/// * **Ed448**: pure Ed448 (RFC 8032 §5.2) with an empty context, as the
+///   114-byte signature RFC 8032 encodes.
 /// * **ML-DSA-44/65/87**: the raw FIPS 204 signature bytes.
 ///
 /// Returns [`CryptoError::KeyTypeMismatch`] when `alg` signs with another
@@ -221,6 +236,9 @@ pub fn try_sign_challenge(
         (CredentialSecretKey::Ed25519(seed), Scheme::EdDsa(EdwardsCurve::Ed25519)) => {
             eddsa_ed25519::sign(seed, &msg)
         }
+        (CredentialSecretKey::Ed448(seed), Scheme::EdDsa(EdwardsCurve::Ed448)) => {
+            eddsa_ed448::sign(seed, &msg)
+        }
         (CredentialSecretKey::MlDsa(seed), Scheme::MlDsa(param_set)) => {
             mldsa::sign(param_set, seed, &msg)
         }
@@ -231,6 +249,7 @@ pub fn try_sign_challenge(
             | CredentialSecretKey::P521(_)
             | CredentialSecretKey::Secp256k1(_)
             | CredentialSecretKey::Ed25519(_)
+            | CredentialSecretKey::Ed448(_)
             | CredentialSecretKey::MlDsa(_),
             Scheme::Ecdsa(_) | Scheme::EdDsa(_) | Scheme::MlDsa(_),
         ) => Err(CryptoError::KeyTypeMismatch),
@@ -437,7 +456,11 @@ mod tests {
     #[test]
     fn every_eddsa_key_is_an_okp_key_on_its_curve() {
         let int = |value: i64| Value::Integer(Integer::from(value));
-        let curves = [(CoseAlg::EdDSA, 6, 32), (CoseAlg::Ed25519, 6, 32)];
+        let curves = [
+            (CoseAlg::EdDSA, 6, 32),
+            (CoseAlg::Ed25519, 6, 32),
+            (CoseAlg::Ed448, 7, 57),
+        ];
         let eddsa: Vec<CoseAlg> = CoseAlg::ALL
             .into_iter()
             .filter(|alg| matches!(alg.scheme(), Scheme::EdDsa(_)))
@@ -609,41 +632,44 @@ mod tests {
         assert!(verifying_key.verify_prehash(&other, &signature).is_err());
     }
 
-    /// An EdDSA signature is pure Ed25519 over `authData || clientDataHash`
-    /// itself, no digest of it, encoded as RFC 8032's 64-byte R ‖ S rather
-    /// than as DER (RFC 9053 §2.2).
+    /// An EdDSA signature is pure EdDSA over `authData || clientDataHash`
+    /// itself, no digest of it, encoded as RFC 8032's R ‖ S rather than as DER
+    /// (RFC 9053 §2.2): 64 bytes for Ed25519, and 114 for Ed448, whose context
+    /// is empty.
     #[test]
-    fn eddsa_signature_is_raw_rfc_8032_over_auth_data_and_client_data_hash() {
-        let (cose_key, secret_key) = generated(CoseAlg::EdDSA);
-        let Value::Map(entries) = from_reader(cose_key.as_slice()).expect("a COSE_Key") else {
-            panic!("a COSE_Key is a map");
-        };
-        let x: [u8; 32] = entries[3]
-            .1
-            .as_bytes()
-            .expect("x")
-            .as_slice()
-            .try_into()
-            .expect("32");
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&x).expect("a point");
-
+    fn eddsa_signatures_are_raw_rfc_8032_over_auth_data_and_client_data_hash() {
         let auth_data = [0x11u8; 37];
         let client_data_hash = [0x22u8; 32];
-        let signature =
-            try_sign_challenge(CoseAlg::EdDSA, &secret_key, &auth_data, &client_data_hash)
-                .expect("EdDSA signature");
-        let signature: [u8; 64] = signature.as_slice().try_into().expect("64 bytes");
-        let signature = ed25519_dalek::Signature::from_bytes(&signature);
-
         let message = [&auth_data[..], &client_data_hash[..]].concat();
-        verifying_key
-            .verify_strict(&message, &signature)
-            .expect("the signature verifies over authData || clientDataHash");
-        assert!(
-            verifying_key
-                .verify_strict(&Sha256::digest(&message), &signature)
-                .is_err()
-        );
+        let digest = Sha256::digest(&message);
+        // A new key's x, and its signature over `message`.
+        let signed = |alg| {
+            let (cose_key, secret_key) = generated(alg);
+            let Value::Map(entries) = from_reader(cose_key.as_slice()).expect("a COSE_Key") else {
+                panic!("a COSE_Key is a map");
+            };
+            let x = entries[3].1.as_bytes().expect("x").clone();
+            let signature = try_sign_challenge(alg, &secret_key, &auth_data, &client_data_hash)
+                .expect("a signature");
+            (x, signature)
+        };
+
+        let (x, signature) = signed(CoseAlg::EdDSA);
+        let x: [u8; 32] = x.try_into().expect("32 bytes");
+        let key = ed25519_dalek::VerifyingKey::from_bytes(&x).expect("a point");
+        let signature: [u8; 64] = signature.try_into().expect("64 bytes");
+        let signature = ed25519_dalek::Signature::from_bytes(&signature);
+        assert!(key.verify_strict(&message, &signature).is_ok());
+        assert!(key.verify_strict(&digest, &signature).is_err());
+
+        let (x, signature) = signed(CoseAlg::Ed448);
+        let x: [u8; 57] = x.try_into().expect("57 bytes");
+        let key = ed448_goldilocks::VerifyingKey::from_bytes(&x).expect("a point");
+        assert_eq!(signature.len(), 114);
+        let signature = ed448_goldilocks::Signature::try_from(signature.as_slice()).expect("R ‖ S");
+        assert!(key.verify_ctx(&signature, &[], &message).is_ok());
+        assert!(key.verify_ctx(&signature, &[], &digest).is_err());
+        assert!(key.verify_ctx(&signature, b"pqkey", &message).is_err());
     }
 
     // ---------------------------------------------------------------------
@@ -738,6 +764,7 @@ mod tests {
         let (es512, _) = generated(CoseAlg::ES512);
         let (es256k, _) = generated(CoseAlg::ES256K);
         let (eddsa, _) = generated(CoseAlg::EdDSA);
+        let (ed448, _) = generated(CoseAlg::Ed448);
         let (mldsa65, _) = generated(CoseAlg::MLDSA65);
         let mut not_a_map = Vec::new();
         into_writer(&Value::Array(Vec::new()), &mut not_a_map).expect("encode");
@@ -837,6 +864,27 @@ mod tests {
                 CoseAlg::EdDSA,
                 "a private key",
                 with_label(&eddsa, -4, Value::Bytes(vec![0x11; 32])),
+            ),
+            (
+                CoseAlg::Ed448,
+                "crv Ed25519",
+                with_label(&ed448, -1, int(6)),
+            ),
+            (
+                CoseAlg::Ed448,
+                "a 32-byte x",
+                with_label(&ed448, -2, Value::Bytes(vec![0x11; 32])),
+            ),
+            (
+                CoseAlg::Ed448,
+                // y = 2 is the y of no point: (y² − 1) / (d·y² − 1) is not
+                // a square.
+                "an x that is no point",
+                with_label(
+                    &ed448,
+                    -2,
+                    Value::Bytes([[2].as_slice(), &[0; 56]].concat()),
+                ),
             ),
             (CoseAlg::MLDSA65, "kty EC2", with_label(&mldsa65, 1, int(2))),
             (

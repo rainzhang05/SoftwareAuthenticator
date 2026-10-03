@@ -71,6 +71,7 @@ enum EcCurve {
 /// The curves of the EdDSA algorithms.
 enum EdCurve {
     Ed25519,
+    Ed448,
 }
 
 /// The hashes ECDSA signs a message's digest of.
@@ -83,11 +84,11 @@ enum Hash {
 /// The COSE identifier of `alg` and what its keys and signatures are.  The
 /// identifiers are IANA's (RFC 9053 §2.1 for ES256, ES384 and ES512, RFC 9864
 /// §2.1 for ESP256, ESP384 and ESP512, RFC 8812 §3.2 for ES256K, RFC 9053 §2.2
-/// for EdDSA, RFC 9864 §2.2 for Ed25519, RFC 9964 §8.1 for ML-DSA), and so are
-/// the curves (RFC 9053 §7.1, RFC 8812 §3.1 for secp256k1).  An ECDSA
-/// coordinate is as long as the curve's field elements, an EdDSA public key as
-/// RFC 8032 encodes it (32 bytes for Ed25519, §5.1.5), an ML-DSA public key as
-/// FIPS 204's Table 2 says.
+/// for EdDSA, RFC 9864 §2.2 for Ed25519 and Ed448, RFC 9964 §8.1 for ML-DSA),
+/// and so are the curves (RFC 9053 §7.1, RFC 8812 §3.1 for secp256k1).  An
+/// ECDSA coordinate is as long as the curve's field elements, an EdDSA public
+/// key as RFC 8032 encodes it (32 bytes for Ed25519, §5.1.5, and 57 for Ed448,
+/// §5.2.5), an ML-DSA public key as FIPS 204's Table 2 says.
 fn expected(alg: CoseAlg) -> (i64, Expected) {
     let p256_sha256 = Expected::Ecdsa {
         crv: 1,
@@ -130,6 +131,14 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
         ),
         CoseAlg::EdDSA => (-8, ed25519),
         CoseAlg::Ed25519 => (-19, ed25519),
+        CoseAlg::Ed448 => (
+            -53,
+            Expected::EdDsa {
+                crv: 7,
+                length: 57,
+                curve: EdCurve::Ed448,
+            },
+        ),
         CoseAlg::MLDSA44 => (
             -48,
             Expected::MlDsa {
@@ -184,12 +193,14 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
 /// parameter." (WebAuthn Level 3 §5.8.5)  Ed25519 is "EdDSA using the Ed25519
 /// parameter set" (RFC 9864 §2.2), so its keys are on Ed25519 too: "Within
 /// WebAuthn, the values [...] -19 (Ed25519) represent the same thing
-/// respectively as [...] -8 (EdDSA)" (WebAuthn Level 3 §5.4).  An OKP key's "x"
-/// "contains the public key as defined by the algorithm" (RFC 9053 §7.2), so it
-/// is as long as RFC 8032 encodes the curve's public keys and decodes to a
-/// point on it, and "\[RFC8032\] describes the method of encoding the signature
-/// value." (RFC 9053 §2.2): the signature is RFC 8032's R ‖ S, never DER.  For
-/// ML-DSA, `pub` has the length of the parameter set's public key.
+/// respectively as [...] -8 (EdDSA)" (WebAuthn Level 3 §5.4).  Ed448 is "EdDSA
+/// using the Ed448 parameter set" (RFC 9864 §2.2), with an empty context, as
+/// COSE gives none.  An OKP key's "x" "contains the public key as defined by
+/// the algorithm" (RFC 9053 §7.2), so it is as long as RFC 8032 encodes the
+/// curve's public keys and decodes to a point on it, and "\[RFC8032\] describes
+/// the method of encoding the signature value." (RFC 9053 §2.2): the signature
+/// is RFC 8032's R ‖ S, never DER.  For ML-DSA, `pub` has the length of the
+/// parameter set's public key.
 pub fn verify_signature(
     alg: CoseAlg,
     cose_key: &[u8],
@@ -303,6 +314,14 @@ fn verify_eddsa(
                 .ok_or_else(|| malformed("x is not a point on Ed25519".into()))?;
             ed25519_dalek::Signature::from_slice(signature)
                 .is_ok_and(|signature| key.verify_strict(message, &signature).is_ok())
+        }
+        EdCurve::Ed448 => {
+            let key = <&[u8; 57]>::try_from(x)
+                .ok()
+                .and_then(|x| ed448_goldilocks::VerifyingKey::from_bytes(x).ok())
+                .ok_or_else(|| malformed("x is not a point on Ed448".into()))?;
+            ed448_goldilocks::Signature::try_from(signature)
+                .is_ok_and(|signature| key.verify_ctx(&signature, &[], message).is_ok())
         }
     };
     if verified {
