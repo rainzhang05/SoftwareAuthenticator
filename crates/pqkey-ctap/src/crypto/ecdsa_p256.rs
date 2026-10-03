@@ -25,7 +25,8 @@ pub(super) fn generate_scalar<R: TryCryptoRng + ?Sized>(
     Ok(())
 }
 
-/// The signing key whose big-endian scalar is `bytes`.
+/// The signing key whose big-endian scalar is `bytes`.  It multiplies the
+/// base point by the scalar, so it runs on a scrubbed stack.
 ///
 /// Returns [`CryptoError::InvalidKey`] unless `bytes` is exactly 32 bytes and
 /// a scalar that is non-zero and below the group order.
@@ -34,10 +35,9 @@ pub(super) fn signing_key(bytes: &[u8]) -> Result<SigningKey, CryptoError> {
     // 24 to 31 bytes, reading a truncated key as some other key.
     // `from_bytes` performs the full range check (non-zero and below the
     // group order), and borrowing the bytes in place needs no intermediate
-    // copy of the scalar.  It multiplies the base point by the scalar, so it
-    // runs on a scrubbed stack.
+    // copy of the scalar.
     let scalar = <&p256::FieldBytes>::try_from(bytes).map_err(|_| CryptoError::InvalidKey)?;
-    with_scrubbed_stack(|| SigningKey::from_bytes(scalar)).map_err(|_| CryptoError::InvalidKey)
+    SigningKey::from_bytes(scalar).map_err(|_| CryptoError::InvalidKey)
 }
 
 /// The CBOR COSE_Key of `key`'s public key, for `alg`.

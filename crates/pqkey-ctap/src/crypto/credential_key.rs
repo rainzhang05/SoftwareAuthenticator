@@ -10,6 +10,7 @@ use zeroize::{Zeroize, Zeroizing};
 use super::CryptoError;
 use super::alg::{CoseAlg, KeyKind, Scheme};
 use super::ecdsa::Curve;
+use super::scrub::with_scrubbed_stack;
 use super::{ecdsa_p256, ecdsa_p384, ecdsa_p521, ecdsa_secp256k1, mldsa};
 
 /// A credential's signing key, named by its key type: algorithms that share
@@ -115,6 +116,10 @@ pub(crate) fn try_generate_key<R: TryCryptoRng + ?Sized>(
 /// `bytes` comes from persistent storage and is therefore not trusted: a
 /// corrupted or truncated record must produce an error, never a panic.
 ///
+/// The key is read on a scrubbed stack, which wipes the copies of it that
+/// reading leaves in temporaries on its way to the caller (Rust moves are
+/// copies), and a P-256 key's multiplication of the base point.
+///
 /// Returns [`CryptoError::InvalidKey`] when the bytes are not a valid key for
 /// the requested algorithm: a P-256 scalar (non-zero and below the group
 /// order) or a 32-byte seed.
@@ -122,13 +127,13 @@ pub fn try_credential_secret_from_bytes(
     alg: CoseAlg,
     bytes: &[u8],
 ) -> Result<CredentialSecretKey, CryptoError> {
-    match alg.scheme() {
+    with_scrubbed_stack(|| match alg.scheme() {
         Scheme::Ecdsa(Curve::P256) => ecdsa_p256::signing_key(bytes).map(CredentialSecretKey::P256),
         Scheme::Ecdsa(Curve::P384) => seed(bytes).map(CredentialSecretKey::P384),
         Scheme::Ecdsa(Curve::P521) => seed(bytes).map(CredentialSecretKey::P521),
         Scheme::Ecdsa(Curve::Secp256k1) => seed(bytes).map(CredentialSecretKey::Secp256k1),
         Scheme::MlDsa(_) => seed(bytes).map(CredentialSecretKey::MlDsa),
-    }
+    })
 }
 
 /// The CBOR COSE_Key of `sk`'s public key, labelled with `alg`.
