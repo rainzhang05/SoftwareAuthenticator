@@ -41,8 +41,8 @@ const SCAN: usize = 2 * 1024 * 1024;
 /// A point's affine x and y, big-endian.
 type Point = (Vec<u8>, Vec<u8>);
 
-/// What the test states itself about a curve the engine signs on.
-struct Case {
+/// What the test states itself about a curve the engine signs ECDSA on.
+struct EcdsaCase {
     /// An algorithm on the curve.
     alg: CoseAlg,
     /// The order n of the curve's group, big-endian, in as many bytes as the
@@ -70,8 +70,8 @@ enum Kept {
     Seed(&'static str),
 }
 
-const CASES: [Case; 4] = [
-    Case {
+const ECDSA_CASES: [EcdsaCase; 4] = [
+    EcdsaCase {
         alg: CoseAlg::ES256,
         order: "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
         digest: digest::<Sha256>,
@@ -87,7 +87,7 @@ const CASES: [Case; 4] = [
             0x8B, 0xEE, 0xC1, 0x24,
         ],
     },
-    Case {
+    EcdsaCase {
         alg: CoseAlg::ES384,
         order: concat!(
             "ffffffffffffffffffffffffffffffffffffffffffffffff",
@@ -102,7 +102,7 @@ const CASES: [Case; 4] = [
         kept: Kept::Seed("P-384"),
         key: [0x5A; 32],
     },
-    Case {
+    EcdsaCase {
         alg: CoseAlg::ES512,
         order: concat!(
             "01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
@@ -117,7 +117,7 @@ const CASES: [Case; 4] = [
         kept: Kept::Seed("P-521"),
         key: [0xA5; 32],
     },
-    Case {
+    EcdsaCase {
         alg: CoseAlg::ES256K,
         order: "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
         digest: digest::<Sha256>,
@@ -218,7 +218,7 @@ fn reduce(x: &[u8], n: &[u8]) -> Vec<u8> {
 /// the first ⌈(N + 64) / 8⌉ bytes of SHAKE256("pqkey/v1/ecdsa-key/" ‖ curve
 /// ‖ seed), N the bit length of `n`, read as an integer c, and
 /// d = (c mod (n − 1)) + 1.
-fn private_scalar(case: &Case, n: &[u8]) -> (Vec<u8>, Option<Vec<u8>>) {
+fn private_scalar(case: &EcdsaCase, n: &[u8]) -> (Vec<u8>, Option<Vec<u8>>) {
     let Kept::Seed(curve) = case.kept else {
         return (case.key.to_vec(), None);
     };
@@ -272,7 +272,7 @@ fn cose_coordinates(cose_key: &[u8]) -> Point {
 /// drawn from.  `h1` is no longer than `q` and below it, true of the curves
 /// and values used here, so bits2octets(`h1`) is `h1` itself, padded to the
 /// length of `q`.
-fn rfc6979_k(case: &Case, q: &[u8], x: &[u8], h1: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
+fn rfc6979_k(case: &EcdsaCase, q: &[u8], x: &[u8], h1: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
     let mut h = vec![0; q.len() - h1.len()];
     h.extend_from_slice(h1);
     assert!(
@@ -311,20 +311,21 @@ fn rfc6979_k(case: &Case, q: &[u8], x: &[u8], h1: &[u8]) -> (Vec<u8>, Vec<Vec<u8
     }
 }
 
-/// Run `case` through the engine and return what it left in the stack.
-#[inline(never)]
-fn check(case: &Case) -> Vec<String> {
+/// The authenticator data every case signs.
+const AUTH_DATA: [u8; 37] = [0x11; 37];
+/// The client data hash every case signs.
+const CLIENT_DATA_HASH: [u8; 32] = [0x22; 32];
+
+/// The secrets of `case`'s key and signature, checked to be the real ones
+/// and looked for in the stack the engine left: what [`run`] found.
+fn check_ecdsa(case: &EcdsaCase) -> Vec<String> {
     let alg = case.alg;
     let order = unhex(case.order);
     let (d, returned_bits) = private_scalar(case, &order);
-    let (auth_data, client_data_hash) = ([0x11u8; 37], [0x22u8; 32]);
-    let message = [&auth_data[..], &client_data_hash[..]].concat();
+    let message = [&AUTH_DATA[..], &CLIENT_DATA_HASH[..]].concat();
     let (k, blocks) = rfc6979_k(case, &order, &d, &(case.digest)(&message));
     let public_key = (case.multiply)(&d);
     let r = reduce(&(case.multiply)(&k).0, &order);
-    let control = Sha256::digest(b"never computed by the signer").to_vec();
-    // Every needle is made before the engine runs, so that making one leaves
-    // nothing behind that a scan would find.
     // The blocks are k itself unless qlen is not a whole number of them.
     let blocks: Vec<(String, Vec<u8>)> = blocks
         .into_iter()
@@ -332,31 +333,14 @@ fn check(case: &Case) -> Vec<String> {
         .enumerate()
         .map(|(i, block)| (format!("T block {}", i + 1), block))
         .collect();
-    let needles: Vec<(String, Vec<u8>, Vec<u8>)> = [("k", k), ("d", d), ("control", control)]
+    let needles: Vec<(String, Vec<u8>)> = [("k", k), ("d", d)]
         .into_iter()
         .chain(returned_bits.map(|bytes| ("SHAKE256 output", bytes)))
         .map(|(name, bytes)| (name.to_owned(), bytes))
         .chain(blocks)
-        .map(|(name, bytes)| (name, bytes.iter().rev().copied().collect(), bytes))
         .collect();
 
-    wipe();
-    let (cose_key, signature) = {
-        let key = try_credential_secret_from_bytes(alg, &case.key).expect("key");
-        let cose_key = try_cose_public_key(alg, &key).expect("public key");
-        let signature = try_sign_challenge(alg, &key, &auth_data, &client_data_hash).expect("sign");
-        (cose_key, signature)
-    };
-    let found: Vec<(&str, usize, usize)> = needles
-        .iter()
-        .map(|(name, reversed, bytes)| (name.as_str(), scan(bytes), scan(reversed)))
-        .collect();
-
-    let report: Vec<String> = found
-        .iter()
-        .map(|(name, hits, reversed)| format!("{name} {hits}x/{reversed}x"))
-        .collect();
-    println!("{alg:?}: {} (big-endian/reversed)", report.join(", "));
+    let (cose_key, signature, found) = run(alg, &case.key, needles);
     assert_eq!(
         cose_coordinates(&cose_key),
         public_key,
@@ -368,14 +352,56 @@ fn check(case: &Case) -> Vec<String> {
         "{alg:?}: k·G does not give the signature's r"
     );
     found
+}
+
+/// Read `key` as `alg`, derive its public key and sign
+/// [`AUTH_DATA`] ‖ [`CLIENT_DATA_HASH`] through the engine's public entry
+/// points, then scan the dead stack below for each of `needles` and for a
+/// control value nobody computed, each as given and reversed.  Returns the
+/// COSE_Key, the signature, and a line for each value found.
+///
+/// Every needle is made before the engine runs, so that making one leaves
+/// nothing behind that a scan would find.
+#[inline(never)]
+fn run(
+    alg: CoseAlg,
+    key: &[u8; 32],
+    needles: Vec<(String, Vec<u8>)>,
+) -> (Vec<u8>, Vec<u8>, Vec<String>) {
+    let control = Sha256::digest(b"never computed by the signer").to_vec();
+    let needles: Vec<(String, Vec<u8>, Vec<u8>)> = needles
+        .into_iter()
+        .chain([("control".to_owned(), control)])
+        .map(|(name, bytes)| (name, bytes.iter().rev().copied().collect(), bytes))
+        .collect();
+
+    wipe();
+    let (cose_key, signature) = {
+        let key = try_credential_secret_from_bytes(alg, key).expect("key");
+        let cose_key = try_cose_public_key(alg, &key).expect("public key");
+        let signature = try_sign_challenge(alg, &key, &AUTH_DATA, &CLIENT_DATA_HASH).expect("sign");
+        (cose_key, signature)
+    };
+    let found: Vec<(&str, usize, usize)> = needles
+        .iter()
+        .map(|(name, reversed, bytes)| (name.as_str(), scan(bytes), scan(reversed)))
+        .collect();
+
+    let report: Vec<String> = found
+        .iter()
+        .map(|(name, hits, reversed)| format!("{name} {hits}x/{reversed}x"))
+        .collect();
+    println!("{alg:?}: {} (as given/reversed)", report.join(", "));
+    let found = found
         .into_iter()
         .filter(|(_, hits, reversed)| hits + reversed > 0)
         .map(|(name, hits, reversed)| format!("{alg:?}: {name} {hits}x/{reversed}x"))
-        .collect()
+        .collect();
+    (cose_key, signature, found)
 }
 
 fn main() {
-    let failures: Vec<String> = CASES.iter().flat_map(check).collect();
+    let failures: Vec<String> = ECDSA_CASES.iter().flat_map(check_ecdsa).collect();
     assert!(
         failures.is_empty(),
         "ECDSA secrets left in the stack after signing: {failures:?}"
