@@ -57,12 +57,13 @@ else has to change.
    that differs from another only in its identifier, as ESP256 does from
    ES256, shares its scheme and needs nothing more in Rust.
 2. A new scheme needs a `Scheme` variant and a module for its family, as
-   `crypto/ecdsa.rs` and `crypto/mldsa.rs` are. ECDSA on a new curve needs a
-   `Curve` variant, a module for the curve next to `crypto/ecdsa_p384.rs`, a
-   case in `tests/residue.rs` and, for keys kept as a seed, known answers in
-   `crypto/ecdsa.rs`. A new type of key needs a `CredentialSecretKey`
-   variant. Keys kept in a new form need a `KeyKind`, a `PrivateKeyMaterial`
-   variant and a key type in `store/codec.rs`.
+   `crypto/ecdsa.rs`, `crypto/eddsa.rs` and `crypto/mldsa.rs` are. ECDSA or
+   EdDSA on a new curve needs a `Curve` or `EdwardsCurve` variant, a module
+   for the curve next to `crypto/ecdsa_p384.rs` or `crypto/eddsa_ed25519.rs`,
+   a case in `tests/residue.rs` and, for keys derived from a seed, known
+   answers in its family's module. A new type of key needs a
+   `CredentialSecretKey` variant. Keys kept in a new form need a `KeyKind`,
+   a `PrivateKeyMaterial` variant and a key type in `store/codec.rs`.
 3. Build and run clippy, and handle every match they point to, among them
    the test verifier in `crypto/verify.rs`, which pqkey's tests and the fuzz
    targets reach through pqkey-ctap's `test-support` feature. A check at
@@ -75,8 +76,9 @@ else has to change.
 5. Outside Rust, add it to `ALGORITHMS` in `tests/e2e/ctap.py` and to
    `test_get_info.py`, to `NAMES` in `tests/browser/q.py` and
    `tests/browser/index.html`, to the `fido2-token -I` line that
-   `tests/e2e/libfido2.sh` expects, and to the algorithm lists in the README
-   and the [architecture notes](architecture.md).
+   `tests/e2e/libfido2.sh` expects (and its register-and-assert tests, if
+   libfido2 implements the algorithm), and to the algorithm lists in the
+   README and the [architecture notes](architecture.md).
 
 Then run `scripts/check.sh`, regenerate the fuzz seeds with `cargo run
 --release --manifest-path fuzz/Cargo.toml --example seeds` (the

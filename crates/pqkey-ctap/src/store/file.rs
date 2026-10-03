@@ -129,8 +129,9 @@ const ATTESTATION_FILE: &str = "attestation";
 ///    4  user_name               text string, optional
 ///    5  user_display_name       text string, optional
 ///    6  alg                     integer, COSE algorithm identifier, one of CoseAlg's
-///    7  private key type        unsigned: 1 = P-256 scalar, 2 = seed (ML-DSA's ξ, or an
-///                               ECDSA key's seed on P-384, P-521 or secp256k1)
+///    7  private key type        unsigned: 1 = P-256 scalar, 2 = seed (ML-DSA's ξ, an
+///                               ECDSA key's seed on P-384, P-521 or secp256k1, or
+///                               an Ed25519 private key)
 ///    8  private key             byte string, 32 bytes
 ///    9  cred_random_with_uv     byte string, 32 bytes
 ///   10  cred_random_without_uv  byte string, 32 bytes

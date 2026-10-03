@@ -11,8 +11,9 @@
 #
 # python-fido2: CTAPHID transport, CTAP2 commands and the PIN/UV protocols.
 fido2==2.2.1
-# cryptography: independent verification of ECDSA and ML-DSA signatures. ML-DSA
-# needs 48.0.0 or later, whose wheels are built with OpenSSL's implementation.
+# cryptography: independent verification of ECDSA, EdDSA and ML-DSA signatures.
+# ML-DSA needs 48.0.0 or later, whose wheels are built with OpenSSL's
+# implementation.
 cryptography==50.0.1
 pytest==9.1.1
 # jeepney: a pure-Python D-Bus implementation, for the fake desktop

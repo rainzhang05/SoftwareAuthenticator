@@ -28,6 +28,9 @@ p256 = { workspace = true, features = ["ecdh"] }
 p384 = { version = "0.14", features = ["ecdsa"] }
 p521 = { version = "0.14", features = ["ecdsa"] }
 k256 = { version = "0.14", features = ["ecdsa"] }
+# EdDSA on Ed25519 (EdDSA).  `zeroize`, a default feature, is named because
+# the keys rely on it: it wipes the private key and its hash on drop.
+ed25519-dalek = { workspace = true, features = ["zeroize"] }
 # SHAKE256, from which ECDSA keys kept as a seed derive their scalar.
 # `zeroize` wipes the sponge states that held the seed and the scalar.
 shake = { workspace = true, features = ["zeroize"] }
@@ -49,6 +52,8 @@ pqkey-mldsa = { workspace = true, features = ["mldsa44", "mldsa65", "mldsa87"] }
 [dev-dependencies]
 # Tests derive key pairs from chosen seeds, FIPS 204's internal interface.
 pqkey-mldsa = { workspace = true, features = ["mldsa44", "mldsa65", "mldsa87", "hazmat"] }
+# The residue test multiplies the base point by an Ed25519 key's scalar.
+ed25519-dalek = { workspace = true, features = ["hazmat"] }
 
 # A program of its own: it reads the stack other functions left behind.
 [[test]]

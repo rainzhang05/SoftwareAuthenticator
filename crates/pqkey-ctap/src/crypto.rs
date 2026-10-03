@@ -23,6 +23,8 @@ pub(crate) mod ecdsa_p256;
 pub(crate) mod ecdsa_p384;
 pub(crate) mod ecdsa_p521;
 pub(crate) mod ecdsa_secp256k1;
+pub(crate) mod eddsa;
+pub(crate) mod eddsa_ed25519;
 pub(crate) mod hkdf;
 pub(crate) mod mldsa;
 pub(crate) mod pin_uv;

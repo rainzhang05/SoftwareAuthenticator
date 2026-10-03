@@ -44,7 +44,9 @@ use crate::{
 ///
 /// ECDSA keys on P-384, P-521 and secp256k1 are kept as a 32-byte seed too,
 /// from which each use derives the scalar (FIPS 186-5 Appendix A.2.1), so
-/// that their records hold 32 bytes of key like every other.
+/// that their records hold 32 bytes of key like every other.  An EdDSA key on
+/// Ed25519 is its 32-byte RFC 8032 private key, a seed by nature: random
+/// bytes that each use hashes into the secret scalar (§5.1.5).
 ///
 /// The public key is never stored: [`CredentialRecord::cose_public_key`]
 /// derives it from this material, so a record cannot carry a public key that
@@ -58,8 +60,9 @@ pub enum PrivateKeyMaterial {
     },
     /// A seed from which the owning record's `alg` derives the key
     /// ([`KeyKind::Seed`]): for ML-DSA, the FIPS 204 key-generation seed `ξ`,
-    /// which the parameter set of `alg` expands, and for ECDSA on P-384, P-521
-    /// and secp256k1, the seed the scalar is derived from.
+    /// which the parameter set of `alg` expands; for ECDSA on P-384, P-521
+    /// and secp256k1, the seed the scalar is derived from; and for EdDSA on
+    /// Ed25519, the RFC 8032 private key itself.
     Seed {
         /// The seed.
         seed: [u8; 32],
@@ -72,7 +75,7 @@ impl PrivateKeyMaterial {
     ///
     /// For ML-DSA this draws only the 32-byte seed `ξ`; the expensive
     /// expansion happens when the key is first used.  ECDSA on P-384, P-521
-    /// and secp256k1 draws a seed as well.  getrandom(2) is a
+    /// and secp256k1 and EdDSA draw a seed as well.  getrandom(2) is a
     /// cryptographically secure generator, but not a random bit generator
     /// approved under NIST SP 800-90A, which FIPS 204 §3.6.1 asks a validated
     /// implementation to use for `ξ` and for hedged signing's `rnd`; that
@@ -192,8 +195,8 @@ pub struct CredentialRecord {
     /// `user.displayName`, if the relying party supplied one.
     pub user_display_name: Option<String>,
     /// The COSE algorithm of the credential key.  It selects the ML-DSA
-    /// parameter set or the ECDSA curve, and must agree with the variant of
-    /// `private_key`.
+    /// parameter set, the ECDSA curve or the EdDSA curve, and must agree with
+    /// the variant of `private_key`.
     #[zeroize(skip)]
     pub alg: CoseAlg,
     /// The credential's private key.
@@ -441,6 +444,7 @@ mod tests {
     use super::*;
     use crate::crypto::alg::Scheme;
     use crate::crypto::ecdsa::{self, Curve};
+    use crate::crypto::eddsa::{self, EdwardsCurve};
     use crate::crypto::mldsa;
     use crate::crypto::verify::verify_signature;
     use crate::try_sign_challenge;
@@ -571,7 +575,7 @@ mod tests {
         for alg in CoseAlg::ALL {
             let param_set = match alg.scheme() {
                 Scheme::MlDsa(param_set) => param_set,
-                Scheme::Ecdsa(_) => continue,
+                Scheme::Ecdsa(_) | Scheme::EdDsa(_) => continue,
             };
             let record = record(alg);
             let PrivateKeyMaterial::Seed { seed } = &record.private_key else {
@@ -581,6 +585,22 @@ mod tests {
             let expected = mldsa::try_cose_key(alg, &public_key).unwrap();
             assert_eq!(record.cose_public_key().unwrap(), expected, "{alg:?}");
         }
+    }
+
+    /// The stored seed of an EdDSA key is its RFC 8032 private key itself,
+    /// from which nothing is derived before RFC 8032 hashes it.
+    #[test]
+    fn eddsa_material_is_the_rfc_8032_private_key() {
+        let record = record(CoseAlg::EdDSA);
+        let PrivateKeyMaterial::Seed { seed } = &record.private_key else {
+            panic!("an EdDSA record must hold a seed");
+        };
+        let public_key = ed25519_dalek::SigningKey::from_bytes(seed).verifying_key();
+        assert_eq!(
+            record.cose_public_key().unwrap(),
+            eddsa::try_cose_key(CoseAlg::EdDSA, EdwardsCurve::Ed25519, public_key.as_bytes())
+                .unwrap()
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
-//! COSE_Key encoding (RFC 9052 §7) of the two key types the authenticator's
-//! public keys take: EC2 and AKP.  The algorithm, and for EC2 the curve, are
-//! inputs, so no encoder states an algorithm of its own.
+//! COSE_Key encoding (RFC 9052 §7) of the three key types the authenticator's
+//! public keys take: EC2, OKP and AKP.  The algorithm, and for EC2 and OKP
+//! the curve, are inputs, so no encoder states an algorithm of its own.
 
 use ciborium::ser::into_writer;
 use ciborium::value::{Integer, Value};
@@ -31,6 +31,17 @@ pub(crate) const CRV_P521: i32 = 3;
 /// Curve 8, secp256k1 (RFC 8812 §3.1).
 pub(crate) const CRV_SECP256K1: i32 = 8;
 
+/// Key type 1, OKP: an Octet Key Pair, whose public key is one byte string
+/// (RFC 9053 §7.2).
+const KTY_OKP: i32 = 1;
+/// OKP label -1, the curve (RFC 9053 §7.2).
+const LABEL_OKP_CRV: i32 = -1;
+/// OKP label -2, x: "the public key as defined by the algorithm" (RFC 9053
+/// §7.2).
+const LABEL_OKP_X: i32 = -2;
+/// Curve 6, Ed25519, "for use w/ EdDSA only" (RFC 9053 §7.1).
+pub(crate) const CRV_ED25519: i32 = 6;
+
 /// Key type 7, AKP: an Algorithm Key Pair, whose algorithm determines its
 /// format (RFC 9964).
 const KTY_AKP: i32 = 7;
@@ -46,6 +57,17 @@ fn ec2_key_map(alg: CoseAlg, crv: i32, x: &[u8], y: &[u8]) -> Value {
         (int(LABEL_EC2_CRV), int(crv)),
         (int(LABEL_EC2_X), Value::Bytes(x.to_vec())),
         (int(LABEL_EC2_Y), Value::Bytes(y.to_vec())),
+    ])
+}
+
+/// The COSE_Key map of the OKP public key `x` on curve `crv` for `alg`, in
+/// canonical order.
+fn okp_key_map(alg: CoseAlg, crv: i32, x: &[u8]) -> Value {
+    Value::Map(vec![
+        (int(LABEL_KTY), int(KTY_OKP)),
+        (int(LABEL_ALG), int(alg.identifier())),
+        (int(LABEL_OKP_CRV), int(crv)),
+        (int(LABEL_OKP_X), Value::Bytes(x.to_vec())),
     ])
 }
 
@@ -68,6 +90,12 @@ pub(crate) fn try_ec2_key(
     y: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     encode(&ec2_key_map(alg, crv, x, y))
+}
+
+/// [`okp_key_map`], encoded.  Returns [`CryptoError::CborEncoding`] if
+/// serialization fails.
+pub(crate) fn try_okp_key(alg: CoseAlg, crv: i32, x: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    encode(&okp_key_map(alg, crv, x))
 }
 
 /// [`akp_key_map`], encoded.  Returns [`CryptoError::CborEncoding`] if
@@ -101,5 +129,21 @@ mod tests {
         assert_eq!(cose, expected);
         let decoded: Value = from_reader(cose.as_slice()).expect("valid COSE public key");
         assert_eq!(decoded, akp_key_map(CoseAlg::MLDSA44, &pk_bytes));
+    }
+
+    /// An OKP key is a map of kty 1, alg, crv and x, in that order, each label
+    /// and integer in one byte.
+    #[test]
+    fn okp_public_key_canonical_encoding_matches_fixture() {
+        let x = [0xAB; 32];
+        let cose = try_okp_key(CoseAlg::EdDSA, CRV_ED25519, &x).expect("encode COSE key");
+        let expected = [
+            [0xA4, 0x01, 0x01, 0x03, 0x27, 0x20, 0x06, 0x21, 0x58, 0x20].as_slice(),
+            &x,
+        ]
+        .concat();
+        assert_eq!(cose, expected);
+        let decoded: Value = from_reader(cose.as_slice()).expect("valid COSE public key");
+        assert_eq!(decoded, okp_key_map(CoseAlg::EdDSA, CRV_ED25519, &x));
     }
 }

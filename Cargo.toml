@@ -16,11 +16,13 @@ readme = "README.md"
 # The newest `rust-version` in the locked dependency graph: aes 0.9.3.
 rust-version = "1.89"
 
-# Dependencies used by more than one member, declared once so their versions
-# cannot drift apart. Members add the features they need on top; a crate used
-# by a single member stays in that member's manifest.
+# Dependencies declared more than once, by more than one member or by one as
+# both a dependency and a dev-dependency, declared once here so their versions
+# cannot drift apart. Members add the features they need on top; a crate
+# declared once stays in its member's manifest.
 [workspace.dependencies]
 ciborium = { version = "0.2", default-features = false, features = ["std"] }
+ed25519-dalek = "3.0"
 getrandom = { version = "0.4", features = ["sys_rng"] }
 log = { version = "0.4", default-features = false }
 p256 = "0.14"

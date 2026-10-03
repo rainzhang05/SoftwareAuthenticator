@@ -48,6 +48,13 @@ enum Expected {
         curve: EcCurve,
         hash: Hash,
     },
+    /// An OKP key (kty 1) on curve `crv`, whose x is `length` bytes, and pure
+    /// EdDSA signatures as RFC 8032 encodes them, which `curve` checks.
+    EdDsa {
+        crv: i64,
+        length: usize,
+        curve: EdCurve,
+    },
     /// An AKP key (kty 7) whose `pub` is an ML-DSA public key of `length`
     /// bytes, and ML-DSA signatures with `param_set` and an empty context.
     MlDsa { param_set: ParamSet, length: usize },
@@ -61,6 +68,11 @@ enum EcCurve {
     Secp256k1,
 }
 
+/// The curves of the EdDSA algorithms.
+enum EdCurve {
+    Ed25519,
+}
+
 /// The hashes ECDSA signs a message's digest of.
 enum Hash {
     Sha256,
@@ -70,10 +82,12 @@ enum Hash {
 
 /// The COSE identifier of `alg` and what its keys and signatures are.  The
 /// identifiers are IANA's (RFC 9053 §2.1 for ES256, ES384 and ES512, RFC 9864
-/// §2.1 for ESP256, ESP384 and ESP512, RFC 8812 §3.2 for ES256K, RFC 9964
-/// §8.1 for ML-DSA), and so are the curves (RFC 9053 §7.1, RFC 8812 §3.1 for
-/// secp256k1).  An ECDSA coordinate is as long as the curve's
-/// field elements, an ML-DSA public key as FIPS 204's Table 2 says.
+/// §2.1 for ESP256, ESP384 and ESP512, RFC 8812 §3.2 for ES256K, RFC 9053
+/// §2.2 for EdDSA, RFC 9964 §8.1 for ML-DSA), and so are the curves (RFC 9053
+/// §7.1, RFC 8812 §3.1 for secp256k1).  An ECDSA coordinate is as long as the
+/// curve's field elements, an EdDSA public key as RFC 8032 encodes it (32
+/// bytes for Ed25519, §5.1.5), an ML-DSA public key as FIPS 204's Table 2
+/// says.
 fn expected(alg: CoseAlg) -> (i64, Expected) {
     let p256_sha256 = Expected::Ecdsa {
         crv: 1,
@@ -107,6 +121,14 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
                 length: 32,
                 curve: EcCurve::Secp256k1,
                 hash: Hash::Sha256,
+            },
+        ),
+        CoseAlg::EdDSA => (
+            -8,
+            Expected::EdDsa {
+                crv: 6,
+                length: 32,
+                curve: EdCurve::Ed25519,
             },
         ),
         CoseAlg::MLDSA44 => (
@@ -156,8 +178,16 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
 /// So x and y are as long as the curve's field elements and form a point on
 /// it, and "the sig value MUST be encoded as an ASN.1 DER Ecdsa-Sig-Value"
 /// (§6.5.5) over the message's digest with the algorithm's hash, which this
-/// verifier computes itself.  For ML-DSA, `pub` has the length of the
-/// parameter set's public key.
+/// verifier computes itself.  For EdDSA, "The "kty" field MUST be present,
+/// and it MUST be "OKP" (Octet Key Pair).  The "crv" field MUST be present,
+/// and it MUST be a curve defined for this signature algorithm." (RFC 9053
+/// §2.2), and "Keys with algorithm -8 (EdDSA) MUST specify 6 (Ed25519) as the
+/// crv parameter." (WebAuthn Level 3 §5.8.5)  An OKP key's "x" "contains the
+/// public key as defined by the algorithm" (RFC 9053 §7.2), so it is as long
+/// as RFC 8032 encodes the curve's public keys and decodes to a point on it,
+/// and "\[RFC8032\] describes the method of encoding the signature value."
+/// (RFC 9053 §2.2): the signature is RFC 8032's R ‖ S, never DER.  For
+/// ML-DSA, `pub` has the length of the parameter set's public key.
 pub fn verify_signature(
     alg: CoseAlg,
     cose_key: &[u8],
@@ -186,6 +216,13 @@ pub fn verify_signature(
                 Hash::Sha512 => Sha512::digest(message).to_vec(),
             };
             verify_ecdsa(curve, &point, &digest, signature)
+        }
+        Expected::EdDsa { crv, length, curve } => {
+            key.exactly(&[1, 3, -1, -2])?;
+            key.integer(1, 1)?;
+            key.integer(3, identifier)?;
+            key.integer(-1, crv)?;
+            verify_eddsa(curve, key.bytes(-2, length)?, message, signature)
         }
         Expected::MlDsa { param_set, length } => {
             key.exactly(&[1, 3, -1])?;
@@ -236,6 +273,34 @@ fn verify_ecdsa(
                 .map_err(|_| malformed("x and y are not a point on secp256k1".into()))?;
             k256::ecdsa::Signature::from_der(signature)
                 .is_ok_and(|signature| key.verify_prehash(digest, &signature.normalize_s()).is_ok())
+        }
+    };
+    if verified {
+        Ok(())
+    } else {
+        Err(VerificationError::BadSignature)
+    }
+}
+
+/// Check the pure EdDSA `signature` over `message` under the public key on
+/// `curve` whose RFC 8032 encoding is `x`.  An `x` that decodes to no point
+/// on the curve is a malformed key.
+fn verify_eddsa(
+    curve: EdCurve,
+    x: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), VerificationError> {
+    let verified = match curve {
+        // Strict verification also rejects a small-order public key or R,
+        // which RFC 8032 §5.1.7 accepts; the authenticator makes neither.
+        EdCurve::Ed25519 => {
+            let key = <&[u8; 32]>::try_from(x)
+                .ok()
+                .and_then(|x| ed25519_dalek::VerifyingKey::from_bytes(x).ok())
+                .ok_or_else(|| malformed("x is not a point on Ed25519".into()))?;
+            ed25519_dalek::Signature::from_slice(signature)
+                .is_ok_and(|signature| key.verify_strict(message, &signature).is_ok())
         }
     };
     if verified {

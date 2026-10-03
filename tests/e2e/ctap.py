@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, mldsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, mldsa
 from fido2.ctap2 import Ctap2
 from fido2.hid import CtapHidDevice
 from fido2.hid.linux import LinuxCtapHidConnection, get_descriptor
@@ -35,13 +35,16 @@ ESP384 = -51
 ES512 = -36
 ESP512 = -52
 ES256K = -47
+EDDSA = -8
 
+COSE_KTY_OKP = 1
 COSE_KTY_EC2 = 2
 COSE_KTY_AKP = 7
 COSE_CRV_P256 = 1
 COSE_CRV_P384 = 2
 COSE_CRV_P521 = 3
 COSE_CRV_SECP256K1 = 8
+COSE_CRV_ED25519 = 6
 
 # The AAGUID pqkey uses unless --aaguid is given.
 DEFAULT_AAGUID = bytes.fromhex("5931e805a1664eb7845a7f6aa93d9cd8")
@@ -155,6 +158,33 @@ def _verify_ecdsa(
     return verify
 
 
+def _check_okp(crv: int, public_key_size: int) -> Callable[[Mapping[int, Any]], None]:
+    """An OKP key (RFC 9053, 7.2) on curve `crv`, whose x is the
+    `public_key_size`-byte public key as RFC 8032 encodes it (WebAuthn Level
+    3, 5.8.5)."""
+
+    def check(cose_key: Mapping[int, Any]) -> None:
+        assert cose_key.get(1) == COSE_KTY_OKP
+        assert cose_key.get(-1) == crv, f"crv {cose_key.get(-1)} != {crv}"
+        assert len(cose_key.get(-2, b"")) == public_key_size
+        assert set(cose_key) == {1, 3, -1, -2}, f"unexpected labels {set(cose_key)}"
+
+    return check
+
+
+def _verify_eddsa(public_key_class: Any, signature_size: int) -> Callable[[Mapping[int, Any], bytes, bytes], None]:
+    """Pure EdDSA (RFC 8032) over the message itself, the signature R || S
+    as RFC 8032 encodes it (RFC 9053, 2.2), verified by OpenSSL through
+    cryptography, whose Ed448 has an empty context."""
+
+    def verify(cose_key: Mapping[int, Any], message: bytes, signature: bytes) -> None:
+        if len(signature) != signature_size:
+            raise InvalidSignature(f"EdDSA signature is {len(signature)} bytes")
+        public_key_class.from_public_bytes(cose_key[-2]).verify(signature, message)
+
+    return verify
+
+
 def _check_akp(public_key_size: int) -> Callable[[Mapping[int, Any]], None]:
     """An AKP key (RFC 9964) whose public key is `public_key_size` bytes."""
 
@@ -193,7 +223,8 @@ class Algorithm:
 # Every signature algorithm the key supports, in the order getInfo lists them:
 # the key's own table is CoseAlg in crates/pqkey-ctap/src/crypto/alg.rs. The
 # ML-DSA public key and signature sizes are FIPS 204's, table 2; each ECDSA
-# curve's coordinates are as long as its field elements.
+# curve's coordinates are as long as its field elements; EdDSA public keys and
+# signatures are as long as RFC 8032 encodes them.
 ALGORITHMS = (
     Algorithm(ES256, "ES256", _check_ec2(COSE_CRV_P256, 32), _verify_ecdsa(ec.SECP256R1(), hashes.SHA256())),
     Algorithm(ML_DSA_44, "ML-DSA-44", _check_akp(1312), _verify_mldsa(mldsa.MLDSA44PublicKey, 2420)),
@@ -205,6 +236,7 @@ ALGORITHMS = (
     Algorithm(ES512, "ES512", _check_ec2(COSE_CRV_P521, 66), _verify_ecdsa(ec.SECP521R1(), hashes.SHA512())),
     Algorithm(ESP512, "ESP512", _check_ec2(COSE_CRV_P521, 66), _verify_ecdsa(ec.SECP521R1(), hashes.SHA512())),
     Algorithm(ES256K, "ES256K", _check_ec2(COSE_CRV_SECP256K1, 32), _verify_ecdsa(ec.SECP256K1(), hashes.SHA256())),
+    Algorithm(EDDSA, "EdDSA", _check_okp(COSE_CRV_ED25519, 32), _verify_eddsa(ed25519.Ed25519PublicKey, 64)),
 )
 BY_IDENTIFIER = {algorithm.identifier: algorithm for algorithm in ALGORITHMS}
 NAMES = {algorithm.identifier: algorithm.name for algorithm in ALGORITHMS}
