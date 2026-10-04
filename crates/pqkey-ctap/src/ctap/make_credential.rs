@@ -16,7 +16,6 @@ use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
-use p256::ecdsa::{Signature as P256EcdsaSignature, signature::Signer};
 use sha2::{Digest, Sha256};
 
 use crate::ctap::constants::*;
@@ -405,26 +404,18 @@ impl CtapApp<'_> {
                         log::error!("the attestation key is unusable: {err}");
                         CTAP2_ERR_PROCESSING
                     })?;
-                    let mut message = Vec::with_capacity(auth_data.len() + client_hash.len());
-                    message.extend_from_slice(&auth_data);
-                    message.extend_from_slice(&client_hash);
-                    let signature: P256EcdsaSignature =
-                        crate::crypto::scrub::with_scrubbed_stack(|| {
-                            signing_key.try_sign(&message)
-                        })
-                        .map_err(|err| {
-                            log::error!("the attestation signature failed: {err}");
-                            CTAP2_ERR_PROCESSING
-                        })?;
+                    let signature =
+                        try_sign_challenge(CoseAlg::ES256, &signing_key, &auth_data, &client_hash)
+                            .map_err(|err| {
+                                log::error!("the attestation signature failed: {err}");
+                                CTAP2_ERR_PROCESSING
+                            })?;
                     let statement = canonical_map(vec![
                         (
                             Value::Text("alg".into()),
                             Value::Integer(Integer::from(CoseAlg::ES256.identifier())),
                         ),
-                        (
-                            Value::Text("sig".into()),
-                            Value::Bytes(signature.to_der().as_bytes().to_vec()),
-                        ),
+                        (Value::Text("sig".into()), Value::Bytes(signature)),
                         (
                             Value::Text("x5c".into()),
                             Value::Array(

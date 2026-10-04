@@ -18,7 +18,6 @@
 
 use core::fmt;
 
-use p256::ecdsa::SigningKey as P256SigningKey;
 use rand_core::TryCryptoRng;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -377,11 +376,13 @@ pub struct AttestationRecord {
 }
 
 impl AttestationRecord {
-    /// Materialise the attestation signing key.
+    /// Materialise the attestation signing key, an ES256 key read as a
+    /// credential's is ([`try_credential_secret_from_bytes`]): on a scrubbed
+    /// stack, since reading it multiplies the base point by the scalar.
     ///
     /// Returns [`CryptoError::InvalidKey`] for an out-of-range scalar.
-    pub fn signing_key(&self) -> Result<P256SigningKey, CryptoError> {
-        P256SigningKey::from_slice(&self.private_key).map_err(|_| CryptoError::InvalidKey)
+    pub fn signing_key(&self) -> Result<CredentialSecretKey, CryptoError> {
+        try_credential_secret_from_bytes(CoseAlg::ES256, &self.private_key)
     }
 }
 
@@ -451,7 +452,7 @@ mod tests {
     use crate::crypto::mldsa;
     use crate::crypto::verify::verify_signature;
     use crate::try_sign_challenge;
-    use p256::ecdsa::{Signature, signature::Verifier};
+    use p256::ecdsa::{Signature, SigningKey as P256SigningKey, signature::Verifier};
     use pqkey_mldsa::try_keypair_from_seed;
 
     /// A random number generator that always fails.
@@ -751,7 +752,10 @@ mod tests {
             private_key: [0x42; 32],
             certificate_chain: vec![vec![0x30]],
         };
-        let signing_key = valid.signing_key().expect("valid scalar");
+        let CredentialSecretKey::P256(signing_key) = valid.signing_key().expect("valid scalar")
+        else {
+            panic!("the attestation key is a P-256 key");
+        };
         let signature: Signature = p256::ecdsa::signature::Signer::sign(&signing_key, b"msg");
         signing_key
             .verifying_key()
