@@ -42,7 +42,8 @@ unprivileged processes. Failures are warned about and startup continues.
 The user service also sets `LimitCORE=0`. Memory in use, swap and root remain
 outside these protections; the daemon does not lock its memory.
 
-The transport thread speaks CTAPHID (§11.2). It puts requests together from
+The transport loop in `crates/pqkey/src/transport/mod.rs` speaks CTAPHID
+(§11.2). It puts requests together from
 packets, sends keepalives while the engine waits for you, and answers other
 programs "busy". It also passes cancellation on to the engine. The engine
 runs on a worker thread, so the device keeps being served while a prompt is
