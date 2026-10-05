@@ -137,10 +137,9 @@ documented in `crates/pqkey/src/cli/mod.rs`.
 While holding the state lock, it publishes non-secret run options and the
 running executable's device and inode in `authenticator.info`, then its
 ready pid in `authenticator.pid`. Commands use that information to preserve
-options when restarting and to detect an installed replacement binary.
-They read another process's `/proc` entries only for older daemons that do
-not publish usable information. Both runtime files are removed on exit;
-neither is trusted without the lock and a matching pid.
+options when restarting and to detect an installed replacement binary, so
+they never read the daemon's `/proc` entries. Both runtime files are removed
+on exit; neither is trusted without the lock and a matching pid.
 
 ## Tests
 

@@ -24,7 +24,7 @@ mod key;
 pub mod output;
 mod setup;
 
-use std::{ffi::OsString, fs, io, path::PathBuf, process::ExitCode, time::Duration};
+use std::{ffi::OsString, io, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_num::maybe_hex;
@@ -330,20 +330,16 @@ impl Default for DaemonArgs {
 }
 
 /// The options the daemon `pid` runs with, from its published information.
+/// Without it the options are unknown, and never replaced with defaults.
 fn daemon_args_of(state_dir: &std::path::Path, pid: nix::unistd::Pid) -> io::Result<DaemonArgs> {
-    if let Ok(info) = daemon_info::DaemonInfo::read(state_dir, pid) {
-        return info.args();
-    }
-    // Older daemons published only their pid. Recover their options when
-    // proc permits it, before stopping them; never substitute defaults.
-    let unavailable = || {
-        io::Error::other(format!(
-            "the key (pid {pid}) was not started by this version of pqkey; restart it with \
-             `pqkey stop && pqkey start` first"
-        ))
-    };
-    let cmdline = fs::read(format!("/proc/{pid}/cmdline")).map_err(|_| unavailable())?;
-    daemon_args_from(&cmdline).ok_or_else(unavailable)
+    daemon_info::DaemonInfo::read(state_dir, pid)
+        .and_then(|info| info.args())
+        .map_err(|_| {
+            io::Error::other(format!(
+                "the key (pid {pid}) was not started by this version of pqkey; restart it with \
+                 `pqkey stop && pqkey start` first"
+            ))
+        })
 }
 
 /// The options of `pqkey run` in a NUL-separated command line, as

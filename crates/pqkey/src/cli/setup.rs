@@ -345,19 +345,13 @@ fn finish(ready: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// Whether the daemon runs another inode than `binary`. Unknown identity
-/// restarts it too, so an inaccessible old daemon cannot defeat installation.
+/// Whether the daemon runs another inode than `binary`, as after `cargo
+/// install` replaced it. A daemon whose identity is unknown counts as running
+/// another, so that setup restarts it.
 fn runs_another_binary(state_dir: &Path, pid: unistd::Pid, binary: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let same = super::daemon_info::DaemonInfo::read(state_dir, pid)
+    !super::daemon_info::DaemonInfo::read(state_dir, pid)
         .and_then(|info| info.runs_binary(binary))
-        .or_else(|_| {
-            // Compatibility with daemons that predate the information file.
-            let running = fs::metadata(format!("/proc/{pid}/exe"))?;
-            let installed = fs::metadata(binary)?;
-            Ok::<_, io::Error>(running.dev() == installed.dev() && running.ino() == installed.ino())
-        });
-    !same.unwrap_or(false)
+        .unwrap_or(false)
 }
 
 /// Run `script` as root with `sudo` (or, in tests, another program), which
@@ -557,19 +551,6 @@ mod tests {
             dir.path(),
             me,
             Path::new("/nonexistent/pqkey")
-        ));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn an_older_daemon_s_binary_is_read_from_proc() {
-        let me = unistd::Pid::this();
-        let exe = env::current_exe().unwrap().canonicalize().unwrap();
-        assert!(!runs_another_binary(Path::new("/nonexistent"), me, &exe));
-        assert!(runs_another_binary(
-            Path::new("/nonexistent"),
-            me,
-            Path::new("/usr/bin/pqkey")
         ));
     }
 
