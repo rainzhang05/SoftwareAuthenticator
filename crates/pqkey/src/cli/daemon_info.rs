@@ -18,12 +18,7 @@ pub(crate) struct DaemonInfo {
 
 impl DaemonInfo {
     pub fn current(args: &DaemonArgs) -> io::Result<Self> {
-        // Self access is allowed even when this process is non-dumpable, and
-        // names the actual inode even if installation replaced its pathname.
-        #[cfg(target_os = "linux")]
-        let metadata = fs::metadata("/proc/self/exe")?;
-        #[cfg(not(target_os = "linux"))]
-        let metadata = fs::metadata(std::env::current_exe()?)?;
+        let (device, inode) = crate::platform::linux::runtime::current_executable_identity()?;
         let mut cmdline = b"pqkey\0run\0".to_vec();
         for arg in args.to_args() {
             cmdline.extend_from_slice(arg.as_encoded_bytes());
@@ -31,8 +26,8 @@ impl DaemonInfo {
         }
         Ok(Self {
             pid: Pid::this(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            device,
+            inode,
             cmdline,
         })
     }

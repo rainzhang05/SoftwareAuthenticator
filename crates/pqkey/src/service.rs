@@ -15,6 +15,7 @@ use crate::{
     attestation::{IdentityConfig, certificate_aaguid, generate_attestation_certificate},
     clock::BootTimeClock,
     create_device, exec,
+    platform::linux::runtime::disable_core_dumps,
     presence::{
         PresenceMode, Unanswered,
         dbus::SessionBus,
@@ -303,46 +304,6 @@ pub fn run(
         log::info!("shutdown requested; the virtual authenticator has been removed");
     }
     ok_if_shutdown(result)
-}
-
-/// Apply before any secrets are read or a device is created. Attempt both
-/// protections independently: failure is warned about, never fatal.
-fn disable_core_dumps() {
-    use nix::sys::resource::{Resource, setrlimit};
-    warn_if_protection_failed("disable core files", setrlimit(Resource::RLIMIT_CORE, 0, 0));
-    #[cfg(target_os = "linux")]
-    warn_if_protection_failed(
-        "make the daemon non-dumpable",
-        nix::sys::prctl::set_dumpable(false),
-    );
-}
-
-fn warn_if_protection_failed(setting: &str, result: nix::Result<()>) {
-    if let Err(err) = result {
-        log::warn!("could not {setting}: {err}");
-    }
-}
-
-#[cfg(test)]
-mod protection_tests {
-    use super::*;
-
-    #[test]
-    fn failed_protections_warn_and_do_not_stop_startup() {
-        use crate::test_support::logs;
-        logs::install();
-        let first = "apply the test core limit";
-        let second = "apply the test dumpability setting";
-        warn_if_protection_failed(first, Err(nix::errno::Errno::EPERM));
-        warn_if_protection_failed(second, Err(nix::errno::Errno::EINVAL));
-        for name in [first, second] {
-            let messages = logs::containing(name);
-            assert_eq!(messages.len(), 1);
-            assert_eq!(messages[0].0, log::Level::Warn);
-        }
-        warn_if_protection_failed("successful test protection", Ok(()));
-        assert!(logs::containing("successful test protection").is_empty());
-    }
 }
 
 /// Build the CTAP app from `data` and serve it on `device` until the device

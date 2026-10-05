@@ -9,28 +9,10 @@ use std::{
     fs::{self, DirBuilder},
     io,
     os::unix::fs::{DirBuilderExt, PermissionsExt},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
-/// The name of the default state directory.
-const STATE_DIR_NAME: &str = "pqkey";
-
-/// `name` in the user's data directory: `$XDG_DATA_HOME/name`, or
-/// `~/.local/share/name` when XDG_DATA_HOME is unset.
-fn data_dir(name: &str) -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
-        PathBuf::from(dir).join(name)
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".local/share").join(name)
-    } else {
-        PathBuf::from(".").join(name)
-    }
-}
-
-/// Where the state lives unless `--state-dir` says otherwise.
-pub fn default_state_dir() -> PathBuf {
-    data_dir(STATE_DIR_NAME)
-}
+pub use crate::platform::linux::state::default_state_dir;
 
 /// Create the state directory if needed and make it private to this user.
 ///

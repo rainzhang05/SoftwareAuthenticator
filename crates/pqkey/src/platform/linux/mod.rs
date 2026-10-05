@@ -1,8 +1,11 @@
 pub(crate) mod checks;
+pub(crate) mod clock;
 pub(crate) mod daemon;
 pub mod dbus;
 pub mod hidraw;
 pub mod notification;
 pub mod permissions;
+pub(crate) mod runtime;
 pub(crate) mod setup;
+pub mod state;
 pub mod uhid;

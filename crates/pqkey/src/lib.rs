@@ -6,7 +6,7 @@ pub mod allocator;
 pub mod attestation;
 pub mod cli;
 pub mod client;
-mod clock;
+pub(crate) use platform::linux::clock;
 pub mod platform;
 pub use platform::linux::permissions;
 pub mod pin_input;

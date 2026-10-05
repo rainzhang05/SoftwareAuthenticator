@@ -58,7 +58,8 @@ Two details carry ML-DSA's large messages across the kernel:
 
 The Linux HID adapters, permissions, notifications, setup and service code
 live in
-`crates/pqkey/src/platform/linux/`.
+`crates/pqkey/src/platform/linux/`, alongside the boot clock, process
+protections, executable identity and XDG state paths.
 
 ## What the key supports
 
