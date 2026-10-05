@@ -70,9 +70,8 @@ jobs:
         with:
           tool: cargo-audit
 
-      # No vulnerability is ignored: any advisory against the locked tree fails
-      # this job. deny.toml lists the non-vulnerability findings that are
-      # tolerated.
+      # .cargo/audit.toml mirrors the documented Marvin exception in deny.toml.
+      # Every other vulnerability against the locked tree fails this job.
       - name: Audit dependencies
         run: cargo audit
 

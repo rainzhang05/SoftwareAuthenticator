@@ -1,0 +1,4 @@
+# pqkey never decrypts with RSA. It signs locally on the user's computer, blinds every RSA signature, requires approval for registration, and follows CTAP user-presence rules for assertions. This prevents a remote attacker from collecting the private-operation timings Marvin needs. Remove this ignore when the advisory lists a patched rsa release.
+# Mirrored in deny.toml; no other vulnerability is tolerated.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]

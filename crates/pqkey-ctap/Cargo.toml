@@ -40,6 +40,9 @@ ed448-goldilocks = { version = "=0.14.0-pre.15", default-features = false, featu
 # private key.  `zeroize` wipes the sponge states that held the seed and what
 # it derived.
 shake = { workspace = true, features = ["zeroize"] }
+# RSA-2048 signatures only. Pin the release candidate; SHA-2's OIDs supply
+# PKCS#1 v1.5 DigestInfo. Defaults add std and unused key encodings.
+rsa = { version = "=0.10.0-rc.18", default-features = false, features = ["sha2"] }
 rand_core.workspace = true
 # `SysRng`, the operating system RNG that key generation uses.
 getrandom.workspace = true

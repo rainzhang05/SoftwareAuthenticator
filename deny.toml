@@ -10,7 +10,7 @@
 #
 # This file is the *source of truth* for which known findings are tolerated.
 # Should a vulnerability ever need to be ignored here, mirror it into a
-# `cargo audit --ignore` flag in .github/workflows/security.yml; none is today.
+# matching entry in .cargo/audit.toml.
 
 [graph]
 # Check the dependency graph with every feature enabled. pqkey-mldsa's `log`
@@ -42,9 +42,11 @@ unsound = "all"
 # of this repo; that should be loud, not a hard stop on every open PR.
 yanked = "warn"
 
-# Nothing is tolerated today. An entry needs the advisory ID, a reason, and
-# what makes it go away.
-ignore = []
+# An entry needs the advisory ID, a reason, and what makes it go away.
+# Mirrored in .cargo/audit.toml; no other vulnerability is tolerated.
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "pqkey never decrypts with RSA. It signs locally on the user's computer, blinds every RSA signature, requires approval for registration, and follows CTAP user-presence rules for assertions. This prevents a remote attacker from collecting the private-operation timings Marvin needs. Remove this ignore when the advisory lists a patched rsa release." },
+]
 
 # ---------------------------------------------------------------------------
 # licenses
