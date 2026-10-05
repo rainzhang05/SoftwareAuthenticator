@@ -31,7 +31,7 @@ use zbus::{
     zvariant::Value,
 };
 
-use super::notification::{
+use crate::presence::notification::{
     APPROVE_ACTION, ConnectError, DENY_ACTION, Notification, NotificationEvent, NotificationServer,
     ServerInfo,
 };
@@ -89,7 +89,7 @@ impl NotificationServer for SessionBus {
         self.disconnect();
         // Uses DBUS_SESSION_BUS_ADDRESS, or $XDG_RUNTIME_DIR/bus without it.
         let builder = connection::Builder::session()
-            .map_err(|err| ConnectError::NoSessionBus(err.to_string()))?;
+            .map_err(|err| ConnectError::NoSession(err.to_string()))?;
         let connection = connect_bus(builder, METHOD_TIMEOUT)?;
 
         // Also starts a D-Bus activatable server that is not running yet.
@@ -149,10 +149,12 @@ impl NotificationServer for SessionBus {
             signals,
         });
         Ok(ServerInfo {
-            capabilities,
+            supports_actions: capabilities.iter().any(|c| c == "actions"),
+            supports_body: capabilities.iter().any(|c| c == "body"),
+            body_markup: capabilities.iter().any(|c| c == "body-markup"),
+            refresh_interval: super::notification::refresh_interval(name.as_deref()),
             name,
-            owner: Some(owner.to_string()),
-            bus_id,
+            identity: bus_id.map(|scope| (scope, owner.to_string())),
         })
     }
 
@@ -292,7 +294,7 @@ fn connect_bus(
             .method_timeout(timeout)
             .build()
             .await
-            .map_err(|err| ConnectError::NoSessionBus(err.to_string()))
+            .map_err(|err| ConnectError::NoSession(err.to_string()))
     };
     let expire = async {
         async_io::Timer::after(timeout).await;
@@ -315,7 +317,10 @@ fn parse_signal(message: &Message) -> Option<NotificationEvent> {
         }
         "NotificationClosed" => {
             let (id, reason): (u32, u32) = body.deserialize().ok()?;
-            Some(NotificationEvent::Closed { id, reason })
+            Some(NotificationEvent::Closed {
+                id,
+                expired: reason == 1,
+            })
         }
         _ => None,
     }

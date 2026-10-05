@@ -67,6 +67,12 @@ socket. A callback device can queue reports and signal a private pipe; it does
 not need to expose a device file descriptor. Dropping the device removes it
 before the transport joins the cancelled worker.
 
+Presence policy uses `NotificationServer` for connection, showing a prompt,
+receiving an event, closing it, refreshing it and disconnecting. The backend
+normalizes prompt capabilities, events and opaque server identity. It requests
+any queue-refresh interval; Linux supplies GNOME's existing two-second one.
+Timeouts, cancellation, sanitization and stale-prompt policy remain portable.
+
 ## What the key supports
 
 - CTAP 2.3, 2.1 and 2.0 over USB HID.

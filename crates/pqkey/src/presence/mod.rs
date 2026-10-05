@@ -11,7 +11,7 @@ use std::{
 
 use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest, UserPresence};
 
-pub use crate::platform::linux::{dbus, notification};
+pub mod notification;
 
 /// How often waiting implementations look at their [`Cancellation`].
 pub(crate) const CANCELLATION_POLL: Duration = Duration::from_millis(20);

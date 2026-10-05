@@ -14,3 +14,8 @@ pub fn create_device(descriptor: HidDeviceDescriptor) -> io::Result<Device> {
 
 pub(crate) use linux::hidraw::device_problems;
 pub use linux::hidraw::open_client;
+
+pub use linux::dbus::SessionBus as Notifications;
+pub(crate) use linux::notification::{
+    connect_error_message as notification_connect_error, failure_message as notification_failure,
+};

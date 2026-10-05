@@ -15,10 +15,9 @@ use crate::{
     attestation::{IdentityConfig, certificate_aaguid, generate_attestation_certificate},
     clock::BootTimeClock,
     create_device, exec,
-    platform::linux::runtime::disable_core_dumps,
+    platform::{Notifications, linux::runtime::disable_core_dumps},
     presence::{
         PresenceMode, Unanswered,
-        dbus::SessionBus,
         notification::{NotificationPresence, PROMPT_FILE},
     },
     shutdown::{ShutdownSignal, is_shutdown, ok_if_shutdown},
@@ -319,7 +318,7 @@ pub fn serve_ctap(
     match data.presence {
         PresenceMode::Notify => {
             log::info!("asking for user presence with desktop notifications");
-            let mut presence = NotificationPresence::new(SessionBus::new())
+            let mut presence = NotificationPresence::new(Notifications::new())
                 .with_prompt_record(data.state_dir.join(PROMPT_FILE));
             presence.withdraw_stale_prompt();
             serve_ctap_with_presence(device, data, presence, shutdown, on_ready)

@@ -27,8 +27,8 @@ use super::output::{self, errln, outln};
 use crate::client::ctap2::{Authenticator, ClientError, Passkey, PinRetries, Token};
 use crate::client::ctaphid::{ReportLink, STATUS_UPNEEDED};
 use crate::pin_input::{MIN_PIN_CODE_POINTS, Pin, PinReader, PinSource, validate_pin};
+use crate::platform::Notifications;
 use crate::platform::{self, ClientLink};
-use crate::presence::dbus::SessionBus;
 use crate::presence::notification::{ConnectError, Keep, NotificationServer, ServerInfo, sanitise};
 use crate::service;
 use crate::state::default_state_dir;
@@ -216,7 +216,7 @@ fn asks_with_notifications(state_dir: &Path, running: Running) -> bool {
 
 /// What the desktop's notification server says about itself.
 fn notification_server() -> Result<ServerInfo, ConnectError> {
-    let mut bus = SessionBus::new();
+    let mut bus = Notifications::new();
     let server = bus.connect();
     bus.disconnect();
     server

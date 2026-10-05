@@ -339,7 +339,7 @@ pub fn browser_problems(system: &System, node: &Path, opened: &io::Result<()>) -
 pub fn notification_problem(server: &Result<ServerInfo, ConnectError>) -> Option<Problem> {
     let denied = "so every registration, sign-in and reset is denied";
     match server {
-        Err(ConnectError::NoSessionBus(err)) => Some(Problem::new(
+        Err(ConnectError::NoSession(err)) => Some(Problem::new(
             format!("there is no D-Bus session bus ({err}), {denied}"),
             "run pqkey in your desktop session",
         )),
@@ -355,7 +355,10 @@ pub fn notification_problem(server: &Result<ServerInfo, ConnectError>) -> Option
         Ok(info) => {
             let missing: Vec<&str> = ["actions", "body"]
                 .into_iter()
-                .filter(|capability| !info.capabilities.iter().any(|have| have == capability))
+                .filter(|capability| match *capability {
+                    "actions" => !info.supports_actions,
+                    _ => !info.supports_body,
+                })
                 .collect();
             (!missing.is_empty()).then(|| {
                 Problem::new(
@@ -593,7 +596,8 @@ mod tests {
     fn notifications_need_buttons_and_a_body() {
         let server = |capabilities: &[&str]| {
             Ok(ServerInfo {
-                capabilities: capabilities.iter().map(|&c| c.into()).collect(),
+                supports_actions: capabilities.contains(&"actions"),
+                supports_body: capabilities.contains(&"body"),
                 name: Some("example".into()),
                 ..ServerInfo::default()
             })
