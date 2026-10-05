@@ -50,6 +50,16 @@ const KTY_AKP: i32 = 7;
 /// AKP label -1, `pub`: the public key bytes (RFC 9964).
 const LABEL_AKP_PUB: i32 = -1;
 
+/// Key type 3, RSA: a modulus and a public exponent, each an unsigned
+/// big-endian byte string in the fewest bytes (RFC 8230 §4).
+const KTY_RSA: i32 = 3;
+/// RSA label -1, n: the modulus (RFC 8230 §4).
+const LABEL_RSA_N: i32 = -1;
+/// RSA label -2, e: the public exponent (RFC 8230 §4).
+const LABEL_RSA_E: i32 = -2;
+/// The public exponent of every RSA key the authenticator makes, 65537.
+const RSA_E: [u8; 3] = [0x01, 0x00, 0x01];
+
 /// The COSE_Key map of the EC2 public key (`x`, `y`) on curve `crv` for
 /// `alg`, in canonical order.
 fn ec2_key_map(alg: CoseAlg, crv: i32, x: &[u8], y: &[u8]) -> Value {
@@ -83,6 +93,17 @@ fn akp_key_map(alg: CoseAlg, public_key: &[u8]) -> Value {
     ])
 }
 
+/// The COSE_Key map of the RSA public key with modulus `n` and exponent
+/// 65537 for `alg`, in canonical order.
+fn rsa_key_map(alg: CoseAlg, n: &[u8]) -> Value {
+    Value::Map(vec![
+        (int(LABEL_KTY), int(KTY_RSA)),
+        (int(LABEL_ALG), int(alg.identifier())),
+        (int(LABEL_RSA_N), Value::Bytes(n.to_vec())),
+        (int(LABEL_RSA_E), Value::Bytes(RSA_E.to_vec())),
+    ])
+}
+
 /// [`ec2_key_map`], encoded.  Returns [`CryptoError::CborEncoding`] if
 /// serialization fails.
 pub(crate) fn try_ec2_key(
@@ -106,15 +127,10 @@ pub(crate) fn try_akp_key(alg: CoseAlg, public_key: &[u8]) -> Result<Vec<u8>, Cr
     encode(&akp_key_map(alg, public_key))
 }
 
-/// RSA COSE_Key: kty 3, alg, unsigned big-endian n and e in the fewest
-/// bytes (RFC 8230 §4). The authenticator uses RSA-2048 and e = 65537.
+/// [`rsa_key_map`], encoded.  Returns [`CryptoError::CborEncoding`] if
+/// serialization fails.
 pub(crate) fn try_rsa_key(alg: CoseAlg, n: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    encode(&Value::Map(vec![
-        (int(LABEL_KTY), int(3)),
-        (int(LABEL_ALG), int(alg.identifier())),
-        (int(-1), Value::Bytes(n.to_vec())),
-        (int(-2), Value::Bytes(vec![1, 0, 1])),
-    ]))
+    encode(&rsa_key_map(alg, n))
 }
 
 fn encode(map: &Value) -> Result<Vec<u8>, CryptoError> {
