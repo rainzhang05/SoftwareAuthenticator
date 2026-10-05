@@ -125,7 +125,7 @@ mod tests {
     /// The shipped rule for the key's hidraw node, its continuation lines
     /// joined.
     fn hidraw_rule() -> String {
-        include_str!("../../../contrib/udev/70-pqkey.rules")
+        include_str!("../../../../../contrib/udev/70-pqkey.rules")
             .replace("\\\n", "")
             .lines()
             .find(|line| line.starts_with(r#"SUBSYSTEM=="hidraw""#))

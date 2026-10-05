@@ -56,6 +56,9 @@ Two details carry ML-DSA's large messages across the kernel:
 - getInfo reports a maxMsgSize of 1,768 bytes, the most that the kernel's
   queue delivers whole.
 
+The Linux HID adapters, permissions and notification implementation live in
+`crates/pqkey/src/platform/linux/`.
+
 ## What the key supports
 
 - CTAP 2.3, 2.1 and 2.0 over USB HID.

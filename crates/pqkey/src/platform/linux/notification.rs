@@ -28,7 +28,7 @@ use pqkey_ctap::ctap::presence::{
     Cancellation, PresenceOperation, PresenceOutcome, PresenceRequest, UserPresence,
 };
 
-use super::CANCELLATION_POLL;
+use crate::presence::CANCELLATION_POLL;
 
 /// The action key of the Approve button.
 pub const APPROVE_ACTION: &str = "approve";

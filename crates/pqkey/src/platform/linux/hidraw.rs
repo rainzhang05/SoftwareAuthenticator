@@ -13,7 +13,7 @@ use nix::{
     poll::{PollFd, PollFlags, PollTimeout, poll},
 };
 
-use super::ctaphid::{Report, ReportLink};
+use crate::client::ctaphid::{Report, ReportLink};
 use crate::uhid::CTAPHID_FRAME_LEN;
 
 /// The hidraw node of the HID device whose unique identifier is `uniq`

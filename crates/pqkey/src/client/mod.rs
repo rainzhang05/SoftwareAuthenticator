@@ -5,7 +5,7 @@
 
 pub mod ctap2;
 pub mod ctaphid;
-pub mod hidraw;
+pub use crate::platform::linux::hidraw;
 
 #[cfg(test)]
 pub(crate) mod tests;

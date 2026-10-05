@@ -7,7 +7,8 @@ pub mod attestation;
 pub mod cli;
 pub mod client;
 mod clock;
-pub mod permissions;
+pub mod platform;
+pub use platform::linux::permissions;
 pub mod pin_input;
 pub mod presence;
 pub mod service;
@@ -15,7 +16,7 @@ pub mod shutdown;
 pub mod state;
 pub mod state_lock;
 pub mod transport;
-pub mod uhid;
+pub use platform::linux::uhid;
 
 #[cfg(test)]
 mod test_support;
