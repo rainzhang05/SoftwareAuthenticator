@@ -634,7 +634,7 @@ fn credential_key(dir: &Path) {
         input.extend_from_slice(key);
         input
     };
-    let seeds = vec![
+    let mut seeds = vec![
         layout(0, 0, &[0x11; 32]),
         layout(0, 0, &[0xFF; 32]),
         layout(0, 1, &[0x11; 32]),
@@ -670,5 +670,42 @@ fn credential_key(dir: &Path) {
         layout(10, 9, &[0xDD; 32]),
         layout(12, 12, &[0xF1; 57]),
     ];
+    // RSA follows the existing thirteen algorithms. Use the pinned primes,
+    // never generate RSA keys in this corpus generator's search loops.
+    let primes = pqkey_ctap::rsa_fixture::PRIMES;
+    for other in 0..13 {
+        seeds.push(layout(other, other, &primes));
+    }
+    for alg in 13..19 {
+        seeds.push(layout(alg, alg, &primes));
+        for other in 0..13 {
+            seeds.push(layout(alg, other, &primes));
+            seeds.push(layout(other, alg, &[0x31; 32]));
+        }
+        seeds.push(layout(alg, alg, &[0x31; 32]));
+        for length in [0, 128, 255, 257] {
+            seeds.push(layout(alg, alg, &vec![0xff; length]));
+        }
+        for offset in [0, 128] {
+            let mut even = primes;
+            even[offset + 127] &= 0xfe;
+            seeds.push(layout(alg, alg, &even));
+            let mut short = primes;
+            short[offset] &= 0x7f;
+            seeds.push(layout(alg, alg, &short));
+        }
+        let mut equal = primes;
+        equal.copy_within(..128, 128);
+        seeds.push(layout(alg, alg, &equal));
+        let mut small_n = [0; 256];
+        small_n[0] = 0x80;
+        small_n[128] = 0x80;
+        small_n[127] = 3;
+        small_n[255] = 5;
+        seeds.push(layout(alg, alg, &small_n));
+        let mut invalid = [0xff; 256];
+        invalid[125] = 0xfe; // e divides p-1: RSA reconstruction fails.
+        seeds.push(layout(alg, alg, &invalid));
+    }
     write_all(dir, &seeds);
 }
