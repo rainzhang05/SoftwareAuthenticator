@@ -71,7 +71,33 @@ pub enum PrivateKeyMaterial {
     },
 }
 
+/// The 32-byte key material that fits a sealed credential ID. Only the
+/// scalar and seed variants can construct it; zeroized on drop and redacted.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct SealableKeyMaterial([u8; 32]);
+
+impl SealableKeyMaterial {
+    /// The sealed ID's fixed-size private key field.
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SealableKeyMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SealableKeyMaterial(<redacted>)")
+    }
+}
+
 impl PrivateKeyMaterial {
+    /// A copy that fits a sealed ID, if this kind of key can be sealed.
+    pub(crate) fn sealable(&self) -> Option<SealableKeyMaterial> {
+        match self {
+            Self::P256Scalar { scalar } => Some(SealableKeyMaterial(*scalar)),
+            Self::Seed { seed } => Some(SealableKeyMaterial(*seed)),
+        }
+    }
+
     /// Generate fresh key material for `alg` from the operating system's
     /// random number generator, getrandom(2) on Linux.
     ///

@@ -74,6 +74,15 @@ pub enum KeyKind {
     Seed,
 }
 
+impl KeyKind {
+    /// Whether this kind fits the sealed credential ID's 32-byte key field.
+    pub(crate) const fn is_sealable(self) -> bool {
+        match self {
+            Self::P256Scalar | Self::Seed => true,
+        }
+    }
+}
+
 /// The signature scheme behind an algorithm.  It picks the family that reads
 /// the key, derives the public key and signs: [`super::ecdsa`],
 /// [`super::eddsa`] or [`super::mldsa`].  Algorithms that differ only in their

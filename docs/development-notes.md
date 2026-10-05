@@ -66,8 +66,10 @@ else has to change.
    a `PrivateKeyMaterial` variant and a key type in `store/codec.rs`.
 3. Build and run clippy, and handle every match they point to, among them
    the test verifier in `crypto/verify.rs`, which pqkey's tests and the fuzz
-   targets reach through pqkey-ctap's `test-support` feature. A check at
-   compile time says if the algorithm does not fit a sealed credential ID.
+   targets reach through pqkey-ctap's `test-support` feature. Only key material represented by the fixed-size sealable key type may
+   enter a sealed credential ID. A compile-time check requires the identifiers
+   of algorithms with sealable keys to fit its signed-byte algorithm field.
+   Keys that do not fit a sealed ID must use stored non-discoverable records.
 4. Run the tests. The table-driven ones cover the new algorithm, and the
    known-answer tests of the table, of getInfo and of the CLI say what to
    add to them. If `UNSUPPORTED_ALGORITHMS` in `fuzz/src/requests.rs` lists

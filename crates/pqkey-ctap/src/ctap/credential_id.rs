@@ -13,7 +13,10 @@ use super::CtapApp;
 use super::storage::store_status;
 use crate::CoseAlg;
 use crate::crypto::hkdf::hkdf_sha256;
-use crate::store::{CredentialRecord, PrivateKeyMaterial, SEALED_ID_OVERHEAD, validate_credential};
+use crate::store::{
+    CredentialRecord, PrivateKeyMaterial, SEALED_ID_OVERHEAD, SealableKeyMaterial,
+    validate_credential,
+};
 
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -34,14 +37,18 @@ impl CtapApp<'_> {
     /// needs to be stored.  A fresh random seed for its hmac-secret
     /// CredRandom values goes into the ID too, and `record` gets the values
     /// it derives.  See [`is_discoverable`].
-    pub(super) fn seal_credential(&mut self, record: &mut CredentialRecord) -> Result<Vec<u8>, u8> {
+    pub(super) fn seal_credential(
+        &mut self,
+        record: &mut CredentialRecord,
+        key: &SealableKeyMaterial,
+    ) -> Result<Vec<u8>, u8> {
         let alg = i8::try_from(record.alg.identifier()).map_err(|_| CTAP2_ERR_PROCESSING)?;
         let seed = Zeroizing::new(self.random_array::<32>());
         derive_sealed_cred_randoms(record, &seed)?;
         let mut plaintext = Zeroizing::new([0u8; SEALED_PLAINTEXT_LENGTH]);
         plaintext[0] = alg as u8;
         plaintext[1] = record.cred_protect;
-        let key: &[u8; SEALED_KEY_LENGTH] = record.private_key.as_bytes();
+        let key: &[u8; SEALED_KEY_LENGTH] = key.as_bytes();
         plaintext[2..2 + SEALED_KEY_LENGTH].copy_from_slice(key);
         plaintext[2 + SEALED_KEY_LENGTH..].copy_from_slice(&seed[..]);
         let sealed = self
@@ -112,16 +119,17 @@ const SEALED_PLAINTEXT_LENGTH: usize = 2 + SEALED_KEY_LENGTH + 32;
 /// material of any kind.
 const SEALED_KEY_LENGTH: usize = 32;
 
-// Every algorithm of the table fits a sealed ID.  Its identifier is the
+// Every algorithm whose key can be sealed fits a sealed ID.  Its identifier is the
 // plaintext's first byte, a signed one.  Its key material fits the key field
-// by type: `PrivateKeyMaterial::as_bytes` is `[u8; SEALED_KEY_LENGTH]` for
-// every kind, or `seal_credential` does not compile.
+// by type: `SealableKeyMaterial::as_bytes` is `[u8; SEALED_KEY_LENGTH]`,
+// or `seal_credential` does not compile.
 const _: () = {
     let mut i = 0;
     while i < CoseAlg::ALL.len() {
         let identifier = CoseAlg::ALL[i].identifier();
         assert!(
-            identifier >= i8::MIN as i32 && identifier <= i8::MAX as i32,
+            !CoseAlg::ALL[i].key_kind().is_sealable()
+                || identifier >= i8::MIN as i32 && identifier <= i8::MAX as i32,
             "a COSE algorithm identifier does not fit a sealed credential ID"
         );
         i += 1;
@@ -200,6 +208,9 @@ fn sealed_credential(
     let seed: &[u8; 32] = seed.try_into().ok()?;
     let key: &[u8; SEALED_KEY_LENGTH] = key.try_into().ok()?;
     let alg = CoseAlg::try_from(i32::from(*alg as i8)).ok()?;
+    if !alg.key_kind().is_sealable() {
+        return None;
+    }
     let private_key = PrivateKeyMaterial::from_bytes(alg.key_kind(), key);
     let mut credential = CredentialRecord {
         credential_id: credential_id.to_vec(),

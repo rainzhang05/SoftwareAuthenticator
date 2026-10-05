@@ -86,6 +86,7 @@ mod fsio;
 mod keys;
 mod memory;
 mod record;
+pub(crate) use record::SealableKeyMaterial;
 #[cfg(test)]
 mod test_support;
 
