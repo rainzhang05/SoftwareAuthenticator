@@ -73,6 +73,13 @@ normalizes prompt capabilities, events and opaque server identity. It requests
 any queue-refresh interval; Linux supplies GNOME's existing two-second one.
 Timeouts, cancellation, sanitization and stale-prompt policy remain portable.
 
+Commands use the selected `UserService` to inspect, install and remove the
+user service and request start, restart, stop, enable or reset-failed. `System`
+prepares installation steps and reports startup, device and prompt problems.
+Commands retain confirmation, readiness waits, restart decisions, PIN setup
+and CTAP operations; native rules, scripts, units and diagnostics stay in the
+backend.
+
 ## What the key supports
 
 - CTAP 2.3, 2.1 and 2.0 over USB HID.

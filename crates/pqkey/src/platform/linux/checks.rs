@@ -23,26 +23,13 @@ pub const MODULES_LOAD_PATH: &str = "/etc/modules-load.d/pqkey.conf";
 /// The group the udev rules give `/dev/uhid` to.
 pub const UHID_GROUP: &str = "plugdev";
 
-/// Something the key needs that is missing, and how to fix it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Problem {
-    pub what: String,
-    pub fix: String,
-}
-
-impl Problem {
-    fn new(what: impl Into<String>, fix: impl Into<String>) -> Self {
-        Self {
-            what: what.into(),
-            fix: fix.into(),
-        }
-    }
-}
+pub(crate) use crate::cli::checks::Problem;
 
 /// The system the checks look at, under a root directory.
 #[derive(Clone, Debug)]
 pub struct System {
     root: PathBuf,
+    membership: Option<Membership>,
 }
 
 /// Whether the udev rules are installed, and as this version ships them.
@@ -93,13 +80,16 @@ pub const SNAP_BROWSERS: [SnapBrowser; 2] = [
 
 impl System {
     /// The running system.
-    pub fn real() -> Self {
-        Self::under(PathBuf::from("/"))
+    pub fn real() -> io::Result<Self> {
+        Ok(Self::under(PathBuf::from("/")))
     }
 
     /// A system whose root directory is `root`.
     pub fn under(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            membership: None,
+        }
     }
 
     /// `path`, an absolute path on the system, under the root.
@@ -371,6 +361,89 @@ pub fn notification_problem(server: &Result<ServerInfo, ConnectError>) -> Option
                 )
             })
         }
+    }
+}
+
+impl System {
+    pub fn check_setup_caller(state_dir: &Path) -> io::Result<()> {
+        super::setup::check_caller(state_dir)
+    }
+    pub fn refresh(&mut self) -> io::Result<()> {
+        self.membership = Some(membership());
+        Ok(())
+    }
+    pub fn setup_steps(&self) -> io::Result<Option<crate::platform::SetupSteps>> {
+        let member = self.membership.clone().unwrap_or_else(membership);
+        let Some(root) = super::setup::root_script(self, &member) else {
+            return Ok(None);
+        };
+        let artifact =
+            super::setup::hand_over(&super::setup::runtime_dir(), &root.script, "pqkey-setup.sh")?;
+        let instructions = vec![
+            String::new(),
+            "Run this script, then `pqkey setup` again:".into(),
+            String::new(),
+            format!("    sudo sh {}", artifact.display()),
+        ];
+        Ok(Some(crate::platform::SetupSteps {
+            summary: root.summary,
+            heading: "Setup needs root (sudo) once, for:",
+            question: "Set these up with sudo?",
+            instructions,
+            artifact,
+        }))
+    }
+    pub fn apply_setup_steps(&self, steps: &crate::platform::SetupSteps) -> io::Result<()> {
+        super::setup::run_as_root("sudo", &steps.artifact)?;
+        let _ = fs::remove_file(&steps.artifact);
+        Ok(())
+    }
+    pub fn login_problem(&self) -> io::Result<Option<Problem>> {
+        let member = self.membership.clone().unwrap_or_else(membership);
+        Ok(needs_login(self, &member).then(|| {
+            Problem::new(
+                format!("this session started before you joined '{UHID_GROUP}'"),
+                "log out and in again: the key then starts by itself, and `pqkey pin` sets its PIN",
+            )
+        }))
+    }
+    pub fn start_problems(&self) -> io::Result<Vec<Problem>> {
+        let member = self.membership.clone().unwrap_or_else(membership);
+        Ok(start_problems(self, &member))
+    }
+    pub fn device_problems(
+        &self,
+        pid: unistd::Pid,
+        wait: std::time::Duration,
+    ) -> io::Result<Vec<Problem>> {
+        Ok(super::hidraw::device_problems(self, pid, wait))
+    }
+    pub fn notification_problem(
+        &self,
+        server: &Result<ServerInfo, ConnectError>,
+    ) -> io::Result<Option<Problem>> {
+        Ok(notification_problem(server))
+    }
+    pub fn uninstall_instructions(binary: &Path, state_dir: &Path) -> io::Result<Vec<String>> {
+        let script = super::setup::root_undo_script(binary);
+        let artifact =
+            super::setup::hand_over(&super::setup::runtime_dir(), &script, "pqkey-uninstall.sh")?;
+        let heading = if binary == Path::new(super::setup::INSTALLED_BINARY) {
+            "To remove pqkey itself, its udev rules and the uhid setting too, run:"
+        } else {
+            "To remove the udev rules and the uhid setting too, run:"
+        };
+        Ok(vec![
+            String::new(),
+            heading.into(),
+            String::new(),
+            format!("    sudo sh {}", artifact.display()),
+            String::new(),
+            format!(
+                "Your passkeys and PIN stay in {}; delete it to remove them for good. Your membership in '{UHID_GROUP}' stays too.",
+                state_dir.display()
+            ),
+        ])
     }
 }
 

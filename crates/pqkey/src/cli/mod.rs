@@ -17,12 +17,12 @@
 //! itself, for the systemd unit and for test rigs, with the options only they
 //! need.
 
-pub(crate) use crate::platform::linux::checks;
-pub(crate) use crate::platform::linux::daemon;
+pub(crate) mod checks;
+mod daemon;
 pub(crate) mod daemon_info;
 pub(crate) mod key;
 pub mod output;
-pub(crate) use crate::platform::linux::setup;
+mod setup;
 
 use std::{ffi::OsString, io, path::PathBuf, process::ExitCode, time::Duration};
 
@@ -84,6 +84,7 @@ enum Command {
     },
     /// Plug the key in: start it, through its systemd user service when that
     /// is installed
+    #[clap(about = crate::platform::START_HELP)]
     Start(DaemonArgs),
     /// Pull the key out: stop it
     Stop,
@@ -112,7 +113,7 @@ enum Command {
     },
     /// Run the key in the foreground until it is stopped (for the systemd
     /// unit and test rigs)
-    #[clap(hide = true)]
+    #[clap(hide = true, about = crate::platform::RUN_HELP)]
     Run(DaemonArgs),
 }
 
@@ -188,6 +189,7 @@ enum PresenceArg {
     /// Ask with a desktop notification that has Approve and Deny buttons.
     /// Without a session bus and a notification server that can show
     /// buttons, every request is denied
+    #[value(help = crate::platform::PRESENCE_NOTIFY_HELP)]
     Notify,
     /// Approve every request without asking. Anything running as you can then
     /// use your passkeys unnoticed; for tests and CI only

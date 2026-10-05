@@ -21,7 +21,7 @@ use pqkey_ctap::ctap::constants::{
 };
 use signal_hook::{consts::SIGINT, flag};
 
-use super::checks::{self, Problem, System};
+use super::checks::Problem;
 use super::daemon::{self, Running};
 use super::output::{self, errln, outln};
 use crate::client::ctap2::{Authenticator, ClientError, Passkey, PinRetries, Token};
@@ -29,6 +29,7 @@ use crate::client::ctaphid::{ReportLink, STATUS_UPNEEDED};
 use crate::pin_input::{MIN_PIN_CODE_POINTS, Pin, PinReader, PinSource, validate_pin};
 use crate::platform::Notifications;
 use crate::platform::{self, ClientLink};
+use crate::platform::{System, UserService};
 use crate::presence::notification::{ConnectError, Keep, NotificationServer, ServerInfo, sanitise};
 use crate::service;
 use crate::state::default_state_dir;
@@ -116,7 +117,7 @@ fn is_yes(answer: &str, default_yes: bool) -> bool {
 /// `pqkey status`: whether the key runs, its device, PIN and room for
 /// passkeys, then every problem found, with its fix.
 pub fn status(state_dir: &Path) -> io::Result<()> {
-    let system = System::real();
+    let system = System::real()?;
     let mut problems = Vec::new();
     let running = match daemon::running(state_dir) {
         Err(err) if err.kind() == io::ErrorKind::ResourceBusy => {
@@ -127,26 +128,26 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
     match running {
         None => {
             outln!("Key:      not running; `pqkey start` starts it")?;
-            problems.extend(checks::start_problems(&system, &checks::membership()));
+            problems.extend(system.start_problems()?);
             // `pqkey start` asks with notifications on the default state
             // directory; test rigs choose for themselves.
             if state_dir == default_state_dir() {
-                problems.extend(checks::notification_problem(&notification_server()));
+                problems.extend(system.notification_problem(&notification_server())?);
             }
         }
         Some(running) => {
             match running {
                 Running::Service(pid) => outln!(
-                    "Key:      running (pid {pid}, systemd user service {})",
-                    daemon::UNIT
+                    "Key:      running (pid {pid}, {})",
+                    UserService::DESCRIPTION
                 )?,
                 Running::Daemon(pid) => outln!("Key:      running (pid {pid})")?,
             }
             show_key(running)?;
-            problems.extend(running_problems(state_dir, &system, running, STATUS_WAIT));
+            problems.extend(running_problems(state_dir, &system, running, STATUS_WAIT)?);
         }
     }
-    problems.extend(service_problems(state_dir, running));
+    problems.extend(service_problems(state_dir, running)?);
     if !problems.is_empty() {
         outln!()?;
         output::problems(&problems)?;
@@ -195,13 +196,12 @@ pub fn running_problems(
     system: &System,
     running: Running,
     wait: Duration,
-) -> Vec<Problem> {
-    let mut problems = Vec::new();
-    problems.extend(platform::device_problems(system, running.pid(), wait));
+) -> io::Result<Vec<Problem>> {
+    let mut problems = system.device_problems(running.pid(), wait)?;
     if asks_with_notifications(state_dir, running) {
-        problems.extend(checks::notification_problem(&notification_server()));
+        problems.extend(system.notification_problem(&notification_server())?);
     }
-    problems
+    Ok(problems)
 }
 
 /// Whether the key `running` asks for presence with notifications, as the
@@ -224,25 +224,20 @@ fn notification_server() -> Result<ServerInfo, ConnectError> {
 
 /// Whether the systemd user service runs the key on the default state
 /// directory, as `pqkey setup` arranges.
-fn service_problems(state_dir: &Path, running: Option<Running>) -> Vec<Problem> {
+fn service_problems(state_dir: &Path, running: Option<Running>) -> io::Result<Vec<Problem>> {
     if state_dir != default_state_dir() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    if !daemon::uses_service(state_dir) {
-        return vec![Problem {
+    if !daemon::uses_service(state_dir)? {
+        return Ok(vec![Problem {
             what: "the key does not start with your session".into(),
             fix: "run `pqkey setup`".into(),
-        }];
+        }]);
     }
-    match running {
-        Some(Running::Daemon(pid)) => vec![Problem {
-            what: format!(
-                "the key (pid {pid}) was started by hand, so the systemd user service cannot run it"
-            ),
-            fix: format!("run `{REPLUG}`"),
-        }],
+    Ok(match running {
+        Some(Running::Daemon(pid)) => vec![UserService::manual_start_problem(pid)],
         _ => Vec::new(),
-    }
+    })
 }
 
 /// How often `pqkey setup` asks for a new PIN that was mistyped.
