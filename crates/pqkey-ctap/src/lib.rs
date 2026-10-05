@@ -4,8 +4,8 @@
 //! here: the signature algorithms ([`CoseAlg`]), credential keys and
 //! signing, and the PIN/UV auth protocols' key derivation and encryption.
 
-// Everything here is safe Rust; the one place that needs `unsafe` (the uhid
-// device) lives in the pqkey crate.
+// Everything here is safe Rust; memory wiping and kernel operations that
+// need `unsafe` live in the pqkey crate.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

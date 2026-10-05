@@ -35,6 +35,13 @@ The binary's allocator wipes every heap block before returning it to the
 system allocator. Reallocation allocates a replacement, copies the retained
 prefix, and wipes the old block, including any discarded tail.
 
+Before opening the store or creating the device, the daemon disables core
+files with a zero core size limit. On Linux it makes itself non-dumpable too,
+blocking core dumps, ptrace attachment and `/proc` memory reads by other
+unprivileged processes. Failures are warned about and startup continues.
+The user service also sets `LimitCORE=0`. Memory in use, swap and root remain
+outside these protections; the daemon does not lock its memory.
+
 The transport thread speaks CTAPHID (§11.2). It puts requests together from
 packets, sends keepalives while the engine waits for you, and answers other
 programs "busy". It also passes cancellation on to the engine. The engine

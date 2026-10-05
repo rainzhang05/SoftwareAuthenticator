@@ -600,6 +600,7 @@ mod tests {
         assert_eq!(exec, ["ExecStart=/home/a/.cargo/bin/pqkey run"]);
         assert_eq!(unit.lines().count(), UNIT_TEMPLATE.lines().count());
         assert!(unit.contains("RestartPreventExitStatus=3"));
+        assert!(unit.contains("LimitCORE=0"));
 
         let unit = unit_file(Path::new("/home/a b/100%/pqkey")).unwrap();
         assert!(

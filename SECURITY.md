@@ -51,11 +51,18 @@ sensor software cannot press.
   Signature counters may show a relying party that two copies are in use, but
   not a copy used after the original stops.
 - **Reading the daemon's memory.** Secrets are wiped after use as far as Rust
-  allows, but the daemon neither locks its memory nor disables core dumps.
+  allows. Before opening the store, the daemon sets its core file size limit
+  to zero; the systemd user service sets `LimitCORE=0` too. On Linux it also
+  makes itself non-dumpable, preventing core dumps and crash handlers from
+  collecting its memory, and other unprivileged processes from attaching
+  with ptrace or reading its memory through `/proc`. If either setting
+  fails, the daemon logs a warning and continues.
   The binary wipes every heap block before releasing it, including old
   blocks and discarded tails from reallocation. This covers the copies RSA
   arithmetic leaves on the heap as well as values explicitly wiped on drop.
-  Memory still in use and copies in swap remain outside that protection.
+  Memory still in use can contain secrets. These protections do not lock
+  memory, so copies in swap remain possible, and root can still read live
+  memory. They do not prevent the same user from reading the state files.
 
 ### Limits of the prompt
 

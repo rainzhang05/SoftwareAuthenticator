@@ -27,6 +27,10 @@ StartLimitBurst=5
 Type=exec
 ExecStart=/usr/local/bin/pqkey run
 Environment=RUST_LOG=info
+# Keep secrets out of core files. The daemon also sets this limit itself,
+# and makes itself non-dumpable before opening its store, so crash handlers
+# cannot collect its memory and other user processes cannot attach to it.
+LimitCORE=0
 # On SIGTERM the daemon removes the virtual device and exits with status 0, so
 # stopping the service is not a failure and does not trigger a restart.
 Restart=on-failure
