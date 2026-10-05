@@ -238,5 +238,8 @@ fn main() {
     ] {
         exercise(alg, PrivateKeyMaterial::try_generate(alg).unwrap());
     }
+    // The last case's control buffers were dropped after its secret scan.
+    // Inspect their retained blocks too, before the program exits.
+    scan_freed("final cleanup", &[]);
     println!("heap residue: 8 cases passed, including live controls");
 }

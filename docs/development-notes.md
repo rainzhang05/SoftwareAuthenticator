@@ -22,6 +22,7 @@ and store roundtrips under the binary's wiping allocator. Its test allocator
 retains freed blocks until they have been scanned, and live controls prove
 that the scan finds each secret pattern. CI and `scripts/check.sh` run it in
 debug and release, as they do the stack residue tests.
+The final cleanup scan also checks blocks released by the last controls.
 
 ## Running your changes
 
