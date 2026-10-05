@@ -202,8 +202,10 @@ def test_non_discoverable_rs256_uses_a_slot_but_is_not_managed(ctap: Ctap2, capa
     metadata = management.get_metadata()
     assert metadata[RESULT.EXISTING_CRED_COUNT] == 0
     assert metadata[RESULT.MAX_REMAINING_COUNT] == capacity - 1
+    # enumerate_rps() turns NO_CREDENTIALS into an empty list; the first
+    # command itself says it.
     with pytest.raises(CtapError) as error:
-        management.enumerate_rps()
+        management.enumerate_rps_begin()
     assert error.value.code == CtapError.ERR.NO_CREDENTIALS
     response, _ = client.authenticate(ctap, credential)
     assert 4 not in response, "non-discoverable assertions contain no user entity"
