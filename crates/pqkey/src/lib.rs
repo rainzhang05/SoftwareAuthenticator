@@ -1,7 +1,8 @@
-// The uhid device reads and writes kernel structures through `unsafe`; each
-// block says why it is sound.
+// The allocator wipes owned memory and the uhid device reads and writes
+// kernel structures through `unsafe`; each block says why it is sound.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
+pub mod allocator;
 pub mod attestation;
 pub mod cli;
 pub mod client;

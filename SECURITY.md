@@ -52,9 +52,10 @@ sensor software cannot press.
   not a copy used after the original stops.
 - **Reading the daemon's memory.** Secrets are wiped after use as far as Rust
   allows, but the daemon neither locks its memory nor disables core dumps.
-  RSA private arithmetic uses heap allocations beyond stack scrubbing. The
-  pinned rsa crate wipes primes and private exponents, but does not explicitly
-  wipe its CRT inverse or Montgomery parameters on drop.
+  The binary wipes every heap block before releasing it, including old
+  blocks and discarded tails from reallocation. This covers the copies RSA
+  arithmetic leaves on the heap as well as values explicitly wiped on drop.
+  Memory still in use and copies in swap remain outside that protection.
 
 ### Limits of the prompt
 

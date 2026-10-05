@@ -31,6 +31,10 @@ The daemon, which the systemd user service starts, creates a virtual USB HID
 device through `/dev/uhid`. Browsers open its hidraw node as they would any
 security key.
 
+The binary's allocator wipes every heap block before returning it to the
+system allocator. Reallocation allocates a replacement, copies the retained
+prefix, and wipes the old block, including any discarded tail.
+
 The transport thread speaks CTAPHID (§11.2). It puts requests together from
 packets, sends keepalives while the engine waits for you, and answers other
 programs "busy". It also passes cancellation on to the engine. The engine
