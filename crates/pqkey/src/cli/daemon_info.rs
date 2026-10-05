@@ -213,9 +213,9 @@ mod tests {
             state_lock::write_pid_file(&path, &lock).unwrap();
             nix::sys::prctl::set_dumpable(false).unwrap();
             assert!(!nix::sys::prctl::get_dumpable().unwrap());
-            writeln!(std::io::stdout(), "ready").unwrap();
-            std::io::stdout().flush().unwrap();
-            let _ = std::io::stdin().read_line(&mut String::new());
+            writeln!(io::stdout(), "ready").unwrap();
+            io::stdout().flush().unwrap();
+            let _ = io::stdin().read_line(&mut String::new());
             state_lock::remove_pid_file(&path, &lock).unwrap();
             state_lock::remove_info_file(&path, &lock).unwrap();
             return;
@@ -232,10 +232,11 @@ mod tests {
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut reader = io::BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         while reader.read_line(&mut line).unwrap() > 0 {
-            if line.trim() == "ready" {
+            // libtest can prefix the line with the test's name.
+            if line.trim_end().ends_with("ready") {
                 break;
             }
             line.clear();
