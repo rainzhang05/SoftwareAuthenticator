@@ -85,8 +85,8 @@ class Pqkey:
         assert re.split(r"\s{2,}", heading) == ["SITE", "USER", "ALGORITHM", "ID"], heading
         return [re.split(r"\s{2,}", row) for row in rows]
 
-    def start(self, presence: str = "auto-approve") -> int:
-        output = self.ok(*START, "--presence", presence)
+    def start(self, presence: str = "auto-approve", *options: str) -> int:
+        output = self.ok(*START, "--presence", presence, *options)
         started = re.fullmatch(r"Key started \(pid (\d+)\); logging to (.+)\n", output)
         assert started, output
         assert started[2] == str(self.state_dir / "authenticator.log")
@@ -134,6 +134,8 @@ def test_start_status_and_stop(pqkey: Pqkey):
     assert pqkey.ok("stop") == "The key is not running\n"
     assert pqkey.status() == {"Key": "not running; `pqkey start` starts it"}
     assert (pqkey.state_dir / "authenticator.log").is_file()
+    assert not (pqkey.state_dir / "authenticator.pid").exists()
+    assert not (pqkey.state_dir / "authenticator.info").exists()
 
 
 def test_commands_need_a_running_key(pqkey: Pqkey):
@@ -215,13 +217,20 @@ def test_reset_replugs_the_key_and_erases_it(pqkey: Pqkey):
     """reset restarts the key with its options, as re-plugging does, so
     authenticatorReset comes within 10 seconds of power-up (CTAP 2.3 §6.6),
     and leaves it running."""
-    old_pid = pqkey.start()
+    old_pid = pqkey.start("auto-approve", "--name", "CLI reset key",
+                          "--attestation", "none", "--presence-timeout", "12")
+    old_info = (pqkey.state_dir / "authenticator.info").read_bytes().split(b"\n", 1)
+    assert old_info[0].split()[1] == str(old_pid).encode()
     pqkey.ok("pin", stdin=f"{PIN}\n")
     assert pqkey.ok("reset", "--yes") == "The key is reset: its passkeys and its PIN are erased.\n"
     status = pqkey.status()
     assert status["PIN"].startswith("not set"), status
     pid = int(re.fullmatch(r"running \(pid (\d+)\)", status["Key"])[1])
     assert pid != old_pid
+    new_info = (pqkey.state_dir / "authenticator.info").read_bytes().split(b"\n", 1)
+    assert new_info[0].split()[1] == str(pid).encode()
+    assert new_info[0].split()[2:] == old_info[0].split()[2:]
+    assert new_info[1] == old_info[1]
 
     # Declined, nothing happens.
     pqkey.ok("pin", stdin=f"{PIN}\n")

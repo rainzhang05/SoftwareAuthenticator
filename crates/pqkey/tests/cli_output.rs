@@ -1,6 +1,7 @@
 //! The `pqkey` binary when its output goes nowhere: a pipe whose reader has
 //! exited, as after `pqkey status | head -1`, and a full device.
 //! `println!` panicked in both cases (exit status 101).
+//! Failed startup must also remove stale runtime information and its pid.
 
 use std::{
     env, fs, io,
@@ -54,6 +55,31 @@ fn a_closed_standard_output_ends_pqkey_quietly() {
     let output = pqkey(&["status"], "closed", closed_pipe(), None);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn failed_startup_removes_stale_runtime_files() {
+    let dir = state_dir("failed-startup");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(pqkey::state_lock::PID_FILE), b"12345\n").unwrap();
+    fs::write(dir.join(pqkey::state_lock::INFO_FILE), b"stale information").unwrap();
+    // A file where the keys directory belongs forces failure before uhid is
+    // opened, on both platforms and even when tests run as root.
+    fs::write(dir.join("keys"), b"not a directory").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pqkey"))
+        .arg("run")
+        .arg("--state-dir")
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(!dir.join(pqkey::state_lock::PID_FILE).exists());
+    assert!(!dir.join(pqkey::state_lock::INFO_FILE).exists());
+    assert_eq!(
+        pqkey::state_lock::daemon_state(&dir).unwrap(),
+        pqkey::state_lock::DaemonState::Stopped
+    );
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[cfg(target_os = "linux")]

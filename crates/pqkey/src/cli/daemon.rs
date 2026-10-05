@@ -25,8 +25,8 @@ use nix::{
     unistd::{self, Group, Pid},
 };
 
-use super::DaemonArgs;
 use super::output::{errln, outln};
+use super::{DaemonArgs, daemon_info::DaemonInfo};
 use crate::{
     permissions, service,
     shutdown::ShutdownSignal,
@@ -87,6 +87,8 @@ pub fn run(state_dir: PathBuf, args: &DaemonArgs) -> io::Result<()> {
     // Nothing else can be running, so a pid file is left over from a daemon
     // that did not exit cleanly.
     state_lock::remove_pid_file(&state_dir, &lock)?;
+    state_lock::remove_info_file(&state_dir, &lock)?;
+    let info = DaemonInfo::current(args)?;
     warn_uhid_access();
     // Without RUST_LOG, warnings too: that --presence auto-approve asks
     // nobody, for example, is only ever logged.
@@ -94,10 +96,14 @@ pub fn run(state_dir: PathBuf, args: &DaemonArgs) -> io::Result<()> {
     let shutdown = ShutdownSignal::new();
     shutdown.install_signal_handlers()?;
     let result = service::run(config, shutdown, || {
+        info.publish(&state_dir, &lock)?;
         state_lock::write_pid_file(&state_dir, &lock)
     });
     if let Err(err) = state_lock::remove_pid_file(&state_dir, &lock) {
         log::warn!("could not remove the pid file: {err}");
+    }
+    if let Err(err) = state_lock::remove_info_file(&state_dir, &lock) {
+        log::warn!("could not remove the daemon information: {err}");
     }
     result
 }
@@ -169,7 +175,7 @@ pub fn replug(state_dir: &Path) -> io::Result<Running> {
             wait_for_pid(state_dir, |pid| pid != old).map(Running::Service)
         }
         Some(Running::Daemon(pid)) => {
-            let args = super::daemon_args_of(pid)?;
+            let args = super::daemon_args_of(state_dir, pid)?;
             unplug(state_dir)?;
             spawn_daemon(state_dir, &args).map(Running::Daemon)
         }

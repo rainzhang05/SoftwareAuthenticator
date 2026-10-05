@@ -19,6 +19,7 @@
 
 mod checks;
 mod daemon;
+mod daemon_info;
 mod key;
 pub mod output;
 mod setup;
@@ -328,15 +329,21 @@ impl Default for DaemonArgs {
     }
 }
 
-/// The options the daemon `pid` runs with, from its command line.
-fn daemon_args_of(pid: nix::unistd::Pid) -> io::Result<DaemonArgs> {
-    let cmdline = fs::read(format!("/proc/{pid}/cmdline"))?;
-    daemon_args_from(&cmdline).ok_or_else(|| {
+/// The options the daemon `pid` runs with, from its published information.
+fn daemon_args_of(state_dir: &std::path::Path, pid: nix::unistd::Pid) -> io::Result<DaemonArgs> {
+    if let Ok(info) = daemon_info::DaemonInfo::read(state_dir, pid) {
+        return info.args();
+    }
+    // Older daemons published only their pid. Recover their options when
+    // proc permits it, before stopping them; never substitute defaults.
+    let unavailable = || {
         io::Error::other(format!(
             "the key (pid {pid}) was not started by this version of pqkey; restart it with \
              `pqkey stop && pqkey start` first"
         ))
-    })
+    };
+    let cmdline = fs::read(format!("/proc/{pid}/cmdline")).map_err(|_| unavailable())?;
+    daemon_args_from(&cmdline).ok_or_else(unavailable)
 }
 
 /// The options of `pqkey run` in a NUL-separated command line, as

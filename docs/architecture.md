@@ -127,6 +127,14 @@ The daemon itself is `pqkey run`. It also takes hidden options that only
 test rigs use, such as approving every request without asking; they are
 documented in `crates/pqkey/src/cli/mod.rs`.
 
+While holding the state lock, it publishes non-secret run options and the
+running executable's device and inode in `authenticator.info`, then its
+ready pid in `authenticator.pid`. Commands use that information to preserve
+options when restarting and to detect an installed replacement binary.
+They read another process's `/proc` entries only for older daemons that do
+not publish usable information. Both runtime files are removed on exit;
+neither is trusted without the lock and a matching pid.
+
 ## Tests
 
 | Layer | Where |

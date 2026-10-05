@@ -298,7 +298,7 @@ pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
     };
     let (running, how) = match running {
         // A new unit, or a new binary in place of the one the service runs.
-        Some(Running::Service(pid)) if changed || runs_another_binary(pid, &binary) => {
+        Some(Running::Service(pid)) if changed || runs_another_binary(state_dir, pid, &binary) => {
             (daemon::replug(state_dir)?, "restarted")
         }
         Some(running) => (running, "running"),
@@ -309,7 +309,7 @@ pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
     };
     output::done(format_args!("Key {how}; it starts with your session"))?;
 
-    let mut problems = key::running_problems(&system, running, Duration::from_secs(5));
+    let mut problems = key::running_problems(state_dir, &system, running, Duration::from_secs(5));
     problems.extend(path_problem(&binary, env::var_os("PATH").as_deref()));
     output::problems(&problems)?;
     let has_pin = match key::ensure_pin(running, interactive) {
@@ -345,10 +345,19 @@ fn finish(ready: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// Whether the process `pid` runs another file than `binary`: `cargo
-/// install` replaced it, and `/proc` names the old file as deleted.
-fn runs_another_binary(pid: unistd::Pid, binary: &Path) -> bool {
-    fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|exe| exe != binary)
+/// Whether the daemon runs another inode than `binary`. Unknown identity
+/// restarts it too, so an inaccessible old daemon cannot defeat installation.
+fn runs_another_binary(state_dir: &Path, pid: unistd::Pid, binary: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let same = super::daemon_info::DaemonInfo::read(state_dir, pid)
+        .and_then(|info| info.runs_binary(binary))
+        .or_else(|_| {
+            // Compatibility with daemons that predate the information file.
+            let running = fs::metadata(format!("/proc/{pid}/exe"))?;
+            let installed = fs::metadata(binary)?;
+            Ok::<_, io::Error>(running.dev() == installed.dev() && running.ino() == installed.ino())
+        });
+    !same.unwrap_or(false)
 }
 
 /// Run `script` as root with `sudo` (or, in tests, another program), which
@@ -525,14 +534,52 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
     }
 
-    // It reads /proc, which only Linux has.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_service_running_a_replaced_binary_is_restarted() {
+        let dir = TempDir::new("setup-binary");
+        let lock = crate::state_lock::StateLock::try_acquire(dir.path())
+            .unwrap()
+            .unwrap();
+        super::super::daemon_info::DaemonInfo::current(&super::super::DaemonArgs::default())
+            .unwrap()
+            .publish(dir.path(), &lock)
+            .unwrap();
+        crate::state_lock::write_pid_file(dir.path(), &lock).unwrap();
         let me = unistd::Pid::this();
         let exe = env::current_exe().unwrap().canonicalize().unwrap();
-        assert!(!runs_another_binary(me, &exe));
-        assert!(runs_another_binary(me, Path::new("/usr/bin/pqkey")));
+        assert!(!runs_another_binary(dir.path(), me, &exe));
+        assert!(runs_another_binary(
+            dir.path(),
+            me,
+            Path::new("/usr/bin/pqkey")
+        ));
+        assert!(runs_another_binary(
+            dir.path(),
+            me,
+            Path::new("/nonexistent/pqkey")
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_older_daemon_s_binary_is_read_from_proc() {
+        let me = unistd::Pid::this();
+        let exe = env::current_exe().unwrap().canonicalize().unwrap();
+        assert!(!runs_another_binary(Path::new("/nonexistent"), me, &exe));
+        assert!(runs_another_binary(
+            Path::new("/nonexistent"),
+            me,
+            Path::new("/usr/bin/pqkey")
+        ));
+    }
+
+    #[test]
+    fn an_unknown_running_binary_is_restarted() {
+        assert!(runs_another_binary(
+            Path::new("/nonexistent"),
+            unistd::Pid::from_raw(i32::MAX),
+            &env::current_exe().unwrap()
+        ));
     }
 
     #[test]

@@ -27,6 +27,7 @@ use nix::{
 
 pub const LOCK_FILE: &str = "authenticator.lock";
 pub const PID_FILE: &str = "authenticator.pid";
+pub const INFO_FILE: &str = "authenticator.info";
 
 /// How long [`StateLock::try_acquire`] keeps trying. [`is_locked`] takes a
 /// shared lock for an instant, and must not make a starting daemon give up.
@@ -129,22 +130,43 @@ pub fn read_pid(state_dir: &Path) -> io::Result<Option<Pid>> {
 /// Publish this process's pid. Only the holder of the lock may do this. The
 /// file is replaced atomically, so readers never see a partial pid.
 pub fn write_pid_file(state_dir: &Path, _lock: &StateLock) -> io::Result<()> {
-    let pid = process::id();
-    let path = state_dir.join(PID_FILE);
-    let temporary = state_dir.join(format!("{PID_FILE}.{pid}.tmp"));
+    write_file(
+        state_dir,
+        PID_FILE,
+        format!("{}\n", process::id()).as_bytes(),
+    )
+}
+
+/// Publish non-secret daemon information atomically, before its ready pid.
+pub fn write_info_file(state_dir: &Path, _lock: &StateLock, bytes: &[u8]) -> io::Result<()> {
+    write_file(state_dir, INFO_FILE, bytes)
+}
+
+fn write_file(state_dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let path = state_dir.join(name);
+    let temporary = state_dir.join(format!("{name}.{}.tmp", process::id()));
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(&temporary)?;
-    writeln!(file, "{pid}")?;
+    file.write_all(bytes)?;
     fs::rename(&temporary, path)
 }
 
 /// Remove the pid file. Only the holder of the lock may do this.
 pub fn remove_pid_file(state_dir: &Path, _lock: &StateLock) -> io::Result<()> {
-    match fs::remove_file(state_dir.join(PID_FILE)) {
+    remove_file(state_dir, PID_FILE)
+}
+
+/// Remove daemon information while its state directory is exclusively held.
+pub fn remove_info_file(state_dir: &Path, _lock: &StateLock) -> io::Result<()> {
+    remove_file(state_dir, INFO_FILE)
+}
+
+fn remove_file(state_dir: &Path, name: &str) -> io::Result<()> {
+    match fs::remove_file(state_dir.join(name)) {
         Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
         _ => Ok(()),
     }

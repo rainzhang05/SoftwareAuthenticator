@@ -171,7 +171,7 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
                 Running::Daemon(pid) => outln!("Key:      running (pid {pid})")?,
             }
             show_key(running)?;
-            problems.extend(running_problems(&system, running, STATUS_WAIT));
+            problems.extend(running_problems(state_dir, &system, running, STATUS_WAIT));
         }
     }
     problems.extend(service_problems(state_dir, running));
@@ -218,7 +218,12 @@ fn show_key(running: Running) -> io::Result<()> {
 
 /// What keeps browsers from using the key `running`, waiting up to `wait`
 /// for its device: one they cannot open, or notifications that cannot ask.
-pub fn running_problems(system: &System, running: Running, wait: Duration) -> Vec<Problem> {
+pub fn running_problems(
+    state_dir: &Path,
+    system: &System,
+    running: Running,
+    wait: Duration,
+) -> Vec<Problem> {
     let mut problems = Vec::new();
     match open_node(running, wait) {
         Ok((node, _)) => problems.extend(checks::browser_problems(system, &node, &Ok(()))),
@@ -237,7 +242,7 @@ pub fn running_problems(system: &System, running: Running, wait: Duration) -> Ve
             }),
         },
     }
-    if asks_with_notifications(running) {
+    if asks_with_notifications(state_dir, running) {
         problems.extend(checks::notification_problem(&notification_server()));
     }
     problems
@@ -245,12 +250,11 @@ pub fn running_problems(system: &System, running: Running, wait: Duration) -> Ve
 
 /// Whether the key `running` asks for presence with notifications, as the
 /// systemd unit and `pqkey start` without test options have it do.
-fn asks_with_notifications(running: Running) -> bool {
+fn asks_with_notifications(state_dir: &Path, running: Running) -> bool {
     match running {
         Running::Service(_) => true,
-        Running::Daemon(pid) => {
-            super::daemon_args_of(pid).is_ok_and(|args| args.presence == super::PresenceArg::Notify)
-        }
+        Running::Daemon(pid) => super::daemon_args_of(state_dir, pid)
+            .is_ok_and(|args| args.presence == super::PresenceArg::Notify),
     }
 }
 
