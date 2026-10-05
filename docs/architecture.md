@@ -49,10 +49,10 @@ Two details carry ML-DSA's large messages across the kernel:
 - CTAP 2.3, 2.1 and 2.0 over USB HID.
 - ES256 (-7), ML-DSA-44 (-48), ML-DSA-65 (-49), ML-DSA-87 (-50), ESP256 (-9),
   ES384 (-35), ESP384 (-51), ES512 (-36), ESP512 (-52), ES256K (-47), EdDSA
-  (-8), Ed25519 (-19), Ed448 (-53), RS256 (-257), RS384 (-258), RS512
-  (-259), PS256 (-37), PS384 (-38) and PS512 (-39), all RSA-2048 with e =
-  65537. The first algorithm in the relying
-  party's list that the key supports wins (§6.1.2).
+  (-8), Ed25519 (-19), Ed448 (-53), RS256 (-257), RS384 (-258), RS512 (-259),
+  PS256 (-37), PS384 (-38) and PS512 (-39), the RSA ones with 2048-bit keys
+  and e = 65537. The first algorithm in the relying party's list that the key
+  supports wins (§6.1.2).
 - A PIN, with PIN/UV auth protocols 1 and 2 and pinUvAuthTokens. After 8
   wrong PINs the PIN is blocked, and after 3 in a row the key must be
   restarted. There is no built-in user verification.
@@ -79,9 +79,9 @@ Two details carry ML-DSA's large messages across the kernel:
 Every file above except the root keys is encrypted and authenticated with
 XChaCha20-Poly1305, under keys derived from a root key with HKDF-SHA-256.
 Files are replaced atomically, never changed in place. A reset deletes the
-stored credentials and replaces `credential.key`, so old copies of files and every
-sealed credential ID can no longer be decrypted. [SECURITY.md](../SECURITY.md)
-describes what this protects against.
+stored credentials and replaces `credential.key`, so old copies of files and
+every sealed credential ID can no longer be decrypted.
+[SECURITY.md](../SECURITY.md) describes what this protects against.
 
 Discoverable credential IDs are `0x01` and 32 random bytes. Sealed IDs are
 107 bytes starting with `0x02`, carrying the algorithm, credProtect, 32-byte

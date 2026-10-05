@@ -9,8 +9,8 @@
 
 pqkey shows up in your browser as an ordinary USB security key. A user daemon
 creates a virtual HID device through the kernel's `uhid` driver, so any FIDO2
-client can use it, and registration, sign-ins that require user presence, and reset
-wait for you to approve them in a desktop notification.
+client can use it, and every registration, reset and sign-in that asks for
+your presence waits for you to approve it in a desktop notification.
 
 - **Post-quantum:** ML-DSA-44, ML-DSA-65 and ML-DSA-87 credentials (FIPS 204),
   alongside ECDSA (ES256, ESP256, ES384, ESP384, ES512, ESP512 and ES256K),
@@ -72,10 +72,10 @@ the notification that appears.
 | `pqkey stop`, `pqkey start` | Unplugs and plugs in the key |
 
 `pqkey passkeys` lists only passkeys, which are discoverable credentials. A
-site that registers the key as a second factor must supply its credential ID
-when signing in. Those credentials are sealed into their IDs, or stored for
-RSA-2048, and are never listed by credential management. The prompt makes
-the difference clear, saying "Create a passkey" or "Register a security key".
+site that registers the key as a second factor keeps the credential's ID and
+sends it back to sign in, so the key does not list that credential. The
+prompt makes the difference clear, saying "Create a passkey" or "Register a
+security key".
 Like a hardware key, pqkey accepts a reset only within 10 seconds of being
 plugged in, so `pqkey reset` restarts it first. The key's state lives in
 `~/.local/share/pqkey`.

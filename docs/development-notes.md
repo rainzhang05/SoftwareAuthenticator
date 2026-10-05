@@ -57,19 +57,21 @@ else has to change.
    that differs from another only in its identifier, as ESP256 does from
    ES256, shares its scheme and needs nothing more in Rust.
 2. A new scheme needs a `Scheme` variant and a module for its family, as
-   `crypto/ecdsa.rs`, `crypto/eddsa.rs` and `crypto/mldsa.rs` are. ECDSA or
-   EdDSA on a new curve needs a `Curve` or `EdwardsCurve` variant, a module
-   for the curve next to `crypto/ecdsa_p384.rs` or `crypto/eddsa_ed25519.rs`,
-   a case in `tests/residue.rs` and, for keys derived from a seed, known
-   answers in its family's module. A new type of key needs a
-   `CredentialSecretKey` variant. Keys kept in a new form need a `KeyKind`,
-   a `PrivateKeyMaterial` variant and a key type in `store/codec.rs`.
+   `crypto/ecdsa.rs`, `crypto/eddsa.rs`, `crypto/mldsa.rs` and
+   `crypto/rsa.rs` are. ECDSA or EdDSA on a new curve needs a `Curve` or
+   `EdwardsCurve` variant, a module for the curve next to
+   `crypto/ecdsa_p384.rs` or `crypto/eddsa_ed25519.rs`, a case in
+   `tests/residue.rs` and, for keys derived from a seed, known answers in its
+   family's module. A new type of key needs a `CredentialSecretKey` variant.
+   Keys kept in a new form need a `KeyKind`, a `PrivateKeyMaterial` variant
+   and a key type in `store/codec.rs`; `KeyKind::is_sealable` says whether
+   they fit a sealed credential ID. A key that does not, as RSA's primes do
+   not, is stored even for a non-discoverable credential.
 3. Build and run clippy, and handle every match they point to, among them
    the test verifier in `crypto/verify.rs`, which pqkey's tests and the fuzz
-   targets reach through pqkey-ctap's `test-support` feature. Only key material represented by the fixed-size sealable key type may
-   enter a sealed credential ID. A compile-time check requires the identifiers
-   of algorithms with sealable keys to fit its signed-byte algorithm field.
-   Keys that do not fit a sealed ID must use stored non-discoverable records.
+   targets reach through pqkey-ctap's `test-support` feature. A check at
+   compile time says if an algorithm whose key can be sealed does not fit a
+   sealed credential ID.
 4. Run the tests. The table-driven ones cover the new algorithm, and the
    known-answer tests of the table, of getInfo and of the CLI say what to
    add to them. If `UNSUPPORTED_ALGORITHMS` in `fuzz/src/requests.rs` lists
@@ -118,11 +120,11 @@ them, and the udev rules tag the key for the Firefox and Chromium snaps. If
 `pqkey status` says the tag is missing, run `./install.sh`.
 
 **`pqkey passkeys` lists nothing, although sites accepted the key.** It lists
-passkeys, the discoverable credentials. A site that registers it as a second
-factor (`residentKey: "discouraged"`) must supply its credential ID for assertions, and so does
-Chromium when the key has no PIN. Those sign-ins work, but their credentials are not discoverable
-and are not listed, and their prompt says "Register a security key" instead of "Create a
-passkey".
+passkeys, the credentials the key can find by itself. A site that registers it
+as a second factor (`residentKey: "discouraged"`) keeps the credential's ID
+and sends it back to sign in, and so does Chromium when the key has no PIN.
+Those sign-ins work, but the key does not list them, and their prompt says
+"Register a security key" instead of "Create a passkey".
 
 **Chromium says "Your device can't be used with this site".** Chromium uses a
 security key for passkeys only if it has a PIN. Set one with `pqkey pin`.
