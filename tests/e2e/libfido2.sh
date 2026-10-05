@@ -5,10 +5,11 @@
 # Usage: tests/e2e/libfido2.sh /dev/hidrawN
 #
 # libfido2 only knows ES256, ES384, RS256 and EdDSA credentials, so ML-DSA,
-# ESP256, ESP384, ES512, ESP512, ES256K, Ed25519, Ed448 and the other five
-# RSA algorithms are covered by the Python suite instead; `fido2-token -I` prints them as "unknown", and the
-# Python suite checks their exact COSE IDs. ES256, ES384, RS256 and EdDSA credentials
-# are registered and asserted here too.
+# ESP256, ESP384, ES512, ESP512, ES256K, Ed25519, Ed448, RS384, RS512, PS256,
+# PS384 and PS512 are covered by the Python suite instead; `fido2-token -I`
+# prints them as "unknown", and the Python suite checks their exact COSE IDs.
+# ES256, ES384, EdDSA and RS256 credentials are registered and asserted here
+# too.
 # The tests do not reset the authenticator: each registers a non-discoverable
 # credential and asserts with that credential's ID in the allow list, so they do
 # not depend on anything else stored on the key.
@@ -77,8 +78,8 @@ test_token_info() {
   grep -qE '^pin protocols: .*\b2\b' <<<"$info" || fail "PIN/UV auth protocol 2 is not advertised"
 }
 
-# Register a credential of libfido2 type $1 (es256, es384, eddsa or rs256) and assert
-# with it.
+# Register a credential of libfido2 type $1 (es256, es384, eddsa or rs256)
+# and assert with it.
 test_register_and_assert() {
   local type=$1
   local rp=libfido2.e2e.example
@@ -119,10 +120,10 @@ run_test "fido2-token -I reports FIDO 2.1, every algorithm and both PIN protocol
 run_test "ES256 fido2-cred -M / -V and fido2-assert -G / -V" test_register_and_assert es256
 run_test "ES384 fido2-cred -M / -V and fido2-assert -G / -V" test_register_and_assert es384
 run_test "EdDSA fido2-cred -M / -V and fido2-assert -G / -V" test_register_and_assert eddsa
+run_test "RS256 fido2-cred -M / -V and fido2-assert -G / -V" test_register_and_assert rs256
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures libfido2 test(s) failed"
   exit 1
 fi
 echo "All libfido2 tests passed"
-run_test "RS256 fido2-cred -M / -V and fido2-assert -G / -V" test_register_and_assert rs256
