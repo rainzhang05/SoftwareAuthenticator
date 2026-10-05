@@ -116,7 +116,7 @@ fn confirm(question: &str) -> io::Result<bool> {
 }
 
 /// Ask `question` on the terminal. An empty answer is `default_yes`.
-pub(super) fn ask(question: &str, default_yes: bool) -> io::Result<bool> {
+pub(crate) fn ask(question: &str, default_yes: bool) -> io::Result<bool> {
     {
         let mut stderr = io::stderr().lock();
         let choices = if default_yes { "[Y/n]" } else { "[y/N]" };

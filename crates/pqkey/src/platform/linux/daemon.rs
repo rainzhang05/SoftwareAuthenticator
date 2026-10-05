@@ -25,8 +25,8 @@ use nix::{
     unistd::{self, Group, Pid},
 };
 
-use super::output::{errln, outln};
-use super::{DaemonArgs, daemon_info::DaemonInfo};
+use crate::cli::output::{errln, outln};
+use crate::cli::{DaemonArgs, daemon_info::DaemonInfo};
 use crate::{
     permissions, service,
     shutdown::ShutdownSignal,
@@ -46,7 +46,7 @@ fn log_path(state_dir: &Path) -> PathBuf {
 }
 
 /// A key runs on the state directory already, so another cannot start; pqkey
-/// exits with [`EXIT_ALREADY_RUNNING`](super::EXIT_ALREADY_RUNNING).
+/// exits with [`EXIT_ALREADY_RUNNING`](crate::cli::EXIT_ALREADY_RUNNING).
 #[derive(Debug)]
 pub struct AlreadyRunning(String);
 
@@ -175,7 +175,7 @@ pub fn replug(state_dir: &Path) -> io::Result<Running> {
             wait_for_pid(state_dir, |pid| pid != old).map(Running::Service)
         }
         Some(Running::Daemon(pid)) => {
-            let args = super::daemon_args_of(state_dir, pid)?;
+            let args = crate::cli::daemon_args_of(state_dir, pid)?;
             unplug(state_dir)?;
             spawn_daemon(state_dir, &args).map(Running::Daemon)
         }

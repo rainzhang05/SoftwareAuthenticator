@@ -22,13 +22,13 @@ use super::checks::{
     self, MODULES_LOAD_PATH, Membership, Rules, System, UDEV_RULES, UDEV_RULES_PATH, UHID_GROUP,
 };
 use super::daemon::{self, Running, UNIT};
-use super::key;
-use super::output::{self, outln};
+use crate::cli::key;
+use crate::cli::output::{self, outln};
 use crate::state::default_state_dir;
 
 /// The systemd user unit this version ships, with `ExecStart` for
 /// `/usr/local/bin/pqkey`.
-const UNIT_TEMPLATE: &str = include_str!("../../../../contrib/systemd/user/pqkey.service");
+const UNIT_TEMPLATE: &str = include_str!("../../../../../contrib/systemd/user/pqkey.service");
 
 /// Where the user's systemd units live.
 fn unit_dir() -> PathBuf {
@@ -303,7 +303,7 @@ pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
         }
         Some(running) => (running, "running"),
         None => (
-            daemon::plug_in(state_dir, &super::DaemonArgs::default())?,
+            daemon::plug_in(state_dir, &crate::cli::DaemonArgs::default())?,
             "started",
         ),
     };
@@ -349,7 +349,7 @@ fn finish(ready: bool) -> io::Result<()> {
 /// install` replaced it. A daemon whose identity is unknown counts as running
 /// another, so that setup restarts it.
 fn runs_another_binary(state_dir: &Path, pid: unistd::Pid, binary: &Path) -> bool {
-    !super::daemon_info::DaemonInfo::read(state_dir, pid)
+    !crate::cli::daemon_info::DaemonInfo::read(state_dir, pid)
         .and_then(|info| info.runs_binary(binary))
         .unwrap_or(false)
 }
@@ -534,7 +534,7 @@ mod tests {
         let lock = crate::state_lock::StateLock::try_acquire(dir.path())
             .unwrap()
             .unwrap();
-        super::super::daemon_info::DaemonInfo::current(&super::super::DaemonArgs::default())
+        crate::cli::daemon_info::DaemonInfo::current(&crate::cli::DaemonArgs::default())
             .unwrap()
             .publish(dir.path(), &lock)
             .unwrap();

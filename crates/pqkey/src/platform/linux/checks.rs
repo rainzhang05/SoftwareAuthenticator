@@ -15,7 +15,7 @@ use nix::unistd::{self, Gid, Group, User};
 use crate::presence::notification::{ConnectError, ServerInfo};
 
 /// The udev rules this version of pqkey ships.
-pub const UDEV_RULES: &str = include_str!("../../../../contrib/udev/70-pqkey.rules");
+pub const UDEV_RULES: &str = include_str!("../../../../../contrib/udev/70-pqkey.rules");
 /// Where `pqkey setup` installs [`UDEV_RULES`].
 pub const UDEV_RULES_PATH: &str = "/etc/udev/rules.d/70-pqkey.rules";
 /// Where `pqkey setup` has uhid loaded at boot.

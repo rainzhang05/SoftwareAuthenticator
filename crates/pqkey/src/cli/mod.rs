@@ -17,12 +17,12 @@
 //! itself, for the systemd unit and for test rigs, with the options only they
 //! need.
 
-mod checks;
-mod daemon;
-mod daemon_info;
-mod key;
+pub(crate) use crate::platform::linux::checks;
+pub(crate) use crate::platform::linux::daemon;
+pub(crate) mod daemon_info;
+pub(crate) mod key;
 pub mod output;
-mod setup;
+pub(crate) use crate::platform::linux::setup;
 
 use std::{ffi::OsString, io, path::PathBuf, process::ExitCode, time::Duration};
 
@@ -243,7 +243,10 @@ impl AttestationArg {
 }
 
 impl DaemonArgs {
-    fn to_runner_config(&self, state_dir: PathBuf) -> Result<service::RunnerConfig, String> {
+    pub(crate) fn to_runner_config(
+        &self,
+        state_dir: PathBuf,
+    ) -> Result<service::RunnerConfig, String> {
         let aaguid = service::parse_aaguid(&self.aaguid)?;
         let descriptor = service::descriptor(
             self.name.clone(),
@@ -279,7 +282,7 @@ impl DaemonArgs {
     }
 
     /// The command-line arguments that give `run` these options.
-    fn to_args(&self) -> Vec<OsString> {
+    pub(crate) fn to_args(&self) -> Vec<OsString> {
         let mut args: Vec<OsString> = vec![
             "--presence".into(),
             self.presence.name().into(),
@@ -315,7 +318,7 @@ impl DaemonArgs {
 
     /// Whether these are the options a key for a person runs with, the ones
     /// the systemd unit uses.
-    fn are_defaults(&self) -> bool {
+    pub(crate) fn are_defaults(&self) -> bool {
         self.to_args() == Self::default().to_args()
     }
 }
@@ -331,7 +334,10 @@ impl Default for DaemonArgs {
 
 /// The options the daemon `pid` runs with, from its published information.
 /// Without it the options are unknown, and never replaced with defaults.
-fn daemon_args_of(state_dir: &std::path::Path, pid: nix::unistd::Pid) -> io::Result<DaemonArgs> {
+pub(crate) fn daemon_args_of(
+    state_dir: &std::path::Path,
+    pid: nix::unistd::Pid,
+) -> io::Result<DaemonArgs> {
     daemon_info::DaemonInfo::read(state_dir, pid)
         .and_then(|info| info.args())
         .map_err(|_| {

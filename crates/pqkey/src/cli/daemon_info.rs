@@ -9,7 +9,7 @@ use crate::state_lock::{self, DaemonState, StateLock};
 
 const VERSION: &str = "pqkey-daemon-v1";
 
-pub(super) struct DaemonInfo {
+pub(crate) struct DaemonInfo {
     pid: Pid,
     device: u64,
     inode: u64,
