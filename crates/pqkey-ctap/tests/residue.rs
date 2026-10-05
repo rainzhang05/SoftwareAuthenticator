@@ -1,5 +1,5 @@
-//! ECDSA, EdDSA and RSA secrets left behind in the stack after reading a key and
-//! signing.
+//! ECDSA, EdDSA and RSA secrets left behind in the stack after reading a key
+//! and signing.
 //!
 //! An ECDSA signature together with its nonce `k` reveals the private key, and
 //! so does an EdDSA signature together with its nonce `r`, so neither nonce

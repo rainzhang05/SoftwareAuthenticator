@@ -309,9 +309,10 @@ impl CtapApp<'_> {
 
         // ML-DSA keys are kept as their 32-byte seed (RFC 9964 §4).  A
         // discoverable credential is stored; a non-discoverable one is sealed
-        // if its key fits, otherwise stored (see is_discoverable).  A generator failure
-        // fails the request, "CTAP1_ERR_OTHER: Other unspecified error" (CTAP
-        // 2.3 §8.2), not the authenticator.
+        // into its credential ID if its key fits, and stored otherwise (see
+        // is_discoverable).  A generator failure fails the request,
+        // "CTAP1_ERR_OTHER: Other unspecified error" (CTAP 2.3 §8.2), not the
+        // authenticator.
         let private_key = (self.generate_key)(alg).map_err(|err| {
             log::error!("cannot generate a {alg:?} key: {err}");
             CTAP1_ERR_OTHER

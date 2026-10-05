@@ -239,8 +239,10 @@ impl Platform {
                     let Value::Map(public_key) = public_key else {
                         panic!("credential public key is a map");
                     };
-                    if matches!(get_int(&public_key, 1), Some(Value::Integer(kty)) if i128::from(*kty) == 3)
-                    {
+                    // An RSA key (kty 3) does not fit a sealed ID, so it is
+                    // stored.
+                    let kty = get_int(&public_key, 1);
+                    if matches!(kty, Some(Value::Integer(kty)) if i128::from(*kty) == 3) {
                         (33, 0x00)
                     } else {
                         (107, 0x02)

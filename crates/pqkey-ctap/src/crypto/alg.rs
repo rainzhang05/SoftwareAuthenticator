@@ -103,8 +103,8 @@ impl KeyKind {
 
 /// The signature scheme behind an algorithm.  It picks the family that reads
 /// the key, derives the public key and signs: [`super::ecdsa`],
-/// [`super::eddsa`], [`super::mldsa`] or [`super::rsa`].  Algorithms that differ only in their
-/// identifier share a scheme.
+/// [`super::eddsa`], [`super::mldsa`] or [`super::rsa`].  Algorithms that
+/// differ only in their identifier share a scheme.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum Scheme {
     /// ECDSA over this curve with the curve's hash, the signature

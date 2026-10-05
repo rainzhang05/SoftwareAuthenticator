@@ -155,10 +155,10 @@ fn a_discoverable_registration_replaces_only_discoverable_credentials() {
     assert!(assertion_with_allow_list(&mut app, &server_side).is_ok());
 }
 
-/// A non-discoverable credential with a sealable key is sealed into its ID: nothing is stored,
-/// and the ID holds its algorithm, credProtect level, private key and the
-/// random seed of its hmac-secret CredRandom values, sealed for its relying
-/// party.
+/// A non-discoverable credential with a sealable key is sealed into its ID:
+/// nothing is stored, and the ID holds its algorithm, credProtect level,
+/// private key and the random seed of its hmac-secret CredRandom values,
+/// sealed for its relying party.
 #[test]
 fn a_non_discoverable_credential_is_sealed_into_its_id() {
     for alg in CoseAlg::ALL
@@ -348,8 +348,8 @@ fn a_sealed_assertion_is_signed_only_once_its_count_is_saved() {
     }
 }
 
-/// Sealed non-discoverable registrations need no room in the store, so they go on
-/// when it is full, while discoverable ones are refused.
+/// Sealed non-discoverable registrations need no room in the store, so they
+/// go on when it is full, while discoverable ones are refused.
 #[test]
 fn a_full_store_still_registers_non_discoverable_credentials() {
     let (mut app, _) = app_with_store(

@@ -1,6 +1,7 @@
 //! The credential IDs this engine creates and reads: the ID of a
-//! discoverable credential names a stored record; a non-discoverable one
-//! is sealed into its ID if its key fits, otherwise stored; see [`is_discoverable`].
+//! discoverable credential names a stored record, and a non-discoverable
+//! credential is sealed into its own ID if its key fits and stored otherwise;
+//! see [`is_discoverable`].
 
 // A new algorithm, key kind or key type must be handled at every match on
 // one: no arm may catch it unseen.
@@ -24,7 +25,8 @@ use zeroize::Zeroizing;
 use crate::ctap::constants::*;
 
 impl CtapApp<'_> {
-    /// A fresh ID for a stored credential, marked with its discoverability; see [`is_discoverable`].
+    /// A fresh ID for a stored credential, marked discoverable or not; see
+    /// [`is_discoverable`].
     pub(super) fn new_credential_id(&mut self, discoverable: bool) -> Vec<u8> {
         let mut credential_id = Vec::with_capacity(CREDENTIAL_ID_LENGTH);
         credential_id.push(if discoverable {
@@ -123,9 +125,9 @@ const SEALED_PLAINTEXT_LENGTH: usize = 2 + SEALED_KEY_LENGTH + 32;
 /// material of a sealable kind.
 const SEALED_KEY_LENGTH: usize = 32;
 
-// Every algorithm whose key can be sealed fits a sealed ID.  Its identifier is the
-// plaintext's first byte, a signed one.  Its key material fits the key field
-// by type: `SealableKeyMaterial::as_bytes` is `[u8; SEALED_KEY_LENGTH]`,
+// Every algorithm whose key can be sealed fits a sealed ID.  Its identifier
+// is the plaintext's first byte, a signed one.  Its key material fits the key
+// field by type: `SealableKeyMaterial::as_bytes` is `[u8; SEALED_KEY_LENGTH]`,
 // or `seal_credential` does not compile.
 const _: () = {
     let mut i = 0;
@@ -254,10 +256,11 @@ fn sealed_credential(
 ///   and bound to the relying party.  It has no signature counter of its
 ///   own, and counts on the global one instead.
 /// * RSA credentials, whose primes do not fit a sealed ID, and older
-///   non-discoverable credentials are stored records whose ID is [`NON_DISCOVERABLE_MARKER`] and 32 random bytes.
-///   They keep their own counters and random CredRandom values, and RSA
-///   records keep no user ID or names. They take a store slot and reset erases
-///   them, but credential management neither lists nor counts them.
+///   non-discoverable credentials are stored records whose ID is
+///   [`NON_DISCOVERABLE_MARKER`] and 32 random bytes.  They keep their own
+///   signature counters and random CredRandom values, and RSA records keep no
+///   user ID or names.  They take room in the store and a reset erases them,
+///   but credential management neither lists nor counts them.
 /// * Any other stored ID, such as the 32 random bytes of credentials created
 ///   before non-discoverable credentials existed, all of which were
 ///   discoverable, is discoverable.
