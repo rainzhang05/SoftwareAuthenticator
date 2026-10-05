@@ -15,15 +15,14 @@ ALGORITHMS = [pytest.param(algorithm.identifier, id=algorithm.name) for algorith
 
 @pytest.mark.parametrize("alg", ALGORITHMS)
 def test_register_and_authenticate(ctap: Ctap2, alg):
-    """A non-discoverable credential is sealed into its credential ID and keeps
-    no state on the authenticator: its signatures count on the authenticator's
-    global signature counter (WebAuthn Level 3 §6.1.1), which every assertion
-    of a sealed credential increments."""
+    """Non-discoverable credentials work with their IDs in the allowList.
+    Sealed credentials use the global signature counter (WebAuthn Level 3
+    §6.1.1); stored RSA credentials keep a counter of their own."""
     credential = client.register(ctap, RP_ID, alg)
 
     _, first = client.authenticate(ctap, credential)
     _, second = client.authenticate(ctap, credential)
-    assert 0 < first.sign_count < second.sign_count, "the global signature counter did not increase"
+    assert 0 < first.sign_count < second.sign_count, "the signature counter did not increase"
 
 
 @pytest.mark.parametrize("alg", ALGORITHMS)

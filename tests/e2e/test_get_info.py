@@ -52,4 +52,10 @@ def test_get_info(ctap: Ctap2):
         {"type": "public-key", "alg": client.EDDSA},
         {"type": "public-key", "alg": client.ED25519},
         {"type": "public-key", "alg": client.ED448},
+        {"type": "public-key", "alg": client.RS256},
+        {"type": "public-key", "alg": client.RS384},
+        {"type": "public-key", "alg": client.RS512},
+        {"type": "public-key", "alg": client.PS256},
+        {"type": "public-key", "alg": client.PS384},
+        {"type": "public-key", "alg": client.PS512},
     ]

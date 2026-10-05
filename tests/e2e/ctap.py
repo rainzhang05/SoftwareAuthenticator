@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, mldsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, mldsa, padding, rsa
 from fido2.ctap2 import Ctap2
 from fido2.hid import CtapHidDevice
 from fido2.hid.linux import LinuxCtapHidConnection, get_descriptor
@@ -38,10 +38,17 @@ ES256K = -47
 EDDSA = -8
 ED25519 = -19
 ED448 = -53
+RS256 = -257
+RS384 = -258
+RS512 = -259
+PS256 = -37
+PS384 = -38
+PS512 = -39
 
 COSE_KTY_OKP = 1
 COSE_KTY_EC2 = 2
 COSE_KTY_AKP = 7
+COSE_KTY_RSA = 3
 COSE_CRV_P256 = 1
 COSE_CRV_P384 = 2
 COSE_CRV_P521 = 3
@@ -188,6 +195,36 @@ def _verify_eddsa(public_key_class: Any, signature_size: int) -> Callable[[Mappi
     return verify
 
 
+def _check_rsa(cose_key: Mapping[int, Any]) -> None:
+    """RSA-2048 with e = 65537, unsigned minimal byte strings (RFC 8230, 4)."""
+    assert cose_key.get(1) == COSE_KTY_RSA
+    assert set(cose_key) == {1, 3, -1, -2}, f"unexpected labels {set(cose_key)}"
+    n = cose_key.get(-1, b"")
+    assert isinstance(n, bytes) and len(n) == 256 and n[0] & 0x80
+    assert cose_key.get(-2) == b"\x01\x00\x01"
+
+
+def _verify_rsa(
+    hash_algorithm: hashes.HashAlgorithm, *, pss: bool
+) -> Callable[[Mapping[int, Any], bytes, bytes], None]:
+    """RFC 8017 signatures, raw 256-byte values. PSS uses the same hash for
+    MGF1 and a hash-sized salt (RFC 8230, 2). Use cryptography: python-fido2
+    2.2.1 parses RS384/512 and PS384/512 as UnsupportedKey."""
+
+    def verify(cose_key: Mapping[int, Any], message: bytes, signature: bytes) -> None:
+        n = int.from_bytes(cose_key[-1], "big")
+        e = int.from_bytes(cose_key[-2], "big")
+        if len(signature) != 256 or int.from_bytes(signature, "big") >= n:
+            raise InvalidSignature("RSA signature must be 256 bytes and below n")
+        scheme = (
+            padding.PSS(mgf=padding.MGF1(hash_algorithm), salt_length=hash_algorithm.digest_size)
+            if pss else padding.PKCS1v15()
+        )
+        rsa.RSAPublicNumbers(e, n).public_key().verify(signature, message, scheme, hash_algorithm)
+
+    return verify
+
+
 def _check_akp(public_key_size: int) -> Callable[[Mapping[int, Any]], None]:
     """An AKP key (RFC 9964) whose public key is `public_key_size` bytes."""
 
@@ -227,7 +264,8 @@ class Algorithm:
 # the key's own table is CoseAlg in crates/pqkey-ctap/src/crypto/alg.rs. The
 # ML-DSA public key and signature sizes are FIPS 204's, table 2; each ECDSA
 # curve's coordinates are as long as its field elements; EdDSA public keys and
-# signatures are as long as RFC 8032 encodes them.
+# signatures are as long as RFC 8032 encodes them; RSA uses 2048-bit keys
+# and 256-byte raw signatures (RFC 8017, 8; RFC 8230, 6.1).
 ALGORITHMS = (
     Algorithm(ES256, "ES256", _check_ec2(COSE_CRV_P256, 32), _verify_ecdsa(ec.SECP256R1(), hashes.SHA256())),
     Algorithm(ML_DSA_44, "ML-DSA-44", _check_akp(1312), _verify_mldsa(mldsa.MLDSA44PublicKey, 2420)),
@@ -242,6 +280,12 @@ ALGORITHMS = (
     Algorithm(EDDSA, "EdDSA", _check_okp(COSE_CRV_ED25519, 32), _verify_eddsa(ed25519.Ed25519PublicKey, 64)),
     Algorithm(ED25519, "Ed25519", _check_okp(COSE_CRV_ED25519, 32), _verify_eddsa(ed25519.Ed25519PublicKey, 64)),
     Algorithm(ED448, "Ed448", _check_okp(COSE_CRV_ED448, 57), _verify_eddsa(ed448.Ed448PublicKey, 114)),
+    Algorithm(RS256, "RS256", _check_rsa, _verify_rsa(hashes.SHA256(), pss=False)),
+    Algorithm(RS384, "RS384", _check_rsa, _verify_rsa(hashes.SHA384(), pss=False)),
+    Algorithm(RS512, "RS512", _check_rsa, _verify_rsa(hashes.SHA512(), pss=False)),
+    Algorithm(PS256, "PS256", _check_rsa, _verify_rsa(hashes.SHA256(), pss=True)),
+    Algorithm(PS384, "PS384", _check_rsa, _verify_rsa(hashes.SHA384(), pss=True)),
+    Algorithm(PS512, "PS512", _check_rsa, _verify_rsa(hashes.SHA512(), pss=True)),
 )
 BY_IDENTIFIER = {algorithm.identifier: algorithm for algorithm in ALGORITHMS}
 NAMES = {algorithm.identifier: algorithm.name for algorithm in ALGORITHMS}

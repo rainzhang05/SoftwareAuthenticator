@@ -8,7 +8,7 @@
   q.py chrome --clear ...                    drop what is still queued first
 
 The browser is "chrome" (any Chromium) or "firefox": a page polls the queue of
-its own family. The presets are the ones index.html lists (R1-R29, L1-L7).
+its own family. The presets are the ones index.html lists (R1-R35, L1-L7).
 """
 import json
 import os
@@ -17,7 +17,7 @@ import urllib.request
 
 BASE = f"http://localhost:{os.environ.get('RP_PORT', '8080')}"
 # The names of the algorithms, as in ALGORITHMS in tests/e2e/ctap.py.
-NAMES = {-7: "ES256", -48: "ML-DSA-44", -49: "ML-DSA-65", -50: "ML-DSA-87", -9: "ESP256", -35: "ES384", -51: "ESP384", -36: "ES512", -52: "ESP512", -47: "ES256K", -8: "EdDSA", -19: "Ed25519", -53: "Ed448"}
+NAMES = {-7: "ES256", -48: "ML-DSA-44", -49: "ML-DSA-65", -50: "ML-DSA-87", -9: "ESP256", -35: "ES384", -51: "ESP384", -36: "ES512", -52: "ESP512", -47: "ES256K", -8: "EdDSA", -19: "Ed25519", -53: "Ed448", -257: "RS256", -258: "RS384", -259: "RS512", -37: "PS256", -38: "PS384", -39: "PS512"}
 
 
 def get(path):

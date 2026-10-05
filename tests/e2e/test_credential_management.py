@@ -86,8 +86,9 @@ def test_metadata_counts_discoverable_credentials_and_free_space(ctap: Ctap2, ca
     """getCredsMetadata (CTAP 2.3 §6.8.2): existingResidentCredentialsCount
     counts the discoverable credentials, and
     maxPossibleRemainingResidentCredentialsCount is the room left in the store,
-    which only they take up: a non-discoverable credential is sealed into its
-    credential ID and not stored (is_discoverable in
+    including any stored non-discoverable RSA credentials. The ES256
+    non-discoverable credential in this fixture is sealed and consumes no
+    slot (is_discoverable in
     crates/pqkey-ctap/src/ctap/credential_id.rs). getInfo's
     remainingDiscoverableCredentials says the same."""
     discoverable = len(registered) - 1
@@ -185,3 +186,27 @@ def test_an_rp_without_credentials_has_none_to_enumerate(credman):
     with pytest.raises(CtapError) as excinfo:
         credman.enumerate_creds_begin(_rp_id_hash("none.credman.e2e.example"))
     assert excinfo.value.code == CtapError.ERR.NO_CREDENTIALS
+
+
+def test_non_discoverable_rs256_uses_a_slot_but_is_not_managed(ctap: Ctap2, capacity):
+    """RSA credentials are stored with no user entity even when rk is false.
+    They require an allowList and consume room without being discoverable."""
+    credential = client.register(ctap, RP_A, client.RS256, options={"rk": False})
+    assert len(credential.credential_id) == 33 and credential.credential_id[0] == 0
+    assert ctap.send_cbor(Ctap2.CMD.GET_INFO)[0x14] == capacity - 1
+    protocol = PinProtocolV2()
+    pin = ClientPin(ctap, protocol)
+    pin.set_pin(PIN)
+    token = pin.get_pin_token(PIN, ClientPin.PERMISSION.CREDENTIAL_MGMT)
+    management = CredentialManagement(ctap, protocol, token)
+    metadata = management.get_metadata()
+    assert metadata[RESULT.EXISTING_CRED_COUNT] == 0
+    assert metadata[RESULT.MAX_REMAINING_COUNT] == capacity - 1
+    with pytest.raises(CtapError) as error:
+        management.enumerate_rps()
+    assert error.value.code == CtapError.ERR.NO_CREDENTIALS
+    response, _ = client.authenticate(ctap, credential)
+    assert 4 not in response, "non-discoverable assertions contain no user entity"
+    with pytest.raises(CtapError) as error:
+        client.authenticate(ctap, credential, allow_list=False)
+    assert error.value.code == CtapError.ERR.NO_CREDENTIALS
