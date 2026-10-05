@@ -22,7 +22,7 @@ use crate::{
         notification::{NotificationPresence, PROMPT_FILE},
     },
     shutdown::{ShutdownSignal, is_shutdown, ok_if_shutdown},
-    uhid::UhidDevice,
+    transport::HidDevice,
 };
 
 /// Who a newly provisioned attestation certificate names.
@@ -311,7 +311,7 @@ pub fn run(
 /// [`shutdown_error`](crate::shutdown::shutdown_error). `on_ready` runs just
 /// before requests are served.
 pub fn serve_ctap(
-    device: UhidDevice,
+    device: impl HidDevice,
     data: AppData,
     shutdown: ShutdownSignal,
     on_ready: impl FnOnce() -> io::Result<()>,
@@ -349,7 +349,7 @@ pub fn serve_ctap(
 /// and CTAPHID_CANCEL, resynchronisation of the channel and shutdown reach
 /// `presence` through its [`Cancellation`](pqkey_ctap::ctap::presence::Cancellation).
 pub fn serve_ctap_with_presence(
-    device: UhidDevice,
+    device: impl HidDevice,
     data: AppData,
     presence: impl UserPresence + Send + 'static,
     shutdown: ShutdownSignal,
@@ -448,7 +448,12 @@ pub fn parse_aaguid(input: &str) -> Result<[u8; 16], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_support::TempDir, tests::socket_device, uhid, uhid::CTAPHID_FRAME_LEN};
+    use crate::{
+        platform::{Device as UhidDevice, linux::uhid},
+        test_support::TempDir,
+        tests::socket_device,
+        transport::CTAPHID_FRAME_LEN,
+    };
     use ciborium::value::{Integer, Value};
     use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest};
     use pqkey_ctap::{CoseAlg, verify_signature};

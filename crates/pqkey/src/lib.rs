@@ -16,16 +16,15 @@ pub mod shutdown;
 pub mod state;
 pub mod state_lock;
 pub mod transport;
-pub use platform::linux::uhid;
 
 #[cfg(test)]
 mod test_support;
 
+pub use platform::create_device;
+use transport::HidDeviceDescriptor;
 pub use transport::{
-    App, CAPABILITY_CBOR, CAPABILITY_NMSG, MESSAGE_SIZE, UhidTransport, WaitingForUser,
-    create_device, exec, serve,
+    App, CAPABILITY_CBOR, CAPABILITY_NMSG, MESSAGE_SIZE, Transport, WaitingForUser, exec, serve,
 };
-use uhid::HidDeviceDescriptor;
 
 #[cfg(test)]
 pub(crate) use transport::tests;

@@ -27,7 +27,7 @@ use pqkey::transport::ctaphid_host::{
     CONTINUATION_TIMEOUT_MS, CTAP2_ERR_KEEPALIVE_CANCEL, Command, CtaphidHost,
     KEEPALIVE_INTERVAL_MS, MAX_MESSAGE_SIZE,
 };
-use pqkey::uhid::{CTAPHID_FRAME_LEN, CtapHidFrame};
+use pqkey::transport::{CTAPHID_FRAME_LEN, CtapHidFrame};
 
 pub const INIT_DATA: usize = CTAPHID_FRAME_LEN - 7;
 pub const CONT_DATA: usize = CTAPHID_FRAME_LEN - 5;

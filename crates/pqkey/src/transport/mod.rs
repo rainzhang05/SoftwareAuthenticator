@@ -1,4 +1,10 @@
 pub mod ctaphid_host;
+mod device;
+pub(crate) use device::CTAPHID_REPORT_DESCRIPTOR;
+pub use device::{
+    CTAPHID_FRAME_LEN, CtapHidFrame, DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID, HidDevice,
+    HidDeviceDescriptor,
+};
 
 use std::{
     io::{self, Read, Write},
@@ -14,10 +20,6 @@ use std::{
 
 use self::ctaphid_host::{CtaphidHost, MAX_MESSAGE_SIZE, Version};
 use crate::shutdown::ShutdownSignal;
-use crate::{
-    permissions,
-    uhid::{HidDeviceDescriptor, UhidDevice},
-};
 use pqkey_ctap::ctap::{CtapApp, InterruptFlag};
 
 // CTAPHID capability flags (CTAP spec section 11.2.9.1.3)
@@ -171,19 +173,16 @@ fn run_app<'interrupt, A>(
 /// reads packets, answers INIT and PING itself, passes complete requests to
 /// the app, sends keepalives while the app works, passes CTAPHID_CANCEL on to
 /// the app through its interrupt flag, and sends the app's answers.
-pub struct UhidTransport<'interrupt> {
-    device: UhidDevice,
+pub struct Transport<'interrupt, D: HidDevice> {
+    device: D,
     host: CtaphidHost,
     app: AppWorker<'interrupt>,
     waiting: WaitingForUser,
     epoch: Instant,
     shutdown: ShutdownSignal,
-    /// Whether the hidraw node's permissions have been checked, which
-    /// happens once a client first opens the device.
-    node_checked: bool,
 }
 
-impl UhidTransport<'_> {
+impl<D: HidDevice> Transport<'_, D> {
     fn now(&self) -> u64 {
         self.epoch.elapsed().as_millis() as u64
     }
@@ -227,12 +226,6 @@ impl UhidTransport<'_> {
     pub fn poll(&mut self) -> io::Result<bool> {
         self.shutdown.check()?;
         let mut did_work = self.read_frames()?;
-        if !self.node_checked && self.device.take_opened() {
-            self.node_checked = true;
-            if let Ok(nodes) = permissions::hidraw_nodes_for_descriptor(self.device.descriptor()) {
-                permissions::warn_if_world_accessible(&nodes);
-            }
-        }
         // Before anything new goes to the app: an interrupt is only meant for
         // the request the app has now.
         if self.host.take_interrupt() {
@@ -277,21 +270,12 @@ impl UhidTransport<'_> {
 ///
 /// Returns only with an error: [`crate::shutdown::shutdown_error`] once shutdown has
 /// been requested, or whatever made the device or the app fail.
-pub fn serve(transport: &mut UhidTransport<'_>) -> io::Result<()> {
+pub fn serve(transport: &mut Transport<'_, impl HidDevice>) -> io::Result<()> {
     loop {
         if !transport.poll()? {
             transport.wait()?;
         }
     }
-}
-
-/// Create the uhid device.
-///
-/// Its hidraw node appears asynchronously, and udev sets its mode after that,
-/// so whether every user can open it is checked later, once a client first
-/// opens the device (see [`UhidTransport::poll`]).
-pub fn create_device(descriptor: HidDeviceDescriptor) -> io::Result<UhidDevice> {
-    UhidDevice::new(descriptor)
 }
 
 /// Serve CTAPHID on `device` with `app` until the device or the app fails or
@@ -304,8 +288,8 @@ pub fn create_device(descriptor: HidDeviceDescriptor) -> io::Result<UhidDevice> 
 /// working on is cancelled through its interrupt flag, the device is
 /// destroyed, and then the worker is joined: a presence prompt must honour
 /// cancellation for this to return.
-pub fn exec<'interrupt, A>(
-    device: UhidDevice,
+pub fn exec<'interrupt, A, D>(
+    device: D,
     app: &mut A,
     waiting: &WaitingForUser,
     shutdown: ShutdownSignal,
@@ -313,6 +297,7 @@ pub fn exec<'interrupt, A>(
 ) -> io::Result<()>
 where
     A: App<'interrupt> + Send + ?Sized,
+    D: HidDevice,
 {
     let interrupt = app.interrupt();
     let (wake, worker_wake) = UnixStream::pair()?;
@@ -336,7 +321,7 @@ where
         });
         // Setting both capability bits prevents hosts from probing CTAPHID_MSG and enables proper CTAP2 detection
         host.set_capabilities(CAPABILITY_CBOR | CAPABILITY_NMSG);
-        let mut transport = UhidTransport {
+        let mut transport = Transport {
             device,
             host,
             app: AppWorker {
@@ -347,7 +332,6 @@ where
             },
             waiting: waiting.clone(),
             epoch: Instant::now(),
-            node_checked: false,
             shutdown,
         };
 
@@ -365,9 +349,9 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::platform::{Device as UhidDevice, linux::uhid};
     use crate::shutdown::is_shutdown;
     use crate::transport::ctaphid_host::Command;
-    use crate::uhid::{self, CTAPHID_FRAME_LEN};
     use std::os::fd::{AsRawFd, OwnedFd};
 
     /// A uhid device whose descriptor is one end of a socket pair; the other
@@ -565,7 +549,7 @@ pub(crate) mod tests {
         let (_app_responses, responses) = mpsc::channel();
         let (wake, _worker_wake) = UnixStream::pair().unwrap();
         wake.set_nonblocking(true).unwrap();
-        let mut transport = UhidTransport {
+        let mut transport = Transport {
             device,
             host: CtaphidHost::new(),
             app: AppWorker {
@@ -577,7 +561,6 @@ pub(crate) mod tests {
             waiting: WaitingForUser::new(),
             epoch: Instant::now(),
             shutdown: ShutdownSignal::new(),
-            node_checked: false,
         };
 
         let host = thread::spawn(move || {
@@ -613,5 +596,113 @@ pub(crate) mod tests {
         );
         assert_eq!(reports[echo][..4], 0x0A0B_0C0Du32.to_be_bytes());
         assert_eq!(&reports[echo][7..13], b"second");
+    }
+}
+
+#[cfg(test)]
+mod callback_tests {
+    use super::*;
+    use crate::test_support::callback::{self, Event};
+
+    #[test]
+    fn callbacks_wake_a_wait_and_queued_reports_do_not_need_more_wake_bytes() {
+        let (device, peer) = callback::pair();
+        let (other, _writer) = UnixStream::pair().unwrap();
+        thread::scope(|scope| {
+            let sender = scope.spawn(|| {
+                thread::sleep(Duration::from_millis(20));
+                peer.send(&[1; 64]).unwrap();
+                peer.send(&[2; 64]).unwrap();
+            });
+            assert!(
+                device
+                    .wait_with(other.as_fd(), Some(Duration::from_secs(5)))
+                    .unwrap()
+            );
+            sender.join().unwrap();
+        });
+        assert_eq!(device.try_read_frame().unwrap().unwrap().0, [1; 64]);
+        assert!(
+            device
+                .wait_with(other.as_fd(), Some(Duration::ZERO))
+                .unwrap()
+        );
+        assert_eq!(device.try_read_frame().unwrap().unwrap().0, [2; 64]);
+        assert!(device.try_read_frame().unwrap().is_none());
+        drop(device);
+        let reader = peer.try_clone().unwrap();
+        assert!(matches!(reader.read_event().unwrap(), Event::Destroyed));
+    }
+
+    #[test]
+    fn a_callback_device_waits_for_the_worker_and_honours_timeouts() {
+        let (device, _peer) = callback::pair();
+        let (other, mut writer) = UnixStream::pair().unwrap();
+        let start = Instant::now();
+        assert!(
+            !device
+                .wait_with(other.as_fd(), Some(Duration::from_millis(20)))
+                .unwrap()
+        );
+        assert!(start.elapsed() >= Duration::from_millis(20));
+        writer.write_all(&[0]).unwrap();
+        assert!(
+            device
+                .wait_with(other.as_fd(), Some(Duration::from_secs(5)))
+                .unwrap()
+        );
+    }
+
+    struct Echo<'a>(&'a InterruptFlag);
+    impl<'a> App<'a> for Echo<'a> {
+        fn interrupt(&self) -> &'a InterruptFlag {
+            self.0
+        }
+        fn call(&mut self, request: &[u8]) -> Vec<u8> {
+            request.to_vec()
+        }
+    }
+
+    #[test]
+    fn the_transport_serves_callbacks_and_destroys_the_device_on_shutdown() {
+        let (device, peer) = callback::pair();
+        let shutdown = ShutdownSignal::new();
+        let stop = shutdown.clone();
+        let (sender, ready) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let flag = InterruptFlag::new();
+            exec(
+                device,
+                &mut Echo(&flag),
+                &WaitingForUser::new(),
+                shutdown,
+                || {
+                    sender.send(()).unwrap();
+                    Ok(())
+                },
+            )
+        });
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut init = [0; 64];
+        init[..4].copy_from_slice(&u32::MAX.to_be_bytes());
+        init[4] = 0x86;
+        init[6] = 8;
+        init[7..15].copy_from_slice(&[1; 8]);
+        peer.send(&init).unwrap();
+        let answer = peer.receive(Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(&answer[7..15], &[1; 8]);
+        let mut request = [0; 64];
+        request[..4].copy_from_slice(&answer[15..19]);
+        request[4] = 0x90;
+        request[6] = 1;
+        request[7] = 0x42;
+        peer.send(&request).unwrap();
+        let answer = peer.receive(Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(&answer[..8], &request[..8]);
+        stop.request();
+        assert!(crate::shutdown::is_shutdown(
+            &worker.join().unwrap().unwrap_err()
+        ));
+        assert!(matches!(peer.read_event().unwrap(), Event::Destroyed));
     }
 }

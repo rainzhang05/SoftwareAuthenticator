@@ -2,7 +2,7 @@
 //! responses and keepalives back as packets.
 //!
 //! [`CtaphidHost`] is a state machine without I/O, threads or clocks. The
-//! transport ([`crate::UhidTransport`]) feeds it the packets the host sent
+//! transport ([`crate::Transport`]) feeds it the packets the host sent
 //! and the current time, passes the requests it hands out to the app,
 //! reports the app's answers back, and sends the packets it queues.
 //!
@@ -49,7 +49,7 @@ use rand_core::{CryptoRng, UnwrapErr};
 /// The operating system RNG; panics if it fails, as rand 0.8's `OsRng` did.
 type OsRng = UnwrapErr<SysRng>;
 
-use crate::uhid::{CTAPHID_FRAME_LEN, CtapHidFrame};
+use crate::transport::{CTAPHID_FRAME_LEN, CtapHidFrame};
 
 const PACKET_SIZE: usize = CTAPHID_FRAME_LEN;
 const INIT_DATA: usize = PACKET_SIZE - 7;

@@ -8,10 +8,9 @@
 
 use std::{
     io::{self, BufRead, Write},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, atomic::AtomicBool},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use pqkey_ctap::CoseAlg;
@@ -27,8 +26,8 @@ use super::daemon::{self, Running};
 use super::output::{self, errln, outln};
 use crate::client::ctap2::{Authenticator, ClientError, Passkey, PinRetries, Token};
 use crate::client::ctaphid::{ReportLink, STATUS_UPNEEDED};
-use crate::client::hidraw::{self, Hidraw};
 use crate::pin_input::{MIN_PIN_CODE_POINTS, Pin, PinReader, PinSource, validate_pin};
+use crate::platform::{self, ClientLink};
 use crate::presence::dbus::SessionBus;
 use crate::presence::notification::{ConnectError, Keep, NotificationServer, ServerInfo, sanitise};
 use crate::service;
@@ -62,52 +61,25 @@ fn client_error(err: ClientError) -> io::Error {
 }
 
 /// The running key on `state_dir`, through its hidraw node.
-fn connect(state_dir: &Path) -> io::Result<Authenticator<Hidraw>> {
+fn connect(state_dir: &Path) -> io::Result<Authenticator<ClientLink>> {
     let running = daemon::running(state_dir)?.ok_or_else(not_running)?;
     connect_to(running, DEVICE_WAIT).map(|(_, key)| key)
 }
 
 /// The hidraw node of the key `running`, which names its device after its
 /// pid, and a CTAPHID channel to it, waiting up to `wait` for both.
-fn connect_to(running: Running, wait: Duration) -> io::Result<(PathBuf, Authenticator<Hidraw>)> {
+fn connect_to(running: Running, wait: Duration) -> io::Result<(String, Authenticator<ClientLink>)> {
     let (path, link) = open_node(running, wait)?;
     let key = Authenticator::open(link).map_err(client_error)?;
     Ok((path, key))
 }
 
-/// The hidraw node of the key `running`, opened, waiting up to `wait` for
-/// it to appear and for access to it.
-fn open_node(running: Running, wait: Duration) -> io::Result<(PathBuf, Hidraw)> {
-    let pid = running.pid();
-    let uniq = service::device_uniq(pid.as_raw().unsigned_abs());
-    let deadline = Instant::now() + wait;
-    loop {
-        let waited = Instant::now() >= deadline;
-        match hidraw::find_system_node(&uniq)? {
-            Some(path) => match Hidraw::open(&path) {
-                Ok(link) => return Ok((path, link)),
-                // udev has not granted access yet.
-                Err(err) if err.kind() == io::ErrorKind::PermissionDenied && !waited => {}
-                Err(err) => {
-                    return Err(io::Error::new(
-                        err.kind(),
-                        format!(
-                            "cannot open the key's device {}: {err}; `pqkey status` shows why",
-                            path.display()
-                        ),
-                    ));
-                }
-            },
-            None if waited => {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("the key runs (pid {pid}), but its device is missing"),
-                ));
-            }
-            None => {}
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+/// Open the selected platform's client link to this daemon's device.
+fn open_node(running: Running, wait: Duration) -> io::Result<(String, ClientLink)> {
+    platform::open_client(
+        &service::device_uniq(running.pid().as_raw().unsigned_abs()),
+        wait,
+    )
 }
 
 /// Ask `question` on the terminal; only "y" or "yes" is a yes.
@@ -193,12 +165,12 @@ fn show_key(running: Running) -> io::Result<()> {
             return outln!(
                 "Device:   {}, busy with another program's request (a browser waiting for your \
                  approval?)",
-                path.display()
+                path
             );
         }
-        Err(err) => return outln!("Device:   {}, not answering: {err}", path.display()),
+        Err(err) => return outln!("Device:   {}, not answering: {err}", path),
     };
-    outln!("Device:   {}", path.display())?;
+    outln!("Device:   {}", path)?;
     let info = key.info().map_err(client_error)?;
     match info.pin_set {
         Some(true) => {
@@ -225,23 +197,7 @@ pub fn running_problems(
     wait: Duration,
 ) -> Vec<Problem> {
     let mut problems = Vec::new();
-    match open_node(running, wait) {
-        Ok((node, _)) => problems.extend(checks::browser_problems(system, &node, &Ok(()))),
-        Err(err) => match hidraw::find_system_node(&service::device_uniq(
-            running.pid().as_raw().unsigned_abs(),
-        )) {
-            Ok(Some(node)) => {
-                problems.extend(checks::browser_problems(system, &node, &Err(err)));
-            }
-            _ => problems.push(Problem {
-                what: format!(
-                    "the key runs (pid {}), but its device is missing",
-                    running.pid()
-                ),
-                fix: format!("run `{REPLUG}`"),
-            }),
-        },
-    }
+    problems.extend(platform::device_problems(system, running.pid(), wait));
     if asks_with_notifications(state_dir, running) {
         problems.extend(checks::notification_problem(&notification_server()));
     }

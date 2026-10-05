@@ -16,11 +16,11 @@ use pqkey_ctap::store::{CredentialRecord, CredentialStore, FileStore, PrivateKey
 
 use super::ctap2::{Authenticator, ClientError, PinRetries};
 use super::ctaphid::{Report, ReportLink};
+use crate::platform::linux::uhid;
 use crate::presence::PresenceMode;
 use crate::service::{self, AppData};
 use crate::shutdown::ShutdownSignal;
 use crate::test_support::TempDir;
-use crate::uhid;
 
 /// Reports through the kernel's side of a uhid device.
 pub(crate) struct KernelSide(UnixStream);

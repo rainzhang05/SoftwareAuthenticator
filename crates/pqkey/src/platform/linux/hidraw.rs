@@ -5,6 +5,7 @@ use std::{
     io::{self, Read, Write},
     os::fd::AsFd,
     path::{Path, PathBuf},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -14,7 +15,7 @@ use nix::{
 };
 
 use crate::client::ctaphid::{Report, ReportLink};
-use crate::uhid::CTAPHID_FRAME_LEN;
+use crate::transport::CTAPHID_FRAME_LEN;
 
 /// The hidraw node of the HID device whose unique identifier is `uniq`
 /// (`HID_UNIQ` in its uevent), with sysfs's `class/hidraw` at `sys_hidraw`
@@ -95,6 +96,66 @@ impl ReportLink for Hidraw {
         }
         Ok(Some(report))
     }
+}
+
+fn open_node(uniq: &str, wait: Duration) -> io::Result<(PathBuf, Hidraw)> {
+    let pid = uniq.strip_prefix("pqkey-").unwrap_or(uniq);
+    let deadline = Instant::now() + wait;
+    loop {
+        let waited = Instant::now() >= deadline;
+        match find_system_node(uniq)? {
+            Some(path) => match Hidraw::open(&path) {
+                Ok(link) => return Ok((path, link)),
+                // udev has not granted access yet.
+                Err(err) if err.kind() == io::ErrorKind::PermissionDenied && !waited => {}
+                Err(err) => {
+                    return Err(io::Error::new(
+                        err.kind(),
+                        format!(
+                            "cannot open the key's device {}: {err}; `pqkey status` shows why",
+                            path.display()
+                        ),
+                    ));
+                }
+            },
+            None if waited => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("the key runs (pid {pid}), but its device is missing"),
+                ));
+            }
+            None => {}
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Open the daemon's client device, returning its display label and reports.
+pub fn open_client(uniq: &str, wait: Duration) -> io::Result<(String, Hidraw)> {
+    open_node(uniq, wait).map(|(path, link)| (path.display().to_string(), link))
+}
+
+pub(crate) fn device_problems(
+    system: &super::checks::System,
+    pid: nix::unistd::Pid,
+    wait: Duration,
+) -> Vec<super::checks::Problem> {
+    use super::checks::Problem;
+    let uniq = crate::service::device_uniq(pid.as_raw().unsigned_abs());
+    let mut problems = Vec::new();
+    match open_node(&uniq, wait) {
+        Ok((node, _)) => problems.extend(super::checks::browser_problems(system, &node, &Ok(()))),
+        Err(err) => match find_system_node(&uniq) {
+            Ok(Some(node)) => {
+                problems.extend(super::checks::browser_problems(system, &node, &Err(err)));
+            }
+            _ => problems.push(Problem {
+                what: format!("the key runs (pid {}), but its device is missing", pid),
+                fix: "run `pqkey stop && pqkey start`".into(),
+            }),
+        },
+    }
+    problems
 }
 
 #[cfg(test)]

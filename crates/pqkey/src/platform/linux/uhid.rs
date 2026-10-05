@@ -1,3 +1,6 @@
+use crate::transport::{
+    CTAPHID_FRAME_LEN, CTAPHID_REPORT_DESCRIPTOR, CtapHidFrame, HidDevice, HidDeviceDescriptor,
+};
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
@@ -13,76 +16,7 @@ const DEVICE_PATH: &str = "/dev/uhid";
 
 pub(crate) use raw::{UHID_EVENT_SIZE, UHID_EVENT_TYPE_DESTROY};
 
-pub const CTAPHID_FRAME_LEN: usize = 64;
 const BUS_USB: u16 = 0x03;
-
-const CTAPHID_REPORT_DESCRIPTOR: [u8; 34] = [
-    0x06, 0xD0, 0xF1, // Usage Page (FIDO Alliance)
-    0x09, 0x01, // Usage (U2F HID Authenticator)
-    0xA1, 0x01, // Collection (Application)
-    0x09, 0x20, //   Usage (Input Report Data)
-    0x15, 0x00, //   Logical Minimum (0)
-    0x26, 0xFF, 0x00, //   Logical Maximum (255)
-    0x75, 0x08, //   Report Size (8 bits)
-    0x95, 0x40, //   Report Count (64 bytes)
-    0x81, 0x02, //   Input (Data, Variable, Absolute)
-    0x09, 0x21, //   Usage (Output Report Data)
-    0x15, 0x00, //   Logical Minimum (0)
-    0x26, 0xFF, 0x00, //   Logical Maximum (255)
-    0x75, 0x08, //   Report Size (8 bits)
-    0x95, 0x40, //   Report Count (64 bytes)
-    0x91, 0x02, //   Output (Data, Variable, Absolute)
-    0xC0, // End Collection
-];
-/// The USB vendor ID the virtual key reports unless `--vendor-id` says
-/// otherwise: 0x1209, the vendor ID pid.codes shares out to open source
-/// projects.
-pub const DEFAULT_VENDOR_ID: u32 = 0x1209;
-
-/// The USB product ID the virtual key reports unless `--product-id` says
-/// otherwise: 0x0001, the first of pid.codes' test product IDs (0x0001 to
-/// 0x0010 under vendor 0x1209). pid.codes reserves them for private testing,
-/// and they are not unique to this project, a test project that is not
-/// released and so keeps one of them.
-pub const DEFAULT_PRODUCT_ID: u32 = 0x0001;
-
-#[derive(Debug, Clone)]
-pub struct HidDeviceDescriptor {
-    pub name: String,
-    pub vendor_id: u32,
-    pub product_id: u32,
-    pub version: u32,
-    pub country: u32,
-    /// The device's unique identifier (`HID_UNIQ` in sysfs, a USB device's
-    /// serial number), which lets `pqkey` find this daemon's hidraw node.
-    pub uniq: String,
-}
-
-impl Default for HidDeviceDescriptor {
-    fn default() -> Self {
-        Self {
-            name: "Virtual FIDO Authenticator".to_string(),
-            vendor_id: DEFAULT_VENDOR_ID,
-            product_id: DEFAULT_PRODUCT_ID,
-            version: 0x0001,
-            country: 0,
-            uniq: String::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CtapHidFrame(pub [u8; CTAPHID_FRAME_LEN]);
-
-impl CtapHidFrame {
-    pub fn new(data: [u8; CTAPHID_FRAME_LEN]) -> Self {
-        Self(data)
-    }
-
-    pub fn as_bytes(&self) -> &[u8; CTAPHID_FRAME_LEN] {
-        &self.0
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportType {
@@ -133,6 +67,7 @@ pub struct UhidDevice {
     /// Set by a UHID_OPEN event, which the kernel sends once something
     /// opens the device, and cleared by [`Self::take_opened`].
     opened: AtomicBool,
+    node_checked: AtomicBool,
 }
 
 impl UhidDevice {
@@ -159,6 +94,7 @@ impl UhidDevice {
             },
             descriptor,
             opened: AtomicBool::new(false),
+            node_checked: AtomicBool::new(false),
         })
     }
 
@@ -169,24 +105,35 @@ impl UhidDevice {
             inner: UhidInner { fd },
             descriptor,
             opened: AtomicBool::new(false),
+            node_checked: AtomicBool::new(false),
         }
     }
 
     /// Whether a client opened the device since the last call: by then udev
     /// has long applied its rules to the hidraw node, so its mode is final.
+    #[cfg(test)]
     pub fn take_opened(&self) -> bool {
         self.opened.swap(false, Ordering::Relaxed)
     }
+}
 
-    /// The descriptor the device was created with.
-    pub fn descriptor(&self) -> &HidDeviceDescriptor {
-        &self.descriptor
-    }
-
-    pub fn try_read_frame(&self) -> io::Result<Option<CtapHidFrame>> {
+impl HidDevice for UhidDevice {
+    fn try_read_frame(&self) -> io::Result<Option<CtapHidFrame>> {
         loop {
             match self.inner.try_read_event()? {
-                None => return Ok(None),
+                None => {
+                    if !self.node_checked.load(Ordering::Relaxed)
+                        && self.opened.load(Ordering::Relaxed)
+                    {
+                        self.node_checked.store(true, Ordering::Relaxed);
+                        if let Ok(nodes) =
+                            super::permissions::hidraw_nodes_for_descriptor(&self.descriptor)
+                        {
+                            super::permissions::warn_if_world_accessible(&nodes);
+                        }
+                    }
+                    return Ok(None);
+                }
                 Some(event) => match event.type_ {
                     raw::UHID_EVENT_TYPE_OUTPUT => {
                         // SAFETY: every union member is plain integers, valid
@@ -253,13 +200,13 @@ impl UhidDevice {
         }
     }
 
-    pub fn write_frame(&self, frame: &CtapHidFrame) -> io::Result<()> {
+    fn write_frame(&self, frame: &CtapHidFrame) -> io::Result<()> {
         self.inner.send_input_report(frame.as_bytes())
     }
 
     /// Wait until the device or `other` is readable, or `timeout` passes (no
     /// timeout waits indefinitely). Returns whether either became readable.
-    pub fn wait_with(&self, other: BorrowedFd<'_>, timeout: Option<Duration>) -> io::Result<bool> {
+    fn wait_with(&self, other: BorrowedFd<'_>, timeout: Option<Duration>) -> io::Result<bool> {
         self.inner.wait(timeout, other)
     }
 }

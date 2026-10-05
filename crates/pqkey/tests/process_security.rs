@@ -8,7 +8,7 @@ use pqkey::{
     presence::PresenceMode,
     service::{self, AttestationConfig, RunnerConfig},
     shutdown::ShutdownSignal,
-    uhid::HidDeviceDescriptor,
+    transport::HidDeviceDescriptor,
 };
 
 #[test]

@@ -11,8 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::transport::CTAPHID_FRAME_LEN;
 use crate::transport::ctaphid_host::{BROADCAST_CID, Command};
-use crate::uhid::CTAPHID_FRAME_LEN;
 
 /// A 64-byte HID report.
 pub type Report = [u8; CTAPHID_FRAME_LEN];

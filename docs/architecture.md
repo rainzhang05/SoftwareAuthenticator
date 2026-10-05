@@ -61,6 +61,12 @@ live in
 `crates/pqkey/src/platform/linux/`, alongside the boot clock, process
 protections, executable identity and XDG state paths.
 
+The transport uses `HidDevice`: nonblocking output-report reads, input-report
+writes, and `wait_with`, which waits on device readiness and the worker's wake
+socket. A callback device can queue reports and signal a private pipe; it does
+not need to expose a device file descriptor. Dropping the device removes it
+before the transport joins the cancelled worker.
+
 ## What the key supports
 
 - CTAP 2.3, 2.1 and 2.0 over USB HID.

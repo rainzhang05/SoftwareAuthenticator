@@ -529,10 +529,13 @@ mod tests {
     #[test]
     fn the_defaults_name_no_vendor() {
         let config = run_config(&[]).unwrap();
-        assert_eq!(config.descriptor.vendor_id, crate::uhid::DEFAULT_VENDOR_ID);
+        assert_eq!(
+            config.descriptor.vendor_id,
+            crate::transport::DEFAULT_VENDOR_ID
+        );
         assert_eq!(
             config.descriptor.product_id,
-            crate::uhid::DEFAULT_PRODUCT_ID
+            crate::transport::DEFAULT_PRODUCT_ID
         );
         assert_eq!(config.descriptor.name, DEFAULT_NAME);
         assert_eq!(config.state_dir, PathBuf::from("/tmp/state"));
