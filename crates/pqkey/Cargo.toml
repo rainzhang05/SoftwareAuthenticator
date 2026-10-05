@@ -53,3 +53,8 @@ async-io = "2"
 pqkey-ctap = { workspace = true, features = ["test-support"] }
 # Reads the attestation certificate back independently of rcgen, which wrote it.
 x509-parser = "0.18"
+
+# A program of its own: its allocator retains every freed block for scanning.
+[[test]]
+name = "heap_residue"
+harness = false

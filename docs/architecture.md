@@ -138,5 +138,9 @@ documented in `crates/pqkey/src/cli/mod.rs`.
 | End to end | `tests/e2e/`, the release daemon driven by libfido2 and python-fido2 |
 | Fuzzing | `fuzz/`, CTAPHID packets, CTAP requests and request sequences |
 
+The heap residue test in `crates/pqkey/tests/heap_residue.rs` scans retained
+freed blocks after key operations and store roundtrips. Live controls show
+that the scanner can find every secret pattern.
+
 The scripts in `scripts/` run all of them; see the
 [development notes](development-notes.md).

@@ -158,6 +158,9 @@ jobs:
       - name: Stack residue (release)
         run: cargo test --locked --release -p pqkey-mldsa -p pqkey-ctap --test residue
 
+      - name: Heap residue (release)
+        run: cargo test --locked --release -p pqkey --test heap_residue
+
       # Every feature combination of every crate, not just "all on". pqkey-mldsa
       # dispatches per parameter set behind cfg(feature), so a build with one set
       # compiled out is exactly where a silent break would otherwise hide until a

@@ -13,6 +13,10 @@
 //!     print(k.sign(message, padding.PKCS1v15(), h).hex())
 //! ```
 
+#[path = "rsa_private.rs"]
+mod private;
+pub use private::{PrivateValue, PrivateValues, private_values};
+
 /// Stored p || q, two 1024-bit primes, each big-endian.
 pub const PRIMES: [u8; 256] = [
     0xfa, 0x8a, 0x3f, 0x67, 0x2d, 0x67, 0xf4, 0x43, 0xef, 0x4a, 0xbc, 0x58, 0xa5, 0xa1, 0xe7, 0x5b,

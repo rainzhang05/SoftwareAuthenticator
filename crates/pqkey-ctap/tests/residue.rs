@@ -59,7 +59,7 @@ use p256::elliptic_curve::bigint::{
     NonZero, Odd, U1024, U2048,
     modular::{FixedMontyForm, MontyParams},
 };
-use zeroize::Zeroizing;
+use pqkey_ctap::CryptoError;
 
 #[path = "vectors/rsa2048.rs"]
 mod rsa_fixture;
@@ -616,33 +616,14 @@ fn run(
 /// before the engine run wipes and scans the stack. The private exponent uses
 /// Carmichael's lcm(p-1, q-1), as RSA's from_p_q does (RFC 8017 §3.2).
 fn check_rsa(alg: &CoseAlg) -> Vec<String> {
-    let p = Zeroizing::new(U1024::from_be_slice(&rsa_fixture::PRIMES[..128]));
-    let q = Zeroizing::new(U1024::from_be_slice(&rsa_fixture::PRIMES[128..]));
-    let n: U2048 = p.concatenating_mul(&q);
-    let p1 = Zeroizing::new(p.wrapping_sub(&U1024::ONE));
-    let q1 = Zeroizing::new(q.wrapping_sub(&U1024::ONE));
-    let gcd = Zeroizing::new(p1.gcd(&q1));
-    let quotient = Zeroizing::new(*p1 / NonZero::new(*gcd).expect("fixed primes' gcd"));
-    let lambda = Zeroizing::new(quotient.concatenating_mul::<_, { U2048::LIMBS }>(&q1));
-    let d = Zeroizing::new(
-        U2048::from(65537u64)
-            .invert_mod(&NonZero::new(*lambda).expect("lambda"))
-            .expect("fixed RSA exponent is invertible"),
-    );
-    let dp = Zeroizing::new(d.rem(&NonZero::new(p1.resize::<{ U2048::LIMBS }>()).expect("p-1")));
-    let dq = Zeroizing::new(d.rem(&NonZero::new(q1.resize::<{ U2048::LIMBS }>()).expect("q-1")));
-    let qinv = Zeroizing::new(
-        q.invert_mod(&NonZero::new(*p).expect("p"))
-            .expect("fixed primes are coprime"),
-    );
-    let needles = vec![
-        ("p".into(), p.to_be_bytes().to_vec()),
-        ("q".into(), q.to_be_bytes().to_vec()),
-        ("d".into(), d.to_be_bytes().to_vec()),
-        ("dp".into(), dp.to_be_bytes()[128..].to_vec()),
-        ("dq".into(), dq.to_be_bytes()[128..].to_vec()),
-        ("qinv".into(), qinv.to_be_bytes().to_vec()),
-    ];
+    let values: rsa_fixture::PrivateValues =
+        rsa_fixture::private_values(&rsa_fixture::PRIMES).expect("fixed primes");
+    let n = U2048::from_be_slice(&values.modulus);
+    let needles = values
+        .secrets
+        .into_iter()
+        .map(|rsa_fixture::PrivateValue { name, bytes }| (name.into(), bytes.to_vec()))
+        .collect();
     assert_eq!(n.to_be_bytes().as_slice(), rsa_fixture::MODULUS);
     assert_eq!(
         [AUTH_DATA.as_slice(), CLIENT_DATA_HASH.as_slice()].concat(),

@@ -17,6 +17,12 @@ macOS.
 Each script prints one line per step and keeps the full output in
 `target/scripts/`. The top of each script says what it needs.
 
+The heap residue test runs credential generation, reconstruction, signing
+and store roundtrips under the binary's wiping allocator. Its test allocator
+retains freed blocks until they have been scanned, and live controls prove
+that the scan finds each secret pattern. CI and `scripts/check.sh` run it in
+debug and release, as they do the stack residue tests.
+
 ## Running your changes
 
 `./install.sh` rebuilds pqkey and restarts the key with your changes. To

@@ -32,6 +32,8 @@ step "Doctests" cargo test --workspace --locked --doc
 if ! $quick; then
   step "Stack residue tests (release)" \
     cargo test --locked --release -p pqkey-mldsa -p pqkey-ctap --test residue
+  step "Heap residue test (release)" \
+    cargo test --locked --release -p pqkey --test heap_residue
   step "Release build" cargo build --workspace --locked --release
   step "Documentation" sh -c 'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --locked --no-deps --all-features &&
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --locked --no-deps --all-features --document-private-items'
