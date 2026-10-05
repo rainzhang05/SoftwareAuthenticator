@@ -12,7 +12,8 @@
 //! * a new credential's authenticator data carries the RP ID hash of the
 //!   request, the AT flag and a credential ID of the form its "rk" option
 //!   asks for: 33 bytes starting 0x01 for a stored discoverable credential,
-//!   107 bytes starting 0x02 for a sealed non-discoverable one;
+//!   107 bytes starting 0x02 for a sealed non-discoverable one, or 33 bytes
+//!   starting 0x00 for a stored non-discoverable RSA credential;
 //! * getAssertion, getNextAssertion and credential enumeration only return
 //!   credentials this engine created and has not deleted, and getAssertion
 //!   and getNextAssertion only for the RP ID requested; getNextAssertion only
@@ -233,7 +234,17 @@ impl Platform {
                 let (expected_length, marker) = if discoverable {
                     (33, 0x01)
                 } else {
-                    (107, 0x02)
+                    let public_key: Value = ciborium::de::from_reader(&auth_data[55 + length..])
+                        .expect("credential public key");
+                    let Value::Map(public_key) = public_key else {
+                        panic!("credential public key is a map");
+                    };
+                    if matches!(get_int(&public_key, 1), Some(Value::Integer(kty)) if i128::from(*kty) == 3)
+                    {
+                        (33, 0x00)
+                    } else {
+                        (107, 0x02)
+                    }
                 };
                 assert_eq!(length, expected_length, "credential ID length");
                 assert_eq!(auth_data[55], marker, "credential ID marker");

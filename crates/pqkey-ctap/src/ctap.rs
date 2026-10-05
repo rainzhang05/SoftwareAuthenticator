@@ -205,8 +205,8 @@ impl<'interrupt> CtapApp<'interrupt> {
     }
 
     /// Replace the credential key generator, for tests.
-    #[cfg(test)]
-    pub(crate) fn set_key_generator(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_key_generator(
         &mut self,
         generate_key: fn(CoseAlg) -> Result<PrivateKeyMaterial, CryptoError>,
     ) {

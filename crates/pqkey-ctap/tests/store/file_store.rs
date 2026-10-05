@@ -1048,6 +1048,7 @@ fn nothing_is_stored_in_plaintext() {
         let private_key = match &record.private_key {
             PrivateKeyMaterial::P256Scalar { scalar } => scalar.to_vec(),
             PrivateKeyMaterial::Seed { seed } => seed.to_vec(),
+            PrivateKeyMaterial::RsaPrimes { primes } => primes.to_vec(),
         };
         needles.push((label("private key"), private_key));
         // The public key is derived, not stored, so it must not appear either.

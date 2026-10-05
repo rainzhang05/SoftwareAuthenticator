@@ -118,10 +118,10 @@ them, and the udev rules tag the key for the Firefox and Chromium snaps. If
 `pqkey status` says the tag is missing, run `./install.sh`.
 
 **`pqkey passkeys` lists nothing, although sites accepted the key.** It lists
-passkeys, the credentials the key stores. A site that registers it as a second
-factor (`residentKey: "discouraged"`) keeps its credential itself, and so does
-Chromium when the key has no PIN. Those sign-ins work, but the key has nothing
-to list, and their prompt says "Register a security key" instead of "Create a
+passkeys, the discoverable credentials. A site that registers it as a second
+factor (`residentKey: "discouraged"`) must supply its credential ID for assertions, and so does
+Chromium when the key has no PIN. Those sign-ins work, but their credentials are not discoverable
+and are not listed, and their prompt says "Register a security key" instead of "Create a
 passkey".
 
 **Chromium says "Your device can't be used with this site".** Chromium uses a

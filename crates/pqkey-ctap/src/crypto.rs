@@ -29,6 +29,7 @@ pub(crate) mod eddsa_ed448;
 pub(crate) mod hkdf;
 pub(crate) mod mldsa;
 pub(crate) mod pin_uv;
+pub(crate) mod rsa;
 pub(crate) mod scrub;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod verify;

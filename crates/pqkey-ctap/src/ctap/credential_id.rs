@@ -1,6 +1,6 @@
 //! The credential IDs this engine creates and reads: the ID of a
-//! discoverable credential names a stored record, and a non-discoverable
-//! credential is sealed into its own ID; see [`is_discoverable`].
+//! discoverable credential names a stored record; a non-discoverable one
+//! is sealed into its ID if its key fits, otherwise stored; see [`is_discoverable`].
 
 // A new algorithm, key kind or key type must be handled at every match on
 // one: no arm may catch it unseen.
@@ -24,10 +24,14 @@ use zeroize::Zeroizing;
 use crate::ctap::constants::*;
 
 impl CtapApp<'_> {
-    /// A fresh ID for a discoverable credential; see [`is_discoverable`].
-    pub(super) fn new_credential_id(&mut self) -> Vec<u8> {
+    /// A fresh ID for a stored credential, marked with its discoverability; see [`is_discoverable`].
+    pub(super) fn new_credential_id(&mut self, discoverable: bool) -> Vec<u8> {
         let mut credential_id = Vec::with_capacity(CREDENTIAL_ID_LENGTH);
-        credential_id.push(DISCOVERABLE_MARKER);
+        credential_id.push(if discoverable {
+            DISCOVERABLE_MARKER
+        } else {
+            NON_DISCOVERABLE_MARKER
+        });
         credential_id.extend_from_slice(&self.random_array::<32>());
         credential_id
     }
@@ -103,7 +107,7 @@ pub(super) const CREDENTIAL_ID_LENGTH: usize = 33;
 const DISCOVERABLE_MARKER: u8 = 0x01;
 
 /// The first byte of the ID of a stored credential created with "rk" false,
-/// before non-discoverable credentials were sealed into their IDs.
+/// including RSA and older non-discoverable credentials.
 const NON_DISCOVERABLE_MARKER: u8 = 0x00;
 
 /// The first byte of a sealed credential ID.
@@ -116,7 +120,7 @@ const SEALED_MARKER: u8 = 0x02;
 const SEALED_PLAINTEXT_LENGTH: usize = 2 + SEALED_KEY_LENGTH + 32;
 
 /// The length of a sealed ID's private key field, which holds the key
-/// material of any kind.
+/// material of a sealable kind.
 const SEALED_KEY_LENGTH: usize = 32;
 
 // Every algorithm whose key can be sealed fits a sealed ID.  Its identifier is the
@@ -211,7 +215,7 @@ fn sealed_credential(
     if !alg.key_kind().is_sealable() {
         return None;
     }
-    let private_key = PrivateKeyMaterial::from_bytes(alg.key_kind(), key);
+    let private_key = PrivateKeyMaterial::from_bytes(alg.key_kind(), key).ok()?;
     let mut credential = CredentialRecord {
         credential_id: credential_id.to_vec(),
         rp_id: rp_id.to_owned(),
@@ -238,19 +242,22 @@ fn sealed_credential(
 /// "credential IDs MUST be supplied by the Relying Party in
 /// authenticatorGetAssertion's allowList parameter in order for the
 /// authenticator to discover and employ them" (§6.1.3).  Such a credential
-/// needs no state on the authenticator, so its ID carries it:
+/// may carry its key in its ID, or name a stored record:
 ///
 /// * A discoverable credential is a stored record with a
 ///   [`CREDENTIAL_ID_LENGTH`]-byte ID, [`DISCOVERABLE_MARKER`] and 32 random
 ///   bytes.
-/// * A non-discoverable credential is not stored.  Its ID is
+/// * A non-discoverable credential whose key fits is not stored. Its ID is
 ///   [`SEALED_ID_LENGTH`] bytes: [`SEALED_MARKER`], then its algorithm,
 ///   credProtect level, private key and the random seed of its hmac-secret
 ///   CredRandom values, sealed by the store under a key that a reset replaces
 ///   and bound to the relying party.  It has no signature counter of its
 ///   own, and counts on the global one instead.
-/// * Non-discoverable credentials made before they were sealed are stored
-///   records whose ID is [`NON_DISCOVERABLE_MARKER`] and 32 random bytes.
+/// * RSA credentials, whose primes do not fit a sealed ID, and older
+///   non-discoverable credentials are stored records whose ID is [`NON_DISCOVERABLE_MARKER`] and 32 random bytes.
+///   They keep their own counters and random CredRandom values, and RSA
+///   records keep no user ID or names. They take a store slot and reset erases
+///   them, but credential management neither lists nor counts them.
 /// * Any other stored ID, such as the 32 random bytes of credentials created
 ///   before non-discoverable credentials existed, all of which were
 ///   discoverable, is discoverable.

@@ -41,7 +41,8 @@ sensor software cannot press.
 - **Anything running as you, or as root.** It can read the root keys and so
   every private key, or use the key while a prompt is up, or interfere with the
   notification. A single copy of `keys/credential.key` also opens every
-  non-discoverable credential until the next reset.
+  sealed non-discoverable credential until the next reset; RSA credentials
+  require their encrypted stored records as well.
 - **Offline PIN guessing by such an attacker.** The stored PIN hash is an
   unsalted, truncated SHA-256.
 - **Rolling files back.** Integrity is per file, so an older copy of
@@ -51,6 +52,9 @@ sensor software cannot press.
   not a copy used after the original stops.
 - **Reading the daemon's memory.** Secrets are wiped after use as far as Rust
   allows, but the daemon neither locks its memory nor disables core dumps.
+  RSA private arithmetic uses heap allocations beyond stack scrubbing. The
+  pinned rsa crate wipes primes and private exponents, but does not explicitly
+  wipe its CRT inverse or Montgomery parameters on drop.
 
 ### Limits of the prompt
 

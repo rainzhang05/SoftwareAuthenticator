@@ -9,12 +9,13 @@
 
 pqkey shows up in your browser as an ordinary USB security key. A user daemon
 creates a virtual HID device through the kernel's `uhid` driver, so any FIDO2
-client can use it, and every registration, sign-in and reset waits for you to
-approve it in a desktop notification.
+client can use it, and registration, sign-ins that require user presence, and reset
+wait for you to approve them in a desktop notification.
 
 - **Post-quantum:** ML-DSA-44, ML-DSA-65 and ML-DSA-87 credentials (FIPS 204),
-  alongside ECDSA (ES256, ESP256, ES384, ESP384, ES512, ESP512 and ES256K)
-  and EdDSA (EdDSA, Ed25519 and Ed448).
+  alongside ECDSA (ES256, ESP256, ES384, ESP384, ES512, ESP512 and ES256K),
+  EdDSA (EdDSA, Ed25519 and Ed448), and RSA-2048 (RS256, RS384, RS512,
+  PS256, PS384 and PS512).
 - **CTAP 2.3:** PIN (protocols 1 and 2), passkeys with credential management,
   `hmac-secret`, `credProtect`, and packed self-attestation.
 - **Rust throughout:** pure-Rust cryptography, and `unsafe` code only where
@@ -67,12 +68,13 @@ the notification that appears.
 | `pqkey pin` | Sets or changes the PIN |
 | `pqkey passkeys` | Lists the passkeys stored on the key |
 | `pqkey passkeys delete QUERY` | Deletes the passkey whose site, user or ID contains `QUERY` |
-| `pqkey reset` | Erases every passkey and the PIN |
+| `pqkey reset` | Erases every credential and the PIN |
 | `pqkey stop`, `pqkey start` | Unplugs and plugs in the key |
 
 `pqkey passkeys` lists only passkeys, which are discoverable credentials. A
-site that registers the key as a second factor keeps that credential itself:
-signing in works, but the key stores nothing it could list. The prompt makes
+site that registers the key as a second factor must supply its credential ID
+when signing in. Those credentials are sealed into their IDs, or stored for
+RSA-2048, and are never listed by credential management. The prompt makes
 the difference clear, saying "Create a passkey" or "Register a security key".
 Like a hardware key, pqkey accepts a reset only within 10 seconds of being
 plugged in, so `pqkey reset` restarts it first. The key's state lives in

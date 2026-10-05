@@ -111,7 +111,7 @@ impl CtapApp<'_> {
 
         // remainingDiscoverableCredentials: the free slots of the store,
         // which holds the discoverable credentials (and non-discoverable ones
-        // made before they were sealed into their IDs); a record's size does
+        // with RSA keys or made before sealing); a record's size does
         // not matter to it.  Omitted rather than failing getInfo if the store
         // cannot be counted.
         if let Some(remaining) = self.remaining_credential_slots() {

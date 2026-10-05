@@ -1,6 +1,6 @@
 //! Discoverable and non-discoverable credentials (CTAP 2.3 §6.1.2 steps 17
 //! and 18, §6.1.3): discoverable ones are stored, non-discoverable ones are
-//! sealed into their credential ID.
+//! sealed into their credential ID when their key fits, otherwise stored.
 
 use super::support::{
     NEVER_INTERRUPTED, TestApp, TestStore, app_with_store, created_credential, encode,
@@ -155,13 +155,16 @@ fn a_discoverable_registration_replaces_only_discoverable_credentials() {
     assert!(assertion_with_allow_list(&mut app, &server_side).is_ok());
 }
 
-/// A non-discoverable credential is sealed into its ID: nothing is stored,
+/// A non-discoverable credential with a sealable key is sealed into its ID: nothing is stored,
 /// and the ID holds its algorithm, credProtect level, private key and the
 /// random seed of its hmac-secret CredRandom values, sealed for its relying
 /// party.
 #[test]
 fn a_non_discoverable_credential_is_sealed_into_its_id() {
-    for alg in CoseAlg::ALL {
+    for alg in CoseAlg::ALL
+        .into_iter()
+        .filter(|alg| alg.key_kind().is_sealable())
+    {
         let mut app = test_app([0x66; 16]);
         let entries = vec![
             (int(1), Value::Bytes(vec![0x11; 32])),
@@ -199,6 +202,7 @@ fn a_non_discoverable_credential_is_sealed_into_its_id() {
         let key = match &credential.private_key {
             PrivateKeyMaterial::P256Scalar { scalar } => scalar,
             PrivateKeyMaterial::Seed { seed } => seed,
+            PrivateKeyMaterial::RsaPrimes { .. } => panic!("this test covers sealable keys"),
         };
         assert_eq!(plaintext.len(), 66);
         assert_eq!(plaintext[0], alg.identifier() as i8 as u8, "{alg:?}");
@@ -344,7 +348,7 @@ fn a_sealed_assertion_is_signed_only_once_its_count_is_saved() {
     }
 }
 
-/// Non-discoverable registrations need no room in the store, so they go on
+/// Sealed non-discoverable registrations need no room in the store, so they go on
 /// when it is full, while discoverable ones are refused.
 #[test]
 fn a_full_store_still_registers_non_discoverable_credentials() {
@@ -502,4 +506,242 @@ fn sealed_cred_randoms_match_an_independent_implementation() {
         hex(&credential.cred_random_without_uv),
         "35c71b7c676af00fa30f0753765261e11437dbe692c4683e6016b6f49bf795ae"
     );
+}
+
+/// RSA's large key requires a stored credential even when rk is false.
+fn rsa_request(alg: CoseAlg, discoverable: bool, exclude: Option<&[u8]>) -> Vec<u8> {
+    let mut entries = vec![
+        (int(1), Value::Bytes(vec![0x11; 32])),
+        (int(2), canonical_map(vec![(text("id"), text(RP_ID))])),
+        (
+            int(3),
+            canonical_map(vec![
+                (text("id"), Value::Bytes(vec![1])),
+                (text("name"), text("alice")),
+                (text("displayName"), text("Alice")),
+            ]),
+        ),
+        (
+            int(4),
+            Value::Array(vec![canonical_map(vec![
+                (text("type"), text("public-key")),
+                (text("alg"), int(i64::from(alg.identifier()))),
+            ])]),
+        ),
+        (int(6), canonical_map(vec![(text("credProtect"), int(2))])),
+        (int(7), rk(discoverable).expect("options")),
+    ];
+    if let Some(id) = exclude {
+        entries.push((
+            int(5),
+            Value::Array(vec![canonical_map(vec![
+                (text("type"), text("public-key")),
+                (text("id"), Value::Bytes(id.to_vec())),
+            ])]),
+        ));
+    }
+    encode(&canonical_map(entries))
+}
+
+fn use_fixed_rsa_key(app: &mut TestApp) {
+    app.set_key_generator(|alg| match alg.key_kind() {
+        crate::KeyKind::RsaPrimes => Ok(PrivateKeyMaterial::RsaPrimes {
+            primes: crate::rsa_fixture::PRIMES,
+        }),
+        crate::KeyKind::P256Scalar | crate::KeyKind::Seed => PrivateKeyMaterial::try_generate(alg),
+    });
+}
+
+#[test]
+fn non_discoverable_rsa_is_stored_hidden_counted_excluded_and_reset() {
+    for alg in [
+        CoseAlg::RS256,
+        CoseAlg::RS384,
+        CoseAlg::RS512,
+        CoseAlg::PS256,
+        CoseAlg::PS384,
+        CoseAlg::PS512,
+    ] {
+        let mut app = test_app([0x76; 16]);
+        use_fixed_rsa_key(&mut app);
+        let response = app
+            .handle_make_credential(&rsa_request(alg, false, None))
+            .expect("register RSA");
+        let credential = created_credential(&app, &response, RP_ID);
+        let id = credential.credential_id.clone();
+        assert_eq!(id.len(), 33);
+        assert_eq!(id[0], 0);
+        assert!(!is_discoverable(&id) && !is_sealed(&id));
+        assert_eq!(app.store.count().expect("count"), 1);
+        assert!(credential.user_id.is_empty());
+        assert!(credential.user_name.is_none() && credential.user_display_name.is_none());
+        assert_ne!(credential.cred_random_with_uv, [0; 32]);
+        assert_ne!(credential.cred_random_without_uv, [0; 32]);
+        assert_ne!(
+            credential.cred_random_with_uv,
+            credential.cred_random_without_uv
+        );
+        assert_eq!(credential.cred_protect, 2);
+        assert_eq!(credential.sign_count, 0);
+        let response = assertion_with_allow_list(&mut app, &id).expect("assertion");
+        let Value::Map(map) = from_reader(&response[1..]).expect("map") else {
+            panic!("map");
+        };
+        assert!(
+            !map.iter().any(|(label, _)| *label == int(4)),
+            "no user entity"
+        );
+        assert_eq!(
+            app.store
+                .get(&id)
+                .expect("read")
+                .expect("stored")
+                .sign_count,
+            1
+        );
+        assert_eq!(app.store.signature_counter().expect("global counter"), 0);
+        assert_eq!(
+            discoverable_assertion(&mut app),
+            Err(CTAP2_ERR_NO_CREDENTIALS)
+        );
+        assert_eq!(
+            app.handle_make_credential(&rsa_request(alg, false, Some(&id))),
+            Err(CTAP2_ERR_CREDENTIAL_EXCLUDED)
+        );
+        let token = [0x77; 32];
+        install_pin_uv_auth_token(
+            &mut app,
+            ClassicPinProtocol::V2,
+            token,
+            PIN_PERMISSION_CM,
+            None,
+        );
+        let request = canonical_map(vec![
+            (int(1), int(1)),
+            (int(3), int(2)),
+            (
+                int(4),
+                Value::Bytes(token_pin_auth(ClassicPinProtocol::V2, &token, &[1])),
+            ),
+        ]);
+        let response = app
+            .handle_credential_management(&encode(&request))
+            .expect("metadata");
+        let Value::Map(map) = from_reader(&response[1..]).expect("map") else {
+            panic!("map");
+        };
+        assert!(
+            map.contains(&(int(1), int(0))),
+            "existing discoverable count"
+        );
+        assert!(
+            map.contains(&(int(2), int((app.store.max_credentials() - 1) as i64))),
+            "remaining slots"
+        );
+        let begin = canonical_map(vec![
+            (int(1), int(2)),
+            (int(3), int(2)),
+            (
+                int(4),
+                Value::Bytes(token_pin_auth(ClassicPinProtocol::V2, &token, &[2])),
+            ),
+        ]);
+        assert_eq!(
+            app.handle_credential_management(&encode(&begin)),
+            Err(CTAP2_ERR_NO_CREDENTIALS)
+        );
+        let Value::Map(info) =
+            from_reader(&app.handle_get_info().expect("getInfo")[1..]).expect("getInfo")
+        else {
+            panic!("map");
+        };
+        assert!(info.contains(&(int(0x14), int((app.store.max_credentials() - 1) as i64))));
+        assert_eq!(app.handle_reset(), Ok(vec![CTAP2_OK]));
+        assert_eq!(app.store.count().expect("count"), 0);
+        assert_eq!(
+            assertion_with_allow_list(&mut app, &id),
+            Err(CTAP2_ERR_NO_CREDENTIALS)
+        );
+    }
+}
+
+#[test]
+fn full_store_refuses_non_discoverable_rsa_without_replacing_a_passkey() {
+    let (mut app, _) = app_with_store(
+        TestStore::with_max_credentials(1),
+        [0x78; 16],
+        [],
+        &NEVER_INTERRUPTED,
+    );
+    use_fixed_rsa_key(&mut app);
+    let mut original = es256_credential(RP_ID, &[0x01; 33]);
+    original.user_id.clear();
+    app.store.put(&original).expect("store passkey");
+    let original = app
+        .store
+        .get(&original.credential_id)
+        .expect("read")
+        .expect("stored");
+    for alg in [
+        CoseAlg::RS256,
+        CoseAlg::RS384,
+        CoseAlg::RS512,
+        CoseAlg::PS256,
+        CoseAlg::PS384,
+        CoseAlg::PS512,
+    ] {
+        assert_eq!(
+            app.handle_make_credential(&rsa_request(alg, false, None)),
+            Err(CTAP2_ERR_KEY_STORE_FULL)
+        );
+        assert_eq!(
+            app.store.get(&original.credential_id).expect("read"),
+            Some(original.clone())
+        );
+        assert_eq!(app.store.count().expect("count"), 1);
+    }
+}
+
+#[test]
+fn discoverable_rsa_keeps_its_user_and_is_found_without_an_allow_list() {
+    let mut app = test_app([0x79; 16]);
+    use_fixed_rsa_key(&mut app);
+    let Value::Map(mut request) =
+        from_reader(rsa_request(CoseAlg::RS256, true, None).as_slice()).expect("request")
+    else {
+        panic!("map");
+    };
+    request.retain(|(label, _)| *label != int(6));
+    let response = app
+        .handle_make_credential(&encode(&canonical_map(request)))
+        .expect("register");
+    let credential = created_credential(&app, &response, RP_ID);
+    assert_eq!(credential.credential_id.len(), 33);
+    assert_eq!(credential.credential_id[0], 1);
+    assert_eq!(credential.user_id, [1]);
+    assert_eq!(credential.user_name.as_deref(), Some("alice"));
+    assert_eq!(credential.user_display_name.as_deref(), Some("Alice"));
+    assert!(discoverable_assertion(&mut app).is_ok());
+}
+
+#[test]
+fn rsa_randomness_failure_fails_registration_without_storing_a_record() {
+    for alg in [
+        CoseAlg::RS256,
+        CoseAlg::RS384,
+        CoseAlg::RS512,
+        CoseAlg::PS256,
+        CoseAlg::PS384,
+        CoseAlg::PS512,
+    ] {
+        for rk in [false, true] {
+            let mut app = test_app([0x7a; 16]);
+            app.set_key_generator(|_| Err(crate::CryptoError::Randomness));
+            assert_eq!(
+                app.handle_make_credential(&rsa_request(alg, rk, None)),
+                Err(CTAP1_ERR_OTHER)
+            );
+            assert_eq!(app.store.count().expect("count"), 0);
+        }
+    }
 }

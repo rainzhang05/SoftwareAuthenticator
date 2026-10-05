@@ -47,12 +47,17 @@ use crate::{
 /// Ed25519 is its 32-byte RFC 8032 private key, a seed by nature: random
 /// bytes that each use hashes into the secret scalar (§5.1.5).  One on Ed448
 /// is a 32-byte seed from which each use derives its 57-byte private key with
-/// SHAKE256.
+/// SHAKE256. RSA keeps its two 1024-bit primes, 256 bytes in total.
+/// Each read reconstructs n, d and the CRT values, with e = 65537.
 ///
 /// The public key is never stored: [`CredentialRecord::cose_public_key`]
 /// derives it from this material, so a record cannot carry a public key that
 /// disagrees with its secret.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "keep the fixed RSA prime bytes inline and zeroize the entire material on drop"
+)]
 pub enum PrivateKeyMaterial {
     /// A P-256 private scalar, big-endian ([`KeyKind::P256Scalar`]).
     P256Scalar {
@@ -68,6 +73,11 @@ pub enum PrivateKeyMaterial {
     Seed {
         /// The seed.
         seed: [u8; 32],
+    },
+    /// RSA-2048 primes, with e = 65537 implicit ([`KeyKind::RsaPrimes`]).
+    RsaPrimes {
+        /// p || q, each prime exactly 128 big-endian bytes.
+        primes: [u8; 256],
     },
 }
 
@@ -95,6 +105,7 @@ impl PrivateKeyMaterial {
         match self {
             Self::P256Scalar { scalar } => Some(SealableKeyMaterial(*scalar)),
             Self::Seed { seed } => Some(SealableKeyMaterial(*seed)),
+            Self::RsaPrimes { .. } => None,
         }
     }
 
@@ -112,20 +123,19 @@ impl PrivateKeyMaterial {
     /// Fails with [`CryptoError::Randomness`] if the generator fails, so a
     /// registration fails instead of the process.
     pub fn try_generate(alg: CoseAlg) -> Result<Self, CryptoError> {
-        crate::crypto::scrub::with_scrubbed_stack(|| {
-            Self::try_generate_from_rng(alg, &mut getrandom::SysRng)
-                .map_err(|_| CryptoError::Randomness)
-        })
+        Self::try_generate_from_rng(alg, &mut getrandom::SysRng)
     }
 
     /// [`Self::try_generate`] with `rng` as the random number generator.
     pub fn try_generate_from_rng<R: TryCryptoRng + ?Sized>(
         alg: CoseAlg,
         rng: &mut R,
-    ) -> Result<Self, R::Error> {
-        let kind = alg.key_kind();
-        let key = try_generate_key(kind, rng)?;
-        Ok(Self::from_bytes(kind, &key))
+    ) -> Result<Self, CryptoError> {
+        crate::crypto::scrub::with_scrubbed_stack(|| {
+            let kind = alg.key_kind();
+            let key = try_generate_key(kind, rng)?;
+            Self::from_bytes(kind, &key)
+        })
     }
 
     /// [`Self::try_generate`] for tests and tools that cannot go on without a
@@ -133,10 +143,10 @@ impl PrivateKeyMaterial {
     ///
     /// # Panics
     ///
-    /// Panics if the operating system's random number generator fails.
+    /// Panics if key generation fails.
     #[must_use]
     pub fn generate(alg: CoseAlg) -> Self {
-        Self::try_generate(alg).expect("the operating system's random number generator failed")
+        Self::try_generate(alg).expect("credential key generation failed")
     }
 
     /// The kind of key material this is.
@@ -144,24 +154,33 @@ impl PrivateKeyMaterial {
         match self {
             PrivateKeyMaterial::P256Scalar { .. } => KeyKind::P256Scalar,
             PrivateKeyMaterial::Seed { .. } => KeyKind::Seed,
+            PrivateKeyMaterial::RsaPrimes { .. } => KeyKind::RsaPrimes,
         }
     }
 
     /// Key material of `kind` holding `bytes`.  The bytes are not checked
     /// here: an out-of-range P-256 scalar is found where a record is
     /// validated.
-    pub(crate) fn from_bytes(kind: KeyKind, bytes: &[u8; 32]) -> Self {
+    pub(crate) fn from_bytes(kind: KeyKind, bytes: &[u8]) -> Result<Self, CryptoError> {
         match kind {
-            KeyKind::P256Scalar => PrivateKeyMaterial::P256Scalar { scalar: *bytes },
-            KeyKind::Seed => PrivateKeyMaterial::Seed { seed: *bytes },
+            KeyKind::P256Scalar => Ok(Self::P256Scalar {
+                scalar: bytes.try_into().map_err(|_| CryptoError::InvalidKey)?,
+            }),
+            KeyKind::Seed => Ok(Self::Seed {
+                seed: bytes.try_into().map_err(|_| CryptoError::InvalidKey)?,
+            }),
+            KeyKind::RsaPrimes => Ok(Self::RsaPrimes {
+                primes: bytes.try_into().map_err(|_| CryptoError::InvalidKey)?,
+            }),
         }
     }
 
     /// The key bytes, whatever their kind.
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         match self {
-            PrivateKeyMaterial::P256Scalar { scalar } => scalar,
-            PrivateKeyMaterial::Seed { seed } => seed,
+            Self::P256Scalar { scalar } => scalar,
+            Self::Seed { seed } => seed,
+            Self::RsaPrimes { primes } => primes,
         }
     }
 }
@@ -169,7 +188,7 @@ impl PrivateKeyMaterial {
 /// Constant-time with respect to the key bytes.
 impl PartialEq for PrivateKeyMaterial {
     fn eq(&self, other: &Self) -> bool {
-        self.kind() == other.kind() && bool::from(self.as_bytes()[..].ct_eq(&other.as_bytes()[..]))
+        self.kind() == other.kind() && bool::from(self.as_bytes().ct_eq(other.as_bytes()))
     }
 }
 
@@ -186,6 +205,10 @@ impl fmt::Debug for PrivateKeyMaterial {
             PrivateKeyMaterial::Seed { .. } => {
                 f.debug_struct("Seed").field("seed", &Redacted).finish()
             }
+            PrivateKeyMaterial::RsaPrimes { .. } => f
+                .debug_struct("RsaPrimes")
+                .field("primes", &Redacted)
+                .finish(),
         }
     }
 }
@@ -256,7 +279,8 @@ impl CredentialRecord {
     ///
     /// Returns [`CryptoError::KeyTypeMismatch`] when `alg` and the key material
     /// disagree, and [`CryptoError::InvalidKey`] for an out-of-range P-256
-    /// scalar.  Records loaded from a store have already been checked for both.
+    /// scalar or malformed RSA primes. Records loaded from a store have
+    /// already been checked for both.
     pub fn keypair(&self) -> Result<(CredentialSecretKey, Vec<u8>), CryptoError> {
         let secret = self.secret_key()?;
         let public_key = try_cose_public_key(self.alg, &secret)?;
@@ -560,7 +584,18 @@ mod tests {
             assert_eq!(material.kind(), alg.key_kind(), "{alg:?}");
             for other in CoseAlg::ALL {
                 let p256 = |alg| matches!(alg, CoseAlg::ES256 | CoseAlg::ESP256);
-                let same_family = p256(alg) == p256(other);
+                let rsa = |alg| {
+                    matches!(
+                        alg,
+                        CoseAlg::RS256
+                            | CoseAlg::RS384
+                            | CoseAlg::RS512
+                            | CoseAlg::PS256
+                            | CoseAlg::PS384
+                            | CoseAlg::PS512
+                    )
+                };
+                let same_family = p256(alg) == p256(other) && rsa(alg) == rsa(other);
                 assert_eq!(
                     material.kind() == other.key_kind(),
                     same_family,
@@ -572,6 +607,9 @@ mod tests {
                     assert!(p256::SecretKey::from_slice(scalar).is_ok());
                 }
                 PrivateKeyMaterial::Seed { .. } => {}
+                PrivateKeyMaterial::RsaPrimes { primes } => {
+                    assert!(crate::crypto::rsa::signing_key(primes).is_ok());
+                }
             }
         }
         assert_ne!(
@@ -605,7 +643,7 @@ mod tests {
         for alg in CoseAlg::ALL {
             let param_set = match alg.scheme() {
                 Scheme::MlDsa(param_set) => param_set,
-                Scheme::Ecdsa(_) | Scheme::EdDsa(_) => continue,
+                Scheme::Ecdsa(_) | Scheme::EdDsa(_) | Scheme::Rsa(_, _) => continue,
             };
             let record = record(alg);
             let PrivateKeyMaterial::Seed { seed } = &record.private_key else {

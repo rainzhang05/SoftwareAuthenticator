@@ -13,7 +13,7 @@ use super::ecdsa::Curve;
 use super::eddsa::EdwardsCurve;
 use super::scrub::with_scrubbed_stack;
 use super::{
-    ecdsa_p256, ecdsa_p384, ecdsa_p521, ecdsa_secp256k1, eddsa_ed448, eddsa_ed25519, mldsa,
+    ecdsa_p256, ecdsa_p384, ecdsa_p521, ecdsa_secp256k1, eddsa_ed448, eddsa_ed25519, mldsa, rsa,
 };
 
 /// A credential's signing key, named by its key type: algorithms that share
@@ -46,6 +46,8 @@ pub enum CredentialSecretKey {
     /// is derived from, the form stored credentials use: Ed448.  Each use
     /// derives the private key anew.
     Ed448(Seed),
+    /// RSA-2048, reconstructed from its primes with e = 65537.
+    Rsa(::rsa::RsaPrivateKey),
 }
 
 impl CredentialSecretKey {
@@ -62,6 +64,7 @@ impl CredentialSecretKey {
             | CredentialSecretKey::Secp256k1(seed)
             | CredentialSecretKey::Ed25519(seed)
             | CredentialSecretKey::Ed448(seed) => Zeroizing::new(seed.as_bytes().to_vec()),
+            CredentialSecretKey::Rsa(key) => rsa::secret_bytes(key),
             CredentialSecretKey::P256(sk) => {
                 let mut scalar = sk.to_bytes();
                 let out = Zeroizing::new(scalar.to_vec());
@@ -112,17 +115,22 @@ fn seed(bytes: &[u8]) -> Result<Seed, CryptoError> {
 }
 
 /// Fresh key material of `kind` from `rng`: a P-256 scalar, or 32 random
-/// bytes.
+/// bytes, or RSA-2048 primes.
 pub(crate) fn try_generate_key<R: TryCryptoRng + ?Sized>(
     kind: KeyKind,
     rng: &mut R,
-) -> Result<Zeroizing<[u8; 32]>, R::Error> {
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     let mut key = Zeroizing::new([0u8; 32]);
     match kind {
-        KeyKind::P256Scalar => ecdsa_p256::generate_scalar(rng, &mut key)?,
-        KeyKind::Seed => rng.try_fill_bytes(&mut key[..])?,
+        KeyKind::P256Scalar => {
+            ecdsa_p256::generate_scalar(rng, &mut key).map_err(|_| CryptoError::Randomness)?
+        }
+        KeyKind::Seed => rng
+            .try_fill_bytes(&mut key[..])
+            .map_err(|_| CryptoError::Randomness)?,
+        KeyKind::RsaPrimes => return rsa::generate(rng),
     }
-    Ok(key)
+    Ok(Zeroizing::new(key.to_vec()))
 }
 
 /// Reconstruct a credential secret key from stored bytes.
@@ -136,7 +144,7 @@ pub(crate) fn try_generate_key<R: TryCryptoRng + ?Sized>(
 ///
 /// Returns [`CryptoError::InvalidKey`] when the bytes are not a valid key for
 /// the requested algorithm: a P-256 scalar (non-zero and below the group
-/// order) or a 32-byte seed.
+/// order), a 32-byte seed, or two valid RSA-2048 primes.
 pub fn try_credential_secret_from_bytes(
     alg: CoseAlg,
     bytes: &[u8],
@@ -149,6 +157,7 @@ pub fn try_credential_secret_from_bytes(
         Scheme::EdDsa(EdwardsCurve::Ed25519) => seed(bytes).map(CredentialSecretKey::Ed25519),
         Scheme::EdDsa(EdwardsCurve::Ed448) => seed(bytes).map(CredentialSecretKey::Ed448),
         Scheme::MlDsa(_) => seed(bytes).map(CredentialSecretKey::MlDsa),
+        Scheme::Rsa(_, _) => rsa::signing_key(bytes).map(CredentialSecretKey::Rsa),
     })
 }
 
@@ -181,6 +190,7 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
         (CredentialSecretKey::MlDsa(seed), Scheme::MlDsa(param_set)) => {
             mldsa::cose_public_key(alg, param_set, seed)
         }
+        (CredentialSecretKey::Rsa(key), Scheme::Rsa(_, _)) => rsa::cose_public_key(alg, key),
         // `alg` signs with another type of key.
         (
             CredentialSecretKey::P256(_)
@@ -189,8 +199,9 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
             | CredentialSecretKey::Secp256k1(_)
             | CredentialSecretKey::Ed25519(_)
             | CredentialSecretKey::Ed448(_)
-            | CredentialSecretKey::MlDsa(_),
-            Scheme::Ecdsa(_) | Scheme::EdDsa(_) | Scheme::MlDsa(_),
+            | CredentialSecretKey::MlDsa(_)
+            | CredentialSecretKey::Rsa(_),
+            Scheme::Ecdsa(_) | Scheme::EdDsa(_) | Scheme::MlDsa(_) | Scheme::Rsa(_, _),
         ) => Err(CryptoError::KeyTypeMismatch),
     }
 }
@@ -208,6 +219,8 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
 ///   encoding the signature value.", RFC 9053 §2.2).
 /// * **Ed448**: pure Ed448 (RFC 8032 §5.2) with an empty context, as the
 ///   114-byte signature RFC 8032 encodes.
+/// * **RS256/384/512** and **PS256/384/512**: raw RSA-2048 signatures,
+///   with PKCS#1 v1.5 and PSS respectively (RFC 8017 §8).
 /// * **ML-DSA-44/65/87**: the raw FIPS 204 signature bytes.
 ///
 /// Returns [`CryptoError::KeyTypeMismatch`] when `alg` signs with another
@@ -242,6 +255,9 @@ pub fn try_sign_challenge(
         (CredentialSecretKey::MlDsa(seed), Scheme::MlDsa(param_set)) => {
             mldsa::sign(param_set, seed, &msg)
         }
+        (CredentialSecretKey::Rsa(key), Scheme::Rsa(padding, hash)) => {
+            rsa::sign(key, padding, hash, &msg)
+        }
         // `alg` signs with another type of key.
         (
             CredentialSecretKey::P256(_)
@@ -250,8 +266,9 @@ pub fn try_sign_challenge(
             | CredentialSecretKey::Secp256k1(_)
             | CredentialSecretKey::Ed25519(_)
             | CredentialSecretKey::Ed448(_)
-            | CredentialSecretKey::MlDsa(_),
-            Scheme::Ecdsa(_) | Scheme::EdDsa(_) | Scheme::MlDsa(_),
+            | CredentialSecretKey::MlDsa(_)
+            | CredentialSecretKey::Rsa(_),
+            Scheme::Ecdsa(_) | Scheme::EdDsa(_) | Scheme::MlDsa(_) | Scheme::Rsa(_, _),
         ) => Err(CryptoError::KeyTypeMismatch),
     }
 }
@@ -321,7 +338,7 @@ mod tests {
         for alg in CoseAlg::ALL {
             let ps = match alg.scheme() {
                 Scheme::MlDsa(ps) => ps,
-                Scheme::Ecdsa(_) | Scheme::EdDsa(_) => continue,
+                Scheme::Ecdsa(_) | Scheme::EdDsa(_) | Scheme::Rsa(_, _) => continue,
             };
             let seed = [0x3c; SEED_LEN];
             let (pk, _) = pqkey_mldsa::try_keypair_from_seed(ps, &seed).expect("keygen");
@@ -558,7 +575,7 @@ mod tests {
         for alg in CoseAlg::ALL {
             match alg.key_kind() {
                 KeyKind::Seed => {}
-                KeyKind::P256Scalar => continue,
+                KeyKind::P256Scalar | KeyKind::RsaPrimes => continue,
             }
             for len in [0, 7, SEED_LEN - 1, SEED_LEN + 1, 2560] {
                 assert_eq!(

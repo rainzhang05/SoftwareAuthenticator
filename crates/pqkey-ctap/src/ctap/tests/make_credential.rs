@@ -622,11 +622,20 @@ fn make_credential_chooses_the_first_supported_algorithm_in_rp_order() {
             CoseAlg::MLDSA65,
         ),
         (
-            vec![public_key(-257), public_key(-7), public_key(-50)],
+            vec![public_key(-65535), public_key(-7), public_key(-50)],
             CoseAlg::ES256,
         ),
         (vec![public_key(-50), public_key(-7)], CoseAlg::MLDSA87),
         (vec![public_key(-8), public_key(-7)], CoseAlg::EdDSA),
+        (vec![public_key(-257)], CoseAlg::RS256),
+        (vec![public_key(-258)], CoseAlg::RS384),
+        (vec![public_key(-259)], CoseAlg::RS512),
+        (vec![public_key(-37)], CoseAlg::PS256),
+        (vec![public_key(-38)], CoseAlg::PS384),
+        (vec![public_key(-39)], CoseAlg::PS512),
+        (vec![public_key(-257), public_key(-7)], CoseAlg::RS256),
+        (vec![public_key(-7), public_key(-257)], CoseAlg::ES256),
+        (vec![public_key(-37), public_key(-257)], CoseAlg::PS256),
     ] {
         let mut app = new_app(TestStore::new(), [0x71; 16]);
         let response = app

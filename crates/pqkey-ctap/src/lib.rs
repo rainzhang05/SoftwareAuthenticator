@@ -12,6 +12,10 @@
 mod crypto;
 pub mod ctap;
 pub mod platform;
+/// Fixed RSA known answers shared by tests and fuzz harnesses.
+#[cfg(any(test, feature = "test-support"))]
+#[path = "../tests/vectors/rsa2048.rs"]
+pub mod rsa_fixture;
 pub mod store;
 
 pub use crypto::CryptoError;

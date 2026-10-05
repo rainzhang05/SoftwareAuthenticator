@@ -76,7 +76,9 @@ pub fn attestation_record(certificates: &[usize]) -> AttestationRecord {
     AttestationRecord {
         private_key: match PrivateKeyMaterial::generate(CoseAlg::ES256) {
             PrivateKeyMaterial::P256Scalar { scalar } => scalar,
-            PrivateKeyMaterial::Seed { .. } => unreachable!(),
+            PrivateKeyMaterial::Seed { .. } | PrivateKeyMaterial::RsaPrimes { .. } => {
+                unreachable!()
+            }
         },
         certificate_chain: certificates
             .iter()

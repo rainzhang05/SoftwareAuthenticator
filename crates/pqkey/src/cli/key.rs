@@ -541,8 +541,8 @@ pub fn delete_passkey(state_dir: &Path, query: &str, yes: bool) -> io::Result<()
 }
 
 /// Why a registration can be missing from `pqkey passkeys`: a credential that
-/// is not discoverable is sealed into its ID, which the site keeps, so the
-/// key has nothing to list.
+/// is not discoverable requires the site to supply its ID. Whether sealed
+/// or stored, credential management does not list it.
 const NOT_LISTED: &str = "A site that registered it as a security key (a second factor), or \
                           before the PIN was set,\nkeeps that sign-in itself: it works, but is \
                           not listed here.";
@@ -946,10 +946,16 @@ mod tests {
             (-8, "EdDSA"),
             (-19, "Ed25519"),
             (-53, "Ed448"),
+            (-257, "RS256"),
+            (-258, "RS384"),
+            (-259, "RS512"),
+            (-37, "PS256"),
+            (-38, "PS384"),
+            (-39, "PS512"),
         ] {
             assert_eq!(algorithm(Some(alg)), name);
         }
-        assert_eq!(algorithm(Some(-257)), "COSE -257");
+        assert_eq!(algorithm(Some(-65535)), "COSE -65535");
         assert_eq!(algorithm(None), "-");
     }
 

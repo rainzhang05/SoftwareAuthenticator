@@ -987,7 +987,7 @@ pub(super) fn response_auth_data(response: &[u8]) -> Vec<u8> {
 }
 
 /// The credential a makeCredential `response` created for `rp_id`, whether
-/// stored (discoverable) or sealed into its ID (non-discoverable).
+/// stored or sealed into its ID, depending on discoverability and key kind.
 pub(super) fn created_credential(app: &TestApp, response: &[u8], rp_id: &str) -> CredentialRecord {
     let auth_data = response_auth_data(response);
     let length = usize::from(u16::from_be_bytes([auth_data[53], auth_data[54]]));

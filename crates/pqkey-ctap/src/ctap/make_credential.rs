@@ -11,6 +11,7 @@ use super::{AttestationMode, CtapApp};
 use crate::CoseAlg;
 use crate::store::{AttestationRecord, CredentialRecord, StoreError};
 use crate::try_sign_challenge;
+use zeroize::Zeroize;
 
 use ciborium::{
     ser::into_writer,
@@ -308,7 +309,7 @@ impl CtapApp<'_> {
 
         // ML-DSA keys are kept as their 32-byte seed (RFC 9964 §4).  A
         // discoverable credential is stored; a non-discoverable one is sealed
-        // into its credential ID (see is_discoverable).  A generator failure
+        // if its key fits, otherwise stored (see is_discoverable).  A generator failure
         // fails the request, "CTAP1_ERR_OTHER: Other unspecified error" (CTAP
         // 2.3 §8.2), not the authenticator.
         let private_key = (self.generate_key)(alg).map_err(|err| {
@@ -329,8 +330,14 @@ impl CtapApp<'_> {
             sign_count: 0,
             created_at: 0,
         };
-        if rk {
-            record.credential_id = self.new_credential_id();
+        let stored = rk || !alg.key_kind().is_sealable();
+        if stored {
+            record.credential_id = self.new_credential_id(rk);
+            if !rk {
+                record.user_id.zeroize();
+                record.user_name.zeroize();
+                record.user_display_name.zeroize();
+            }
             record.cred_random_with_uv = self.random_array();
             record.cred_random_without_uv = self.random_array();
         } else {
@@ -482,7 +489,7 @@ impl CtapApp<'_> {
             // Stored only once the response is complete, so a request that
             // fails leaves no credential behind that the platform never
             // learned about.
-            if rk {
+            if stored {
                 self.store_new_credential(&record)?;
             }
             return Ok(out);
@@ -491,7 +498,7 @@ impl CtapApp<'_> {
         Err(CTAP2_ERR_PROCESSING)
     }
 
-    /// Persist a newly created discoverable credential.
+    /// Persist a newly created stored credential.
     ///
     /// CTAP 2.3 §6.1.2 step 17.2: when a discoverable credential is created
     /// ("rk" true) and "a credential for the same rp.id and account ID already
@@ -510,7 +517,8 @@ impl CtapApp<'_> {
             .stored_credentials()?
             .iter()
             .filter(|existing| {
-                existing.rp_id == record.rp_id
+                is_discoverable(&record.credential_id)
+                    && existing.rp_id == record.rp_id
                     && existing.user_id == record.user_id
                     && is_discoverable(&existing.credential_id)
             })

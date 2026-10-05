@@ -16,6 +16,8 @@ use pqkey_mldsa::{ParamSet, PublicKey};
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
 use crate::CoseAlg;
+use p256::elliptic_curve::bigint::Odd;
+use rsa::{BoxedUint, RsaPublicKey, signature::Verifier};
 
 /// Why [`verify_signature`] rejected a signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +60,8 @@ enum Expected {
     /// An AKP key (kty 7) whose `pub` is an ML-DSA public key of `length`
     /// bytes, and ML-DSA signatures with `param_set` and an empty context.
     MlDsa { param_set: ParamSet, length: usize },
+    /// RSA-2048, raw signatures, PKCS#1 v1.5 or PSS with hash-sized salt.
+    Rsa { pss: bool, hash: Hash },
 }
 
 /// The elliptic curves of the ECDSA algorithms.
@@ -74,7 +78,7 @@ enum EdCurve {
     Ed448,
 }
 
-/// The hashes ECDSA signs a message's digest of.
+/// The hashes ECDSA and RSA sign a message's digest of.
 enum Hash {
     Sha256,
     Sha384,
@@ -114,6 +118,48 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
         curve: EdCurve::Ed25519,
     };
     match alg {
+        CoseAlg::RS256 => (
+            -257,
+            Expected::Rsa {
+                pss: false,
+                hash: Hash::Sha256,
+            },
+        ),
+        CoseAlg::RS384 => (
+            -258,
+            Expected::Rsa {
+                pss: false,
+                hash: Hash::Sha384,
+            },
+        ),
+        CoseAlg::RS512 => (
+            -259,
+            Expected::Rsa {
+                pss: false,
+                hash: Hash::Sha512,
+            },
+        ),
+        CoseAlg::PS256 => (
+            -37,
+            Expected::Rsa {
+                pss: true,
+                hash: Hash::Sha256,
+            },
+        ),
+        CoseAlg::PS384 => (
+            -38,
+            Expected::Rsa {
+                pss: true,
+                hash: Hash::Sha384,
+            },
+        ),
+        CoseAlg::PS512 => (
+            -39,
+            Expected::Rsa {
+                pss: true,
+                hash: Hash::Sha512,
+            },
+        ),
         CoseAlg::ES256 => (-7, p256_sha256),
         CoseAlg::ESP256 => (-9, p256_sha256),
         CoseAlg::ES384 => (-35, p384_sha384),
@@ -210,6 +256,16 @@ pub fn verify_signature(
     let (identifier, expected) = expected(alg);
     let key = Labels::decode(cose_key)?;
     match expected {
+        Expected::Rsa { pss, hash } => {
+            key.exactly(&[1, 3, -1, -2])?;
+            key.integer(1, 3)?;
+            key.integer(3, identifier)?;
+            let n = key.bytes(-1, 256)?;
+            if n[0] & 0x80 == 0 || key.bytes(-2, 3)? != [1, 0, 1] {
+                return Err(malformed("RSA needs a 2048-bit n and e = 65537".into()));
+            }
+            verify_rsa(n, pss, hash, message, signature)
+        }
         Expected::Ecdsa {
             crv,
             length,
@@ -249,6 +305,95 @@ pub fn verify_signature(
             }
         }
     }
+}
+
+/// RFC 8017 §5.2.2: the raw 256-byte signature is an integer below n.
+/// For PKCS#1 v1.5 compare its public RSA operation with EMSA ourselves.
+fn verify_rsa(
+    n: &[u8],
+    pss: bool,
+    hash: Hash,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), VerificationError> {
+    if signature.len() != 256 {
+        return Err(VerificationError::BadSignature);
+    }
+    let n =
+        BoxedUint::from_be_slice(n, 2048).map_err(|_| malformed("invalid RSA modulus".into()))?;
+    let s =
+        BoxedUint::from_be_slice(signature, 2048).map_err(|_| VerificationError::BadSignature)?;
+    if s >= n {
+        return Err(VerificationError::BadSignature);
+    }
+    let e = BoxedUint::from(65537u64);
+    let verified = if pss {
+        let key =
+            RsaPublicKey::new(n, e).map_err(|_| malformed("invalid RSA public key".into()))?;
+        let signature = rsa::pss::Signature::try_from(signature)
+            .map_err(|_| VerificationError::BadSignature)?;
+        match hash {
+            Hash::Sha256 => rsa::pss::VerifyingKey::<Sha256>::new_with_salt_len(key, 32)
+                .verify(message, &signature)
+                .is_ok(),
+            Hash::Sha384 => rsa::pss::VerifyingKey::<Sha384>::new_with_salt_len(key, 48)
+                .verify(message, &signature)
+                .is_ok(),
+            Hash::Sha512 => rsa::pss::VerifyingKey::<Sha512>::new_with_salt_len(key, 64)
+                .verify(message, &signature)
+                .is_ok(),
+        }
+    } else {
+        let n = Odd::new(n)
+            .into_option()
+            .ok_or_else(|| malformed("RSA modulus is even".into()))?;
+        let encoded = s.pow_mod(&e, &n).to_be_bytes();
+        encoded.as_ref() == pkcs1_encoding(hash, message)
+    };
+    if verified {
+        Ok(())
+    } else {
+        Err(VerificationError::BadSignature)
+    }
+}
+
+/// DigestInfo prefixes from RFC 8017 §9.2 Note 1, with NULL parameters.
+/// EMSA-PKCS1-v1_5 is 00 || 01 || FF... || 00 || DigestInfo || H.
+fn pkcs1_encoding(hash: Hash, message: &[u8]) -> Vec<u8> {
+    let (algorithm, size, digest) = match hash {
+        Hash::Sha256 => (1, 32, Sha256::digest(message).to_vec()),
+        Hash::Sha384 => (2, 48, Sha384::digest(message).to_vec()),
+        Hash::Sha512 => (3, 64, Sha512::digest(message).to_vec()),
+    };
+    let prefix = [
+        0x30,
+        size + 17,
+        0x30,
+        0x0d,
+        0x06,
+        0x09,
+        0x60,
+        0x86,
+        0x48,
+        0x01,
+        0x65,
+        0x03,
+        0x04,
+        0x02,
+        algorithm,
+        0x05,
+        0x00,
+        0x04,
+        size,
+    ];
+    let mut encoded = vec![0xff; 256];
+    encoded[0] = 0;
+    encoded[1] = 1;
+    let start = 256 - prefix.len() - digest.len();
+    encoded[start - 1] = 0;
+    encoded[start..start + prefix.len()].copy_from_slice(&prefix);
+    encoded[start + prefix.len()..].copy_from_slice(&digest);
+    encoded
 }
 
 /// Check the DER `signature` over `digest` under the SEC1 `point` on

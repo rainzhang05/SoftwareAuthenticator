@@ -440,8 +440,8 @@ pub fn notification_for(request: &PresenceRequest<'_>, markup: bool) -> Notifica
 fn summary(request: &PresenceRequest<'_>) -> &'static str {
     match request.operation {
         PresenceOperation::Register if request.discoverable => "Create a passkey",
-        // The relying party keeps the credential: nothing is stored on the
-        // key, and `pqkey passkeys` will not list it.
+        // A non-discoverable credential requires the relying party to supply
+        // its ID. Stored or sealed, `pqkey passkeys` will not list it.
         PresenceOperation::Register => "Register a security key",
         PresenceOperation::Authenticate => "Sign in with a passkey",
         PresenceOperation::Reset => "Reset the security key",

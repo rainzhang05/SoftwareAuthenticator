@@ -49,14 +49,17 @@ Two details carry ML-DSA's large messages across the kernel:
 - CTAP 2.3, 2.1 and 2.0 over USB HID.
 - ES256 (-7), ML-DSA-44 (-48), ML-DSA-65 (-49), ML-DSA-87 (-50), ESP256 (-9),
   ES384 (-35), ESP384 (-51), ES512 (-36), ESP512 (-52), ES256K (-47), EdDSA
-  (-8), Ed25519 (-19) and Ed448 (-53). The first algorithm in the relying
+  (-8), Ed25519 (-19), Ed448 (-53), RS256 (-257), RS384 (-258), RS512
+  (-259), PS256 (-37), PS384 (-38) and PS512 (-39), all RSA-2048 with e =
+  65537. The first algorithm in the relying
   party's list that the key supports wins (§6.1.2).
 - A PIN, with PIN/UV auth protocols 1 and 2 and pinUvAuthTokens. After 8
   wrong PINs the PIN is blocked, and after 3 in a row the key must be
   restarted. There is no built-in user verification.
-- Up to 1,000 passkeys (discoverable credentials), with credential
-  management. Non-discoverable credentials are sealed into their own ID and
-  not stored.
+- Up to 1,000 stored credentials. Credential management lists and counts
+  discoverable credentials only. Non-discoverable credentials are sealed
+  into their own ID when their key fits; RSA credentials are stored and
+  consume a slot too.
 - The `credProtect` and `hmac-secret` extensions.
 - Packed self attestation: each credential signs its own registration.
 - A reset only within 10 seconds of the key starting (§6.6), approved in a
@@ -68,17 +71,26 @@ Two details carry ML-DSA's large messages across the kernel:
 ~/.local/share/pqkey/       0700
 ├── keys/device.key         root key for the attestation record
 ├── keys/credential.key     root key for everything else; a reset replaces it
-├── credentials/<hash>      one file per passkey, named by an HMAC of its ID
+├── credentials/<hash>      one file per stored credential, named by an HMAC of its ID
 ├── pin-state               the PIN hash and retries
-└── signature-counter       the counter that non-discoverable credentials share
+└── signature-counter       the counter that sealed credentials share
 ```
 
 Every file above except the root keys is encrypted and authenticated with
 XChaCha20-Poly1305, under keys derived from a root key with HKDF-SHA-256.
 Files are replaced atomically, never changed in place. A reset deletes the
-passkeys and replaces `credential.key`, so old copies of files and every
+stored credentials and replaces `credential.key`, so old copies of files and every
 sealed credential ID can no longer be decrypted. [SECURITY.md](../SECURITY.md)
 describes what this protects against.
+
+Discoverable credential IDs are `0x01` and 32 random bytes. Sealed IDs are
+107 bytes starting with `0x02`, carrying the algorithm, credProtect, 32-byte
+key and a seed for the hmac-secret CredRandom values. Their assertions use
+the global signature counter. RSA non-discoverable credentials instead use
+`0x00` and 32 random bytes, like older stored non-discoverable credentials.
+RSA records contain no user ID or names, and keep random CredRandom values,
+credProtect and a counter of their own. They work only through an allowList,
+are excluded by an excludeList, consume a slot, and are erased by reset.
 
 ## User presence
 
@@ -90,8 +102,8 @@ selection asks for your approval in a desktop notification with Approve and Deny
 - No answer within 30 seconds times the request out.
 - A cancelled request withdraws the notification.
 
-A registration asks to "Create a passkey" when the key stores the credential,
-and to "Register a security key" when the site keeps it.
+A registration asks to "Create a passkey" for a discoverable credential, and
+to "Register a security key" for a non-discoverable credential.
 
 ## The `pqkey` command
 

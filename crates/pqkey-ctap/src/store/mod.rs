@@ -325,6 +325,12 @@ pub(crate) fn validate_credential(record: &CredentialRecord) -> Result<(), Store
                 ));
             }
         }
+        PrivateKeyMaterial::RsaPrimes { primes } => {
+            crate::crypto::scrub::with_scrubbed_stack(|| crate::crypto::rsa::signing_key(primes))
+                .map_err(|_| {
+                StoreError::InvalidRecord("the private key is not valid RSA-2048 material")
+            })?;
+        }
         // Every 32 bytes are a seed.
         PrivateKeyMaterial::Seed { .. } => {}
     }

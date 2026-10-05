@@ -7,6 +7,7 @@ use pqkey_mldsa::ParamSet;
 
 use super::ecdsa::Curve;
 use super::eddsa::EdwardsCurve;
+use super::rsa::{Hash, Padding};
 
 /// The COSE algorithm identifiers this authenticator signs with: ES256 (-7,
 /// RFC 9053 §2.1); the three ML-DSA parameter sets, which RFC 9964 §8.1
@@ -19,6 +20,8 @@ use super::eddsa::EdwardsCurve;
 /// (-19) and Ed448 (-53), the fully specified identifiers of "EdDSA using the
 /// Ed25519 parameter set in Section 5.1 of \[RFC8032\]" and "EdDSA using the
 /// Ed448 parameter set in Section 5.2 of \[RFC8032\]" (RFC 9864 §2.2).
+/// RSA-2048 uses RS256/384/512 (RFC 8812 §2) or PS256/384/512
+/// (RFC 8230 §2), with exponent 65537.
 ///
 /// Each variant's discriminant is its identifier, which
 /// [`CoseAlg::identifier`] returns; [`CoseAlg::ALL`] lists every variant.
@@ -54,6 +57,18 @@ pub enum CoseAlg {
     Ed25519 = -19,
     /// EdDSA on Ed448, with an empty context.
     Ed448 = -53,
+    /// RSASSA-PKCS1-v1_5 with SHA-256 (RFC 8812 §2).
+    RS256 = -257,
+    /// RSASSA-PKCS1-v1_5 with SHA-384 (RFC 8812 §2).
+    RS384 = -258,
+    /// RSASSA-PKCS1-v1_5 with SHA-512 (RFC 8812 §2).
+    RS512 = -259,
+    /// RSASSA-PSS with SHA-256 and a 32-byte salt (RFC 8230 §2).
+    PS256 = -37,
+    /// RSASSA-PSS with SHA-384 and a 48-byte salt (RFC 8230 §2).
+    PS384 = -38,
+    /// RSASSA-PSS with SHA-512 and a 64-byte salt (RFC 8230 §2).
+    PS512 = -39,
 }
 
 /// The kind of private key material a credential keeps.  Each algorithm
@@ -72,6 +87,8 @@ pub enum KeyKind {
     /// random bytes (§5.1.5); and for EdDSA on Ed448, the seed its 57-byte
     /// RFC 8032 private key is derived from with SHAKE256.
     Seed,
+    /// RSA-2048 primes p || q, each 128 big-endian bytes; e is 65537.
+    RsaPrimes,
 }
 
 impl KeyKind {
@@ -79,13 +96,14 @@ impl KeyKind {
     pub(crate) const fn is_sealable(self) -> bool {
         match self {
             Self::P256Scalar | Self::Seed => true,
+            Self::RsaPrimes => false,
         }
     }
 }
 
 /// The signature scheme behind an algorithm.  It picks the family that reads
 /// the key, derives the public key and signs: [`super::ecdsa`],
-/// [`super::eddsa`] or [`super::mldsa`].  Algorithms that differ only in their
+/// [`super::eddsa`], [`super::mldsa`] or [`super::rsa`].  Algorithms that differ only in their
 /// identifier share a scheme.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum Scheme {
@@ -97,6 +115,8 @@ pub(crate) enum Scheme {
     EdDsa(EdwardsCurve),
     /// ML-DSA with this parameter set (FIPS 204).
     MlDsa(ParamSet),
+    /// RSA-2048 with exponent 65537, this padding and hash (RFC 8017 §8).
+    Rsa(Padding, Hash),
 }
 
 impl Scheme {
@@ -107,6 +127,7 @@ impl Scheme {
             Scheme::Ecdsa(Curve::P384 | Curve::P521 | Curve::Secp256k1)
             | Scheme::EdDsa(EdwardsCurve::Ed25519 | EdwardsCurve::Ed448)
             | Scheme::MlDsa(_) => KeyKind::Seed,
+            Scheme::Rsa(_, _) => KeyKind::RsaPrimes,
         }
     }
 }
@@ -122,7 +143,7 @@ struct Properties {
 impl CoseAlg {
     /// Every algorithm, in the order authenticatorGetInfo lists them (CTAP 2.3
     /// §6.4, `algorithms`).
-    pub const ALL: [CoseAlg; 13] = [
+    pub const ALL: [CoseAlg; 19] = [
         CoseAlg::ES256,
         CoseAlg::MLDSA44,
         CoseAlg::MLDSA65,
@@ -136,6 +157,12 @@ impl CoseAlg {
         CoseAlg::EdDSA,
         CoseAlg::Ed25519,
         CoseAlg::Ed448,
+        CoseAlg::RS256,
+        CoseAlg::RS384,
+        CoseAlg::RS512,
+        CoseAlg::PS256,
+        CoseAlg::PS384,
+        CoseAlg::PS512,
     ];
 
     /// The table: what the authenticator knows about each algorithm.
@@ -192,6 +219,30 @@ impl CoseAlg {
             CoseAlg::Ed448 => Properties {
                 name: "Ed448",
                 scheme: Scheme::EdDsa(EdwardsCurve::Ed448),
+            },
+            CoseAlg::RS256 => Properties {
+                name: "RS256",
+                scheme: Scheme::Rsa(Padding::Pkcs1v15, Hash::Sha256),
+            },
+            CoseAlg::RS384 => Properties {
+                name: "RS384",
+                scheme: Scheme::Rsa(Padding::Pkcs1v15, Hash::Sha384),
+            },
+            CoseAlg::RS512 => Properties {
+                name: "RS512",
+                scheme: Scheme::Rsa(Padding::Pkcs1v15, Hash::Sha512),
+            },
+            CoseAlg::PS256 => Properties {
+                name: "PS256",
+                scheme: Scheme::Rsa(Padding::Pss, Hash::Sha256),
+            },
+            CoseAlg::PS384 => Properties {
+                name: "PS384",
+                scheme: Scheme::Rsa(Padding::Pss, Hash::Sha384),
+            },
+            CoseAlg::PS512 => Properties {
+                name: "PS512",
+                scheme: Scheme::Rsa(Padding::Pss, Hash::Sha512),
             },
         }
     }
@@ -268,6 +319,12 @@ mod tests {
                 (-8, "EdDSA"),
                 (-19, "Ed25519"),
                 (-53, "Ed448"),
+                (-257, "RS256"),
+                (-258, "RS384"),
+                (-259, "RS512"),
+                (-37, "PS256"),
+                (-38, "PS384"),
+                (-39, "PS512"),
             ]
         );
     }
@@ -298,6 +355,12 @@ mod tests {
                 Scheme::EdDsa(EdwardsCurve::Ed25519),
                 Scheme::EdDsa(EdwardsCurve::Ed25519),
                 Scheme::EdDsa(EdwardsCurve::Ed448),
+                Scheme::Rsa(Padding::Pkcs1v15, Hash::Sha256),
+                Scheme::Rsa(Padding::Pkcs1v15, Hash::Sha384),
+                Scheme::Rsa(Padding::Pkcs1v15, Hash::Sha512),
+                Scheme::Rsa(Padding::Pss, Hash::Sha256),
+                Scheme::Rsa(Padding::Pss, Hash::Sha384),
+                Scheme::Rsa(Padding::Pss, Hash::Sha512),
             ]
         );
     }
@@ -326,6 +389,12 @@ mod tests {
                 KeyKind::Seed,
                 KeyKind::Seed,
                 KeyKind::Seed,
+                KeyKind::RsaPrimes,
+                KeyKind::RsaPrimes,
+                KeyKind::RsaPrimes,
+                KeyKind::RsaPrimes,
+                KeyKind::RsaPrimes,
+                KeyKind::RsaPrimes,
             ]
         );
     }
@@ -337,7 +406,7 @@ mod tests {
         for alg in CoseAlg::ALL {
             assert_eq!(CoseAlg::try_from(alg.identifier()), Ok(alg));
         }
-        assert_eq!(CoseAlg::try_from(-257), Err(UnsupportedCoseAlg(-257)));
+        assert_eq!(CoseAlg::try_from(-65535), Err(UnsupportedCoseAlg(-65535)));
         assert_eq!(CoseAlg::try_from(-46), Err(UnsupportedCoseAlg(-46)));
         assert_eq!(CoseAlg::try_from(-7), Ok(CoseAlg::ES256));
         assert_eq!(CoseAlg::try_from(-48), Ok(CoseAlg::MLDSA44));
@@ -353,8 +422,8 @@ mod tests {
         assert_eq!(CoseAlg::try_from(-19), Ok(CoseAlg::Ed25519));
         assert_eq!(CoseAlg::try_from(-53), Ok(CoseAlg::Ed448));
         assert_eq!(
-            UnsupportedCoseAlg(-257).to_string(),
-            "unsupported COSE algorithm -257"
+            UnsupportedCoseAlg(-65535).to_string(),
+            "unsupported COSE algorithm -65535"
         );
     }
 }

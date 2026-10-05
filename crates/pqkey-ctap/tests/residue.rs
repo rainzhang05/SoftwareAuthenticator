@@ -1,4 +1,4 @@
-//! ECDSA and EdDSA secrets left behind in the stack after reading a key and
+//! ECDSA, EdDSA and RSA secrets left behind in the stack after reading a key and
 //! signing.
 //!
 //! An ECDSA signature together with its nonce `k` reveals the private key, and
@@ -32,6 +32,12 @@
 //! reduced from, and the control value: each as little-endian bytes, the
 //! order of RFC 8032's integers, and reversed.
 //!
+//! For RSA it independently computes n, d mod lcm(p-1, q-1), dp, dq and
+//! qinv from the fixed key's primes. It checks n against the COSE key and
+//! s^65537 mod n against RS256's EMSA encoding, then scans for p, q, d, dp,
+//! dq and qinv in both byte orders. This checks stack copies only; rsa's
+//! heap arithmetic and its incomplete CRT cleanup are outside this scan.
+//!
 //! It does not look for a newly generated private key: a key returned by
 //! value can leave copies in the frames it passes through on its way to the
 //! caller, because Rust moves are copies.  That is a limit of the language
@@ -49,7 +55,14 @@ use ed448_goldilocks::{EdwardsPoint, EdwardsScalar, EdwardsScalarBytes};
 use ed25519_dalek::VerifyingKey;
 use ed25519_dalek::hazmat::ExpandedSecretKey;
 use hmac::{EagerHash, Hmac, KeyInit, Mac};
-use p256::elliptic_curve::bigint::{NonZero, U1024};
+use p256::elliptic_curve::bigint::{
+    NonZero, Odd, U1024, U2048,
+    modular::{FixedMontyForm, MontyParams},
+};
+use zeroize::Zeroizing;
+
+#[path = "vectors/rsa2048.rs"]
+mod rsa_fixture;
 use p256::elliptic_curve::sec1::ToSec1Point;
 use pqkey_ctap::{
     CoseAlg, try_cose_public_key, try_credential_secret_from_bytes, try_sign_challenge,
@@ -564,7 +577,7 @@ fn check_eddsa(case: &EdDsaCase) -> Vec<String> {
 #[inline(never)]
 fn run(
     alg: CoseAlg,
-    key: &[u8; 32],
+    key: &[u8],
     needles: Vec<(String, Vec<u8>)>,
 ) -> (Vec<u8>, Vec<u8>, Vec<String>) {
     let control = Sha256::digest(b"never computed by the signer").to_vec();
@@ -599,15 +612,94 @@ fn run(
     (cose_key, signature, found)
 }
 
+/// Independently derive RSA's private values with fixed-width crypto-bigint,
+/// before the engine run wipes and scans the stack. The private exponent uses
+/// Carmichael's lcm(p-1, q-1), as RSA's from_p_q does (RFC 8017 §3.2).
+fn check_rsa(alg: &CoseAlg) -> Vec<String> {
+    let p = Zeroizing::new(U1024::from_be_slice(&rsa_fixture::PRIMES[..128]));
+    let q = Zeroizing::new(U1024::from_be_slice(&rsa_fixture::PRIMES[128..]));
+    let n: U2048 = p.concatenating_mul(&q);
+    let p1 = Zeroizing::new(p.wrapping_sub(&U1024::ONE));
+    let q1 = Zeroizing::new(q.wrapping_sub(&U1024::ONE));
+    let gcd = Zeroizing::new(p1.gcd(&q1));
+    let quotient = Zeroizing::new(*p1 / NonZero::new(*gcd).expect("fixed primes' gcd"));
+    let lambda = Zeroizing::new(quotient.concatenating_mul::<_, { U2048::LIMBS }>(&q1));
+    let d = Zeroizing::new(
+        U2048::from(65537u64)
+            .invert_mod(&NonZero::new(*lambda).expect("lambda"))
+            .expect("fixed RSA exponent is invertible"),
+    );
+    let dp = Zeroizing::new(d.rem(&NonZero::new(p1.resize::<{ U2048::LIMBS }>()).expect("p-1")));
+    let dq = Zeroizing::new(d.rem(&NonZero::new(q1.resize::<{ U2048::LIMBS }>()).expect("q-1")));
+    let qinv = Zeroizing::new(
+        q.invert_mod(&NonZero::new(*p).expect("p"))
+            .expect("fixed primes are coprime"),
+    );
+    let needles = vec![
+        ("p".into(), p.to_be_bytes().to_vec()),
+        ("q".into(), q.to_be_bytes().to_vec()),
+        ("d".into(), d.to_be_bytes().to_vec()),
+        ("dp".into(), dp.to_be_bytes()[128..].to_vec()),
+        ("dq".into(), dq.to_be_bytes()[128..].to_vec()),
+        ("qinv".into(), qinv.to_be_bytes().to_vec()),
+    ];
+    assert_eq!(n.to_be_bytes().as_slice(), rsa_fixture::MODULUS);
+    assert_eq!(
+        [AUTH_DATA.as_slice(), CLIENT_DATA_HASH.as_slice()].concat(),
+        rsa_fixture::MESSAGE
+    );
+    let (cose, signature, found) = run(*alg, &rsa_fixture::PRIMES, needles);
+    assert_eq!(cose_bytes(&cose, -1), n.to_be_bytes().as_slice());
+    let index = match alg {
+        CoseAlg::RS256 => Some(0),
+        CoseAlg::RS384 => Some(1),
+        CoseAlg::RS512 => Some(2),
+        CoseAlg::PS256 | CoseAlg::PS384 | CoseAlg::PS512 => None,
+        _ => panic!("RSA residue case"),
+    };
+    if let Some(index) = index {
+        assert_eq!(signature, rsa_fixture::SIGNATURES[index]);
+    }
+    if *alg == CoseAlg::RS256 {
+        // SHA-256 DigestInfo, RFC 8017 §9.2 Note 1.
+        let prefix = unhex("3031300d060960864801650304020105000420");
+        let digest = Sha256::digest(rsa_fixture::MESSAGE);
+        let mut emsa = vec![0xff; 256];
+        emsa[..2].copy_from_slice(&[0, 1]);
+        let start = 256 - prefix.len() - digest.len();
+        emsa[start - 1] = 0;
+        emsa[start..start + prefix.len()].copy_from_slice(&prefix);
+        emsa[start + prefix.len()..].copy_from_slice(&digest);
+        let params = MontyParams::new(Odd::new(n).expect("odd modulus"));
+        let recovered = FixedMontyForm::new(&U2048::from_be_slice(&signature), &params)
+            .pow(&U2048::from(65537u64))
+            .retrieve();
+        assert_eq!(recovered.to_be_bytes().as_slice(), emsa);
+    }
+    found
+}
+
 fn main() {
     let failures: Vec<String> = ECDSA_CASES
         .iter()
         .flat_map(check_ecdsa)
         .chain(EDDSA_CASES.iter().flat_map(check_eddsa))
+        .chain(
+            [
+                CoseAlg::RS256,
+                CoseAlg::RS384,
+                CoseAlg::RS512,
+                CoseAlg::PS256,
+                CoseAlg::PS384,
+                CoseAlg::PS512,
+            ]
+            .iter()
+            .flat_map(check_rsa),
+        )
         .collect();
     assert!(
         failures.is_empty(),
         "secrets left in the stack after signing: {failures:?}"
     );
-    println!("no ECDSA or EdDSA secrets left in the stack");
+    println!("no ECDSA, EdDSA or RSA secrets left in the stack");
 }

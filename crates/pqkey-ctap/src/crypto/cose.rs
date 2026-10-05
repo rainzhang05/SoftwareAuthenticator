@@ -1,5 +1,5 @@
-//! COSE_Key encoding (RFC 9052 §7) of the three key types the authenticator's
-//! public keys take: EC2, OKP and AKP.  The algorithm, and for EC2 and OKP
+//! COSE_Key encoding (RFC 9052 §7) of the four key types the authenticator's
+//! public keys take: EC2, OKP, AKP and RSA.  The algorithm, and for EC2 and OKP
 //! the curve, are inputs, so no encoder states an algorithm of its own.
 
 use ciborium::ser::into_writer;
@@ -104,6 +104,17 @@ pub(crate) fn try_okp_key(alg: CoseAlg, crv: i32, x: &[u8]) -> Result<Vec<u8>, C
 /// serialization fails.
 pub(crate) fn try_akp_key(alg: CoseAlg, public_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
     encode(&akp_key_map(alg, public_key))
+}
+
+/// RSA COSE_Key: kty 3, alg, unsigned big-endian n and e in the fewest
+/// bytes (RFC 8230 §4). The authenticator uses RSA-2048 and e = 65537.
+pub(crate) fn try_rsa_key(alg: CoseAlg, n: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    encode(&Value::Map(vec![
+        (int(LABEL_KTY), int(3)),
+        (int(LABEL_ALG), int(alg.identifier())),
+        (int(-1), Value::Bytes(n.to_vec())),
+        (int(-2), Value::Bytes(vec![1, 0, 1])),
+    ]))
 }
 
 fn encode(map: &Value) -> Result<Vec<u8>, CryptoError> {

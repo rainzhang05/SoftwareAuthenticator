@@ -126,7 +126,7 @@ fn make_credential_request(client_data_hash: &[u8], user_id: &[u8], alg: CoseAlg
 }
 
 /// makeCredential for a discoverable credential if `rk`, else for a
-/// non-discoverable one, which is sealed into its ID and not stored.
+/// non-discoverable one, sealed if its key fits, otherwise stored.
 fn make_credential_request_rk(
     client_data_hash: &[u8],
     user_id: &[u8],
@@ -281,21 +281,26 @@ fn every_algorithm_registers_and_authenticates_across_restarts() {
     }
 }
 
-/// A non-discoverable credential is sealed into its ID: nothing is stored,
-/// yet it works across restarts, counting its signatures on the global
-/// signature counter, which survives restarts too, until a reset replaces the
-/// key that sealed it.
+/// Every non-discoverable credential works across restarts until reset.
+/// Sealed credentials use the global counter; stored RSA credentials keep
+/// their own counter and occupy a store slot.
 #[test]
-fn a_sealed_credential_works_across_restarts_until_a_reset() {
+fn non_discoverable_credentials_work_across_restarts_until_a_reset() {
     for alg in CoseAlg::ALL {
         let dir = TempDir::new();
         let registration = register_rk(&mut open_app(&dir.state()), &[0x01], alg, false);
-        assert_eq!(FileStore::open(dir.state()).unwrap().count().unwrap(), 0);
+        if alg.key_kind() == pqkey_ctap::KeyKind::RsaPrimes {
+            assert_eq!(FileStore::open(dir.state()).unwrap().count().unwrap(), 1);
+            assert_eq!(registration.credential_id.len(), 33);
+            assert_eq!(registration.credential_id[0], 0);
+        } else {
+            assert_eq!(FileStore::open(dir.state()).unwrap().count().unwrap(), 0);
+        }
         assert_eq!(authenticate(&mut open_app(&dir.state()), &registration), 1);
         assert_eq!(
             authenticate(&mut open_app(&dir.state()), &registration),
             2,
-            "{alg:?}: the global signature counter survives a restart"
+            "{alg:?}: the signature counter survives a restart"
         );
 
         FileStore::open(dir.state()).unwrap().clear().unwrap();
@@ -547,7 +552,7 @@ fn re_registering_an_account_replaces_its_credential() {
 
 /// The ML-DSA-87 makeCredential response in both attestation modes, against
 /// the CTAPHID message limit.  The largest is a self-attested
-/// non-discoverable one, whose sealed credential ID is 75 bytes.  Run with
+/// non-discoverable one, whose sealed credential ID is 107 bytes.  Run with
 /// `--nocapture` to see the sizes.
 #[test]
 fn ml_dsa_87_make_credential_response_sizes() {

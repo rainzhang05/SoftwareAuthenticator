@@ -107,13 +107,25 @@ impl Engine {
     /// An engine over `store`, for example one with a small credential limit.
     pub fn with_store(seed: u64, store: MemoryStore) -> Self {
         let presence = FuzzPresence::default();
-        let app = CtapApp::new(
+        let mut app = CtapApp::new(
             store,
             SplitMix(seed),
             presence.clone(),
             &NEVER_INTERRUPTED,
             [0xA5; 16],
         );
+        // Repeated registrations exercise storage and signatures with the
+        // fixed RSA key, without generating expensive primes in a fuzz loop.
+        app.set_key_generator(|alg| match alg.key_kind() {
+            pqkey_ctap::KeyKind::RsaPrimes => {
+                Ok(pqkey_ctap::store::PrivateKeyMaterial::RsaPrimes {
+                    primes: pqkey_ctap::rsa_fixture::PRIMES,
+                })
+            }
+            pqkey_ctap::KeyKind::P256Scalar | pqkey_ctap::KeyKind::Seed => {
+                pqkey_ctap::store::PrivateKeyMaterial::try_generate(alg)
+            }
+        });
         Self {
             app,
             presence,

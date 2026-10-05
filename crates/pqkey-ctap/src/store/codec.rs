@@ -14,8 +14,9 @@
 //!    7  private key type        unsigned integer: 1 = P-256 scalar, 2 = seed (ML-DSA's ξ,
 //!                               an ECDSA key's seed on P-384, P-521 or
 //!                               secp256k1, an Ed25519 private key, or an
-//!                               Ed448 key's seed)
-//!    8  private key             byte string, 32 bytes
+//!                               Ed448 key's seed), 3 (RSA primes)
+//!    8  private key             byte string, 32 bytes (types 1-2),
+//!                               256 bytes (type 3, RSA primes p || q)
 //!    9  cred_random_with_uv     byte string, 32 bytes
 //!   10  cred_random_without_uv  byte string, 32 bytes
 //!   11  cred_protect            unsigned integer, 1-3
@@ -65,6 +66,8 @@ const KEY_TYPE_P256_SCALAR: u64 = 1;
 /// EdDSA the RFC 8032 private key itself on Ed25519 and the seed it is
 /// derived from on Ed448.
 const KEY_TYPE_SEED: u64 = 2;
+/// Private key type 3: RSA-2048 primes p || q ([`KeyKind::RsaPrimes`]).
+const KEY_TYPE_RSA_PRIMES: u64 = 3;
 
 /// Encode a credential record with the given creation order.
 #[deny(
@@ -78,6 +81,7 @@ pub(crate) fn encode_credential(
     let key_type = match record.private_key.kind() {
         KeyKind::P256Scalar => KEY_TYPE_P256_SCALAR,
         KeyKind::Seed => KEY_TYPE_SEED,
+        KeyKind::RsaPrimes => KEY_TYPE_RSA_PRIMES,
     };
     let key = record.private_key.as_bytes();
     let mut entries = vec![
@@ -113,13 +117,15 @@ pub(crate) fn decode_credential(bytes: &[u8]) -> Result<CredentialRecord, Corrup
     let mut fields = Fields::parse(bytes)?;
     let alg = CoseAlg::try_from(fields.int::<i32>(6)?).map_err(|_| Corruption::Encoding)?;
     let key_type = fields.uint::<u64>(7)?;
-    let key = Zeroizing::new(fields.array::<32>(8)?);
+    let key = Zeroizing::new(fields.bytes(8)?);
     let kind = match key_type {
         KEY_TYPE_P256_SCALAR => KeyKind::P256Scalar,
         KEY_TYPE_SEED => KeyKind::Seed,
+        KEY_TYPE_RSA_PRIMES => KeyKind::RsaPrimes,
         _ => return Err(Corruption::Encoding),
     };
-    let private_key = PrivateKeyMaterial::from_bytes(kind, &key);
+    let private_key =
+        PrivateKeyMaterial::from_bytes(kind, &key).map_err(|_| Corruption::Encoding)?;
     let record = CredentialRecord {
         credential_id: fields.bytes(1)?,
         rp_id: fields.text(2)?,
@@ -557,6 +563,45 @@ mod tests {
         ));
         assert_eq!(encoded.as_slice(), expected.as_slice());
         assert_eq!(decode_credential(&expected).unwrap(), record);
+    }
+
+    /// RSA keeps p || q under key type 3. The CBOR surrounding the fixed
+    /// cryptography vector is written independently of the encoder.
+    #[test]
+    fn an_rsa_credential_matches_the_documented_format() {
+        let mut record = credential();
+        record.alg = CoseAlg::RS256;
+        record.private_key = PrivateKeyMaterial::RsaPrimes {
+            primes: crate::rsa_fixture::PRIMES,
+        };
+        let expected = [
+            unhex(concat!(
+                "ac",
+                "0150000102030405060708090a0b0c0d0e0f",
+                "026b6578616d706c652e636f6d",
+                "03420102",
+                "0465616c696365",
+                "06390100", // alg -257
+                "0703",     // key type 3
+                "08590100", // 256-byte key
+            )),
+            crate::rsa_fixture::PRIMES.to_vec(),
+            unhex(concat!(
+                "095820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "0a5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "0b02",
+                "0c19012c",
+                "0d1a00011170",
+            )),
+        ]
+        .concat();
+        assert_eq!(
+            encode_credential(&record, 70_000)
+                .expect("encode")
+                .as_slice(),
+            expected
+        );
+        assert_eq!(decode_credential(&expected).expect("decode"), record);
     }
 
     /// An ES384 credential: alg -35 and private key type 2, the seed its
