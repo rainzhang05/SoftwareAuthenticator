@@ -435,7 +435,8 @@ impl System {
             format!("    sudo sh {}", artifact.display()),
             String::new(),
             format!(
-                "Your passkeys and PIN stay in {}; delete it to remove them for good. Your membership in '{UHID_GROUP}' stays too.",
+                "Your passkeys and PIN stay in {}; delete it to remove them for good. Your \
+                 membership in '{UHID_GROUP}' stays too.",
                 state_dir.display()
             ),
         ])

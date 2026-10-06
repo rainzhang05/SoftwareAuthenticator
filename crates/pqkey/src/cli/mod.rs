@@ -6,8 +6,7 @@
 //! pqkey start | stop          plug the key in / pull it out
 //! pqkey status                the key and everything it needs (the default)
 //! pqkey pin                   set the PIN, or change it
-//! pqkey passkeys [delete Q]   list the passkeys stored on the key, or
-//! delete one
+//! pqkey passkeys [delete Q]   list the passkeys stored on the key, or delete one
 //! pqkey reset [--yes]         erase every passkey and the PIN
 //! ```
 //!
@@ -721,9 +720,13 @@ mod macos_state_tests {
                 "/environment/state",
             ),
         ] {
+            let test =
+                "cli::macos_state_tests::state_paths_use_application_support_and_allow_overrides";
             let mut command = Command::new(std::env::current_exe().unwrap());
-            command.args(["--exact", "cli::macos_state_tests::state_paths_use_application_support_and_allow_overrides"])
-                .env(EXPECTED, expected).env("XDG_DATA_HOME", "/ignored/xdg");
+            command
+                .args(["--exact", test])
+                .env(EXPECTED, expected)
+                .env("XDG_DATA_HOME", "/ignored/xdg");
             match home {
                 Some(home) => {
                     command.env("HOME", home);

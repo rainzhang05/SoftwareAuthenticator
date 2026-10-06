@@ -198,4 +198,6 @@ pub(crate) const START_HELP: &str =
     "Plug the key in: start it, through its systemd user service when that is installed";
 pub(crate) const RUN_HELP: &str =
     "Run the key in the foreground until it is stopped (for the systemd unit and test rigs)";
-pub(crate) const PRESENCE_NOTIFY_HELP: &str = "Ask with a desktop notification that has Approve and Deny buttons. Without a session bus and a notification server that can show buttons, every request is denied";
+pub(crate) const PRESENCE_NOTIFY_HELP: &str = "Ask with a desktop notification that has Approve \
+    and Deny buttons. Without a session bus and a notification server that can show buttons, \
+    every request is denied";

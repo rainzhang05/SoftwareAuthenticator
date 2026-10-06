@@ -193,7 +193,8 @@ pub(crate) const START_HELP: &str =
     "Plug the key in: start it, through its user service when that is installed";
 pub(crate) const RUN_HELP: &str =
     "Run the key in the foreground until it is stopped (for the user service and test rigs)";
-pub(crate) const PRESENCE_NOTIFY_HELP: &str = "Ask with a desktop prompt that has Approve and Deny buttons. If the prompt cannot be shown, every request is denied";
+pub(crate) const PRESENCE_NOTIFY_HELP: &str = "Ask with a desktop prompt that has Approve and \
+    Deny buttons. If the prompt cannot be shown, every request is denied";
 
 #[cfg(test)]
 pub(crate) mod test_support {
