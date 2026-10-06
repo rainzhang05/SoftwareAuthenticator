@@ -136,13 +136,7 @@ pub(crate) fn warn_device_access() {
 fn warn_group_membership() {
     const GROUP_NAME: &str = "plugdev";
     let plugdev_gid = Group::from_name(GROUP_NAME).ok().flatten().map(|g| g.gid);
-    // nix does not expose getgroups on Apple platforms. The daemon only runs on
-    // Linux (it needs /dev/uhid), but gating this keeps the crate compiling and
-    // testable on macOS development machines.
-    #[cfg(target_os = "linux")]
     let groups = unistd::getgroups().unwrap_or_default();
-    #[cfg(not(target_os = "linux"))]
-    let groups: Vec<unistd::Gid> = Vec::new();
     let in_group = plugdev_gid.is_some_and(|gid| groups.contains(&gid) || unistd::getegid() == gid);
     if in_group {
         errln!(
@@ -190,13 +184,13 @@ impl UserService {
         drop(systemctl(&["daemon-reload"])?);
         Ok(Some(path))
     }
-    pub(crate) fn manual_start_problem(pid: Pid) -> Problem {
-        Problem {
+    pub(crate) fn manual_start_problem(pid: Pid) -> io::Result<Problem> {
+        Ok(Problem {
             what: format!(
                 "the key (pid {pid}) was started by hand, so the systemd user service cannot run it"
             ),
             fix: "run `pqkey stop && pqkey start`".into(),
-        }
+        })
     }
 }
 

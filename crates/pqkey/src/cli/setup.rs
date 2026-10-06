@@ -226,8 +226,7 @@ mod tests {
         let lock = crate::state_lock::StateLock::try_acquire(dir.path())
             .unwrap()
             .unwrap();
-        crate::cli::daemon_info::DaemonInfo::current(&crate::cli::DaemonArgs::default())
-            .unwrap()
+        crate::test_support::daemon_info(&crate::cli::DaemonArgs::default())
             .publish(dir.path(), &lock)
             .unwrap();
         crate::state_lock::write_pid_file(dir.path(), &lock).unwrap();

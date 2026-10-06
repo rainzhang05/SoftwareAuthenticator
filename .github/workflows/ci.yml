@@ -187,7 +187,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The workspace on macOS: lints and tests, so code gated to Linux keeps
-  # compiling there and macOS development machines can run every unit test.
+  # compiling there; portable unit tests use injected devices and clocks.
   # The daemon itself cannot run on macOS yet; nothing here creates a device.
   test-macos:
     name: test (macOS)

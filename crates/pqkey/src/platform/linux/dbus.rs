@@ -334,6 +334,27 @@ mod tests {
     use crate::test_support::TempDir;
 
     #[test]
+    fn closed_signals_distinguish_expiry_from_every_other_reason() {
+        for reason in [1u32, 2, 3, 4, 99] {
+            let signal = Message::signal(
+                NOTIFICATIONS_PATH,
+                NOTIFICATIONS_INTERFACE,
+                "NotificationClosed",
+            )
+            .unwrap()
+            .build(&(7u32, reason))
+            .unwrap();
+            assert_eq!(
+                parse_signal(&signal),
+                Some(NotificationEvent::Closed {
+                    id: 7,
+                    expired: reason == 1
+                })
+            );
+        }
+    }
+
+    #[test]
     fn connecting_to_a_bus_that_never_answers_times_out() {
         let dir = TempDir::new("silent-bus");
         let path = dir.path().join("bus");

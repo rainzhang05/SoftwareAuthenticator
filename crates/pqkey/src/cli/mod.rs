@@ -6,15 +6,16 @@
 //! pqkey start | stop          plug the key in / pull it out
 //! pqkey status                the key and everything it needs (the default)
 //! pqkey pin                   set the PIN, or change it
-//! pqkey passkeys [delete Q]   list the passkeys stored on the key, or delete one
+//! pqkey passkeys [delete Q]   list the passkeys stored on the key, or
+//! delete one
 //! pqkey reset [--yes]         erase every passkey and the PIN
 //! ```
 //!
 //! While the key runs, `pin`, `passkeys` and `reset` talk to it over CTAP,
-//! through its hidraw node, as a key's management application does
+//! through its platform client link, as a key's management application does
 //! ([`crate::client`]): the key itself checks the PIN, counts retries and asks
 //! the user to approve a reset.  The hidden `run` command is the daemon
-//! itself, for the systemd unit and for test rigs, with the options only they
+//! itself, for the user service and for test rigs, with the options only they
 //! need.
 
 pub(crate) mod checks;
@@ -319,7 +320,7 @@ impl DaemonArgs {
     }
 
     /// Whether these are the options a key for a person runs with, the ones
-    /// the systemd unit uses.
+    /// the user service uses.
     pub(crate) fn are_defaults(&self) -> bool {
         self.to_args() == Self::default().to_args()
     }
@@ -351,7 +352,7 @@ pub(crate) fn daemon_args_of(
 }
 
 /// The options of `pqkey run` in a NUL-separated command line, as
-/// `/proc/PID/cmdline` holds it.
+/// the daemon records in its published information.
 fn daemon_args_from(cmdline: &[u8]) -> Option<DaemonArgs> {
     use std::os::unix::ffi::OsStrExt;
     let args = cmdline
@@ -396,6 +397,7 @@ fn exit_status(result: &io::Result<()>) -> u8 {
 
 pub fn run_cli() -> io::Result<()> {
     let cli = Cli::parse();
+    crate::platform::ensure_supported()?;
     let state_dir = cli.state_dir;
     match cli.command.unwrap_or(Command::Status) {
         Command::Run(args) => daemon::run(state_dir, &args),
@@ -649,6 +651,7 @@ mod tests {
 
     /// A second key on the same state exits with a status of its own, which
     /// the systemd unit does not restart on.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_second_key_on_the_same_state_exits_with_status_3() {
         let dir = crate::test_support::TempDir::new("cli-already-running");
@@ -687,5 +690,58 @@ mod tests {
         assert_eq!(read.to_args(), start.to_args());
         assert!(daemon_args_from(b"/usr/bin/pqkey\0attach\0--foreground\0").is_none());
         assert!(daemon_args_from(b"/usr/bin/pqkey\0status\0").is_none());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_state_tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn state_paths_use_application_support_and_allow_overrides() {
+        const EXPECTED: &str = "PQKEY_EXPECTED_STATE";
+        if let Some(expected) = std::env::var_os(EXPECTED) {
+            let cli = Cli::parse_from(["pqkey"]);
+            assert_eq!(cli.state_dir, PathBuf::from(expected));
+            let cli = Cli::parse_from(["pqkey", "--state-dir", "/explicit/state"]);
+            assert_eq!(cli.state_dir, PathBuf::from("/explicit/state"));
+            return;
+        }
+        for (home, state, expected) in [
+            (
+                Some("/Users/a user"),
+                None,
+                "/Users/a user/Library/Application Support/pqkey",
+            ),
+            (None, None, "./pqkey"),
+            (
+                Some("/Users/a user"),
+                Some("/environment/state"),
+                "/environment/state",
+            ),
+        ] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "cli::macos_state_tests::state_paths_use_application_support_and_allow_overrides"])
+                .env(EXPECTED, expected).env("XDG_DATA_HOME", "/ignored/xdg");
+            match home {
+                Some(home) => {
+                    command.env("HOME", home);
+                }
+                None => {
+                    command.env_remove("HOME");
+                }
+            }
+            match state {
+                Some(state) => {
+                    command.env("PQKEY_STATE_DIR", state);
+                }
+                None => {
+                    command.env_remove("PQKEY_STATE_DIR");
+                }
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
     }
 }

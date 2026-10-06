@@ -85,7 +85,7 @@ impl System {
     }
 
     /// A system whose root directory is `root`.
-    pub fn under(root: PathBuf) -> Self {
+    pub(crate) fn under(root: PathBuf) -> Self {
         Self {
             root,
             membership: None,
@@ -93,13 +93,13 @@ impl System {
     }
 
     /// `path`, an absolute path on the system, under the root.
-    pub fn path(&self, path: &str) -> PathBuf {
+    pub(crate) fn path(&self, path: &str) -> PathBuf {
         self.root.join(path.trim_start_matches('/'))
     }
 
     /// Whether the udev rules are installed, in `/etc` or where a package
     /// puts them, and whether they are this version's.
-    pub fn rules(&self) -> Rules {
+    pub(crate) fn rules(&self) -> Rules {
         let mut found = Rules::Missing;
         for dir in [
             "/etc/udev/rules.d",
@@ -117,7 +117,7 @@ impl System {
 
     /// Whether uhid is loaded at boot: a modules-load.d file, or
     /// `/etc/modules`, names it, or the kernel has it built in.
-    pub fn uhid_at_boot(&self) -> bool {
+    pub(crate) fn uhid_at_boot(&self) -> bool {
         let names_uhid = |text: &str| {
             text.lines()
                 .map(|line| line.split('#').next().unwrap_or("").trim())
@@ -156,12 +156,12 @@ impl System {
     /// Whether the uhid module is loaded, or built in: its misc device is
     /// registered. `/dev/uhid` alone says nothing, as kmod creates it at boot
     /// for the module to be loaded on first open, which only root may do.
-    pub fn uhid_loaded(&self) -> bool {
+    pub(crate) fn uhid_loaded(&self) -> bool {
         self.path("/sys/class/misc/uhid").exists() || self.path("/sys/module/uhid").exists()
     }
 
     /// Open `/dev/uhid` as the daemon does.
-    pub fn open_uhid(&self) -> io::Result<()> {
+    pub(crate) fn open_uhid(&self) -> io::Result<()> {
         fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -170,7 +170,7 @@ impl System {
     }
 
     /// The snap browsers installed.
-    pub fn snap_browsers(&self) -> Vec<SnapBrowser> {
+    pub(crate) fn snap_browsers(&self) -> Vec<SnapBrowser> {
         SNAP_BROWSERS
             .into_iter()
             .filter(|browser| {
@@ -183,7 +183,7 @@ impl System {
 
     /// The udev tags of the hidraw node `node` (such as `/dev/hidraw3`), from
     /// udev's database, or `None` if udev has no record of it.
-    pub fn node_tags(&self, node: &Path) -> Option<Vec<String>> {
+    pub(crate) fn node_tags(&self, node: &Path) -> Option<Vec<String>> {
         let name = node.file_name()?.to_str()?;
         let number =
             fs::read_to_string(self.path("/sys/class/hidraw").join(name).join("dev")).ok()?;
@@ -218,12 +218,7 @@ pub fn membership() -> Membership {
             in_session: false,
         };
     };
-    // nix does not expose getgroups on Apple platforms. The daemon only runs
-    // on Linux (it needs /dev/uhid).
-    #[cfg(target_os = "linux")]
     let groups = unistd::getgroups().unwrap_or_default();
-    #[cfg(not(target_os = "linux"))]
-    let groups: Vec<Gid> = Vec::new();
     Membership {
         member: primary == group.gid || group.mem.contains(&name),
         in_session: unistd::getegid() == group.gid || groups.contains(&group.gid),

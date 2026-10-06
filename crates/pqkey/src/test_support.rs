@@ -93,3 +93,27 @@ pub mod logs {
 }
 
 pub(crate) mod callback;
+
+/// An elapsed clock for portable service tests, injected at app creation.
+pub(crate) struct TestClock(std::time::Instant);
+impl pqkey_ctap::ctap::Clock for TestClock {
+    fn now(&self) -> std::time::Duration {
+        self.0.elapsed()
+    }
+}
+pub(crate) fn clock() -> std::io::Result<TestClock> {
+    Ok(TestClock(std::time::Instant::now()))
+}
+pub(crate) fn serve_ctap(
+    device: crate::platform::test_support::Device,
+    data: crate::service::AppData,
+    shutdown: crate::shutdown::ShutdownSignal,
+    ready: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    crate::service::serve_ctap_with_clock(device, data, clock, shutdown, ready)
+}
+pub(crate) fn daemon_info(args: &crate::cli::DaemonArgs) -> crate::cli::daemon_info::DaemonInfo {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::metadata(std::env::current_exe().unwrap()).unwrap();
+    crate::cli::daemon_info::DaemonInfo::from_identity(args, (metadata.dev(), metadata.ino()))
+}

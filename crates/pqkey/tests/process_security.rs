@@ -1,5 +1,6 @@
 //! Startup protection tested in a child, without lowering the runner's limits.
 #![forbid(unsafe_code)]
+#![cfg(target_os = "linux")]
 
 use std::{fs, process::Command};
 

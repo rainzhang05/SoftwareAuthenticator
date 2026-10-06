@@ -56,29 +56,87 @@ Two details carry ML-DSA's large messages across the kernel:
 - getInfo reports a maxMsgSize of 1,768 bytes, the most that the kernel's
   queue delivers whole.
 
-The Linux HID adapters, permissions, notifications, setup and service code
-live in
-`crates/pqkey/src/platform/linux/`, alongside the boot clock, process
-protections, executable identity and XDG state paths.
+## Platform boundary
 
-The transport uses `HidDevice`: nonblocking output-report reads, input-report
-writes, and `wait_with`, which waits on device readiness and the worker's wake
-socket. A callback device can queue reports and signal a private pipe; it does
-not need to expose a device file descriptor. Dropping the device removes it
-before the transport joins the cancelled worker.
+`crates/pqkey/src/platform/mod.rs` selects `linux` or `macos` with
+`cfg(target_os)`. Portable modules import this facade. CTAPHID framing and
+the loop, the service runner, presence policy, state locking and daemon
+information, attestation, the allocator, PIN input, client protocols and
+command logic stay outside it. Both builds share Unix locks, signals,
+background-process coordination and terminal I/O.
 
-Presence policy uses `NotificationServer` for connection, showing a prompt,
-receiving an event, closing it, refreshing it and disconnecting. The backend
-normalizes prompt capabilities, events and opaque server identity. It requests
-any queue-refresh interval; Linux supplies GNOME's existing two-second one.
-Timeouts, cancellation, sanitization and stale-prompt policy remain portable.
+Linux's backend owns uhid, hidraw, device permissions, udev, groups, kernel
+checks and modules, snap tags, XDG paths, systemd, D-Bus, the boot clock,
+process protections and `/proc/self/exe` identity. These implementations live
+under `crates/pqkey/src/platform/linux/`; shipped units and rules stay in
+`contrib/`.
 
-Commands use the selected `UserService` to inspect, install and remove the
-user service and request start, restart, stop, enable or reset-failed. `System`
-prepares installation steps and reports startup, device and prompt problems.
-Commands retain confirmation, readiness waits, restart decisions, PIN setup
-and CTAP operations; native rules, scripts, units and diagnostics stay in the
-backend.
+The interfaces a backend implements are:
+
+- `Device::new(HidDeviceDescriptor)`, reached through `create_device`, and
+  `HidDevice::try_read_frame`, `write_frame` and `wait_with`. Reads return
+  an optional complete output report without blocking; writes send an input
+  report. `wait_with` takes the worker's wake descriptor and an optional
+  timeout, and returns whether anything became ready. Shared report types,
+  USB IDs and the FIDO report descriptor live in `transport`.
+- `open_client(uniq, wait)`, returning a display label and `ClientLink`.
+  `ReportLink::send` and `receive(timeout)` exchange complete reports; the
+  client owns CTAPHID and CTAP. The label need not be a device-node path.
+- `UserService::installed`, `main_pid`, `install(binary)`, `remove` and
+  `action(ServiceAction)`. Actions are start, restart, stop, enable and
+  reset-failed. Installation returns whether its file changed; removal
+  returns the removed path, if any. Backend descriptions, help and log
+  hints keep native names out of command logic.
+- `System::real`, `check_setup_caller`, `setup_steps`, `apply_setup_steps`,
+  `refresh`, `login_problem`, `start_problems`, `device_problems`,
+  `notification_problem` and `uninstall_instructions`. Setup steps carry
+  their description, confirmation, deferred instructions and artifact.
+  Diagnostics return portable `Problem` values. Commands own confirmation,
+  sequencing, PIN setup, readiness waits and output. Linux refreshes its
+  membership snapshot after privileged setup.
+- `notifications()`, returning `Notifications`, which implements
+  `NotificationServer::connect`, `notify`, `next_event`, `close`, `nudge`
+  and `disconnect`. It normalizes action/body support, markup, events and
+  server identity. An optional refresh interval requests queue nudging;
+  Linux supplies GNOME's existing two-second interval. Backend helpers
+  format native failures. Prompt text, sanitization, deadlines,
+  cancellation and stale-prompt policy stay portable. Linux records the
+  same bus, owner and notification ID as before.
+- `ensure_supported`, `default_state_dir`, `disable_core_dumps`,
+  `current_executable_identity` and `BootTimeClock::new`. Identity is the
+  executable's device and inode; `DaemonInfo` owns its format and validation.
+  The clock implements the engine's `Clock` and counts through suspend.
+  Linux still attempts both memory protections independently, warns on
+  failure and continues.
+
+Services, system preparation and runtime helpers are concrete implementations
+selected by cfg. Traits are used where tests need substitutes: the device,
+client report link, notification server and the engine's existing clock.
+There is no trait for an entire platform.
+
+A callback device can queue host output reports and signal a private pipe
+that `wait_with` polls alongside the worker socket. It need not expose a
+file descriptor or implement `AsFd`. Pending reports must prevent sleep,
+and enqueueing must wake a concurrent wait even when earlier wake bytes
+have been drained. Drop must stop callbacks and remove the virtual device
+before the transport joins the cancelled worker. The loop keeps its 10 ms
+idle bound, CTAPHID deadlines and 1 ms input-report pacing.
+
+Tests inject devices, report links, clocks and executable identity. Linux's
+socket peer retains uhid encoding and destruction assertions; macOS uses a
+callback queue and readiness socket. Portable presence tests script a
+notification server. Linux-specific CLI and kernel tests run on Linux.
+
+macOS currently implements only the default state path,
+`~/Library/Application Support/pqkey`, with `./pqkey` without `HOME`.
+Explicit state-directory overrides still apply. All operational backend
+entry points fail with `the key does not run on macOS yet`. The CLI checks
+support after parsing and before side effects; help and version work.
+A future macOS backend can use IOHIDUserDevice or, on macOS 15 and later,
+CoreHID's HIDVirtualDevice, with Apple's required entitlement; IOHIDManager
+for the client; a LaunchAgent for the service; and a native prompt provider.
+Implementing these interfaces requires no changes to portable command or
+protocol logic.
 
 ## What the key supports
 

@@ -457,7 +457,8 @@ pub(crate) enum Keep {
 }
 
 /// `text` made safe to show: control characters become spaces, invisible
-/// characters ([`is_invisible_format`]) are removed, runs of whitespace collapse, and anything longer than
+/// characters ([`is_invisible_format`]) are removed, runs of whitespace
+/// collapse, and anything longer than
 /// `max_chars` is cut, keeping its start or its end, with an ellipsis. `None`
 /// if nothing is left.
 pub(crate) fn sanitise(text: &str, max_chars: usize, keep: Keep) -> Option<String> {
@@ -1186,7 +1187,8 @@ mod tests {
         }
     }
 
-    /// When the backend requests refreshes, a prompt that waits is nudged every interval, between
+    /// When the backend requests refreshes, a prompt that waits is
+    /// nudged every interval, between
     /// showing it and withdrawing it, and the request still times out when
     /// its own timeout says.
     ///

@@ -6,7 +6,6 @@ pub mod allocator;
 pub mod attestation;
 pub mod cli;
 pub mod client;
-pub(crate) use platform::linux::clock;
 pub mod pin_input;
 pub mod platform;
 pub mod presence;
@@ -20,10 +19,6 @@ pub mod transport;
 mod test_support;
 
 pub use platform::create_device;
-use transport::HidDeviceDescriptor;
 pub use transport::{
     App, CAPABILITY_CBOR, CAPABILITY_NMSG, MESSAGE_SIZE, Transport, WaitingForUser, exec, serve,
 };
-
-#[cfg(test)]
-pub(crate) use transport::tests;

@@ -115,7 +115,7 @@ impl Peer {
         Ok(self.clone())
     }
 
-    pub(crate) fn read_event(&self) -> io::Result<Event> {
+    pub(crate) fn read_event(&mut self) -> io::Result<Event> {
         self.reports
             .lock()
             .unwrap()

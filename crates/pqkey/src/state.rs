@@ -12,7 +12,7 @@ use std::{
     path::Path,
 };
 
-pub use crate::platform::linux::state::default_state_dir;
+pub use crate::platform::default_state_dir;
 
 /// Create the state directory if needed and make it private to this user.
 ///

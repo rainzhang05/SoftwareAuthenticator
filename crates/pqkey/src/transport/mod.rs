@@ -1,6 +1,6 @@
 pub mod ctaphid_host;
 mod device;
-pub(crate) use device::CTAPHID_REPORT_DESCRIPTOR;
+pub use device::CTAPHID_REPORT_DESCRIPTOR;
 pub use device::{
     CTAPHID_FRAME_LEN, CtapHidFrame, DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID, HidDevice,
     HidDeviceDescriptor,
@@ -29,15 +29,7 @@ pub const CAPABILITY_NMSG: u8 = 0x08; // Does NOT implement CTAPHID_MSG
 /// The largest CTAPHID message, and so the longest answer the app can give.
 pub const MESSAGE_SIZE: usize = MAX_MESSAGE_SIZE;
 
-/// Pause between input reports of a multi-packet message.
-///
-/// A USB full-speed HID interrupt endpoint delivers at most one report per
-/// millisecond, and FIDO clients read at that pace. uhid has no such flow
-/// control: each input report goes straight into every hidraw reader's buffer,
-/// which holds only 64 reports (`HIDRAW_BUFFER_SIZE`), so a longer burst drops
-/// packets. An ML-DSA-87 assertion is 82 packets. Pacing like real hardware
-/// keeps even the largest CTAPHID message (129 packets) intact, at a cost of
-/// at most about 130 ms.
+/// Pause between input reports, matching a USB full-speed HID endpoint.
 const INPUT_REPORT_INTERVAL: Duration = Duration::from_millis(1);
 
 /// The longest the loop waits for the device before it looks at the shutdown
@@ -166,7 +158,7 @@ fn run_app<'interrupt, A>(
     }
 }
 
-/// CTAPHID over a uhid device.
+/// CTAPHID over a platform device.
 ///
 /// This runs on the daemon's main thread and owns the device and the CTAPHID
 /// state ([`CtaphidHost`]); the app runs on a worker thread. The transport
@@ -199,10 +191,8 @@ impl<D: HidDevice> Transport<'_, D> {
         Ok(read)
     }
 
-    /// Write every queued packet, [`INPUT_REPORT_INTERVAL`] apart.  In those
-    /// pauses the packets the host writes are read: uhid queues them in a
-    /// ring of only 32 events and drops what does not fit, and a long answer
-    /// takes up to 130 ms to go out.
+    /// Write queued packets, [`INPUT_REPORT_INTERVAL`] apart. Read output
+    /// reports during the pauses so a long answer cannot starve the host.
     fn flush_pending(&mut self) -> io::Result<bool> {
         let mut wrote = false;
         while let Some(frame) = self.host.next_outgoing_frame() {
@@ -268,7 +258,8 @@ impl<D: HidDevice> Transport<'_, D> {
 /// The daemon's main loop: poll the device and the app, and wait whenever a
 /// pass did nothing.
 ///
-/// Returns only with an error: [`crate::shutdown::shutdown_error`] once shutdown has
+/// Returns only with an error: [`crate::shutdown::shutdown_error`] once
+/// shutdown has
 /// been requested, or whatever made the device or the app fail.
 pub fn serve(transport: &mut Transport<'_, impl HidDevice>) -> io::Result<()> {
     loop {
@@ -279,7 +270,8 @@ pub fn serve(transport: &mut Transport<'_, impl HidDevice>) -> io::Result<()> {
 }
 
 /// Serve CTAPHID on `device` with `app` until the device or the app fails or
-/// `shutdown` is requested; the latter ends with [`crate::shutdown::shutdown_error`].
+/// `shutdown` is requested; the latter ends with
+/// [`crate::shutdown::shutdown_error`].
 /// `on_ready` runs just before requests are served. `waiting` is what the app
 /// reports through its keepalive callback.
 ///
@@ -319,7 +311,8 @@ where
             minor: 1,
             build: 0,
         });
-        // Setting both capability bits prevents hosts from probing CTAPHID_MSG and enables proper CTAP2 detection
+        // Setting both capability bits prevents hosts from probing
+        // CTAPHID_MSG and enables proper CTAP2 detection
         host.set_capabilities(CAPABILITY_CBOR | CAPABILITY_NMSG);
         let mut transport = Transport {
             device,
@@ -346,42 +339,14 @@ where
     })
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
     use super::*;
-    use crate::platform::{Device as UhidDevice, linux::uhid};
+    use crate::platform::test_support::uhid;
     use crate::shutdown::is_shutdown;
     use crate::transport::ctaphid_host::Command;
-    use std::os::fd::{AsRawFd, OwnedFd};
 
-    /// A uhid device whose descriptor is one end of a socket pair; the other
-    /// end is returned so the test can play the kernel.
-    pub(crate) fn socket_device() -> (UhidDevice, UnixStream) {
-        let (device_end, test_end) = UnixStream::pair().unwrap();
-        // /dev/uhid reads and writes whole events. A stream socket with its
-        // small default buffers can deliver part of one, and the device drops
-        // a partly read event, losing packets. Buffers this large hold every
-        // event whole while the other side reads along.
-        for socket in [&device_end, &test_end] {
-            for option in [nix::libc::SO_SNDBUF, nix::libc::SO_RCVBUF] {
-                let size: nix::libc::c_int = 1 << 20;
-                // SAFETY: a valid socket, and an int option of the right size.
-                let status = unsafe {
-                    nix::libc::setsockopt(
-                        socket.as_raw_fd(),
-                        nix::libc::SOL_SOCKET,
-                        option,
-                        (&size as *const nix::libc::c_int).cast(),
-                        size_of::<nix::libc::c_int>() as nix::libc::socklen_t,
-                    )
-                };
-                assert_eq!(status, 0, "{}", io::Error::last_os_error());
-            }
-        }
-        device_end.set_nonblocking(true).unwrap();
-        let device = UhidDevice::from_fd(OwnedFd::from(device_end), HidDeviceDescriptor::default());
-        (device, test_end)
-    }
+    use crate::platform::test_support::socket_device;
 
     /// Answers CTAPHID_CBOR by echoing the request, or panics on 0xFF.
     struct EchoApp<'interrupt> {
@@ -630,7 +595,7 @@ mod callback_tests {
         assert_eq!(device.try_read_frame().unwrap().unwrap().0, [2; 64]);
         assert!(device.try_read_frame().unwrap().is_none());
         drop(device);
-        let reader = peer.try_clone().unwrap();
+        let mut reader = peer.try_clone().unwrap();
         assert!(matches!(reader.read_event().unwrap(), Event::Destroyed));
     }
 
@@ -665,7 +630,7 @@ mod callback_tests {
 
     #[test]
     fn the_transport_serves_callbacks_and_destroys_the_device_on_shutdown() {
-        let (device, peer) = callback::pair();
+        let (device, mut peer) = callback::pair();
         let shutdown = ShutdownSignal::new();
         let stop = shutdown.clone();
         let (sender, ready) = mpsc::channel();

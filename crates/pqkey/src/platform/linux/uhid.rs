@@ -1,3 +1,17 @@
+//! The Linux kernel's virtual HID device.
+//!
+//! Pause between input reports of a multi-packet message.
+//!
+//! A USB full-speed HID interrupt endpoint delivers at most one report per
+//! millisecond, and FIDO clients read at that pace. uhid has no such flow
+//! control: each input report goes straight into every hidraw reader's buffer,
+//! which holds only 64 reports (`HIDRAW_BUFFER_SIZE`), so a longer burst drops
+//! packets. An ML-DSA-87 assertion is 82 packets. Pacing like real hardware
+//! keeps even the largest CTAPHID message (129 packets) intact, at a cost of
+//! at most about 130 ms.
+//! The transport also reads during those pauses: uhid holds only 32 output
+//! events, and drops what does not fit.
+
 use crate::transport::{
     CTAPHID_FRAME_LEN, CTAPHID_REPORT_DESCRIPTOR, CtapHidFrame, HidDevice, HidDeviceDescriptor,
 };
@@ -754,7 +768,7 @@ mod tests {
     #[test]
     fn ignores_output_events_with_an_oversize_size() {
         use std::io::Write;
-        let (device, mut kernel) = crate::tests::socket_device();
+        let (device, mut kernel) = crate::platform::test_support::socket_device();
         let frame = ping_frame();
         for size in OVERSIZE {
             kernel
@@ -774,7 +788,7 @@ mod tests {
     #[test]
     fn answers_set_report_events_with_an_oversize_size_with_einval() {
         use std::io::Write;
-        let (device, mut kernel) = crate::tests::socket_device();
+        let (device, mut kernel) = crate::platform::test_support::socket_device();
         let frame = init_frame();
         for (id, size) in (1..).zip(OVERSIZE) {
             let event = set_report_event(id, raw::UHID_REPORT_TYPE_OUTPUT, &frame, size);
@@ -802,7 +816,7 @@ mod tests {
     #[test]
     fn feature_reports_are_refused() {
         use std::io::{Read, Write};
-        let (device, mut kernel) = crate::tests::socket_device();
+        let (device, mut kernel) = crate::platform::test_support::socket_device();
         let frame = init_frame();
         let event = set_report_event(3, raw::UHID_REPORT_TYPE_FEATURE, &frame, 64);
         kernel.write_all(&event).unwrap();
@@ -843,7 +857,7 @@ mod tests {
     #[test]
     fn an_open_event_is_reported_once() {
         use std::io::Write;
-        let (device, mut kernel) = crate::tests::socket_device();
+        let (device, mut kernel) = crate::platform::test_support::socket_device();
         assert!(!device.take_opened());
         let open = raw::uhid_event::new(raw::UHID_EVENT_TYPE_OPEN);
         kernel.write_all(event_as_bytes(&open)).unwrap();

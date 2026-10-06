@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::HidDeviceDescriptor;
+use crate::transport::HidDeviceDescriptor;
 
 pub const UHID_PATH: &str = "/dev/uhid";
 

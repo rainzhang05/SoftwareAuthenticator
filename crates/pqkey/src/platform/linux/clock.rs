@@ -12,9 +12,6 @@ use pqkey_ctap::ctap::Clock;
 /// the same real time however long the machine slept in between, much as it
 /// would on a security key that lost power.
 ///
-/// macOS has no CLOCK_BOOTTIME; its CLOCK_MONOTONIC is the equivalent, a clock
-/// that "will continue to increment while the system is asleep"
-/// (clock_gettime(3)).
 pub(crate) struct BootTimeClock {
     origin: Duration,
 }
@@ -36,10 +33,7 @@ impl Clock for BootTimeClock {
     }
 }
 
-#[cfg(target_os = "linux")]
 const BOOT_TIME: ClockId = ClockId::CLOCK_BOOTTIME;
-#[cfg(target_os = "macos")]
-const BOOT_TIME: ClockId = ClockId::CLOCK_MONOTONIC;
 
 fn boot_time() -> io::Result<Duration> {
     Ok(clock_gettime(BOOT_TIME)?.into())

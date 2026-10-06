@@ -1,7 +1,8 @@
 //! The commands that manage the running key: `status`, `pin`, `passkeys` and
 //! `reset`.
 //!
-//! They talk to the key over CTAP through its hidraw node, as a security
+//! They talk to the key over CTAP through its platform client link, as a
+//! security
 //! key's management application does ([`crate::client`]). So the key itself
 //! checks the PIN and counts retries, asks its user to approve a reset, and
 //! accepts a reset only shortly after it is plugged in.
@@ -27,16 +28,13 @@ use super::output::{self, errln, outln};
 use crate::client::ctap2::{Authenticator, ClientError, Passkey, PinRetries, Token};
 use crate::client::ctaphid::{ReportLink, STATUS_UPNEEDED};
 use crate::pin_input::{MIN_PIN_CODE_POINTS, Pin, PinReader, PinSource, validate_pin};
-use crate::platform::Notifications;
 use crate::platform::{self, ClientLink};
 use crate::platform::{System, UserService};
 use crate::presence::notification::{ConnectError, Keep, NotificationServer, ServerInfo, sanitise};
 use crate::service;
 use crate::state::default_state_dir;
 
-/// How long to wait for the running key's hidraw node, and for access to it:
-/// the kernel creates the node and udev grants access just after the key
-/// starts.
+/// How long to wait for the running key's device and for access to it.
 const DEVICE_WAIT: Duration = Duration::from_secs(5);
 /// The same for `status`, which only reports what it finds.
 const STATUS_WAIT: Duration = Duration::from_secs(1);
@@ -61,14 +59,14 @@ fn client_error(err: ClientError) -> io::Error {
     }
 }
 
-/// The running key on `state_dir`, through its hidraw node.
+/// The running key on `state_dir`, through its platform client link.
 fn connect(state_dir: &Path) -> io::Result<Authenticator<ClientLink>> {
     let running = daemon::running(state_dir)?.ok_or_else(not_running)?;
     connect_to(running, DEVICE_WAIT).map(|(_, key)| key)
 }
 
-/// The hidraw node of the key `running`, which names its device after its
-/// pid, and a CTAPHID channel to it, waiting up to `wait` for both.
+/// The display label and CTAPHID channel of the key `running`, waiting up
+/// to `wait` for its device and access to it.
 fn connect_to(running: Running, wait: Duration) -> io::Result<(String, Authenticator<ClientLink>)> {
     let (path, link) = open_node(running, wait)?;
     let key = Authenticator::open(link).map_err(client_error)?;
@@ -205,7 +203,7 @@ pub fn running_problems(
 }
 
 /// Whether the key `running` asks for presence with notifications, as the
-/// systemd unit and `pqkey start` without test options have it do.
+/// user service and `pqkey start` without test options have it do.
 fn asks_with_notifications(state_dir: &Path, running: Running) -> bool {
     match running {
         Running::Service(_) => true,
@@ -216,26 +214,26 @@ fn asks_with_notifications(state_dir: &Path, running: Running) -> bool {
 
 /// What the desktop's notification server says about itself.
 fn notification_server() -> Result<ServerInfo, ConnectError> {
-    let mut bus = Notifications::new();
+    let mut bus = platform::notifications().map_err(|err| ConnectError::Failed(err.to_string()))?;
     let server = bus.connect();
     bus.disconnect();
     server
 }
 
-/// Whether the systemd user service runs the key on the default state
+/// Whether the installed user service runs the key on the default state
 /// directory, as `pqkey setup` arranges.
 fn service_problems(state_dir: &Path, running: Option<Running>) -> io::Result<Vec<Problem>> {
     if state_dir != default_state_dir() {
         return Ok(Vec::new());
     }
     if !daemon::uses_service(state_dir)? {
-        return Ok(vec![Problem {
-            what: "the key does not start with your session".into(),
-            fix: "run `pqkey setup`".into(),
-        }]);
+        return Ok(vec![Problem::new(
+            "the key does not start with your session",
+            "run `pqkey setup`",
+        )]);
     }
     Ok(match running {
-        Some(Running::Daemon(pid)) => vec![UserService::manual_start_problem(pid)],
+        Some(Running::Daemon(pid)) => vec![UserService::manual_start_problem(pid)?],
         _ => Vec::new(),
     })
 }

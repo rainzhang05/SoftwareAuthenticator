@@ -1,8 +1,8 @@
 # Development notes
 
 pqkey builds with Rust stable, 1.89 or later; `rust-toolchain.toml` picks the
-toolchain. The key runs on Linux. Everything else also builds and tests on
-macOS.
+toolchain. The key runs on Linux. Portable code builds and tests on macOS;
+operational commands there report that the key does not run on macOS yet.
 
 ## Scripts
 
@@ -51,6 +51,43 @@ GitHub Actions runs these workflows:
 Dependabot proposes updates every week. Cargo updates that are
 semver-compatible and pass every workflow are merged automatically. Commit
 changes to `Cargo.lock` and `fuzz/Cargo.lock` together.
+
+## Adding a platform
+
+The boundary is documented in the [architecture notes](architecture.md).
+The current runner shares Unix facilities between Linux and macOS.
+
+1. Add a backend under `crates/pqkey/src/platform/` and select it with
+   `cfg(target_os)` in the facade. Keep native APIs, dependencies, messages
+   and configuration there; do not add platform branches to command or
+   protocol logic.
+2. Implement the concrete virtual device and client link, using the shared
+   report descriptor and identifiers. A callback device queues reports and
+   signals a private pipe or socket, which it waits on with the worker's
+   wake descriptor. Pending reports must not lose their wakeup. Drop stops
+   callbacks and removes the device before the app worker is joined.
+3. Implement user-service inspection, installation, removal and actions,
+   and system preparation and diagnostics. Preserve portable confirmation,
+   readiness, restart and PIN logic. Return no privileged setup steps on a
+   system that needs none; do not invent device groups or kernel modules.
+4. Implement the notification server's normalized capabilities, events,
+   identity and optional refresh interval. Keep fail-closed decisions,
+   prompt text, deadlines and cancellation in presence policy. Give a
+   server identity only when stale prompts can be withdrawn safely.
+5. Implement state paths, executable identity, startup protections and the
+   suspend-aware clock. Keep the daemon information format and state lock
+   portable. Enable `ensure_supported` only when the running key works;
+   until then, operations return one clear error before side effects.
+6. Run the portable tests with injected devices, clocks and notifications,
+   and add native integration tests. Cover callback and worker wakeups,
+   queued reports, timeouts, cancellation, shutdown, state overrides and
+   command exit statuses. Keep every existing Linux assertion.
+
+For macOS, obtaining the virtual-HID entitlement is part of implementing the
+backend; the current stubs do not create a device or a LaunchAgent. Run all
+project checks on both builds and the unchanged end-to-end suite on Linux
+with `/dev/uhid`. Declare native-only dependencies for that target, and keep
+both lockfiles synchronized after changing a manifest.
 
 ## Adding a signature algorithm
 

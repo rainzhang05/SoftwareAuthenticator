@@ -18,18 +18,22 @@ pub(crate) struct DaemonInfo {
 
 impl DaemonInfo {
     pub fn current(args: &DaemonArgs) -> io::Result<Self> {
-        let (device, inode) = crate::platform::linux::runtime::current_executable_identity()?;
+        let (device, inode) = crate::platform::current_executable_identity()?;
+        Ok(Self::from_identity(args, (device, inode)))
+    }
+
+    pub(crate) fn from_identity(args: &DaemonArgs, (device, inode): (u64, u64)) -> Self {
         let mut cmdline = b"pqkey\0run\0".to_vec();
         for arg in args.to_args() {
             cmdline.extend_from_slice(arg.as_encoded_bytes());
             cmdline.push(0);
         }
-        Ok(Self {
+        Self {
             pid: Pid::this(),
             device,
             inode,
             cmdline,
-        })
+        }
     }
 
     pub fn publish(&self, state_dir: &Path, lock: &StateLock) -> io::Result<()> {
@@ -99,8 +103,7 @@ mod tests {
 
     fn publish(dir: &TempDir, args: &DaemonArgs) -> StateLock {
         let lock = StateLock::try_acquire(dir.path()).unwrap().unwrap();
-        DaemonInfo::current(args)
-            .unwrap()
+        crate::test_support::daemon_info(args)
             .publish(dir.path(), &lock)
             .unwrap();
         state_lock::write_pid_file(dir.path(), &lock).unwrap();
@@ -134,7 +137,7 @@ mod tests {
     fn only_the_locked_ready_pid_can_use_the_information() {
         let dir = TempDir::new("daemon-info-lifecycle");
         let lock = StateLock::try_acquire(dir.path()).unwrap().unwrap();
-        let info = DaemonInfo::current(&DaemonArgs::default()).unwrap();
+        let info = crate::test_support::daemon_info(&DaemonArgs::default());
         info.publish(dir.path(), &lock).unwrap();
         assert!(DaemonInfo::read(dir.path(), Pid::this()).is_err());
         state_lock::write_pid_file(dir.path(), &lock).unwrap();
@@ -162,7 +165,7 @@ mod tests {
             fs::write(dir.path().join(state_lock::INFO_FILE), bytes).unwrap();
             assert!(DaemonInfo::read(dir.path(), Pid::this()).is_err());
         }
-        let mut info = DaemonInfo::current(&DaemonArgs::default()).unwrap();
+        let mut info = crate::test_support::daemon_info(&DaemonArgs::default());
         info.cmdline = b"pqkey\0status\0".to_vec();
         info.publish(dir.path(), &_lock).unwrap();
         assert!(DaemonInfo::read(dir.path(), Pid::this()).is_err());
@@ -174,7 +177,7 @@ mod tests {
         let binary = dir.path().join("pqkey");
         fs::write(&binary, b"old binary").unwrap();
         let metadata = fs::metadata(&binary).unwrap();
-        let mut info = DaemonInfo::current(&DaemonArgs::default()).unwrap();
+        let mut info = crate::test_support::daemon_info(&DaemonArgs::default());
         info.device = metadata.dev();
         info.inode = metadata.ino();
         assert!(info.runs_binary(&binary).unwrap());

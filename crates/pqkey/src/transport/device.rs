@@ -4,7 +4,8 @@ use std::{io, os::fd::BorrowedFd, time::Duration};
 
 pub const CTAPHID_FRAME_LEN: usize = 64;
 
-pub(crate) const CTAPHID_REPORT_DESCRIPTOR: [u8; 34] = [
+/// The FIDO HID report descriptor shared by platform backends.
+pub const CTAPHID_REPORT_DESCRIPTOR: [u8; 34] = [
     0x06, 0xD0, 0xF1, // Usage Page (FIDO Alliance)
     0x09, 0x01, // Usage (U2F HID Authenticator)
     0xA1, 0x01, // Collection (Application)

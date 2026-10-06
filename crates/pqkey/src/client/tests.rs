@@ -1,14 +1,8 @@
 //! The client against the whole daemon stack: the engine on a file store,
-//! the worker thread and the CTAPHID transport, over a socket that stands in
-//! for `/dev/uhid`.
+//! the worker thread and the CTAPHID transport, through the backend's test
+//! peer: Linux uhid events or a callback queue.
 
-use std::{
-    io::{self, Read, Write},
-    os::unix::net::UnixStream,
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
+use std::{io, sync::mpsc, thread, time::Duration};
 
 use pqkey_ctap::CoseAlg;
 use pqkey_ctap::ctap::AttestationMode;
@@ -16,33 +10,22 @@ use pqkey_ctap::store::{CredentialRecord, CredentialStore, FileStore, PrivateKey
 
 use super::ctap2::{Authenticator, ClientError, PinRetries};
 use super::ctaphid::{Report, ReportLink};
-use crate::platform::linux::uhid;
+use crate::platform::test_support::Peer;
 use crate::presence::PresenceMode;
-use crate::service::{self, AppData};
+use crate::service::AppData;
 use crate::shutdown::ShutdownSignal;
 use crate::test_support::TempDir;
 
-/// Reports through the kernel's side of a uhid device.
-pub(crate) struct KernelSide(UnixStream);
+/// Reports through the test peer of the selected device.
+pub(crate) struct TestLink(Peer);
 
-impl ReportLink for KernelSide {
+impl ReportLink for TestLink {
     fn send(&mut self, report: &Report) -> io::Result<()> {
-        self.0.write_all(&uhid::output_event(report))
+        self.0.send(report)
     }
 
     fn receive(&mut self, timeout: Duration) -> io::Result<Option<Report>> {
-        self.0.set_read_timeout(Some(timeout))?;
-        let mut event = vec![0u8; uhid::UHID_EVENT_SIZE];
-        loop {
-            match self.0.read_exact(&mut event) {
-                Ok(()) => {}
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
-                Err(err) => return Err(err),
-            }
-            if let Some(report) = uhid::input_report(&event) {
-                return Ok(Some(report));
-            }
-        }
+        self.0.receive(timeout)
     }
 }
 
@@ -60,15 +43,15 @@ impl Drop for Daemon {
     }
 }
 
-pub(crate) fn start(dir: &TempDir) -> (Daemon, Authenticator<KernelSide>) {
+pub(crate) fn start(dir: &TempDir) -> (Daemon, Authenticator<TestLink>) {
     start_with(dir, PresenceMode::AutoApprove)
 }
 
 pub(crate) fn start_with(
     dir: &TempDir,
     presence: PresenceMode,
-) -> (Daemon, Authenticator<KernelSide>) {
-    let (device, kernel) = crate::tests::socket_device();
+) -> (Daemon, Authenticator<TestLink>) {
+    let (device, kernel) = crate::platform::test_support::pair();
     let data = AppData {
         store: FileStore::open(dir.path()).expect("open the store"),
         state_dir: dir.path().to_owned(),
@@ -83,7 +66,7 @@ pub(crate) fn start_with(
     let (done_sender, done) = mpsc::channel();
     let loop_shutdown = shutdown.clone();
     thread::spawn(move || {
-        let _ = service::serve_ctap(device, data, loop_shutdown, move || {
+        let _ = crate::test_support::serve_ctap(device, data, loop_shutdown, move || {
             ready_sender.send(()).unwrap();
             Ok(())
         });
@@ -92,7 +75,7 @@ pub(crate) fn start_with(
     ready
         .recv_timeout(Duration::from_secs(10))
         .expect("the daemon started");
-    let client = Authenticator::open(KernelSide(kernel)).expect("CTAPHID_INIT");
+    let client = Authenticator::open(TestLink(kernel)).expect("CTAPHID_INIT");
     (Daemon { shutdown, done }, client)
 }
 
@@ -123,7 +106,7 @@ fn a_pin_is_set_and_changed_with_its_retries_counted() {
 
     key.set_pin(b"1234").unwrap();
     assert_eq!(key.info().unwrap().pin_set, Some(true));
-    let retries = |key: &mut Authenticator<KernelSide>| key.pin_retries().unwrap();
+    let retries = |key: &mut Authenticator<TestLink>| key.pin_retries().unwrap();
     assert_eq!(
         retries(&mut key),
         PinRetries {

@@ -5,23 +5,20 @@ use std::{fs, io, os::unix::fs::MetadataExt};
 pub(crate) fn current_executable_identity() -> io::Result<(u64, u64)> {
     // Self access is allowed even when this process is non-dumpable, and
     // names the actual inode even if installation replaced its pathname.
-    #[cfg(target_os = "linux")]
     let metadata = fs::metadata("/proc/self/exe")?;
-    #[cfg(not(target_os = "linux"))]
-    let metadata = fs::metadata(std::env::current_exe()?)?;
     Ok((metadata.dev(), metadata.ino()))
 }
 
 /// Apply before any secrets are read or a device is created. Attempt both
 /// protections independently: failure is warned about, never fatal.
-pub(crate) fn disable_core_dumps() {
+pub(crate) fn disable_core_dumps() -> io::Result<()> {
     use nix::sys::resource::{Resource, setrlimit};
     warn_if_protection_failed("disable core files", setrlimit(Resource::RLIMIT_CORE, 0, 0));
-    #[cfg(target_os = "linux")]
     warn_if_protection_failed(
         "make the daemon non-dumpable",
         nix::sys::prctl::set_dumpable(false),
     );
+    Ok(())
 }
 
 fn warn_if_protection_failed(setting: &str, result: nix::Result<()>) {

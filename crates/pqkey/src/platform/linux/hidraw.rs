@@ -51,7 +51,7 @@ pub struct Hidraw {
 }
 
 impl Hidraw {
-    pub fn open(path: &Path) -> io::Result<Self> {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
         Ok(Self {
             file: OpenOptions::new().read(true).write(true).open(path)?,
         })

@@ -1,23 +1,39 @@
-//! Operating-system adapters for the daemon and its commands.
+//! The operating-system boundary. Only the selected backend is compiled.
+//!
+//! Devices and client links exchange reports; services and system preparation
+//! expose semantic operations and diagnostics. Presence policy uses a
+//! normalized notification server. Runtime helpers select state paths,
+//! process protections, executable identity and the suspend-aware clock.
 
-pub mod linux;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "linux")]
+use linux as native;
+#[cfg(target_os = "macos")]
+use macos as native;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("pqkey supports Linux and macOS builds");
 
 use crate::transport::HidDeviceDescriptor;
 use std::io;
 
-pub use linux::{hidraw::Hidraw as ClientLink, uhid::UhidDevice as Device};
+#[cfg(test)]
+pub(crate) use native::test_support;
+pub(crate) use native::{
+    BootTimeClock, PRESENCE_NOTIFY_HELP, RUN_HELP, START_HELP, current_executable_identity,
+    disable_core_dumps, notification_connect_error, notification_failure, warn_device_access,
+};
+pub use native::{
+    ClientLink, Device, Notifications, System, UserService, default_state_dir, ensure_supported,
+    notifications, open_client,
+};
 
 /// Create the selected platform's virtual device. Drop removes it.
 pub fn create_device(descriptor: HidDeviceDescriptor) -> io::Result<Device> {
     Device::new(descriptor)
 }
-
-pub use linux::hidraw::open_client;
-
-pub use linux::dbus::SessionBus as Notifications;
-pub(crate) use linux::notification::{
-    connect_error_message as notification_connect_error, failure_message as notification_failure,
-};
 
 /// An operation on the installed per-user service.
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +53,3 @@ pub struct SetupSteps {
     pub instructions: Vec<String>,
     pub artifact: std::path::PathBuf,
 }
-
-pub(crate) use linux::daemon::{PRESENCE_NOTIFY_HELP, RUN_HELP, START_HELP, warn_device_access};
-pub use linux::{checks::System, daemon::UserService};

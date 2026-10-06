@@ -1,9 +1,9 @@
 //! Running the key, and plugging it in and out: `run`, `start`, `stop`.
 //!
 //! The key is a daemon, `pqkey run`, which holds an exclusive lock on its
-//! state directory for as long as it runs.  When the systemd user service is
+//! state directory for as long as it runs.  When the user service is
 //! installed for the default state directory, `start` and `stop` go through
-//! it, so systemd keeps track of the daemon; otherwise `start` runs one in
+//! it, so the service manager tracks the daemon; otherwise `start` runs one in
 //! the background itself.
 
 use std::{
@@ -77,6 +77,7 @@ fn starting_or_stopping() -> io::Error {
 /// holding the state directory's lock throughout.  The pid file is published
 /// once the virtual device exists and removed on the way out.
 pub fn run(state_dir: PathBuf, args: &DaemonArgs) -> io::Result<()> {
+    platform::ensure_supported()?;
     state::ensure_state_dir(&state_dir)?;
     let config = args
         .to_runner_config(state_dir.clone())
@@ -87,7 +88,7 @@ pub fn run(state_dir: PathBuf, args: &DaemonArgs) -> io::Result<()> {
     state_lock::remove_pid_file(&state_dir, &lock)?;
     state_lock::remove_info_file(&state_dir, &lock)?;
     let info = DaemonInfo::current(args)?;
-    platform::warn_device_access();
+    platform::warn_device_access()?;
     // Without RUST_LOG, warnings too: that --presence auto-approve asks
     // nobody, for example, is only ever logged.
     let _ = env_logger::try_init_from_env(env_logger::Env::default().default_filter_or("warn"));
@@ -109,7 +110,7 @@ pub fn run(state_dir: PathBuf, args: &DaemonArgs) -> io::Result<()> {
 /// How the key runs, if it does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Running {
-    /// As the systemd user service.
+    /// As the installed user service.
     Service(Pid),
     /// As a daemon of its own.
     Daemon(Pid),

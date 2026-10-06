@@ -5,23 +5,22 @@ use std::{
 };
 
 use pqkey_ctap::ctap::{
-    AttestationMode, CtapApp, InterruptFlag, RESET_WINDOW_AFTER_POWER_UP,
+    AttestationMode, Clock, CtapApp, InterruptFlag, RESET_WINDOW_AFTER_POWER_UP,
     presence::{AutoApprove, UserPresence},
 };
 use pqkey_ctap::store::{AttestationRecord, CredentialStore, FileStore};
 
 use crate::{
-    HidDeviceDescriptor, WaitingForUser,
+    WaitingForUser,
     attestation::{IdentityConfig, certificate_aaguid, generate_attestation_certificate},
-    clock::BootTimeClock,
     create_device, exec,
-    platform::{Notifications, linux::runtime::disable_core_dumps},
+    platform::{self, BootTimeClock},
     presence::{
         PresenceMode, Unanswered,
         notification::{NotificationPresence, PROMPT_FILE},
     },
     shutdown::{ShutdownSignal, is_shutdown, ok_if_shutdown},
-    transport::HidDevice,
+    transport::{HidDevice, HidDeviceDescriptor},
 };
 
 /// Who a newly provisioned attestation certificate names.
@@ -82,7 +81,8 @@ pub struct AppData {
     pub presence_timeout: Option<Duration>,
     /// The attestation registrations get.
     pub attestation: AttestationMode,
-    /// Accept authenticatorReset after the CTAP start-up window (test rigs only).
+    /// Accept authenticatorReset after the CTAP start-up window (test
+    /// rigs only).
     pub allow_late_reset: bool,
 }
 
@@ -256,7 +256,8 @@ pub fn run(
     shutdown: ShutdownSignal,
     on_ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
-    disable_core_dumps();
+    platform::ensure_supported()?;
+    platform::disable_core_dumps()?;
     let RunnerConfig {
         descriptor,
         state_dir,
@@ -315,27 +316,39 @@ pub fn serve_ctap(
     shutdown: ShutdownSignal,
     on_ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
+    serve_ctap_with_clock(device, data, BootTimeClock::new, shutdown, on_ready)
+}
+
+/// Serve with an injected clock factory, called when the CTAP app is built.
+/// Tests provide their clock through the same engine interface as the backend.
+pub(crate) fn serve_ctap_with_clock<C: Clock + 'static>(
+    device: impl HidDevice,
+    data: AppData,
+    clock: impl FnOnce() -> io::Result<C>,
+    shutdown: ShutdownSignal,
+    on_ready: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     match data.presence {
         PresenceMode::Notify => {
             log::info!("asking for user presence with desktop notifications");
-            let mut presence = NotificationPresence::new(Notifications::new())
+            let mut presence = NotificationPresence::new(platform::notifications()?)
                 .with_prompt_record(data.state_dir.join(PROMPT_FILE));
             presence.withdraw_stale_prompt();
-            serve_ctap_with_presence(device, data, presence, shutdown, on_ready)
+            serve_ctap_with_presence(device, data, presence, clock, shutdown, on_ready)
         }
         PresenceMode::AutoApprove => {
             log::warn!(
                 "--presence auto-approve: approving every registration, sign-in and reset without asking; \
                  anything running as this user can use the passkeys unnoticed. Use this for tests only"
             );
-            serve_ctap_with_presence(device, data, AutoApprove, shutdown, on_ready)
+            serve_ctap_with_presence(device, data, AutoApprove, clock, shutdown, on_ready)
         }
         PresenceMode::Unanswered => {
             log::warn!(
                 "--presence unanswered: no presence request is ever approved; every request waits \
                  until it is cancelled or times out. Use this for tests only"
             );
-            serve_ctap_with_presence(device, data, Unanswered, shutdown, on_ready)
+            serve_ctap_with_presence(device, data, Unanswered, clock, shutdown, on_ready)
         }
     }
 }
@@ -346,11 +359,13 @@ pub fn serve_ctap(
 /// The app runs on a worker thread (see [`exec`]), so `presence` may block
 /// while the user decides: the transport keeps sending keepalives meanwhile,
 /// and CTAPHID_CANCEL, resynchronisation of the channel and shutdown reach
-/// `presence` through its [`Cancellation`](pqkey_ctap::ctap::presence::Cancellation).
-pub fn serve_ctap_with_presence(
+/// `presence` through its
+/// [`Cancellation`](pqkey_ctap::ctap::presence::Cancellation).
+pub fn serve_ctap_with_presence<C: Clock + 'static>(
     device: impl HidDevice,
     data: AppData,
     presence: impl UserPresence + Send + 'static,
+    clock: impl FnOnce() -> io::Result<C>,
     shutdown: ShutdownSignal,
     on_ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
@@ -358,7 +373,7 @@ pub fn serve_ctap_with_presence(
     let interrupt = InterruptFlag::new();
     let waiting = WaitingForUser::new();
     let mut ctap = CtapApp::with_file_store(data.store, presence, &interrupt, data.aaguid);
-    ctap.set_clock(BootTimeClock::new()?);
+    ctap.set_clock(clock()?);
     ctap.set_attestation_mode(data.attestation);
     if let Some(timeout) = data.presence_timeout {
         warn_if_presence_timeout_too_short(timeout);
@@ -424,7 +439,7 @@ pub fn descriptor(
 }
 
 /// The HID unique identifier the daemon with process ID `pid` gives its
-/// device, by which `pqkey` finds its hidraw node: `pqkey-<pid>`.
+/// device, by which commands find its client link: `pqkey-<pid>`.
 pub fn device_uniq(pid: u32) -> String {
     format!("pqkey-{pid}")
 }
@@ -448,17 +463,14 @@ pub fn parse_aaguid(input: &str) -> Result<[u8; 16], String> {
 mod tests {
     use super::*;
     use crate::{
-        platform::{Device as UhidDevice, linux::uhid},
+        platform::test_support::{Device as TestDevice, Peer as DevicePeer, pair as socket_device},
         test_support::TempDir,
-        tests::socket_device,
         transport::CTAPHID_FRAME_LEN,
     };
     use ciborium::value::{Integer, Value};
     use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest};
     use pqkey_ctap::{CoseAlg, verify_signature};
     use std::{
-        io::{Read, Write},
-        os::unix::net::UnixStream,
         sync::mpsc,
         thread,
         time::{Duration, Instant},
@@ -499,25 +511,19 @@ mod tests {
     /// reads what the daemon writes on a thread of its own, timestamped as
     /// it arrives.
     struct Host {
-        stream: UnixStream,
+        stream: DevicePeer,
         events: mpsc::Receiver<Event>,
     }
 
     impl Host {
-        fn new(stream: UnixStream) -> Self {
+        fn new(stream: DevicePeer) -> Self {
             let mut reader = stream.try_clone().unwrap();
             let (sender, events) = mpsc::channel();
             thread::spawn(move || {
                 let mut next_event = || {
-                    let mut event = vec![0u8; uhid::UHID_EVENT_SIZE];
-                    reader.read_exact(&mut event).ok()?;
-                    Some(match uhid::input_report(&event) {
-                        Some(frame) => Ok(frame),
-                        None => {
-                            let event_type = u32::from_ne_bytes(event[..4].try_into().unwrap());
-                            assert_eq!(event_type, uhid::UHID_EVENT_TYPE_DESTROY);
-                            Err(Event::Destroyed)
-                        }
+                    Some(match reader.read_event().ok()? {
+                        crate::test_support::callback::Event::Report(frame) => Ok(frame.0),
+                        crate::test_support::callback::Event::Destroyed => Err(Event::Destroyed),
                     })
                 };
                 while let Some(event) = next_event() {
@@ -556,7 +562,7 @@ mod tests {
             frame[4] = command;
             frame[5..7].copy_from_slice(&(payload.len() as u16).to_be_bytes());
             frame[7..7 + first.len()].copy_from_slice(first);
-            self.stream.write_all(&uhid::output_event(&frame)).unwrap();
+            self.stream.send(&frame).unwrap();
             for sequence in 0u8.. {
                 if rest.is_empty() {
                     break;
@@ -566,7 +572,7 @@ mod tests {
                 frame[..4].copy_from_slice(&cid.to_be_bytes());
                 frame[4] = sequence;
                 frame[5..5 + chunk.len()].copy_from_slice(chunk);
-                self.stream.write_all(&uhid::output_event(&frame)).unwrap();
+                self.stream.send(&frame).unwrap();
                 rest = remaining;
             }
         }
@@ -626,7 +632,7 @@ mod tests {
     /// Run `serve` with a fresh device on a thread, and return the host side
     /// once requests are served, and the loop's result.
     fn start(
-        serve: impl FnOnce(UhidDevice, Box<dyn FnOnce() -> io::Result<()>>) -> io::Result<()>
+        serve: impl FnOnce(TestDevice, Box<dyn FnOnce() -> io::Result<()>>) -> io::Result<()>
         + Send
         + 'static,
     ) -> (Host, mpsc::Receiver<io::Result<()>>) {
@@ -712,8 +718,9 @@ mod tests {
         let data = app_data(&dir);
         let shutdown = ShutdownSignal::new();
         let loop_shutdown = shutdown.clone();
-        let (mut host, result) =
-            start(move |device, on_ready| serve_ctap(device, data, loop_shutdown, on_ready));
+        let (mut host, result) = start(move |device, on_ready| {
+            crate::test_support::serve_ctap(device, data, loop_shutdown, on_ready)
+        });
 
         let cid = host.init();
         // authenticatorReset clears the credential store, so this also checks
@@ -791,8 +798,9 @@ mod tests {
         let data = app_data(&dir);
         let shutdown = ShutdownSignal::new();
         let loop_shutdown = shutdown.clone();
-        let (mut host, result) =
-            start(move |device, on_ready| serve_ctap(device, data, loop_shutdown, on_ready));
+        let (mut host, result) = start(move |device, on_ready| {
+            crate::test_support::serve_ctap(device, data, loop_shutdown, on_ready)
+        });
         let cid = host.init();
 
         for alg in CoseAlg::ALL {
@@ -936,7 +944,14 @@ mod tests {
         let shutdown = ShutdownSignal::new();
         let loop_shutdown = shutdown.clone();
         let (host, result) = start(move |device, on_ready| {
-            serve_ctap_with_presence(device, data, prompt, loop_shutdown, on_ready)
+            serve_ctap_with_presence(
+                device,
+                data,
+                prompt,
+                crate::test_support::clock,
+                loop_shutdown,
+                on_ready,
+            )
         });
         let handle = PromptHandle {
             asked,
