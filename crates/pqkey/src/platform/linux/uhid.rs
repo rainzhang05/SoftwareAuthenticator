@@ -79,8 +79,10 @@ pub struct UhidDevice {
     inner: UhidInner,
     descriptor: HidDeviceDescriptor,
     /// Set by a UHID_OPEN event, which the kernel sends once something
-    /// opens the device, and cleared by [`Self::take_opened`].
+    /// opens the device. By then udev has long applied its rules to the
+    /// hidraw node, so the device then checks the node's mode, once.
     opened: AtomicBool,
+    /// Whether that check has run.
     node_checked: AtomicBool,
 }
 
