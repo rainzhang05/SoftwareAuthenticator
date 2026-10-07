@@ -158,6 +158,10 @@ jobs:
       # Runs even if the libfido2 tests failed: the two clients are independent.
       - name: python-fido2 tests
         if: (success() || failure()) && env.E2E_HIDRAW != ''
+        # The suite takes under a minute. A key that stops answering makes
+        # every later test wait for its timeout, so cap the step and still
+        # collect diagnostics.
+        timeout-minutes: 10
         run: |
           "$RUNNER_TEMP/e2e-venv/bin/python" -m pytest tests/e2e -v \
             --junitxml="$RUNNER_TEMP/e2e-diagnostics/pytest-junit.xml"
@@ -182,17 +186,23 @@ jobs:
           exit "$failed"
 
       - name: Collect diagnostics
-        if: failure()
+        if: failure() || cancelled()
         run: |
           mkdir -p "$RUNNER_TEMP/e2e-diagnostics"
           sudo dmesg > "$RUNNER_TEMP/e2e-diagnostics/dmesg.txt" 2>&1 || true
+          # A race in the kernel's uhid driver can kill the key's thread on
+          # arm64 (drivers/hid/uhid.c reads its queue without the queue lock).
+          if grep -q usercopy "$RUNNER_TEMP/e2e-diagnostics/dmesg.txt" &&
+            grep -q uhid_char_read "$RUNNER_TEMP/e2e-diagnostics/dmesg.txt"; then
+            echo "::error::The kernel's uhid driver crashed the key (kernel BUG at mm/usercopy.c in uhid_char_read): a kernel race, not a pqkey bug"
+          fi
           {
             ls -l /dev/uhid /dev/hidraw* 2>&1
             udevadm info --query=all --name=uhid 2>&1
           } > "$RUNNER_TEMP/e2e-diagnostics/devices.txt" || true
           cp "$RUNNER_TEMP"/*.status "$RUNNER_TEMP/e2e-diagnostics/" 2>/dev/null || true
       - name: Upload diagnostics
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: e2e-diagnostics-${{ matrix.arch }}
