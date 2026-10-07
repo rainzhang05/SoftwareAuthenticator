@@ -2,8 +2,9 @@
 //! acting as a platform that can set and change a PIN, obtain
 //! pinUvAuthTokens and authenticate makeCredential, getAssertion and
 //! credentialManagement with them, and use credBlob, hmac-secret and
-//! hmac-secret-mc, while the fuzzer chooses the parameters (right, wrong or missing) and mixes in
-//! structure-aware and raw requests and presence denials.
+//! hmac-secret-mc, while the fuzzer chooses the parameters (right, wrong or
+//! missing) and mixes in structure-aware and raw requests and presence
+//! denials.
 //!
 //! Invariants, besides those of `ctap_request` for every response:
 //! * setPIN only succeeds while no PIN is set, and changePIN and the token

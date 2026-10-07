@@ -194,7 +194,8 @@ fn creation_and_assertion_prfs_match_for_each_uv_state_and_protocol() {
                             Some(RP),
                         );
                     }
-                    // The extension protocol need not match the PIN token protocol.
+                    // The extension protocol need not match the PIN token
+                    // protocol.
                     let other = if protocol == ClassicPinProtocol::V1 {
                         ClassicPinProtocol::V2
                     } else {
@@ -211,7 +212,8 @@ fn creation_and_assertion_prfs_match_for_each_uv_state_and_protocol() {
                         auth.map(|p| (p, token_pin_auth(p, &TOKEN, &HASH))),
                         Some(extension),
                     );
-                    // Supply the sealed credential ID; discoverable enumeration works without it.
+                    // Supply the sealed credential ID; discoverable enumeration
+                    // works without it.
                     let Value::Map(mut entries) = from_reader(&request[..]).unwrap() else {
                         panic!("request map")
                     };
