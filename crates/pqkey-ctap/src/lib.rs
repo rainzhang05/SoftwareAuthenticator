@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod cbor;
 mod crypto;
 pub mod ctap;
 pub mod platform;

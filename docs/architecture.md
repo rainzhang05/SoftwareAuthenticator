@@ -172,7 +172,9 @@ protocol logic.
 
 Every file above except the root keys is encrypted and authenticated with
 XChaCha20-Poly1305, under keys derived from a root key with HKDF-SHA-256.
-Files are replaced atomically, never changed in place. A reset deletes the
+Credential records can also hold an opaque blob of at most 32 bytes,
+protected by the same encryption as their private keys. Files are replaced
+atomically, never changed in place. A reset deletes the
 stored credentials and replaces `credential.key`, so old copies of files and
 every sealed credential ID can no longer be decrypted.
 [SECURITY.md](../SECURITY.md) describes what this protects against.

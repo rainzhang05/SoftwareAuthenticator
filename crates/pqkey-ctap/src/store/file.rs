@@ -138,6 +138,7 @@ const ATTESTATION_FILE: &str = "attestation";
 ///   11  cred_protect            unsigned, 1-3
 ///   12  sign_count              unsigned, 32 bits
 ///   13  created_at              unsigned, 64 bits
+///   14  cred_blob               byte string, at most 32 bytes, optional
 ///
 /// PIN state record (type 2)
 ///    1  pin_hash                byte string, 16 bytes, optional
@@ -639,6 +640,7 @@ mod tests {
             private_key: PrivateKeyMaterial::generate(CoseAlg::MLDSA65),
             cred_random_with_uv: [1; 32],
             cred_random_without_uv: [2; 32],
+            cred_blob: None,
             cred_protect: 1,
             sign_count: 0,
             created_at: 0,
@@ -698,6 +700,31 @@ mod tests {
 
         assert!(matches!(
             store.get(b"mismatched"),
+            Err(StoreError::Corrupt {
+                reason: Corruption::Inconsistent,
+                ..
+            })
+        ));
+        assert_eq!(store.count().unwrap(), 1);
+        assert_eq!(store.list().unwrap()[0].credential_id, b"bystander");
+    }
+
+    #[test]
+    fn overlong_credential_blob_is_inconsistent() {
+        let scratch = TempDir::new();
+        let mut store = FileStore::open(scratch.path().join("state")).unwrap();
+        store.put(&record(b"bystander")).unwrap();
+        let mut invalid = record(b"overlong");
+        invalid.cred_blob = Some(vec![0x55; 33]);
+        assert!(matches!(
+            store.put(&invalid),
+            Err(StoreError::InvalidRecord(_))
+        ));
+        let plaintext = codec::encode_credential(&invalid, 7).unwrap();
+        let name = credential_keys(&store).file_name(b"overlong").unwrap();
+        forge(&store, &name, &plaintext);
+        assert!(matches!(
+            store.get(b"overlong"),
             Err(StoreError::Corrupt {
                 reason: Corruption::Inconsistent,
                 ..

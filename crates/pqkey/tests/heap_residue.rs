@@ -164,7 +164,7 @@ impl Drop for TempDir {
 }
 
 fn exercise(alg: CoseAlg, material: PrivateKeyMaterial) {
-    let needles = match &material {
+    let mut needles = match &material {
         PrivateKeyMaterial::RsaPrimes { primes } => {
             rsa_fixture::private_values(primes).unwrap().secrets
         }
@@ -177,6 +177,11 @@ fn exercise(alg: CoseAlg, material: PrivateKeyMaterial) {
             bytes: Zeroizing::new(seed.to_vec()),
         }],
     };
+    let blob: Vec<u8> = (0xd0..=0xef).collect();
+    needles.push(PrivateValue {
+        name: "credential blob",
+        bytes: Zeroizing::new(blob.clone()),
+    });
     {
         let dir = TempDir::new();
         let record = CredentialRecord {
@@ -189,6 +194,7 @@ fn exercise(alg: CoseAlg, material: PrivateKeyMaterial) {
             private_key: material,
             cred_random_with_uv: [0x33; 32],
             cred_random_without_uv: [0x44; 32],
+            cred_blob: Some(blob),
             cred_protect: 1,
             sign_count: 0,
             created_at: 0,

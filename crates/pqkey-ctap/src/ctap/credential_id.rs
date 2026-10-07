@@ -228,6 +228,7 @@ fn sealed_credential(
         private_key,
         cred_random_with_uv: [0; 32],
         cred_random_without_uv: [0; 32],
+        cred_blob: None,
         cred_protect: *cred_protect,
         sign_count: 0,
         created_at: 0,

@@ -136,12 +136,14 @@ fn unusual_field_values_round_trip<B: Backend>() {
     large.user_display_name = Some("Ünïcødé 名前 🔐".repeat(4));
     large.sign_count = u32::MAX;
     large.cred_protect = 3;
+    large.cred_blob = Some((0..32).collect());
     cases.push(large);
 
     let mut binary = new_record(CoseAlg::MLDSA44);
     binary.credential_id = vec![0, 0, 0, 0];
     binary.user_name = Some(String::new());
     binary.cred_protect = 2;
+    binary.cred_blob = Some(Vec::new());
     binary.cred_random_with_uv = [0; 32];
     binary.cred_random_without_uv = [0xff; 32];
     cases.push(binary);
@@ -459,7 +461,11 @@ fn inconsistent_records_are_rejected_and_not_stored<B: Backend>() {
     let mut cred_protect_four = new_record(CoseAlg::ES256);
     cred_protect_four.cred_protect = 4;
 
+    let mut overlong_blob = new_record(CoseAlg::ES256);
+    overlong_blob.cred_blob = Some(vec![0; 33]);
+
     for (name, record) in [
+        ("overlong credential blob", &overlong_blob),
         ("empty credential ID", &empty_id),
         ("ES256 alg with ML-DSA seed", &es256_with_seed),
         ("ML-DSA alg with P-256 scalar", &mldsa_with_scalar),

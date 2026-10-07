@@ -213,6 +213,9 @@ impl fmt::Debug for PrivateKeyMaterial {
     }
 }
 
+/// The largest credential blob this store accepts (CTAP 2.3 §§6.4, 12.2).
+pub(crate) const MAX_CRED_BLOB_LENGTH: usize = 32;
+
 /// One credential: a stored one, or the credential a sealed credential ID
 /// carries, which is never stored.
 ///
@@ -256,6 +259,8 @@ pub struct CredentialRecord {
     pub cred_random_with_uv: [u8; 32],
     /// The `hmac-secret` `CredRandom` used without user verification.
     pub cred_random_without_uv: [u8; 32],
+    /// The opaque credential blob, if stored (CTAP 2.3 §12.2).
+    pub cred_blob: Option<Vec<u8>>,
     /// The `credProtect` level: 1 (`userVerificationOptional`), 2
     /// (`userVerificationOptionalWithCredentialIDList`), or 3
     /// (`userVerificationRequired`).  Credentials created without the
@@ -311,7 +316,13 @@ impl CredentialRecord {
 /// Public fields compare normally; secret fields compare in constant time.
 impl PartialEq for CredentialRecord {
     fn eq(&self, other: &Self) -> bool {
-        let secrets_equal = (self.private_key == other.private_key)
+        let blobs_equal = match (&self.cred_blob, &other.cred_blob) {
+            (Some(left), Some(right)) => bool::from(left.as_slice().ct_eq(right.as_slice())),
+            (None, None) => true,
+            _ => false,
+        };
+        let secrets_equal = blobs_equal
+            & (self.private_key == other.private_key)
             & bool::from(
                 self.cred_random_with_uv[..].ct_eq(&other.cred_random_with_uv[..])
                     & self.cred_random_without_uv[..].ct_eq(&other.cred_random_without_uv[..]),
@@ -331,7 +342,7 @@ impl PartialEq for CredentialRecord {
 
 impl Eq for CredentialRecord {}
 
-/// The private key and both `CredRandom` values are redacted.
+/// The private key, both `CredRandom` values and credential blob are redacted.
 impl fmt::Debug for CredentialRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CredentialRecord")
@@ -344,6 +355,7 @@ impl fmt::Debug for CredentialRecord {
             .field("private_key", &self.private_key)
             .field("cred_random_with_uv", &Redacted)
             .field("cred_random_without_uv", &Redacted)
+            .field("cred_blob", &Redacted)
             .field("cred_protect", &self.cred_protect)
             .field("sign_count", &self.sign_count)
             .field("created_at", &self.created_at)
@@ -557,6 +569,7 @@ mod tests {
             private_key: PrivateKeyMaterial::generate(alg),
             cred_random_with_uv: [0x33; 32],
             cred_random_without_uv: [0x44; 32],
+            cred_blob: None,
             cred_protect: 1,
             sign_count: 7,
             created_at: 0,
@@ -738,6 +751,20 @@ mod tests {
         changed.user_display_name = None;
         assert_ne!(original, changed);
 
+        let mut changed = original.clone();
+        changed.cred_blob = Some(Vec::new());
+        assert_ne!(original, changed, "absent and empty differ");
+        let mut with_blob = original.clone();
+        with_blob.cred_blob = Some(vec![0x55; 32]);
+        changed.cred_blob = Some(vec![0x55; 31]);
+        assert_ne!(with_blob, changed);
+        changed.cred_blob = Some(vec![0x55; 32]);
+        assert_eq!(with_blob, changed);
+        changed.cred_blob.as_mut().unwrap()[31] ^= 1;
+        assert_ne!(with_blob, changed);
+        changed.zeroize();
+        assert!(changed.cred_blob.is_none());
+
         let es256 = PrivateKeyMaterial::P256Scalar { scalar: [1; 32] };
         let mldsa = PrivateKeyMaterial::Seed { seed: [1; 32] };
         assert_ne!(es256, mldsa, "same bytes, different key types");
@@ -759,6 +786,7 @@ mod tests {
             },
             cred_random_with_uv: [secret; 32],
             cred_random_without_uv: [secret; 32],
+            cred_blob: Some(vec![secret; 32]),
             cred_protect: 2,
             sign_count: 5,
             created_at: 9,

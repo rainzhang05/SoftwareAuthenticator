@@ -471,6 +471,7 @@ pub(super) fn credential(
         private_key: PrivateKeyMaterial::generate(alg),
         cred_random_with_uv: [0x10; 32],
         cred_random_without_uv: [0x20; 32],
+        cred_blob: None,
         cred_protect: 1,
         sign_count: 0,
         created_at: 0,

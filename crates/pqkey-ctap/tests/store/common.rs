@@ -59,6 +59,7 @@ pub fn new_record(alg: CoseAlg) -> CredentialRecord {
         private_key: PrivateKeyMaterial::generate(alg),
         cred_random_with_uv: random_bytes(),
         cred_random_without_uv: random_bytes(),
+        cred_blob: None,
         cred_protect: 1,
         sign_count: 0,
         created_at: 0,

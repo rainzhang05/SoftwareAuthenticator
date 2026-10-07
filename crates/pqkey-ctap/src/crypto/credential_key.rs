@@ -298,6 +298,7 @@ mod tests {
             private_key: PrivateKeyMaterial::try_generate(alg).expect("generate key material"),
             cred_random_with_uv: [0; 32],
             cred_random_without_uv: [0; 32],
+            cred_blob: None,
             cred_protect: 1,
             sign_count: 0,
             created_at: 0,

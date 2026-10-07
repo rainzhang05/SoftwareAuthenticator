@@ -86,6 +86,7 @@ mod fsio;
 mod keys;
 mod memory;
 mod record;
+pub(crate) use record::MAX_CRED_BLOB_LENGTH;
 pub(crate) use record::SealableKeyMaterial;
 #[cfg(test)]
 mod test_support;
@@ -333,6 +334,15 @@ pub(crate) fn validate_credential(record: &CredentialRecord) -> Result<(), Store
         }
         // Every 32 bytes are a seed.
         PrivateKeyMaterial::Seed { .. } => {}
+    }
+    if record
+        .cred_blob
+        .as_ref()
+        .is_some_and(|blob| blob.len() > MAX_CRED_BLOB_LENGTH)
+    {
+        return Err(StoreError::InvalidRecord(
+            "credential blob exceeds 32 bytes",
+        ));
     }
     if !(1..=3).contains(&record.cred_protect) {
         return Err(StoreError::InvalidRecord(

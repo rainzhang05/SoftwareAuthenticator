@@ -22,6 +22,7 @@
 //!   11  cred_protect            unsigned integer, 1-3
 //!   12  sign_count              unsigned integer, 32 bits
 //!   13  created_at              unsigned integer, 64 bits
+//!   14  cred_blob               byte string, at most 32 bytes, optional
 //!
 //! PIN state record (record type 2)
 //!    1  pin_hash                byte string, 16 bytes, omitted when no PIN is set
@@ -49,10 +50,13 @@
 //! strings through a scratch buffer on the stack that this module cannot
 //! reach.)
 
+#[cfg(test)]
+use crate::cbor::wipe;
+use crate::cbor::{SecretValue as Item, encoded_len_bound};
 use core::mem;
 
 use ciborium::value::{Integer, Value};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use super::record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKeyMaterial};
 use super::{Corruption, StoreError, validate_attestation, validate_credential};
@@ -105,6 +109,9 @@ pub(crate) fn encode_credential(
         (12, Value::Integer(Integer::from(record.sign_count))),
         (13, Value::Integer(Integer::from(created_at))),
     ]);
+    if let Some(blob) = &record.cred_blob {
+        entries.push((14, Value::Bytes(blob.clone())));
+    }
     encode_map(entries)
 }
 
@@ -139,6 +146,7 @@ pub(crate) fn decode_credential(bytes: &[u8]) -> Result<CredentialRecord, Corrup
         cred_protect: fields.uint(11)?,
         sign_count: fields.uint(12)?,
         created_at: fields.uint(13)?,
+        cred_blob: fields.optional_bytes(14)?,
     };
     fields.finish()?;
     validate_credential(&record).map_err(|_| Corruption::Inconsistent)?;
@@ -227,48 +235,6 @@ fn encode_map(entries: Vec<(u64, Value)>) -> Result<Zeroizing<Vec<u8>>, StoreErr
     Ok(encoded)
 }
 
-/// An upper bound on the encoded length of `value`: no CBOR item header is
-/// longer than nine bytes.
-fn encoded_len_bound(value: &Value) -> usize {
-    const HEADER: usize = 9;
-    HEADER
-        + match value {
-            Value::Bytes(bytes) => bytes.len(),
-            Value::Text(text) => text.len(),
-            Value::Array(items) => items.iter().map(encoded_len_bound).sum(),
-            Value::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| encoded_len_bound(key) + encoded_len_bound(value))
-                .sum(),
-            Value::Tag(_, inner) => encoded_len_bound(inner),
-            _ => 0,
-        }
-}
-
-/// Overwrite every byte and text string inside `value`.
-fn wipe(value: &mut Value) {
-    match value {
-        Value::Bytes(bytes) => bytes.zeroize(),
-        Value::Text(text) => text.zeroize(),
-        Value::Array(items) => items.iter_mut().for_each(wipe),
-        Value::Map(entries) => entries.iter_mut().for_each(|(key, value)| {
-            wipe(key);
-            wipe(value);
-        }),
-        Value::Tag(_, inner) => wipe(inner),
-        _ => {}
-    }
-}
-
-/// A CBOR value that is wiped when dropped.
-struct Item(Value);
-
-impl Drop for Item {
-    fn drop(&mut self) {
-        wipe(&mut self.0);
-    }
-}
-
 impl Item {
     fn into_bytes(mut self) -> Result<Vec<u8>, Corruption> {
         match &mut self.0 {
@@ -345,6 +311,10 @@ impl Fields {
 
     fn text(&mut self, key: u64) -> Result<String, Corruption> {
         self.required(key)?.into_text()
+    }
+
+    fn optional_bytes(&mut self, key: u64) -> Result<Option<Vec<u8>>, Corruption> {
+        self.take(key).map(Item::into_bytes).transpose()
     }
 
     fn optional_text(&mut self, key: u64) -> Result<Option<String>, Corruption> {
@@ -425,10 +395,61 @@ mod tests {
             },
             cred_random_with_uv: [0xaa; 32],
             cred_random_without_uv: [0xbb; 32],
+            cred_blob: None,
             cred_protect: 2,
             sign_count: 300,
             created_at: 70_000,
         }
+    }
+
+    /// Field 14, written independently from RFC 8949 as the other vectors.
+    #[test]
+    fn credential_blob_known_answers() {
+        let mut record = credential();
+        record.cred_blob = Some((0..32).collect());
+        let expected = unhex(concat!(
+            "ad",
+            "0150000102030405060708090a0b0c0d0e0f",
+            "026b6578616d706c652e636f6d",
+            "03420102",
+            "0465616c696365",
+            "06382f0702",
+            "085820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+            "095820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "0a5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "0b020c19012c0d1a00011170",
+            "0e5820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        ));
+        assert_eq!(
+            encode_credential(&record, 70_000).unwrap().as_slice(),
+            expected
+        );
+        assert_eq!(decode_credential(&expected).unwrap(), record);
+        record.cred_blob = Some(Vec::new());
+        let mut empty = expected[..expected.len() - 35].to_vec();
+        empty.extend_from_slice(&[0x0e, 0x40]);
+        assert_eq!(
+            encode_credential(&record, 70_000).unwrap().as_slice(),
+            empty
+        );
+        assert_eq!(decode_credential(&empty).unwrap(), record);
+        record.cred_blob = None;
+        empty[0] = 0xac;
+        empty.truncate(empty.len() - 2);
+        assert_eq!(
+            encode_credential(&record, 70_000).unwrap().as_slice(),
+            empty
+        );
+        assert_eq!(decode_credential(&empty).unwrap(), record);
+    }
+
+    #[test]
+    fn malformed_credential_blobs_are_corrupt() {
+        let valid = encode_credential(&credential(), 1).unwrap();
+        let wrong_type = edited(&valid, |e| set(e, 14, Value::Bool(true)));
+        assert_eq!(decode_credential(&wrong_type), Err(Corruption::Encoding));
+        let overlong = edited(&valid, |e| set(e, 14, Value::Bytes(vec![0x55; 33])));
+        assert_eq!(decode_credential(&overlong), Err(Corruption::Inconsistent));
     }
 
     fn pin_state() -> PinStateRecord {
@@ -722,7 +743,7 @@ mod tests {
             ("truncated", valid[..valid.len() - 1].to_vec()),
             (
                 "unknown key",
-                edited(&valid, |e| set(e, 14, Value::Bool(true))),
+                edited(&valid, |e| set(e, 15, Value::Bool(true))),
             ),
             (
                 "duplicate key",

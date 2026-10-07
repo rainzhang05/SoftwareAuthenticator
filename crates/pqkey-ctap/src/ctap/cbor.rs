@@ -2,6 +2,26 @@
 
 use ciborium::{ser::into_writer, value::Value};
 use std::cmp::Ordering;
+use zeroize::Zeroizing;
+
+/// Decoded request parameters are wiped on every return path.
+pub(super) struct Parameters(Vec<(Value, Value)>);
+
+impl core::ops::Deref for Parameters {
+    type Target = Vec<(Value, Value)>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for Parameters {
+    fn drop(&mut self) {
+        for (key, value) in &mut self.0 {
+            crate::cbor::wipe(key);
+            crate::cbor::wipe(value);
+        }
+    }
+}
 
 use crate::ctap::constants::{
     CTAP2_ERR_CBOR_UNEXPECTED_TYPE, CTAP2_ERR_INVALID_CBOR, CTAP2_ERR_MISSING_PARAMETER,
@@ -223,18 +243,22 @@ pub(super) fn raw_map_value(bytes: &[u8], key: u64) -> Result<Option<&[u8]>, ()>
 /// ciborium turns into [`Value::Null`]: ignored under an unknown key, and of
 /// the wrong type, CTAP2_ERR_CBOR_UNEXPECTED_TYPE, under a known one.
 /// [`raw_map_value`] still sees the payload exactly as received.
-pub(super) fn request_parameters(payload: &[u8]) -> Result<Vec<(Value, Value)>, u8> {
+pub(super) fn request_parameters(payload: &[u8]) -> Result<Parameters, u8> {
     if canonical_item_end(payload, 0, 0) != Some(payload.len()) {
         return Err(CTAP2_ERR_INVALID_CBOR);
     }
-    let mut decodable = Vec::with_capacity(payload.len());
+    let mut decodable = Zeroizing::new(Vec::with_capacity(payload.len()));
     if copy_with_unassigned_simple_values_undefined(payload, 0, &mut decodable)
         != Some(payload.len())
     {
         return Err(CTAP2_ERR_INVALID_CBOR);
     }
     match ciborium::de::from_reader(&decodable[..]) {
-        Ok(Value::Map(entries)) => Ok(entries),
+        Ok(Value::Map(entries)) => Ok(Parameters(entries)),
+        Ok(mut value) => {
+            crate::cbor::wipe(&mut value);
+            Err(CTAP2_ERR_INVALID_CBOR)
+        }
         _ => Err(CTAP2_ERR_INVALID_CBOR),
     }
 }

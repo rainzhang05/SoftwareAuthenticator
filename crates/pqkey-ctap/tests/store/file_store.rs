@@ -1023,9 +1023,11 @@ fn nothing_is_stored_in_plaintext() {
         record.rp_id = format!("plaintext-canary-{i}.example.org");
         record.user_name = Some(format!("canary user name {i}"));
         record.user_display_name = Some(format!("Canary Display Name {i}"));
+        record.cred_blob = Some(format!("Canary credential blob {i:02}").into_bytes());
         store.put(&record).unwrap();
 
         let label = |what: &str| format!("{alg:?} {what}");
+        needles.push((label("credential blob"), record.cred_blob.clone().unwrap()));
         needles.push((label("credential ID"), record.credential_id.clone()));
         needles.push((label("rp_id"), record.rp_id.clone().into_bytes()));
         needles.push((label("user ID"), record.user_id.clone()));
@@ -1270,4 +1272,29 @@ fn concurrent_first_opens_agree_on_keys() {
             .count(),
         2
     );
+}
+
+#[test]
+fn credential_blob_survives_updates_and_is_erased() {
+    let scratch = Scratch::new();
+    let mut record = new_record(CoseAlg::ES256);
+    record.cred_blob = Some((0..32).collect());
+    let mut store = scratch.open();
+    store.put(&record).unwrap();
+    drop(store);
+    let mut store = scratch.open();
+    let mut loaded = store.get(&record.credential_id).unwrap().unwrap();
+    assert_eq!(loaded.cred_blob, record.cred_blob);
+    loaded.sign_count += 1;
+    loaded.user_name = Some("updated".into());
+    store.put(&loaded).unwrap();
+    assert_eq!(
+        store.get(&record.credential_id).unwrap().unwrap().cred_blob,
+        record.cred_blob
+    );
+    assert!(store.delete(&record.credential_id).unwrap());
+    assert!(store.get(&record.credential_id).unwrap().is_none());
+    store.put(&record).unwrap();
+    store.clear().unwrap();
+    assert!(store.get(&record.credential_id).unwrap().is_none());
 }
