@@ -168,6 +168,56 @@ fn ctap_request(dir: &Path) {
             (int(11), Value::Array(vec![text("none")])),
         ]),
     ));
+    for length in [0, 1, 32, 33] {
+        for alg in [-7, -257] {
+            for rk in [false, true] {
+                seeds.push(command(
+                    0x01,
+                    &map(vec![
+                        (int(1), bytes(&hash)),
+                        (int(2), rp.clone()),
+                        (int(3), user.clone()),
+                        (int(4), params(alg)),
+                        (
+                            int(6),
+                            map(vec![
+                                (text("credBlob"), bytes(&vec![0x55; length])),
+                                (text("credProtect"), int(3)),
+                            ]),
+                        ),
+                        (int(7), map(vec![(text("rk"), Value::Bool(rk))])),
+                    ]),
+                ));
+            }
+        }
+    }
+    for input in [Value::Bool(true), text("blob"), Value::Null] {
+        seeds.push(command(
+            0x01,
+            &map(vec![
+                (int(1), bytes(&hash)),
+                (int(2), rp.clone()),
+                (int(3), user.clone()),
+                (int(4), params(-7)),
+                (int(6), map(vec![(text("credBlob"), input)])),
+            ]),
+        ));
+    }
+    for input in [
+        Value::Bool(true),
+        Value::Bool(false),
+        bytes(&[]),
+        Value::Null,
+    ] {
+        seeds.push(command(
+            0x02,
+            &map(vec![
+                (int(1), text("example.com")),
+                (int(2), bytes(&hash)),
+                (int(4), map(vec![(text("credBlob"), input)])),
+            ]),
+        ));
+    }
     for protocol in [1, 2] {
         for salt_length in [32, 64] {
             for companion in [None, Some(false), Some(true)] {

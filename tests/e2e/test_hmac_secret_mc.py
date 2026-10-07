@@ -20,16 +20,6 @@ PIN = "4821"
 PROTOCOLS = [pytest.param(PinProtocolV1, id="protocol-1"), pytest.param(PinProtocolV2, id="protocol-2")]
 
 
-def _auth(ctap, protocol, permission):
-    token = ClientPin(ctap, protocol).get_pin_token(PIN, permission, RP_ID)
-    digest = os.urandom(32)
-    return {
-        "client_data_hash": digest,
-        "pin_uv_param": protocol.authenticate(token, digest),
-        "pin_uv_protocol": protocol.VERSION,
-    }
-
-
 @pytest.mark.parametrize("protocol", PROTOCOLS)
 @pytest.mark.parametrize("alg,rk", [(client.ES256, True), (client.ES256, False), (client.RS256, False)])
 @pytest.mark.parametrize("uv", [False, True])
@@ -55,7 +45,7 @@ def test_prf_at_creation_matches_assertion(ctap, protocol, alg, rk, uv, two_salt
     inputs = processor.prepare_inputs(None)
     assert inputs["hmac-secret"] is True
     assert "hmac-secret-mc" in inputs
-    auth = _auth(ctap, protocol, ClientPin.PERMISSION.MAKE_CREDENTIAL) if uv else {"client_data_hash": os.urandom(32)}
+    auth = client.pin_uv_auth(ctap, protocol, PIN, ClientPin.PERMISSION.MAKE_CREDENTIAL, RP_ID) if uv else {"client_data_hash": os.urandom(32)}
     response = client.make_credential(ctap, RP_ID, user, [alg], extensions=inputs, options={"rk": rk}, **auth)
     data = client.AuthData.parse(response[2])
     data.check(RP_ID, up=True, uv=uv, at=True)
@@ -75,7 +65,7 @@ def test_prf_at_creation_matches_assertion(ctap, protocol, alg, rk, uv, two_salt
     processor = extension.get_assertion(ctap, options, protocol)
     assert processor is not None
     inputs = processor.prepare_inputs(options.allow_credentials[0], None)
-    auth = _auth(ctap, protocol, ClientPin.PERMISSION.GET_ASSERTION) if uv else {}
+    auth = client.pin_uv_auth(ctap, protocol, PIN, ClientPin.PERMISSION.GET_ASSERTION, RP_ID) if uv else {}
     response, _ = client.authenticate(ctap, credential, extensions=inputs, uv=uv, **auth)
     asserted = processor.prepare_outputs(AssertionResponse.from_dict(response), None)["prf"]
     assert asserted.results.first == created.results.first

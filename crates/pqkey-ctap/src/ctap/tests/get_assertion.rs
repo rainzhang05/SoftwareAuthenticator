@@ -1,5 +1,5 @@
 //! authenticatorGetAssertion / authenticatorGetNextAssertion tests, including
-//! hmac-secret and credProtect.
+//! hmac-secret, credBlob and credProtect.
 
 use super::support::new_app;
 use super::support::{

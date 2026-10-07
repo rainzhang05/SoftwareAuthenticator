@@ -23,7 +23,7 @@ def test_get_info(ctap: Ctap2):
 
     assert "FIDO_2_3" in info[1] and "FIDO_2_1" in info[1] and "FIDO_2_0" in info[1], info[1]
     assert "FIDO_2_2" not in info[1], "CTAP 2.3 6.4: FIDO_2_2 MUST not be present"
-    assert set(info[2]) >= {"credProtect", "hmac-secret", "hmac-secret-mc"}, info[2]
+    assert set(info[2]) >= {"credBlob", "credProtect", "hmac-secret", "hmac-secret-mc"}, info[2]
     assert info[3] == client.DEFAULT_AAGUID
 
     options = info[4]
@@ -35,6 +35,8 @@ def test_get_info(ctap: Ctap2):
     assert options.get("clientPin") is False, f"clientPin: {options}"
     assert "uv" not in options, f"uv: {options}"
 
+    assert info[0x0F] == 32, "maxCredBlobLength"
+    assert ctap.info.max_cred_blob_length == 32
     assert info[5] >= 1024, "maxMsgSize"
     assert sorted(info[6]) == [1, 2], f"pinUvAuthProtocols {info[6]}"
     assert info[9] == ["usb"]

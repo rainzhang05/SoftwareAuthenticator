@@ -1,8 +1,8 @@
 //! Stateful CTAP: a sequence of requests against one engine, the harness
 //! acting as a platform that can set and change a PIN, obtain
 //! pinUvAuthTokens and authenticate makeCredential, getAssertion and
-//! credentialManagement with them, and use hmac-secret and hmac-secret-mc, while the fuzzer
-//! chooses the parameters (right, wrong or missing) and mixes in
+//! credentialManagement with them, and use credBlob, hmac-secret and
+//! hmac-secret-mc, while the fuzzer chooses the parameters (right, wrong or missing) and mixes in
 //! structure-aware and raw requests and presence denials.
 //!
 //! Invariants, besides those of `ctap_request` for every response:
@@ -18,7 +18,8 @@
 //!   credentials this engine created and has not deleted, and getAssertion
 //!   and getNextAssertion only for the RP ID requested; getNextAssertion only
 //!   succeeds right after a getAssertion that reported more credentials;
-//! * hmac-secret and hmac-secret-mc return one output per salt.
+//! * hmac-secret and hmac-secret-mc return one output per salt;
+//! * credBlob returns the blob accepted at creation, or an empty byte string.
 
 use crate::cbor::{self, bytes, decode_map, get_int, get_text, int, text};
 use crate::engine::Engine;
@@ -75,6 +76,7 @@ enum Op {
         rp: Option<u8>,
     },
     MakeCredential {
+        cred_blob: Option<u8>,
         hmac_secret_mc: Option<(bool, bool)>,
         auth: Auth,
         rp: u8,
@@ -85,6 +87,7 @@ enum Op {
         alg: Option<u8>,
     },
     GetAssertion {
+        cred_blob: bool,
         auth: Auth,
         rp: u8,
         hmac_secret: Option<(bool, bool)>,
@@ -112,6 +115,7 @@ enum Op {
 }
 
 struct Credential {
+    cred_blob: Option<Vec<u8>>,
     id: Vec<u8>,
     rp_id: String,
 }
@@ -254,6 +258,22 @@ impl Platform {
                 assert_eq!(length, expected_length, "credential ID length");
                 assert_eq!(auth_data[55], marker, "credential ID marker");
                 self.credentials.push(Credential {
+                    cred_blob: match (get_int(&parameters, 6), auth_data.get(55 + length..)) {
+                        (Some(Value::Map(inputs)), Some(mut rest)) => {
+                            let _: Value =
+                                ciborium::de::from_reader(&mut rest).expect("public key");
+                            let outputs = decode_map(rest).unwrap_or_default();
+                            if matches!(get_text(&outputs, "credBlob"), Some(Value::Bool(true))) {
+                                match get_text(inputs, "credBlob") {
+                                    Some(Value::Bytes(blob)) => Some(blob.clone()),
+                                    _ => panic!("stored blob without input"),
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    },
                     id: auth_data[55..55 + length].to_vec(),
                     rp_id: rp_id.clone(),
                 });
@@ -287,6 +307,16 @@ impl Platform {
                     Sha256::digest(rp_id.as_bytes())[..],
                     "rpIdHash"
                 );
+                if auth_data[32] & 0x80 != 0 {
+                    let outputs = decode_map(&auth_data[37..]).expect("extensions");
+                    if let Some(Value::Bytes(blob)) = get_text(&outputs, "credBlob") {
+                        assert_eq!(
+                            blob.as_slice(),
+                            credential.cred_blob.as_deref().unwrap_or_default(),
+                            "credential blob"
+                        );
+                    }
+                }
                 if code == CTAP_CMD_GET_ASSERTION {
                     if get_int(&body, 5).is_some() {
                         self.assertion_rp = Some(rp_id);
@@ -557,12 +587,20 @@ impl Platform {
                 }
             }
             Op::MakeCredential {
+                cred_blob,
                 auth,
                 rp,
                 rk,
                 alg,
                 hmac_secret_mc,
             } => {
+                let cred_blob = if let Some(length) = cred_blob {
+                    let mut blob = vec![0; usize::from(length % 35)];
+                    u.fill_buffer(&mut blob)?;
+                    Some(bytes(&blob))
+                } else {
+                    None
+                };
                 let (hmac_secret_mc, salts) = self.hmac_input(hmac_secret_mc, u)?;
                 let rp_id = rp_id(rp);
                 let hash: [u8; 32] = u.arbitrary()?;
@@ -577,6 +615,7 @@ impl Platform {
                         known_credentials: self.known_ids(),
                         hmac_secret: None,
                         hmac_secret_mc,
+                        cred_blob,
                         options: rk.then(|| Value::Map(vec![(text("rk"), Value::Bool(true))])),
                         no_allow_list: false,
                         credential_parameters: alg.map(|alg| {
@@ -609,6 +648,7 @@ impl Platform {
                 }
             }
             Op::GetAssertion {
+                cred_blob,
                 auth,
                 rp,
                 hmac_secret,
@@ -628,6 +668,7 @@ impl Platform {
                         known_credentials: self.known_ids(),
                         hmac_secret,
                         hmac_secret_mc: None,
+                        cred_blob: cred_blob.then_some(Value::Bool(true)),
                         options: None,
                         no_allow_list: discoverable,
                         credential_parameters: None,

@@ -10,7 +10,7 @@ use super::request;
 use super::storage::store_status;
 use super::{AttestationMode, CtapApp};
 use crate::CoseAlg;
-use crate::store::{AttestationRecord, CredentialRecord, StoreError};
+use crate::store::{AttestationRecord, CredentialRecord, MAX_CRED_BLOB_LENGTH, StoreError};
 use crate::try_sign_challenge;
 use zeroize::Zeroize;
 
@@ -213,6 +213,7 @@ impl CtapApp<'_> {
 
         let mut hmac_secret_requested = false;
         let mut hmac_secret_mc_input = None;
+        let mut cred_blob_input = None;
         let mut cred_protect_requested: Option<u8> = None;
 
         // A wrongly typed extensions map or extension input is
@@ -231,6 +232,12 @@ impl CtapApp<'_> {
                     },
                     Value::Text(text) if text == "hmac-secret-mc" => {
                         hmac_secret_mc_input = Some(value);
+                    }
+                    Value::Text(text) if text == "credBlob" => {
+                        let Value::Bytes(blob) = value else {
+                            return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+                        };
+                        cred_blob_input = Some(blob.as_slice());
                     }
                     Value::Text(text) if text == "credProtect" => {
                         let policy_value = match value {
@@ -349,6 +356,11 @@ impl CtapApp<'_> {
             created_at: 0,
         };
         let stored = rk || !alg.key_kind().is_sealable();
+        // CTAP 2.3 §12.2: sealed IDs cannot carry a blob; stored credentials
+        // can keep an empty blob too. A refused blob does not fail creation.
+        record.cred_blob = cred_blob_input
+            .filter(|blob| stored && blob.len() <= MAX_CRED_BLOB_LENGTH)
+            .map(<[u8]>::to_vec);
         if stored {
             record.credential_id = self.new_credential_id(rk);
             if !rk {
@@ -369,6 +381,12 @@ impl CtapApp<'_> {
         })?;
 
         let mut extension_entries = Vec::new();
+        if cred_blob_input.is_some() {
+            extension_entries.push((
+                Value::Text("credBlob".into()),
+                Value::Bool(record.cred_blob.is_some()),
+            ));
+        }
         if hmac_secret_requested {
             extension_entries.push((Value::Text("hmac-secret".into()), Value::Bool(true)));
         }
@@ -391,21 +409,14 @@ impl CtapApp<'_> {
                 Value::Integer(Integer::from(cred_protect_value as u64)),
             ));
         }
-        let extension_bytes = if extension_entries.is_empty() {
-            None
-        } else {
-            let map = canonical_map(extension_entries);
-            let mut encoded = Vec::new();
-            into_writer(&map, &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
-            Some(encoded)
-        };
+        let extension_bytes = cbor::encode_extensions(extension_entries)?;
 
         let auth_data = self.attested_auth_data(
             &record,
             &cose_key,
             up_bit,
             uv_bit,
-            extension_bytes.as_deref(),
+            extension_bytes.as_ref().map(|bytes| bytes.as_slice()),
         );
         // Step 19.  "If attestationFormatsPreference is present and
         // contains only one entry with the value "none", omit attestation from

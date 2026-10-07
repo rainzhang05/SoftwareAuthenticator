@@ -41,6 +41,7 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
     ]);
 
     let extensions = Value::Array(vec![
+        text("credBlob"),
         text("credProtect"),
         text("hmac-secret"),
         text("hmac-secret-mc"),
@@ -82,6 +83,7 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         (uint(9), Value::Array(vec![text("usb")])),
         (uint(10), algorithms),
         (uint(13), uint(PinState::MIN_PIN_LENGTH as u64)),
+        (uint(0x0F), uint(32)),
         (uint(0x14), uint(remaining)),
         (uint(0x16), Value::Array(vec![text("packed")])),
     ]);

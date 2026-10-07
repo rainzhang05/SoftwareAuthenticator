@@ -4,6 +4,7 @@ use super::cbor::{canonical_map, canonical_sort};
 use super::pin::state::PinState;
 use super::{AttestationMode, CtapApp};
 use crate::CoseAlg;
+use crate::store::MAX_CRED_BLOB_LENGTH;
 
 use ciborium::{
     ser::into_writer,
@@ -50,7 +51,7 @@ impl CtapApp<'_> {
         let mut map = Vec::new();
 
         // FIDO_2_3 carries the obligations of CTAP 2.3 §9, all of which hold:
-        // hmac-secret and credProtect are supported, the rk option ID comes
+        // the mandatory hmac-secret and credProtect are supported; rk comes
         // with clientPin (true or false as a PIN is or is not set) and credMgmt
         // true, pinUvAuthToken is true, and pinUvAuthProtocols includes 2.
         // There is no minPinLength extension and no ep option ID.  "The
@@ -63,6 +64,7 @@ impl CtapApp<'_> {
         map.push((
             uint(2),
             Value::Array(vec![
+                text("credBlob"),
                 text("credProtect"),
                 text("hmac-secret"),
                 text("hmac-secret-mc"),
@@ -112,6 +114,8 @@ impl CtapApp<'_> {
         map.push((uint(10), Value::Array(algorithms)));
 
         map.push((uint(13), uint(PinState::MIN_PIN_LENGTH as u64)));
+        // maxCredBlobLength (CTAP 2.3 §6.4), required by §12.2.1.
+        map.push((uint(0x0F), uint(MAX_CRED_BLOB_LENGTH as u64)));
 
         // remainingDiscoverableCredentials: the free slots of the store,
         // which holds the discoverable credentials (and non-discoverable ones

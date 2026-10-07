@@ -222,6 +222,7 @@ pub struct Overrides {
     pub known_credentials: Vec<Vec<u8>>,
     pub hmac_secret: Option<Value>,
     pub hmac_secret_mc: Option<Value>,
+    pub cred_blob: Option<Value>,
     /// The options map, instead of a generated one.
     pub options: Option<Value>,
     /// Leave the allowList out.
@@ -279,11 +280,27 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
     };
     let known = overrides.known_credentials;
     let exclude_list = optional(u, |u| descriptor_list(u, &known))?;
+    let forced_blob = overrides.cred_blob.is_some();
+    let cred_blob = match overrides.cred_blob {
+        Some(blob) => Some(blob),
+        None => optional(u, |u| Ok(Value::Bytes(arbitrary_bytes(u)?)))?,
+    };
     let extensions = if let Some(input) = overrides.hmac_secret_mc {
-        Some(Value::Map(vec![
+        let mut entries = vec![
             (text("hmac-secret"), Value::Bool(true)),
             (text("hmac-secret-mc"), input),
-        ]))
+        ];
+        if let Some(blob) = cred_blob {
+            entries.push((text("credBlob"), blob));
+        }
+        Some(Value::Map(entries))
+    } else if forced_blob {
+        Some(Value::Map(
+            cred_blob
+                .into_iter()
+                .map(|blob| (text("credBlob"), blob))
+                .collect(),
+        ))
     } else {
         optional(u, |u| {
             let hmac_secret = field(u, |u| Ok(Value::Bool(u.arbitrary()?)))?;
@@ -295,6 +312,7 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
                     (text("hmac-secret"), hmac_secret),
                     (text("credProtect"), cred_protect),
                     (text("hmac-secret-mc"), hmac_secret_mc),
+                    (text("credBlob"), cred_blob),
                 ],
             )
         })?
@@ -351,11 +369,34 @@ pub fn get_assertion(u: &mut Unstructured<'_>, overrides: Overrides) -> Result<V
     } else {
         optional(u, |u| descriptor_list(u, &known))?
     };
+    let forced_blob = overrides.cred_blob.is_some();
+    let cred_blob = match overrides.cred_blob {
+        Some(blob) => Some(blob),
+        None => optional(u, |u| Ok(Value::Bool(u.arbitrary()?)))?,
+    };
     let extensions = match overrides.hmac_secret {
-        Some(hmac_secret) => Some(Value::Map(vec![(text("hmac-secret"), hmac_secret)])),
+        Some(hmac_secret) => {
+            let mut entries = vec![(text("hmac-secret"), hmac_secret)];
+            if let Some(blob) = cred_blob {
+                entries.push((text("credBlob"), blob));
+            }
+            Some(Value::Map(entries))
+        }
+        None if forced_blob => Some(Value::Map(
+            cred_blob
+                .into_iter()
+                .map(|blob| (text("credBlob"), blob))
+                .collect(),
+        )),
         None => optional(u, |u| {
             let hmac_secret = field(u, hmac_secret_input)?;
-            map(u, vec![(text("hmac-secret"), hmac_secret)])
+            map(
+                u,
+                vec![
+                    (text("hmac-secret"), hmac_secret),
+                    (text("credBlob"), cred_blob),
+                ],
+            )
         })?,
     };
     let options = match overrides.options {

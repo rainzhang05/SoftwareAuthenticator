@@ -20,7 +20,7 @@ from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, mldsa, padding, rsa
-from fido2.ctap2 import Ctap2
+from fido2.ctap2 import ClientPin, Ctap2
 from fido2.hid import CtapHidDevice
 from fido2.hid.linux import LinuxCtapHidConnection, get_descriptor
 
@@ -440,3 +440,15 @@ def authenticate(
     else:
         raise AssertionError("the signature also verifies over a different client data hash")
     return response, auth_data
+
+
+def pin_uv_auth(ctap, protocol, pin: str, permission, rp_id: str) -> dict:
+    """Authorize one command with a fresh PIN token; user presence consumes
+    its permissions (CTAP 2.3 §§6.1.2, 6.2.2)."""
+    token = ClientPin(ctap, protocol).get_pin_token(pin, permission, rp_id)
+    digest = os.urandom(32)
+    return {
+        "client_data_hash": digest,
+        "pin_uv_param": protocol.authenticate(token, digest),
+        "pin_uv_protocol": protocol.VERSION,
+    }

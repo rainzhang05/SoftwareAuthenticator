@@ -39,8 +39,8 @@ fn att_stmt_keys(response: &[u8]) -> Vec<Value> {
     }
 }
 
-/// A makeCredential request with the largest user handle, hmac-secret and credProtect
-/// extensions, and `extra` parameters.
+/// A makeCredential request with the largest user handle, extensions and
+/// `extra` parameters.
 fn make_credential(alg: CoseAlg, user_id: u8, extra: Vec<(Value, Value)>) -> Vec<u8> {
     let mut entries = vec![
         (int(1), Value::Bytes(vec![0x44; 32])),
@@ -65,10 +65,17 @@ fn make_credential(alg: CoseAlg, user_id: u8, extra: Vec<(Value, Value)>) -> Vec
             canonical_map(vec![
                 (text("hmac-secret"), Value::Bool(true)),
                 (text("credProtect"), int(1)),
+                (text("credBlob"), Value::Bytes(vec![0x73; 32])),
             ]),
         ),
     ];
-    entries.extend(extra);
+    for (key, value) in extra {
+        if let Some(entry) = entries.iter_mut().find(|(existing, _)| *existing == key) {
+            entry.1 = value;
+        } else {
+            entries.push((key, value));
+        }
+    }
     let mut request = vec![CTAP_CMD_MAKE_CREDENTIAL];
     request.extend(encode(&canonical_map(entries)));
     request
@@ -117,16 +124,29 @@ fn attestation_formats_preference_none_omits_attestation() {
 }
 
 /// The largest makeCredential response, ML-DSA-87 with self attestation, the
-/// longest user handle and both extensions, fits a CTAPHID message.
+/// longest user handle and all extension outputs, fits a CTAPHID message.
 #[test]
 fn the_largest_make_credential_response_fits() {
     let mut app = test_app([0x82; 16]);
+    let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V2, 0x13);
+    let extensions = canonical_map(vec![
+        (text("credBlob"), Value::Bytes(vec![0x73; 32])),
+        (text("credProtect"), int(1)),
+        (text("hmac-secret"), Value::Bool(true)),
+        (
+            text("hmac-secret-mc"),
+            super::hmac_secret_mc::hmac_input(&session, &[0x55; 64], ClassicPinProtocol::V2),
+        ),
+    ]);
     let response = call(
         &mut app,
         &make_credential(
             CoseAlg::MLDSA87,
             1,
-            vec![(int(7), canonical_map(vec![(text("rk"), Value::Bool(true))]))],
+            vec![
+                (int(7), canonical_map(vec![(text("rk"), Value::Bool(true))])),
+                (int(6), extensions),
+            ],
         ),
     );
     assert_eq!(member(&response, 1), text("packed"));
@@ -168,7 +188,8 @@ fn attestation_that_would_not_fit_gives_way() {
 
 /// The largest getAssertion response: an ML-DSA-87 signature, user
 /// verification (so the user's name and display name are returned), two
-/// hmac-secret salts under PIN/UV auth protocol two, and numberOfCredentials.
+/// hmac-secret salts under PIN/UV auth protocol two, a 32-byte credBlob,
+/// and numberOfCredentials.
 #[test]
 fn the_largest_get_assertion_response_fits() {
     let mut app: TestApp = test_app([0x84; 16]);
@@ -213,15 +234,18 @@ fn the_largest_get_assertion_response_fits() {
         (int(2), Value::Bytes(client_data_hash.to_vec())),
         (
             int(4),
-            canonical_map(vec![(
-                text("hmac-secret"),
-                canonical_map(vec![
-                    (int(1), session.key_agreement.clone()),
-                    (int(2), Value::Bytes(salt_enc)),
-                    (int(3), Value::Bytes(salt_auth)),
-                    (int(4), int(2)),
-                ]),
-            )]),
+            canonical_map(vec![
+                (text("credBlob"), Value::Bool(true)),
+                (
+                    text("hmac-secret"),
+                    canonical_map(vec![
+                        (int(1), session.key_agreement.clone()),
+                        (int(2), Value::Bytes(salt_enc)),
+                        (int(3), Value::Bytes(salt_auth)),
+                        (int(4), int(2)),
+                    ]),
+                ),
+            ]),
         ),
         (
             int(6),

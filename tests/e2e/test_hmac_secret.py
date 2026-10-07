@@ -56,14 +56,9 @@ def _user_verification(ctap: Ctap2, protocol) -> dict:
     """getAssertion arguments that verify the user with a new pinUvAuthToken.
     Collecting user presence clears a token's permissions (CTAP 2.3 §6.2.2
     step 9), so every assertion needs a token of its own."""
-    token = ClientPin(ctap, protocol).get_pin_token(PIN, ClientPin.PERMISSION.GET_ASSERTION, RP_ID)
-    client_data_hash = os.urandom(32)
-    return {
-        "uv": True,
-        "client_data_hash": client_data_hash,
-        "pin_uv_param": protocol.authenticate(token, client_data_hash),
-        "pin_uv_protocol": protocol.VERSION,
-    }
+    return {"uv": True, **client.pin_uv_auth(
+        ctap, protocol, PIN, ClientPin.PERMISSION.GET_ASSERTION, RP_ID
+    )}
 
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)

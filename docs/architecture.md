@@ -154,7 +154,9 @@ protocol logic.
   discoverable credentials only. Non-discoverable credentials are sealed
   into their own ID when their key fits; RSA credentials are stored and
   consume a slot too.
-- The `credProtect`, `hmac-secret` and `hmac-secret-mc` extensions.
+- The `credBlob`, `credProtect`, `hmac-secret` and `hmac-secret-mc`
+  extensions. `credBlob` stores up to 32 bytes with a stored credential;
+  sealed credentials refuse it.
   `hmac-secret-mc` evaluates the PRF when a credential is created.
 - Packed self attestation: each credential signs its own registration.
 - A reset only within 10 seconds of the key starting (§6.6), approved in a

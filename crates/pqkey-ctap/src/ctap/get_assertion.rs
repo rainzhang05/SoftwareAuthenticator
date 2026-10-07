@@ -1,5 +1,5 @@
 //! The authenticatorGetAssertion and authenticatorGetNextAssertion commands,
-//! including hmac-secret extension processing.
+//! including hmac-secret and credBlob extension processing.
 
 use super::CtapApp;
 use super::cbor::{self, canonical_map, canonical_sort};
@@ -13,13 +13,14 @@ use super::storage::store_status;
 use crate::store::{CredentialRecord, sort_newest_first};
 use crate::try_sign_challenge;
 
+use crate::cbor::{SecretValue, encoded_len_bound};
 use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
 use core::time::Duration;
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::ctap::constants::*;
 
@@ -41,6 +42,7 @@ pub(super) struct PendingAssertion {
     user_verified: bool,
     remaining_credentials: VecDeque<Vec<u8>>,
     hmac_secret: Option<PendingHmacSecret>,
+    cred_blob: bool,
     /// When authenticatorGetAssertion or the last
     /// authenticatorGetNextAssertion was answered.
     timer_started: Duration,
@@ -140,15 +142,23 @@ impl CtapApp<'_> {
         let allow_list = parameter(3).map(request::credential_ids).transpose()?;
 
         let mut hmac_secret_request: Option<HmacSecretRequest> = None;
+        let mut cred_blob_requested = false;
         if let Some(value) = parameter(4) {
             let Value::Map(extension_map) = value else {
                 return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
             };
             for (key, value) in extension_map.iter() {
-                if let Value::Text(text) = key
-                    && text == "hmac-secret"
-                {
-                    hmac_secret_request = Some(parse_hmac_secret_request(value)?);
+                match key {
+                    Value::Text(text) if text == "hmac-secret" => {
+                        hmac_secret_request = Some(parse_hmac_secret_request(value)?);
+                    }
+                    Value::Text(text) if text == "credBlob" => {
+                        let Value::Bool(requested) = value else {
+                            return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+                        };
+                        cred_blob_requested = *requested;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -277,7 +287,14 @@ impl CtapApp<'_> {
             extension_entries.push((Value::Text("hmac-secret".into()), Value::Bytes(encrypted)));
             pending_hmac_secret = Some(pending_state);
         }
-        let extension_bytes = encode_extensions(extension_entries)?;
+        if cred_blob_requested {
+            // §12.2 returns an empty byte string when no blob is stored.
+            extension_entries.push((
+                Value::Text("credBlob".into()),
+                Value::Bytes(credential.cred_blob.clone().unwrap_or_default()),
+            ));
+        }
+        let extension_bytes = cbor::encode_extensions(extension_entries)?;
 
         let (credential, auth_data, signature) = self.sign_assertion(
             credential,
@@ -285,7 +302,7 @@ impl CtapApp<'_> {
             &client_hash,
             user_present,
             user_verified,
-            extension_bytes.as_deref(),
+            extension_bytes.as_ref().map(|bytes| bytes.as_slice()),
         )?;
 
         if remaining_count != 0 {
@@ -296,6 +313,7 @@ impl CtapApp<'_> {
                 user_verified,
                 remaining_credentials,
                 hmac_secret: pending_hmac_secret,
+                cred_blob: cred_blob_requested,
                 timer_started: self.pin_state.now(),
                 token,
             });
@@ -356,7 +374,13 @@ impl CtapApp<'_> {
             let encrypted = self.encrypt_hmac_secret_outputs(hmac_state, cred_random)?;
             extension_entries.push((Value::Text("hmac-secret".into()), Value::Bytes(encrypted)));
         }
-        let extension_bytes = encode_extensions(extension_entries)?;
+        if pending.cred_blob {
+            extension_entries.push((
+                Value::Text("credBlob".into()),
+                Value::Bytes(credential.cred_blob.clone().unwrap_or_default()),
+            ));
+        }
+        let extension_bytes = cbor::encode_extensions(extension_entries)?;
 
         let (credential, auth_data, signature) = self.sign_assertion(
             credential,
@@ -364,7 +388,7 @@ impl CtapApp<'_> {
             &pending.client_hash,
             pending.user_present,
             pending.user_verified,
-            extension_bytes.as_deref(),
+            extension_bytes.as_ref().map(|bytes| bytes.as_slice()),
         )?;
 
         // "User identifiable information [...] MUST NOT be returned if user
@@ -430,13 +454,13 @@ impl CtapApp<'_> {
                 .map_err(|err| store_status("save the signature counter", err))?;
         }
 
-        let auth_data = self.assertion_auth_data(
+        let mut auth_data = Zeroizing::new(self.assertion_auth_data(
             rp_id,
             credential.sign_count,
             user_present,
             user_verified,
             extensions,
-        );
+        ));
         let signature = try_sign_challenge(credential.alg, &secret_key, &auth_data, client_hash)
             .map_err(|err| {
                 log::error!(
@@ -445,18 +469,8 @@ impl CtapApp<'_> {
                 );
                 CTAP2_ERR_PROCESSING
             })?;
-        Ok((credential, auth_data, signature))
+        Ok((credential, core::mem::take(&mut *auth_data), signature))
     }
-}
-
-/// The CBOR extension outputs for authenticator data, or `None` if empty.
-fn encode_extensions(entries: Vec<(Value, Value)>) -> Result<Option<Vec<u8>>, u8> {
-    if entries.is_empty() {
-        return Ok(None);
-    }
-    let mut encoded = Vec::new();
-    into_writer(&canonical_map(entries), &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
-    Ok(Some(encoded))
 }
 
 /// The authenticatorGetAssertion response, with `numberOfCredentials` only
@@ -521,8 +535,9 @@ fn assertion_response(
     }
 
     canonical_sort(&mut response);
-    let mut encoded = Vec::new();
-    into_writer(&Value::Map(response), &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
+    let response = SecretValue(Value::Map(response));
+    let mut encoded = Zeroizing::new(Vec::with_capacity(encoded_len_bound(&response.0)));
+    into_writer(&response.0, &mut *encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
     let mut out = Vec::with_capacity(1 + encoded.len());
     out.push(CTAP2_OK);
     out.extend_from_slice(&encoded);

@@ -398,3 +398,17 @@ fn canonical_key_order(left: &[u8], right: &[u8]) -> Ordering {
         .then(left.len().cmp(&right.len()))
         .then(left.cmp(right))
 }
+
+/// Encode authenticator extension outputs, wiping their CBOR copies (§§12.2,
+/// 12.7, 12.8). An empty map does not set the ED flag.
+pub(super) fn encode_extensions(
+    entries: Vec<(Value, Value)>,
+) -> Result<Option<Zeroizing<Vec<u8>>>, u8> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let map = crate::cbor::SecretValue(canonical_map(entries));
+    let mut encoded = Zeroizing::new(Vec::with_capacity(crate::cbor::encoded_len_bound(&map.0)));
+    into_writer(&map.0, &mut *encoded).map_err(|_| crate::ctap::constants::CTAP2_ERR_PROCESSING)?;
+    Ok(Some(encoded))
+}
