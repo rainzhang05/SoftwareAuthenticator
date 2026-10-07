@@ -113,14 +113,15 @@ def test_next_assertion_returns_each_blob_and_reset_erases_them(ctap):
     assert error.value.code == CtapError.ERR.NO_CREDENTIALS
 
 
-@pytest.mark.parametrize("blob", [True, "blob", 1, None, []])
+# CBOR null is covered by the engine tests: python-fido2 cannot encode it.
+@pytest.mark.parametrize("blob", [True, "blob", 1, []])
 def test_registration_rejects_wrong_types(ctap, blob):
     with pytest.raises(CtapError) as error:
         client.register(ctap, RP_ID, client.ES256, extensions={"credBlob": blob})
     assert error.value.code == CtapError.ERR.CBOR_UNEXPECTED_TYPE
 
 
-@pytest.mark.parametrize("value", [b"", "true", 1, None])
+@pytest.mark.parametrize("value", [b"", "true", 1])
 def test_assertion_rejects_wrong_types(ctap, value):
     credential = client.register(ctap, RP_ID, client.ES256)
     with pytest.raises(CtapError) as error:
