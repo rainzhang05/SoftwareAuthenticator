@@ -49,6 +49,7 @@ mod credential_id;
 mod credential_management;
 mod get_assertion;
 mod get_info;
+mod hmac_secret;
 mod make_credential;
 mod pin;
 pub mod presence;

@@ -4,24 +4,22 @@
 use super::CtapApp;
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::credential_id::{is_discoverable, is_sealed};
+use super::hmac_secret::{HmacSecretRequest, PendingHmacSecret, parse_hmac_secret_request};
 use super::pin::permissions::PIN_PERMISSION_GA;
-use super::pin::protocol::{
-    HmacSha256, PinProtocol, decrypt, parse_pin_uv_auth_param, parse_pin_uv_auth_protocol, verify,
-};
+use super::pin::protocol::parse_pin_uv_auth_param;
 use super::presence::{PresenceOperation, PresenceRequest};
 use super::request;
 use super::storage::store_status;
 use crate::store::{CredentialRecord, sort_newest_first};
-use crate::{ClassicPinProtocol, PinUvSessionKeys, try_sign_challenge};
+use crate::try_sign_challenge;
 
 use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
 use core::time::Duration;
-use hmac::{KeyInit, Mac};
 use sha2::{Digest, Sha256};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 
 use crate::ctap::constants::*;
 
@@ -32,28 +30,6 @@ use std::collections::VecDeque;
 /// current authenticatorGetAssertion state and return CTAP2_ERR_NOT_ALLOWED."
 /// (CTAP 2.3 §6.3)
 const GET_NEXT_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
-
-struct PendingHmacSecret {
-    protocol: PinProtocol,
-    keys: PinUvSessionKeys,
-    salt_plaintext: Zeroizing<Vec<u8>>,
-}
-
-impl PendingHmacSecret {
-    /// `output1 [|| output2]` with `outputN = HMAC-SHA-256(CredRandom, saltN)`
-    /// (CTAP 2.3 §12.7).
-    fn outputs_for(&self, cred_random: &[u8; 32]) -> Result<Zeroizing<Vec<u8>>, u8> {
-        let mut outputs = Zeroizing::new(Vec::with_capacity(self.salt_plaintext.len()));
-        for salt in self.salt_plaintext.chunks(32) {
-            let mut hmac =
-                HmacSha256::new_from_slice(cred_random).map_err(|_| CTAP2_ERR_PROCESSING)?;
-            hmac.update(salt);
-            let output = Zeroizing::new(hmac.finalize().into_bytes());
-            outputs.extend_from_slice(&output[..]);
-        }
-        Ok(outputs)
-    }
-}
 
 /// The authenticatorGetAssertion parameters remembered for
 /// authenticatorGetNextAssertion: "Remember the authenticatorGetAssertion
@@ -81,13 +57,6 @@ impl Drop for PendingAssertion {
     }
 }
 
-struct HmacSecretRequest {
-    key_agreement: Vec<(Value, Value)>,
-    salt_enc: Vec<u8>,
-    salt_auth: Vec<u8>,
-    protocol: PinProtocol,
-}
-
 impl CtapApp<'_> {
     fn credential_allows(
         credential: &CredentialRecord,
@@ -99,60 +68,6 @@ impl CtapApp<'_> {
             2 => user_verified || allow_list_provided,
             _ => true,
         }
-    }
-
-    fn process_hmac_secret_for_assertion(
-        &mut self,
-        request: &HmacSecretRequest,
-        cred_random_with_uv: &[u8; 32],
-        cred_random_without_uv: &[u8; 32],
-        user_verified: bool,
-    ) -> Result<(Vec<u8>, PendingHmacSecret), u8> {
-        // "The authenticator calls decapsulate on the provided platform
-        // key-agreement key to obtain a shared secret." (CTAP 2.3 §12.7)
-        let keys = self.decapsulate(request.protocol, &request.key_agreement)?;
-
-        // CTAP 2.3 §12.7: "The authenticator calls verify(shared secret,
-        // saltEnc, saltAuth). If the verification fails, return
-        // CTAP2_ERR_PIN_AUTH_INVALID."
-        verify(
-            request.protocol,
-            &keys.auth_key,
-            &request.salt_enc,
-            &request.salt_auth,
-        )?;
-
-        // "The authenticator obtains salt1 and salt2 by calling decrypt(shared
-        // secret, saltEnc). If the decryption fails, or if the result is not 32
-        // or 64 bytes long, return CTAP1_ERR_INVALID_PARAMETER."
-        let salt_plaintext = decrypt(request.protocol, &keys, &request.salt_enc)
-            .filter(|salts| salts.len() == 32 || salts.len() == 64)
-            .ok_or(CTAP1_ERR_INVALID_PARAMETER)?;
-
-        let cred_random = if user_verified {
-            cred_random_with_uv
-        } else {
-            cred_random_without_uv
-        };
-
-        let pending = PendingHmacSecret {
-            protocol: request.protocol,
-            keys,
-            salt_plaintext,
-        };
-        let encrypted = self.encrypt_hmac_secret_outputs(&pending, cred_random)?;
-        Ok((encrypted, pending))
-    }
-
-    /// `encrypt(shared secret, output1 [|| output2])` with the protocol the
-    /// platform selected for hmac-secret (CTAP 2.3 §12.7).
-    fn encrypt_hmac_secret_outputs(
-        &mut self,
-        pending: &PendingHmacSecret,
-        cred_random: &[u8; 32],
-    ) -> Result<Vec<u8>, u8> {
-        let outputs = pending.outputs_for(cred_random)?;
-        self.encrypt_for_platform(pending.protocol, &pending.keys, &outputs)
     }
 
     fn assertion_auth_data(
@@ -353,7 +268,7 @@ impl CtapApp<'_> {
         let mut extension_entries = Vec::new();
         let mut pending_hmac_secret = None;
         if let Some(ref request) = hmac_secret_request {
-            let (encrypted, pending_state) = self.process_hmac_secret_for_assertion(
+            let (encrypted, pending_state) = self.process_hmac_secret(
                 request,
                 &credential.cred_random_with_uv,
                 &credential.cred_random_without_uv,
@@ -532,31 +447,6 @@ impl CtapApp<'_> {
             })?;
         Ok((credential, auth_data, signature))
     }
-}
-
-/// Parse the hmac-secret getAssertion input (CTAP 2.3 §12.7): a missing
-/// member is CTAP2_ERR_MISSING_PARAMETER, a wrongly typed input or member
-/// CTAP2_ERR_CBOR_UNEXPECTED_TYPE (§8).
-fn parse_hmac_secret_request(value: &Value) -> Result<HmacSecretRequest, u8> {
-    let Value::Map(params) = value else {
-        return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
-    };
-    let key_agreement = cbor::required_map(params, 1)?.to_vec();
-    let salt_enc = cbor::required_bytes(params, 2)?.to_vec();
-    let salt_auth = cbor::required_bytes(params, 3)?.to_vec();
-    // "If pinUvAuthProtocol is absent and a pinUvAuthProtocol value of 1 is
-    // supported by the authenticator, let the value of pinUvAuthProtocol be 1"
-    // (CTAP 2.3 §12.7).
-    let protocol = match cbor::map_get(params, Value::Integer(Integer::from(4))) {
-        Some(value) => parse_pin_uv_auth_protocol(value)?,
-        None => ClassicPinProtocol::V1,
-    };
-    Ok(HmacSecretRequest {
-        key_agreement,
-        salt_enc,
-        salt_auth,
-        protocol,
-    })
 }
 
 /// The CBOR extension outputs for authenticator data, or `None` if empty.
