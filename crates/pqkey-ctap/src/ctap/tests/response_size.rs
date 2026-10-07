@@ -39,8 +39,8 @@ fn att_stmt_keys(response: &[u8]) -> Vec<Value> {
     }
 }
 
-/// A makeCredential request with the largest user handle, both extensions
-/// this authenticator supports, and `extra` parameters.
+/// A makeCredential request with the largest user handle, hmac-secret and credProtect
+/// extensions, and `extra` parameters.
 fn make_credential(alg: CoseAlg, user_id: u8, extra: Vec<(Value, Value)>) -> Vec<u8> {
     let mut entries = vec![
         (int(1), Value::Bytes(vec![0x44; 32])),

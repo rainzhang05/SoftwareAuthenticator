@@ -168,6 +168,65 @@ fn ctap_request(dir: &Path) {
             (int(11), Value::Array(vec![text("none")])),
         ]),
     ));
+    for protocol in [1, 2] {
+        for salt_length in [32, 64] {
+            for companion in [None, Some(false), Some(true)] {
+                let mut extensions = vec![(
+                    text("hmac-secret-mc"),
+                    map(vec![
+                        (int(1), platform_key()),
+                        (
+                            int(2),
+                            bytes(&vec![
+                                0x21;
+                                salt_length + if protocol == 2 { 16 } else { 0 }
+                            ]),
+                        ),
+                        (
+                            int(3),
+                            bytes(&vec![0x22; if protocol == 2 { 32 } else { 16 }]),
+                        ),
+                        (int(4), int(protocol)),
+                    ]),
+                )];
+                if let Some(companion) = companion {
+                    extensions.push((text("hmac-secret"), Value::Bool(companion)));
+                }
+                seeds.push(command(
+                    0x01,
+                    &map(vec![
+                        (int(1), bytes(&hash)),
+                        (int(2), rp.clone()),
+                        (int(3), user.clone()),
+                        (int(4), params(-7)),
+                        (int(6), map(extensions)),
+                    ]),
+                ));
+            }
+        }
+    }
+    for malformed in [
+        Value::Bool(true),
+        map(vec![]),
+        map(vec![(int(1), Value::Null)]),
+    ] {
+        seeds.push(command(
+            0x01,
+            &map(vec![
+                (int(1), bytes(&hash)),
+                (int(2), rp.clone()),
+                (int(3), user.clone()),
+                (int(4), params(-7)),
+                (
+                    int(6),
+                    map(vec![
+                        (text("hmac-secret"), Value::Bool(true)),
+                        (text("hmac-secret-mc"), malformed),
+                    ]),
+                ),
+            ]),
+        ));
+    }
     seeds.push(command(
         0x02,
         &map(vec![

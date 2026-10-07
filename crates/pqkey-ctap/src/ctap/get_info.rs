@@ -62,7 +62,11 @@ impl CtapApp<'_> {
         ));
         map.push((
             uint(2),
-            Value::Array(vec![text("credProtect"), text("hmac-secret")]),
+            Value::Array(vec![
+                text("credProtect"),
+                text("hmac-secret"),
+                text("hmac-secret-mc"),
+            ]),
         ));
         map.push((uint(3), Value::Bytes(self.aaguid.to_vec())));
 

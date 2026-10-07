@@ -17,7 +17,8 @@ your presence waits for you to approve it in a desktop notification.
   EdDSA (EdDSA, Ed25519 and Ed448), and RSA-2048 (RS256, RS384, RS512,
   PS256, PS384 and PS512).
 - **CTAP 2.3:** PIN (protocols 1 and 2), passkeys with credential management,
-  `hmac-secret`, `credProtect`, and packed self-attestation.
+  `hmac-secret`, `hmac-secret-mc`, `credProtect`, and packed
+  self-attestation.
 - **Rust throughout:** pure-Rust cryptography, and `unsafe` code only where
   pqkey calls into the operating system.
 

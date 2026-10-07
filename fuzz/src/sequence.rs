@@ -1,7 +1,7 @@
 //! Stateful CTAP: a sequence of requests against one engine, the harness
 //! acting as a platform that can set and change a PIN, obtain
 //! pinUvAuthTokens and authenticate makeCredential, getAssertion and
-//! credentialManagement with them, and use hmac-secret, while the fuzzer
+//! credentialManagement with them, and use hmac-secret and hmac-secret-mc, while the fuzzer
 //! chooses the parameters (right, wrong or missing) and mixes in
 //! structure-aware and raw requests and presence denials.
 //!
@@ -18,7 +18,7 @@
 //!   credentials this engine created and has not deleted, and getAssertion
 //!   and getNextAssertion only for the RP ID requested; getNextAssertion only
 //!   succeeds right after a getAssertion that reported more credentials;
-//! * hmac-secret returns one output per salt.
+//! * hmac-secret and hmac-secret-mc return one output per salt.
 
 use crate::cbor::{self, bytes, decode_map, get_int, get_text, int, text};
 use crate::engine::Engine;
@@ -75,6 +75,7 @@ enum Op {
         rp: Option<u8>,
     },
     MakeCredential {
+        hmac_secret_mc: Option<(bool, bool)>,
         auth: Auth,
         rp: u8,
         /// Ask for a discoverable credential rather than generating options.
@@ -114,6 +115,8 @@ struct Credential {
     id: Vec<u8>,
     rp_id: String,
 }
+
+type HmacInput = (Option<Value>, Option<(Session, usize)>);
 
 struct Platform {
     engine: Engine,
@@ -346,6 +349,30 @@ impl Platform {
         Ok(session)
     }
 
+    fn hmac_input(
+        &mut self,
+        choice: Option<(bool, bool)>,
+        u: &mut Unstructured<'_>,
+    ) -> Result<HmacInput> {
+        let Some((v2, two_salts)) = choice else {
+            return Ok((None, None));
+        };
+        let protocol = protocol(v2);
+        let Some(session) = self.session(protocol, u)? else {
+            return Ok((None, None));
+        };
+        let mut salts = vec![0; if two_salts { 64 } else { 32 }];
+        u.fill_buffer(&mut salts)?;
+        let encrypted = session.encrypt(&salts, Self::iv(u)?);
+        let value = Value::Map(vec![
+            (int(1), session.key_agreement.clone()),
+            (int(2), bytes(&encrypted)),
+            (int(3), bytes(&session.authenticate(&encrypted))),
+            (int(4), protocol_value(protocol)),
+        ]);
+        Ok((Some(value), Some((session, salts.len()))))
+    }
+
     fn iv(u: &mut Unstructured<'_>) -> Result<[u8; 16]> {
         u.arbitrary()
     }
@@ -529,7 +556,14 @@ impl Platform {
                     self.token = Some((protocol, token));
                 }
             }
-            Op::MakeCredential { auth, rp, rk, alg } => {
+            Op::MakeCredential {
+                auth,
+                rp,
+                rk,
+                alg,
+                hmac_secret_mc,
+            } => {
+                let (hmac_secret_mc, salts) = self.hmac_input(hmac_secret_mc, u)?;
                 let rp_id = rp_id(rp);
                 let hash: [u8; 32] = u.arbitrary()?;
                 let (param, protocol) = self.pin_uv_auth(auth, &hash);
@@ -542,6 +576,7 @@ impl Platform {
                         pin_uv_auth_protocol: protocol,
                         known_credentials: self.known_ids(),
                         hmac_secret: None,
+                        hmac_secret_mc,
                         options: rk.then(|| Value::Map(vec![(text("rk"), Value::Bool(true))])),
                         no_allow_list: false,
                         credential_parameters: alg.map(|alg| {
@@ -553,7 +588,25 @@ impl Platform {
                         }),
                     },
                 )?;
-                self.call(&request);
+                let response = self.call(&request);
+                if let (CTAP2_OK, Some((session, salt_len))) = (status(&response), salts) {
+                    let body = decode_map(&response[1..]).expect("a map");
+                    let Some(Value::Bytes(auth_data)) = get_int(&body, 2) else {
+                        panic!("authData")
+                    };
+                    let id_len = usize::from(u16::from_be_bytes([auth_data[53], auth_data[54]]));
+                    let mut remaining = &auth_data[55 + id_len..];
+                    let _: Value = ciborium::de::from_reader(&mut remaining).expect("public key");
+                    let extensions = decode_map(remaining).expect("extensions");
+                    let Some(Value::Bytes(output)) = get_text(&extensions, "hmac-secret-mc") else {
+                        panic!("creation HMAC output")
+                    };
+                    assert_ne!(auth_data[32] & 0x80, 0, "ED flag");
+                    assert_eq!(
+                        session.decrypt(output).expect("decrypt output").len(),
+                        salt_len
+                    );
+                }
             }
             Op::GetAssertion {
                 auth,
@@ -561,27 +614,7 @@ impl Platform {
                 hmac_secret,
                 discoverable,
             } => {
-                let mut salts = None;
-                let hmac_secret = match hmac_secret {
-                    Some((v2, two_salts)) => {
-                        let protocol = protocol(v2);
-                        let Some(session) = self.session(protocol, u)? else {
-                            return Ok(());
-                        };
-                        let mut salt = vec![0u8; if two_salts { 64 } else { 32 }];
-                        u.fill_buffer(&mut salt)?;
-                        let salt_enc = session.encrypt(&salt, Self::iv(u)?);
-                        let value = Value::Map(vec![
-                            (int(1), session.key_agreement.clone()),
-                            (int(2), bytes(&salt_enc)),
-                            (int(3), bytes(&session.authenticate(&salt_enc))),
-                            (int(4), protocol_value(protocol)),
-                        ]);
-                        salts = Some((session, salt.len()));
-                        Some(value)
-                    }
-                    None => None,
-                };
+                let (hmac_secret, salts) = self.hmac_input(hmac_secret, u)?;
                 let rp_id = rp_id(rp);
                 let hash: [u8; 32] = u.arbitrary()?;
                 let (param, protocol) = self.pin_uv_auth(auth, &hash);
@@ -594,6 +627,7 @@ impl Platform {
                         pin_uv_auth_protocol: protocol,
                         known_credentials: self.known_ids(),
                         hmac_secret,
+                        hmac_secret_mc: None,
                         options: None,
                         no_allow_list: discoverable,
                         credential_parameters: None,

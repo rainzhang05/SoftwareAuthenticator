@@ -40,7 +40,11 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         (text("makeCredUvNotRqd"), Value::Bool(true)),
     ]);
 
-    let extensions = Value::Array(vec![text("credProtect"), text("hmac-secret")]);
+    let extensions = Value::Array(vec![
+        text("credProtect"),
+        text("hmac-secret"),
+        text("hmac-secret-mc"),
+    ]);
 
     let algorithms = Value::Array(
         [

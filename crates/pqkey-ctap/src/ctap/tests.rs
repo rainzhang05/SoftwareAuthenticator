@@ -6,6 +6,7 @@ mod dispatch;
 mod get_assertion;
 mod get_assertion_rules;
 mod get_info;
+mod hmac_secret_mc;
 mod make_credential;
 mod make_credential_rules;
 mod pin;

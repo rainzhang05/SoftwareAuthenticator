@@ -15,7 +15,8 @@ real credentials on your key, for `localhost`; `pqkey passkeys delete`
 removes the discoverable ones one at a time.
 
 - **Presets** cover each algorithm and mixed lists, discoverable and
-  non-discoverable credentials, user verification, PRF (`hmac-secret`),
+  non-discoverable credentials, user verification, PRF (`hmac-secret` and
+  `hmac-secret-mc`),
   credProtect and attestation. The form runs anything else.
 - **Results** are in `tests/browser/data/`, which git ignores:
   `results.jsonl` has every check of every ceremony.

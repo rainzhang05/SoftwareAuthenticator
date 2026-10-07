@@ -2,6 +2,7 @@
 
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::credential_id::is_discoverable;
+use super::hmac_secret::parse_hmac_secret_request;
 use super::pin::permissions::PIN_PERMISSION_MC;
 use super::pin::protocol::parse_pin_uv_auth_param;
 use super::presence::{PresenceOperation, PresenceRequest};
@@ -211,6 +212,7 @@ impl CtapApp<'_> {
         };
 
         let mut hmac_secret_requested = false;
+        let mut hmac_secret_mc_input = None;
         let mut cred_protect_requested: Option<u8> = None;
 
         // A wrongly typed extensions map or extension input is
@@ -227,6 +229,9 @@ impl CtapApp<'_> {
                         }
                         _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
                     },
+                    Value::Text(text) if text == "hmac-secret-mc" => {
+                        hmac_secret_mc_input = Some(value);
+                    }
                     Value::Text(text) if text == "credProtect" => {
                         let policy_value = match value {
                             Value::Integer(int) => u8::try_from(i128::from(*int))
@@ -242,6 +247,17 @@ impl CtapApp<'_> {
                 }
             }
         }
+
+        // CTAP 2.3 §12.8 requires hmac-secret true alongside hmac-secret-mc.
+        // A false companion also fails to supply that required input.
+        let hmac_secret_mc_request = if let Some(input) = hmac_secret_mc_input {
+            if !hmac_secret_requested {
+                return Err(CTAP2_ERR_MISSING_PARAMETER);
+            }
+            Some(parse_hmac_secret_request(input)?)
+        } else {
+            None
+        };
 
         // Steps 10 and 11.  Without a PIN the authenticator is not protected,
         // step 11 is skipped and a pinUvAuthParam is not verified: the "uv"
@@ -355,6 +371,19 @@ impl CtapApp<'_> {
         let mut extension_entries = Vec::new();
         if hmac_secret_requested {
             extension_entries.push((Value::Text("hmac-secret".into()), Value::Bool(true)));
+        }
+        if let Some(request) = &hmac_secret_mc_request {
+            // §12.8 uses §12.7's processing and the new credential's secrets.
+            let (encrypted, _) = self.process_hmac_secret(
+                request,
+                &record.cred_random_with_uv,
+                &record.cred_random_without_uv,
+                uv_bit,
+            )?;
+            extension_entries.push((
+                Value::Text("hmac-secret-mc".into()),
+                Value::Bytes(encrypted),
+            ));
         }
         if cred_protect_requested.is_some() {
             extension_entries.push((

@@ -23,7 +23,7 @@ def test_get_info(ctap: Ctap2):
 
     assert "FIDO_2_3" in info[1] and "FIDO_2_1" in info[1] and "FIDO_2_0" in info[1], info[1]
     assert "FIDO_2_2" not in info[1], "CTAP 2.3 6.4: FIDO_2_2 MUST not be present"
-    assert set(info[2]) >= {"credProtect", "hmac-secret"}, info[2]
+    assert set(info[2]) >= {"credProtect", "hmac-secret", "hmac-secret-mc"}, info[2]
     assert info[3] == client.DEFAULT_AAGUID
 
     options = info[4]

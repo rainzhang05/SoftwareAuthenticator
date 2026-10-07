@@ -194,6 +194,23 @@ pub fn cose_key(u: &mut Unstructured<'_>) -> Result<Value> {
     map(u, entries)
 }
 
+/// The shared shape of hmac-secret and hmac-secret-mc inputs.
+fn hmac_secret_input(u: &mut Unstructured<'_>) -> Result<Value> {
+    let salt_enc = field(u, |u| Ok(Value::Bytes(arbitrary_bytes(u)?)))?;
+    let salt_auth = field(u, |u| Ok(Value::Bytes(arbitrary_bytes(u)?)))?;
+    let protocol = optional(u, pin_uv_auth_protocol)?;
+    let key = field(u, cose_key)?;
+    map(
+        u,
+        vec![
+            (int(1), key),
+            (int(2), salt_enc),
+            (int(3), salt_auth),
+            (int(4), protocol),
+        ],
+    )
+}
+
 /// The parts of an authenticatorMakeCredential request the stateful target
 /// fills in itself.
 #[derive(Default)]
@@ -204,6 +221,7 @@ pub struct Overrides {
     pub pin_uv_auth_protocol: Option<Option<Value>>,
     pub known_credentials: Vec<Vec<u8>>,
     pub hmac_secret: Option<Value>,
+    pub hmac_secret_mc: Option<Value>,
     /// The options map, instead of a generated one.
     pub options: Option<Value>,
     /// Leave the allowList out.
@@ -261,17 +279,26 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
     };
     let known = overrides.known_credentials;
     let exclude_list = optional(u, |u| descriptor_list(u, &known))?;
-    let extensions = optional(u, |u| {
-        let hmac_secret = field(u, |u| Ok(Value::Bool(u.arbitrary()?)))?;
-        let cred_protect = field(u, |u| Ok(int(u.int_in_range(0..=4)?)))?;
-        map(
-            u,
-            vec![
-                (text("hmac-secret"), hmac_secret),
-                (text("credProtect"), cred_protect),
-            ],
-        )
-    })?;
+    let extensions = if let Some(input) = overrides.hmac_secret_mc {
+        Some(Value::Map(vec![
+            (text("hmac-secret"), Value::Bool(true)),
+            (text("hmac-secret-mc"), input),
+        ]))
+    } else {
+        optional(u, |u| {
+            let hmac_secret = field(u, |u| Ok(Value::Bool(u.arbitrary()?)))?;
+            let cred_protect = field(u, |u| Ok(int(u.int_in_range(0..=4)?)))?;
+            let hmac_secret_mc = optional(u, hmac_secret_input)?;
+            map(
+                u,
+                vec![
+                    (text("hmac-secret"), hmac_secret),
+                    (text("credProtect"), cred_protect),
+                    (text("hmac-secret-mc"), hmac_secret_mc),
+                ],
+            )
+        })?
+    };
     let options = match overrides.options {
         Some(options) => Some(options),
         None => optional(u, options)?,
@@ -327,21 +354,7 @@ pub fn get_assertion(u: &mut Unstructured<'_>, overrides: Overrides) -> Result<V
     let extensions = match overrides.hmac_secret {
         Some(hmac_secret) => Some(Value::Map(vec![(text("hmac-secret"), hmac_secret)])),
         None => optional(u, |u| {
-            let hmac_secret = field(u, |u| {
-                let salt_enc = field(u, |u| Ok(Value::Bytes(arbitrary_bytes(u)?)))?;
-                let salt_auth = field(u, |u| Ok(Value::Bytes(arbitrary_bytes(u)?)))?;
-                let protocol = optional(u, pin_uv_auth_protocol)?;
-                let key = field(u, cose_key)?;
-                map(
-                    u,
-                    vec![
-                        (int(1), key),
-                        (int(2), salt_enc),
-                        (int(3), salt_auth),
-                        (int(4), protocol),
-                    ],
-                )
-            })?;
+            let hmac_secret = field(u, hmac_secret_input)?;
             map(u, vec![(text("hmac-secret"), hmac_secret)])
         })?,
     };
