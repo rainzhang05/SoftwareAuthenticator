@@ -49,12 +49,24 @@ programs "busy". It also passes cancellation on to the engine. The engine
 runs on a worker thread, so the device keeps being served while a prompt is
 open.
 
-Two details carry ML-DSA's large messages across the kernel:
+Three details carry ML-DSA's large messages across the kernel:
 
 - The transport paces its reports 1 ms apart, because a hidraw reader buffers
   only 64 of them.
+- Each Linux uhid event is read at least 100 µs after its own readiness
+  observation, to avoid a race in the kernel's uhid queue. Settling a queued
+  30-packet request takes at least 3 ms; waits also wake for the worker.
 - getInfo reports a maxMsgSize of 1,768 bytes, the most that the kernel's
   queue delivers whole.
+
+The uhid output ring has 32 slots, with one kept empty. An otherwise empty
+ring holds a whole 30-packet request and one OPEN event, even before the
+daemon reads anything. Settling permits at most 10,000 reads per second; one client
+can send its whole largest request and wait for the answer before sending
+another. While an answer is paced out, output reads follow those 1 ms
+pauses. Two clients sending large requests at once can overflow the ring,
+which drops events. The existing busy reply does not recover lost packets;
+an incomplete request can fail or time out.
 
 ## Platform boundary
 

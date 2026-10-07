@@ -528,6 +528,16 @@ mod tests {
             shutdown: ShutdownSignal::new(),
         };
 
+        // Settle the initial request before the single poll below flushes
+        // its answer. A later poll must not hide a failure to read the second
+        // ping during that flush.
+        for expected in &frames {
+            let frame = transport.device.read_settled_frame().unwrap().unwrap();
+            assert_eq!(frame.as_bytes(), expected);
+            let now = transport.now();
+            transport.host.handle_frame(&frame, now);
+        }
+
         let host = thread::spawn(move || {
             let mut reports = Vec::new();
             let mut event = vec![0u8; uhid::UHID_EVENT_SIZE];
@@ -549,7 +559,7 @@ mod tests {
         assert!(transport.poll().unwrap());
         let (reports, _kernel) = host.join().unwrap();
         assert_eq!(
-            transport.device.try_read_frame().unwrap(),
+            transport.device.read_settled_frame().unwrap(),
             None,
             "the ping was left unread"
         );

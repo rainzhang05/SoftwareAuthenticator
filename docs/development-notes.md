@@ -150,6 +150,19 @@ These were tested on 2026-09-30 on Ubuntu 26.04.1 (aarch64, GNOME 50.1).
 Start with `pqkey status`, which names what is missing and how to fix it, or
 `scripts/diagnose.sh` for the whole picture.
 
+**The key stops answering and `pqkey stop` hangs.** The Linux uhid queue has
+an unlocked read race, seen especially on arm64. When it hits, `dmesg` shows
+the following, with `uhid_char_read` in the call trace:
+
+```text
+usercopy: Kernel memory exposure attempt detected from null address (offset 0, size 4376)
+kernel BUG at mm/usercopy.c:102
+```
+
+pqkey waits for each event to settle before reading it to avoid the race, but
+cannot rule it out. Restart the key; if its process cannot be stopped,
+reboot.
+
 **The browser waits, but no prompt appears.** On GNOME a prompt can queue
 behind another banner, so pqkey nudges the queue every 2 seconds. The prompt
 is also in the notification list (click the clock).

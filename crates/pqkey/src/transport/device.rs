@@ -79,13 +79,15 @@ impl CtapHidFrame {
 /// need not expose a file descriptor, implement `AsFd`, or move to the worker.
 pub trait HidDevice {
     /// Take the next complete output report without waiting. `None` means
-    /// the queue is empty. Invalid native events are handled by the backend.
+    /// no report can be read yet. Native events may need time to settle;
+    /// invalid ones are handled by the backend.
     fn try_read_frame(&self) -> io::Result<Option<CtapHidFrame>>;
     /// Send one complete input report to the host.
     fn write_frame(&self, frame: &CtapHidFrame) -> io::Result<()>;
     /// Wait for a queued report, the worker's `other` descriptor, or the
-    /// timeout. `None` waits indefinitely. Signals may end the wait early.
-    /// Enqueuing a report must wake a concurrent wait; pending reports must
-    /// prevent sleep, even when wake bytes have already been drained.
+    /// timeout. `None` has no caller deadline. Signals or native event
+    /// settling may end the wait early. Enqueuing a report must wake a
+    /// concurrent wait; pending reports must prevent sleep once readable,
+    /// even when wake bytes have already been drained.
     fn wait_with(&self, other: BorrowedFd<'_>, timeout: Option<Duration>) -> io::Result<bool>;
 }

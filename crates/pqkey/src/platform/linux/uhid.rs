@@ -17,16 +17,26 @@ use crate::transport::{
 };
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll, ppoll};
+use nix::sys::time::TimeSpec;
 use nix::unistd::{read, write};
+use std::cell::Cell;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DEVICE_PATH: &str = "/dev/uhid";
+
+/// Let each observed event settle before reading it. In drivers/hid/uhid.c,
+/// uhid_queue stores `outq[head]` and then head under its queue lock, but
+/// uhid_char_poll and uhid_char_read inspect head without that lock. A reader
+/// can see head before the event pointer and copy from NULL. Waiting after
+/// readiness, once per event, gives the pointer time to become visible on
+/// every architecture. This avoids the race but cannot rule it out.
+const READ_SETTLING_TIME: Duration = Duration::from_micros(100);
 
 pub(crate) use raw::{UHID_EVENT_SIZE, UHID_EVENT_TYPE_DESTROY};
 
@@ -107,6 +117,7 @@ impl UhidDevice {
         Ok(Self {
             inner: UhidInner {
                 fd: OwnedFd::from(file),
+                readable_since: Cell::new(None),
             },
             descriptor,
             opened: AtomicBool::new(false),
@@ -118,7 +129,10 @@ impl UhidDevice {
     #[cfg(test)]
     pub(crate) fn from_fd(fd: OwnedFd, descriptor: HidDeviceDescriptor) -> Self {
         Self {
-            inner: UhidInner { fd },
+            inner: UhidInner {
+                fd,
+                readable_since: Cell::new(None),
+            },
             descriptor,
             opened: AtomicBool::new(false),
             node_checked: AtomicBool::new(false),
@@ -130,6 +144,22 @@ impl UhidDevice {
     #[cfg(test)]
     pub fn take_opened(&self) -> bool {
         self.opened.swap(false, Ordering::Relaxed)
+    }
+
+    /// Wait for queued fake events to settle, returning the first frame or
+    /// `None` once the queue is empty, including after non-frame events.
+    #[cfg(test)]
+    pub(crate) fn read_settled_frame(&self) -> io::Result<Option<CtapHidFrame>> {
+        let (wake, _worker) = std::os::unix::net::UnixStream::pair()?;
+        loop {
+            if let Some(frame) = self.try_read_frame()? {
+                return Ok(Some(frame));
+            }
+            if self.inner.readable_since.get().is_none() {
+                return Ok(None);
+            }
+            self.wait_with(wake.as_fd(), None)?;
+        }
     }
 }
 
@@ -220,8 +250,9 @@ impl HidDevice for UhidDevice {
         self.inner.send_input_report(frame.as_bytes())
     }
 
-    /// Wait until the device or `other` is readable, or `timeout` passes (no
-    /// timeout waits indefinitely). Returns whether either became readable.
+    /// Wait until an event can be read, `other` is readable, or `timeout`
+    /// passes. While an observed event settles, wait only for `other`, for
+    /// at most the remaining settling time, even with no timeout.
     fn wait_with(&self, other: BorrowedFd<'_>, timeout: Option<Duration>) -> io::Result<bool> {
         self.inner.wait(timeout, other)
     }
@@ -229,10 +260,25 @@ impl HidDevice for UhidDevice {
 
 struct UhidInner {
     fd: OwnedFd,
+    /// One readiness observation permits one read after it has settled.
+    readable_since: Cell<Option<Instant>>,
 }
 
 impl UhidInner {
     fn try_read_event(&self) -> io::Result<Option<raw::uhid_event>> {
+        let Some(since) = self.readable_since.get() else {
+            let mut fds = [PollFd::new(self.fd.as_fd(), PollFlags::POLLIN)];
+            match poll(&mut fds, PollTimeout::ZERO) {
+                Ok(ready) if ready > 0 => self.readable_since.set(Some(Instant::now())),
+                Ok(_) | Err(Errno::EINTR) => {}
+                Err(err) => return Err(to_io_error(err)),
+            }
+            return Ok(None);
+        };
+        if since.elapsed() < READ_SETTLING_TIME {
+            return Ok(None);
+        }
+        self.readable_since.set(None);
         match read_event_nonblocking(self.fd.as_fd()) {
             Ok(event) => Ok(Some(event)),
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
@@ -245,13 +291,34 @@ impl UhidInner {
             PollFd::new(self.fd.as_fd(), PollFlags::POLLIN),
             PollFd::new(other, PollFlags::POLLIN),
         ];
-        // `PollTimeout::NONE` blocks indefinitely; a wait longer than
-        // `PollTimeout::MAX` can say is capped rather than rejected.
-        let timeout = timeout.map_or(PollTimeout::NONE, |d| {
-            PollTimeout::try_from(d).unwrap_or(PollTimeout::MAX)
-        });
-        match poll(&mut fds, timeout) {
-            Ok(ready) => Ok(ready > 0),
+        let settling = self
+            .readable_since
+            .get()
+            .map(|since| READ_SETTLING_TIME.saturating_sub(since.elapsed()));
+        if settling == Some(Duration::ZERO) {
+            return Ok(true);
+        }
+        let (fds, timeout) = match settling {
+            Some(remaining) => {
+                // The device stays readable while the event settles. Polling
+                // it would wake immediately instead of waiting for the read.
+                (
+                    &mut fds[1..],
+                    Some(timeout.map_or(remaining, |d| d.min(remaining))),
+                )
+            }
+            None => (&mut fds[..], timeout),
+        };
+        // ppoll keeps the sub-millisecond settling timeout. Preserve the
+        // old poll timeout's cap for waits too long to represent.
+        let timeout =
+            timeout.map(|d| TimeSpec::from(d.min(Duration::from_millis(i32::MAX as u64))));
+        match ppoll(fds, timeout, None) {
+            Ok(ready) => Ok(ready > 0
+                || self
+                    .readable_since
+                    .get()
+                    .is_some_and(|since| since.elapsed() >= READ_SETTLING_TIME)),
             // Interrupted by a signal: return, so the caller can look at why.
             Err(Errno::EINTR) => Ok(false),
             Err(err) => Err(to_io_error(err)),
@@ -650,6 +717,153 @@ mod tests {
     }
 
     #[test]
+    fn an_event_is_read_only_after_its_readiness_has_settled() {
+        use std::io::Write;
+        let (device, mut kernel) = crate::platform::test_support::socket_device();
+        kernel.write_all(&output_event(&init_frame())).unwrap();
+        assert_eq!(device.try_read_frame().unwrap(), None);
+        assert!(device.inner.readable_since.get().is_some());
+
+        // Keep the observation young even if the test thread is descheduled.
+        device
+            .inner
+            .readable_since
+            .set(Some(Instant::now() + Duration::from_secs(1)));
+        assert_eq!(device.try_read_frame().unwrap(), None);
+        device
+            .inner
+            .readable_since
+            .set(Some(Instant::now() - READ_SETTLING_TIME));
+        assert_eq!(
+            device.try_read_frame().unwrap(),
+            Some(CtapHidFrame::new(init_frame()))
+        );
+        assert!(device.inner.readable_since.get().is_none());
+        assert_eq!(device.try_read_frame().unwrap(), None);
+    }
+
+    #[test]
+    fn a_burst_is_read_in_order_one_event_per_settling_period() {
+        use std::io::Write;
+        let (device, mut kernel) = crate::platform::test_support::socket_device();
+        for byte in 0..30 {
+            kernel
+                .write_all(&output_event(&[byte; CTAPHID_FRAME_LEN]))
+                .unwrap();
+        }
+        let mut last_read = Instant::now();
+        for byte in 0..30 {
+            assert_eq!(device.try_read_frame().unwrap(), None);
+            let observed = device.inner.readable_since.get().unwrap();
+            assert_eq!(
+                device.read_settled_frame().unwrap(),
+                Some(CtapHidFrame::new([byte; CTAPHID_FRAME_LEN]))
+            );
+            assert!(observed.elapsed() >= READ_SETTLING_TIME);
+            assert!(last_read.elapsed() >= READ_SETTLING_TIME);
+            assert!(device.inner.readable_since.get().is_none());
+            last_read = Instant::now();
+        }
+        assert_eq!(device.try_read_frame().unwrap(), None);
+    }
+
+    #[test]
+    fn non_frame_events_each_need_a_new_readiness_observation() {
+        use std::io::Write;
+        let (device, mut kernel) = crate::platform::test_support::socket_device();
+        let types = [
+            raw::UHID_EVENT_TYPE_OPEN,
+            raw::UHID_EVENT_TYPE_CLOSE,
+            raw::UHID_EVENT_TYPE_START,
+            raw::UHID_EVENT_TYPE_STOP,
+            raw::UHID_EVENT_TYPE_GET_REPORT,
+            raw::UHID_EVENT_TYPE_SET_REPORT,
+            u32::MAX,
+        ];
+        for event_type in types {
+            kernel
+                .write_all(event_as_bytes(&raw::uhid_event::new(event_type)))
+                .unwrap();
+        }
+        kernel.write_all(&output_event(&init_frame())).unwrap();
+        assert_eq!(device.try_read_frame().unwrap(), None);
+        for _ in types {
+            let settled = Instant::now() - READ_SETTLING_TIME;
+            device.inner.readable_since.set(Some(settled));
+            assert_eq!(device.try_read_frame().unwrap(), None);
+            assert!(device.inner.readable_since.get().unwrap() > settled);
+        }
+        assert!(device.node_checked.load(Ordering::Relaxed));
+        assert!(device.take_opened());
+        assert!(!device.take_opened());
+        device
+            .inner
+            .readable_since
+            .set(Some(Instant::now() - READ_SETTLING_TIME));
+        assert_eq!(
+            device.try_read_frame().unwrap(),
+            Some(CtapHidFrame::new(init_frame()))
+        );
+        assert_eq!(device.try_read_frame().unwrap(), None);
+    }
+
+    #[test]
+    fn waiting_for_a_settling_event_sleeps_only_until_it_can_be_read() {
+        use std::io::Write;
+        let (device, mut kernel) = crate::platform::test_support::socket_device();
+        let (wake, _worker) = std::os::unix::net::UnixStream::pair().unwrap();
+        kernel.write_all(&output_event(&init_frame())).unwrap();
+        assert_eq!(device.try_read_frame().unwrap(), None);
+        let observed = Instant::now() - READ_SETTLING_TIME / 2;
+        device.inner.readable_since.set(Some(observed));
+        let start = Instant::now();
+        assert!(
+            device
+                .wait_with(wake.as_fd(), Some(Duration::from_secs(1)))
+                .unwrap()
+        );
+        // A readable device must not wake this wait before settling. Allow
+        // scheduler delay, but not the caller's one-second timeout.
+        assert!(observed.elapsed() >= READ_SETTLING_TIME);
+        assert!(start.elapsed() < Duration::from_millis(20));
+        assert_eq!(
+            device.try_read_frame().unwrap(),
+            Some(CtapHidFrame::new(init_frame()))
+        );
+    }
+
+    #[test]
+    fn settling_honours_a_shorter_timeout_and_the_worker_wakeup() {
+        use std::io::Write;
+        let (device, mut kernel) = crate::platform::test_support::socket_device();
+        let (wake, mut worker) = std::os::unix::net::UnixStream::pair().unwrap();
+        kernel.write_all(&output_event(&init_frame())).unwrap();
+        assert_eq!(device.try_read_frame().unwrap(), None);
+        // Keep the event settling through both waits, independent of the
+        // time taken to schedule the test.
+        device
+            .inner
+            .readable_since
+            .set(Some(Instant::now() + Duration::from_secs(1)));
+        let timeout = READ_SETTLING_TIME / 4;
+        let start = Instant::now();
+        assert!(!device.wait_with(wake.as_fd(), Some(timeout)).unwrap());
+        assert!(start.elapsed() >= timeout);
+        assert!(start.elapsed() < Duration::from_millis(20));
+        worker.write_all(&[1]).unwrap();
+        assert!(device.wait_with(wake.as_fd(), None).unwrap());
+        assert_eq!(device.try_read_frame().unwrap(), None);
+        device
+            .inner
+            .readable_since
+            .set(Some(Instant::now() - READ_SETTLING_TIME));
+        assert_eq!(
+            device.try_read_frame().unwrap(),
+            Some(CtapHidFrame::new(init_frame()))
+        );
+    }
+
+    #[test]
     fn accepts_prefixed_init_report() {
         let frame = init_frame();
         let prefixed = with_leading_zero(frame);
@@ -777,12 +991,12 @@ mod tests {
                 .write_all(&output_event_with_size(&frame, size))
                 .unwrap();
         }
-        assert_eq!(device.try_read_frame().unwrap(), None);
+        assert_eq!(device.read_settled_frame().unwrap(), None);
 
         // The device still reads the next well-formed event.
         kernel.write_all(&output_event(&frame)).unwrap();
         assert_eq!(
-            device.try_read_frame().unwrap(),
+            device.read_settled_frame().unwrap(),
             Some(CtapHidFrame::new(frame))
         );
     }
@@ -795,7 +1009,7 @@ mod tests {
         for (id, size) in (1..).zip(OVERSIZE) {
             let event = set_report_event(id, raw::UHID_REPORT_TYPE_OUTPUT, &frame, size);
             kernel.write_all(&event).unwrap();
-            assert_eq!(device.try_read_frame().unwrap(), None);
+            assert_eq!(device.read_settled_frame().unwrap(), None);
             assert_eq!(
                 read_set_report_reply(&mut kernel),
                 (id, Errno::EINVAL as u16)
@@ -805,7 +1019,7 @@ mod tests {
         let event = set_report_event(9, raw::UHID_REPORT_TYPE_OUTPUT, &frame, 64);
         kernel.write_all(&event).unwrap();
         assert_eq!(
-            device.try_read_frame().unwrap(),
+            device.read_settled_frame().unwrap(),
             Some(CtapHidFrame::new(frame))
         );
         assert_eq!(read_set_report_reply(&mut kernel), (9, 0));
@@ -822,7 +1036,7 @@ mod tests {
         let frame = init_frame();
         let event = set_report_event(3, raw::UHID_REPORT_TYPE_FEATURE, &frame, 64);
         kernel.write_all(&event).unwrap();
-        assert_eq!(device.try_read_frame().unwrap(), None);
+        assert_eq!(device.read_settled_frame().unwrap(), None);
         assert_eq!(
             read_set_report_reply(&mut kernel),
             (3, Errno::EINVAL as u16)
@@ -834,7 +1048,7 @@ mod tests {
         get_report.id = 4;
         get_report.rtype = raw::UHID_REPORT_TYPE_FEATURE;
         kernel.write_all(event_as_bytes(&event)).unwrap();
-        assert_eq!(device.try_read_frame().unwrap(), None);
+        assert_eq!(device.read_settled_frame().unwrap(), None);
         let mut bytes = [0u8; UHID_EVENT_SIZE];
         kernel.read_exact(&mut bytes).unwrap();
         let reply = raw::event_from_bytes(&bytes);
@@ -851,7 +1065,7 @@ mod tests {
         let rtype_offset = 4 + raw::UHID_DATA_MAX + 2;
         output[rtype_offset] = raw::UHID_REPORT_TYPE_FEATURE;
         kernel.write_all(&output).unwrap();
-        assert_eq!(device.try_read_frame().unwrap(), None);
+        assert_eq!(device.read_settled_frame().unwrap(), None);
     }
 
     /// UHID_OPEN, which the kernel sends once a client opens the device, is
@@ -861,13 +1075,15 @@ mod tests {
         use std::io::Write;
         let (device, mut kernel) = crate::platform::test_support::socket_device();
         assert!(!device.take_opened());
+        assert!(!device.node_checked.load(Ordering::Relaxed));
         let open = raw::uhid_event::new(raw::UHID_EVENT_TYPE_OPEN);
         kernel.write_all(event_as_bytes(&open)).unwrap();
         kernel.write_all(&output_event(&init_frame())).unwrap();
         assert_eq!(
-            device.try_read_frame().unwrap(),
+            device.read_settled_frame().unwrap(),
             Some(CtapHidFrame::new(init_frame()))
         );
+        assert!(device.node_checked.load(Ordering::Relaxed));
         assert!(device.take_opened());
         assert!(!device.take_opened());
     }
