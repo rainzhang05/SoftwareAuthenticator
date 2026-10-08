@@ -9,6 +9,7 @@ use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::ctap::constants::*;
+use crate::store::PinStateRecord;
 
 /// The maximum, and initial, value of pinRetries: "Authenticators MUST allow no
 /// more than 8 retries but MAY set a lower maximum." (CTAP 2.3 §6.5.2.3)
@@ -48,10 +49,10 @@ impl Default for PersistentPinState {
         Self {
             pin_hash: None,
             pin_retries: MAX_PIN_RETRIES,
-            min_pin_length: 4,
+            min_pin_length: PinStateRecord::DEFAULT_MIN_PIN_LENGTH,
             min_pin_length_rp_ids: Vec::new(),
             force_pin_change: false,
-            pin_code_point_length: 4,
+            pin_code_point_length: PinStateRecord::DEFAULT_MIN_PIN_LENGTH,
             always_uv: false,
         }
     }
@@ -220,9 +221,6 @@ pub(crate) struct PinState {
 }
 
 impl PinState {
-    #[cfg(test)]
-    pub(crate) const MIN_PIN_LENGTH: usize = 4;
-
     pub(crate) fn new() -> Self {
         Self::from_persistent(PersistentPinState::default())
     }

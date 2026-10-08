@@ -202,10 +202,14 @@ pub(crate) fn decode_pin_state(bytes: &[u8]) -> Result<PinStateRecord, Corruptio
         pin_retries: fields.uint(2)?,
         consecutive_failures: fields.uint(3)?,
         pin_auth_blocked: fields.bool(4)?,
-        min_pin_length: fields.optional_uint(5)?.unwrap_or(4),
+        min_pin_length: fields
+            .optional_uint(5)?
+            .unwrap_or(PinStateRecord::DEFAULT_MIN_PIN_LENGTH),
         min_pin_length_rp_ids: fields.optional_text_array(6)?.unwrap_or_default(),
         force_pin_change: fields.optional_bool(7)?.unwrap_or(false),
-        pin_code_point_length: fields.optional_uint(8)?.unwrap_or(4),
+        pin_code_point_length: fields
+            .optional_uint(8)?
+            .unwrap_or(PinStateRecord::DEFAULT_MIN_PIN_LENGTH),
         always_uv: fields.optional_bool(9)?.unwrap_or(false),
     };
     fields.finish()?;

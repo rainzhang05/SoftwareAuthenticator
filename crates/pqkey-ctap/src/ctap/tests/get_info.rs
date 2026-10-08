@@ -7,7 +7,6 @@ use crate::ctap::cbor::canonical_map;
 use crate::ctap::pin::protocol::{
     PIN_UV_AUTH_PROTOCOL_CLASSIC_V1, PIN_UV_AUTH_PROTOCOL_CLASSIC_V2,
 };
-use crate::ctap::pin::state::PinState;
 
 use ciborium::{
     de::from_reader,
@@ -87,7 +86,7 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         (uint(9), Value::Array(vec![text("usb")])),
         (uint(10), algorithms),
         (uint(12), Value::Bool(false)),
-        (uint(13), uint(PinState::MIN_PIN_LENGTH as u64)),
+        (uint(13), uint(4)),
         (uint(0x0F), uint(32)),
         (uint(0x10), uint(8)),
         (uint(0x1F), Value::Array(vec![uint(2), uint(3)])),
