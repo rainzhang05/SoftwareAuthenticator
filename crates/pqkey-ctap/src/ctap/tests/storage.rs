@@ -329,6 +329,8 @@ fn only_the_pin_hash_and_retry_counter_are_persisted() {
             pin_retries: MAX_PIN_RETRIES - 3,
             consecutive_failures: 0,
             pin_auth_blocked: false,
+            min_pin_length_rp_ids: Vec::new(),
+            ..PinStateRecord::default()
         })
     );
 

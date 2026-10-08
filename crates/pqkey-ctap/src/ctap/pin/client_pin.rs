@@ -2,7 +2,7 @@
 
 use super::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC, requested_pin_permissions};
 use super::protocol::{PinProtocol, decrypt, parse_required_pin_uv_auth_protocol, verify};
-use super::state::{MAX_PIN_RETRIES, PersistentPinState, PinState};
+use super::state::{MAX_PIN_RETRIES, PinState};
 use crate::PinUvSessionKeys;
 use crate::ctap::CtapApp;
 use crate::ctap::cbor::{self, canonical_map, required_bytes, required_map};
@@ -195,10 +195,10 @@ impl CtapApp<'_> {
     /// §6.5.5.6).  The new PIN is written first and only then used, so a
     /// failed write leaves the old PIN in force, in memory as on disk.
     fn store_new_pin(&mut self, hash: &[u8; 16]) -> Result<(), u8> {
-        self.save_pin_state(&PersistentPinState {
-            pin_hash: Some(*hash),
-            pin_retries: MAX_PIN_RETRIES,
-        })?;
+        let mut persistent = self.pin_state.persistent().clone();
+        persistent.pin_hash = Some(*hash);
+        persistent.pin_retries = MAX_PIN_RETRIES;
+        self.save_pin_state(&persistent)?;
         self.pin_state.set_pin(*hash);
         Ok(())
     }

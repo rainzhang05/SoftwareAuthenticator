@@ -145,6 +145,12 @@ const ATTESTATION_FILE: &str = "attestation";
 ///    2  pin_retries             unsigned, 8 bits
 ///    3  consecutive_failures    unsigned, 8 bits
 ///    4  pin_auth_blocked        boolean
+///    5  min_pin_length          unsigned integer, 4-63, default 4
+///    6  min_pin_length_rp_ids   array of text strings, at most 8,
+///                               each at most 253 bytes, default empty
+///    7  force_pin_change        boolean, default false
+///    8  pin_code_point_length   unsigned integer, 4-63, default 4
+///    9  always_uv               boolean, default false
 ///
 /// attestation record (type 3)
 ///    1  private_key             byte string, 32 bytes

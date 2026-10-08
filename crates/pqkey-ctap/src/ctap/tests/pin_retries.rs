@@ -30,6 +30,8 @@ fn state_with_retries(pin_retries: u8) -> PinRetryState {
     PinRetryState::power_up(PersistentPinState {
         pin_hash: Some(pin_hash(PIN)),
         pin_retries,
+        min_pin_length_rp_ids: Vec::new(),
+        ..PersistentPinState::default()
     })
 }
 
@@ -390,6 +392,8 @@ fn restart_clears_the_power_cycle_lockout_but_keeps_retries() {
             pin_retries: MAX_PIN_RETRIES - 3,
             consecutive_failures: 0,
             pin_auth_blocked: false,
+            min_pin_length_rp_ids: Vec::new(),
+            ..PinStateRecord::default()
         }
     );
 
@@ -435,6 +439,8 @@ fn start_up_ignores_a_stored_power_cycle_lockout() {
             pin_retries: MAX_PIN_RETRIES - 3,
             consecutive_failures: 3,
             pin_auth_blocked: true,
+            min_pin_length_rp_ids: Vec::new(),
+            ..PinStateRecord::default()
         })
         .expect("store PIN state");
 

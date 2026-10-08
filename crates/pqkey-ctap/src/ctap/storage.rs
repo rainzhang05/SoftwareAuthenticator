@@ -33,7 +33,7 @@ pub(super) fn store_status(action: &str, err: StoreError) -> u8 {
 
 /// The PIN state the engine starts with, and whether it may be written back.
 ///
-/// Only [`PersistentPinState`], the PIN hash and pinRetries, is read from the
+/// Only [`PersistentPinState`], the PIN and UV policy, is read from the
 /// store.  The consecutive-mismatch lockout is volatile (a restart is this
 /// authenticator's power cycle), so `consecutive_failures` and
 /// `pin_auth_blocked` in [`PinStateRecord`] are never read back.
@@ -49,6 +49,11 @@ pub(super) fn load_pin_state(store: &dyn CredentialStore, rng: &mut dyn Rng) -> 
             PinState::from_persistent(PersistentPinState {
                 pin_hash: record.pin_hash,
                 pin_retries: record.pin_retries,
+                min_pin_length: record.min_pin_length,
+                min_pin_length_rp_ids: record.min_pin_length_rp_ids.clone(),
+                force_pin_change: record.force_pin_change,
+                pin_code_point_length: record.pin_code_point_length,
+                always_uv: record.always_uv,
             }),
             true,
         ),
@@ -72,6 +77,8 @@ fn unreadable_pin_state(rng: &mut dyn Rng) -> PinState {
     let state = PinState::from_persistent(PersistentPinState {
         pin_hash: Some(hash),
         pin_retries: 0,
+        min_pin_length_rp_ids: Vec::new(),
+        ..PersistentPinState::default()
     });
     hash.zeroize();
     state
@@ -99,6 +106,11 @@ impl CtapApp<'_> {
         let record = PinStateRecord {
             pin_hash: persistent.pin_hash,
             pin_retries: persistent.pin_retries,
+            min_pin_length: persistent.min_pin_length,
+            min_pin_length_rp_ids: persistent.min_pin_length_rp_ids.clone(),
+            force_pin_change: persistent.force_pin_change,
+            pin_code_point_length: persistent.pin_code_point_length,
+            always_uv: persistent.always_uv,
             ..PinStateRecord::default()
         };
         self.store

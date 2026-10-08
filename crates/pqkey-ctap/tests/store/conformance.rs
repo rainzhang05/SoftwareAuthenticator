@@ -532,6 +532,11 @@ fn pin_state_round_trips<B: Backend>() {
         pin_retries: 3,
         consecutive_failures: 2,
         pin_auth_blocked: true,
+        min_pin_length: 8,
+        min_pin_length_rp_ids: vec!["example.com".into()],
+        force_pin_change: true,
+        pin_code_point_length: 6,
+        always_uv: true,
     };
     store.set_pin_state(&set).unwrap();
     assert_eq!(store.pin_state().unwrap(), Some(set.clone()));
@@ -541,6 +546,8 @@ fn pin_state_round_trips<B: Backend>() {
         pin_retries: 0,
         consecutive_failures: 0,
         pin_auth_blocked: false,
+        min_pin_length_rp_ids: Vec::new(),
+        ..PinStateRecord::default()
     };
     store.set_pin_state(&cleared).unwrap();
     assert_eq!(store.pin_state().unwrap(), Some(cleared));
@@ -554,6 +561,7 @@ fn pin_state_is_independent_of_credentials<B: Backend>() {
     let store = &mut fixture.store;
     let state = PinStateRecord {
         pin_hash: Some(random_bytes()),
+        min_pin_length_rp_ids: Vec::new(),
         ..PinStateRecord::default()
     };
     store.set_pin_state(&state).unwrap();
@@ -595,6 +603,8 @@ fn clear_removes_credentials_and_resets_pin_state<B: Backend>() {
             pin_retries: 1,
             consecutive_failures: 2,
             pin_auth_blocked: true,
+            min_pin_length_rp_ids: Vec::new(),
+            ..PinStateRecord::default()
         })
         .unwrap();
 
@@ -640,6 +650,7 @@ fn store_is_fully_usable_after_clear<B: Backend>() {
 
     let state = PinStateRecord {
         pin_hash: Some(random_bytes()),
+        min_pin_length_rp_ids: Vec::new(),
         ..PinStateRecord::default()
     };
     store.set_pin_state(&state).unwrap();
@@ -760,6 +771,7 @@ fn sealing_keeps_an_existing_pin_state<B: Backend>() {
     let pin = PinStateRecord {
         pin_hash: Some(random_bytes()),
         pin_retries: 5,
+        min_pin_length_rp_ids: Vec::new(),
         ..PinStateRecord::default()
     };
     store.set_pin_state(&pin).unwrap();

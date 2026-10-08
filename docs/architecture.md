@@ -180,15 +180,19 @@ protocol logic.
 ├── keys/device.key         root key for the attestation record
 ├── keys/credential.key     root key for everything else; a reset replaces it
 ├── credentials/<hash>      one file per stored credential, named by an HMAC of its ID
-├── pin-state               the PIN hash and retries
+├── pin-state               the PIN hash, retries and user-verification settings
 └── signature-counter       the counter that sealed credentials share
 ```
 
 Every file above except the root keys is encrypted and authenticated with
 XChaCha20-Poly1305, under keys derived from a root key with HKDF-SHA-256.
 Credential records can also hold an opaque blob of at most 32 bytes,
-protected by the same encryption as their private keys. Files are replaced
-atomically, never changed in place. A reset deletes the
+protected by the same encryption as their private keys. PIN records also keep the minimum PIN length, authorized `minPinLength` RP
+IDs, force-change flag, stored PIN length and always-UV setting. Old records
+use defaults for the added fields; an old PIN is treated as four code points.
+Files are replaced atomically, never changed in place. A directory flush can
+fail after replacement, leaving the new file installed despite a reported
+write error. A reset deletes the
 stored credentials and replaces `credential.key`, so old copies of files and
 every sealed credential ID can no longer be decrypted.
 [SECURITY.md](../SECURITY.md) describes what this protects against.

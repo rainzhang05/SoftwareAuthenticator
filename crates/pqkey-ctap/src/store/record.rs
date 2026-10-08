@@ -363,10 +363,10 @@ impl fmt::Debug for CredentialRecord {
     }
 }
 
-/// The persistent part of the authenticator's PIN state.
+/// The persistent PIN state and user-verification settings.
 ///
-/// This mirrors what the CTAP engine persists today; the volatile PIN/UV auth
-/// token state is not stored.
+/// The PIN hash, retry budget, PIN policy and always-UV setting are replaced
+/// together in one write. Volatile PIN/UV auth tokens are not stored.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PinStateRecord {
     /// `LEFT(SHA-256(PIN), 16)`, or `None` when no PIN is set.
@@ -377,12 +377,30 @@ pub struct PinStateRecord {
     pub consecutive_failures: u8,
     /// Whether PIN use is blocked until the authenticator is power-cycled.
     pub pin_auth_blocked: bool,
+    /// The minimum PIN length in Unicode code points (CTAP 2.3 §7.4).
+    pub min_pin_length: u8,
+    /// RP IDs authorized to receive the `minPinLength` extension output.
+    pub min_pin_length_rp_ids: Vec<String>,
+    /// Whether the current PIN must be replaced before issuing a token.
+    pub force_pin_change: bool,
+    /// The stored PIN's Unicode code-point length; legacy records use 4.
+    pub pin_code_point_length: u8,
+    /// Whether registration and sign-in with user presence require UV.
+    pub always_uv: bool,
 }
 
 impl PinStateRecord {
     /// The retry budget of a fresh authenticator.  CTAP 2.1 caps the PIN retry
     /// counter at 8, and the CTAP engine starts there.
     pub const MAX_PIN_RETRIES: u8 = 8;
+    /// The default minimum PIN length, restored only by a reset.
+    pub const DEFAULT_MIN_PIN_LENGTH: u8 = 4;
+    /// The largest PIN length the authenticator can require.
+    pub const MAX_PIN_LENGTH: u8 = 63;
+    /// The number of RP IDs the `minPinLength` policy can store.
+    pub const MAX_MIN_PIN_LENGTH_RP_IDS: usize = 8;
+    /// The largest stored RP ID, in UTF-8 bytes.
+    pub const MAX_RP_ID_LENGTH: usize = 253;
 }
 
 /// No PIN set, full retry budget, not blocked: the state after a reset.
@@ -393,6 +411,11 @@ impl Default for PinStateRecord {
             pin_retries: Self::MAX_PIN_RETRIES,
             consecutive_failures: 0,
             pin_auth_blocked: false,
+            min_pin_length: Self::DEFAULT_MIN_PIN_LENGTH,
+            min_pin_length_rp_ids: Vec::new(),
+            force_pin_change: false,
+            pin_code_point_length: Self::DEFAULT_MIN_PIN_LENGTH,
+            always_uv: false,
         }
     }
 }
@@ -409,6 +432,11 @@ impl PartialEq for PinStateRecord {
             && self.pin_retries == other.pin_retries
             && self.consecutive_failures == other.consecutive_failures
             && self.pin_auth_blocked == other.pin_auth_blocked
+            && self.min_pin_length == other.min_pin_length
+            && self.min_pin_length_rp_ids == other.min_pin_length_rp_ids
+            && self.force_pin_change == other.force_pin_change
+            && self.pin_code_point_length == other.pin_code_point_length
+            && self.always_uv == other.always_uv
     }
 }
 
@@ -422,6 +450,11 @@ impl fmt::Debug for PinStateRecord {
             .field("pin_retries", &self.pin_retries)
             .field("consecutive_failures", &self.consecutive_failures)
             .field("pin_auth_blocked", &self.pin_auth_blocked)
+            .field("min_pin_length", &self.min_pin_length)
+            .field("min_pin_length_rp_ids", &self.min_pin_length_rp_ids)
+            .field("force_pin_change", &self.force_pin_change)
+            .field("pin_code_point_length", &self.pin_code_point_length)
+            .field("always_uv", &self.always_uv)
             .finish()
     }
 }
@@ -793,6 +826,7 @@ mod tests {
         };
         let pin = PinStateRecord {
             pin_hash: Some([secret; 16]),
+            min_pin_length_rp_ids: Vec::new(),
             ..PinStateRecord::default()
         };
         let attestation = AttestationRecord {
@@ -828,6 +862,7 @@ mod tests {
     fn pin_state_equality_compares_the_hash() {
         let a = PinStateRecord {
             pin_hash: Some([1; 16]),
+            min_pin_length_rp_ids: Vec::new(),
             ..PinStateRecord::default()
         };
         let mut b = a.clone();

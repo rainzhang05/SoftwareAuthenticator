@@ -304,6 +304,34 @@ impl std::error::Error for StoreError {
     }
 }
 
+/// Check the persistent PIN and user-verification policy.
+pub(crate) fn validate_pin_state(state: &PinStateRecord) -> Result<(), StoreError> {
+    let lengths = PinStateRecord::DEFAULT_MIN_PIN_LENGTH..=PinStateRecord::MAX_PIN_LENGTH;
+    if !lengths.contains(&state.min_pin_length) {
+        return Err(StoreError::InvalidRecord("minimum PIN length out of range"));
+    }
+    if !lengths.contains(&state.pin_code_point_length) {
+        return Err(StoreError::InvalidRecord(
+            "PIN code-point length out of range",
+        ));
+    }
+    if state.min_pin_length_rp_ids.len() > PinStateRecord::MAX_MIN_PIN_LENGTH_RP_IDS {
+        return Err(StoreError::InvalidRecord(
+            "too many minimum PIN length RP IDs",
+        ));
+    }
+    if state
+        .min_pin_length_rp_ids
+        .iter()
+        .any(|rp| rp.len() > PinStateRecord::MAX_RP_ID_LENGTH)
+    {
+        return Err(StoreError::InvalidRecord(
+            "minimum PIN length RP ID too long",
+        ));
+    }
+    Ok(())
+}
+
 /// Check the invariants every stored credential satisfies.
 #[deny(
     clippy::wildcard_enum_match_arm,

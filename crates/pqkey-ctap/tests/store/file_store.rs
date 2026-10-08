@@ -187,6 +187,8 @@ fn pin_with_hash() -> PinStateRecord {
         pin_retries: 6,
         consecutive_failures: 1,
         pin_auth_blocked: false,
+        min_pin_length_rp_ids: Vec::new(),
+        ..PinStateRecord::default()
     }
 }
 

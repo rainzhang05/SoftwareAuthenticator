@@ -9,6 +9,7 @@ use super::keys::{CredentialKeys, RootKey};
 use super::{
     AttestationRecord, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS, PinStateRecord,
     StoreError, next_created_at, sort_newest_first, validate_attestation, validate_credential,
+    validate_pin_state,
 };
 
 /// A [`CredentialStore`] that keeps everything in memory.
@@ -115,6 +116,7 @@ impl CredentialStore for MemoryStore {
     }
 
     fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<(), StoreError> {
+        validate_pin_state(state)?;
         self.pin_state = Some(state.clone());
         Ok(())
     }

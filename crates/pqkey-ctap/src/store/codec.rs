@@ -29,6 +29,12 @@
 //!    2  pin_retries             unsigned integer, 8 bits
 //!    3  consecutive_failures    unsigned integer, 8 bits
 //!    4  pin_auth_blocked        boolean
+//!    5  min_pin_length          unsigned integer, 4-63, default 4
+//!    6  min_pin_length_rp_ids   array of text strings, at most 8,
+//!                               each at most 253 bytes, default empty
+//!    7  force_pin_change        boolean, default false
+//!    8  pin_code_point_length   unsigned integer, 4-63, default 4
+//!    9  always_uv               boolean, default false
 //!
 //! attestation record (record type 3)
 //!    1  private_key             byte string, 32 bytes
@@ -59,7 +65,9 @@ use ciborium::value::{Integer, Value};
 use zeroize::Zeroizing;
 
 use super::record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKeyMaterial};
-use super::{Corruption, StoreError, validate_attestation, validate_credential};
+use super::{
+    Corruption, StoreError, validate_attestation, validate_credential, validate_pin_state,
+};
 use crate::{CoseAlg, KeyKind};
 
 /// Private key type 1: a P-256 scalar ([`KeyKind::P256Scalar`]).
@@ -155,7 +163,8 @@ pub(crate) fn decode_credential(bytes: &[u8]) -> Result<CredentialRecord, Corrup
 
 /// Encode a PIN state record.
 pub(crate) fn encode_pin_state(state: &PinStateRecord) -> Result<Zeroizing<Vec<u8>>, StoreError> {
-    let mut entries = Vec::with_capacity(4);
+    validate_pin_state(state)?;
+    let mut entries = Vec::with_capacity(9);
     if let Some(pin_hash) = &state.pin_hash {
         entries.push((1, Value::Bytes(pin_hash.to_vec())));
     }
@@ -163,6 +172,24 @@ pub(crate) fn encode_pin_state(state: &PinStateRecord) -> Result<Zeroizing<Vec<u
         (2, Value::Integer(Integer::from(state.pin_retries))),
         (3, Value::Integer(Integer::from(state.consecutive_failures))),
         (4, Value::Bool(state.pin_auth_blocked)),
+        (5, Value::Integer(Integer::from(state.min_pin_length))),
+        (
+            6,
+            Value::Array(
+                state
+                    .min_pin_length_rp_ids
+                    .iter()
+                    .cloned()
+                    .map(Value::Text)
+                    .collect(),
+            ),
+        ),
+        (7, Value::Bool(state.force_pin_change)),
+        (
+            8,
+            Value::Integer(Integer::from(state.pin_code_point_length)),
+        ),
+        (9, Value::Bool(state.always_uv)),
     ]);
     encode_map(entries)
 }
@@ -175,8 +202,14 @@ pub(crate) fn decode_pin_state(bytes: &[u8]) -> Result<PinStateRecord, Corruptio
         pin_retries: fields.uint(2)?,
         consecutive_failures: fields.uint(3)?,
         pin_auth_blocked: fields.bool(4)?,
+        min_pin_length: fields.optional_uint(5)?.unwrap_or(4),
+        min_pin_length_rp_ids: fields.optional_text_array(6)?.unwrap_or_default(),
+        force_pin_change: fields.optional_bool(7)?.unwrap_or(false),
+        pin_code_point_length: fields.optional_uint(8)?.unwrap_or(4),
+        always_uv: fields.optional_bool(9)?.unwrap_or(false),
     };
     fields.finish()?;
+    validate_pin_state(&state).map_err(|_| Corruption::Inconsistent)?;
     Ok(state)
 }
 
@@ -337,6 +370,41 @@ impl Fields {
             .ok_or(Corruption::Encoding)
     }
 
+    fn optional_uint<T: TryFrom<u64>>(&mut self, key: u64) -> Result<Option<T>, Corruption> {
+        self.take(key)
+            .map(|item| {
+                let integer = item.into_integer()?;
+                u64::try_from(integer)
+                    .ok()
+                    .and_then(|value| T::try_from(value).ok())
+                    .ok_or(Corruption::Encoding)
+            })
+            .transpose()
+    }
+
+    fn optional_bool(&mut self, key: u64) -> Result<Option<bool>, Corruption> {
+        self.take(key)
+            .map(|item| match item.0 {
+                Value::Bool(value) => Ok(value),
+                _ => Err(Corruption::Encoding),
+            })
+            .transpose()
+    }
+
+    fn optional_text_array(&mut self, key: u64) -> Result<Option<Vec<String>>, Corruption> {
+        self.take(key)
+            .map(|mut item| {
+                let Value::Array(items) = &mut item.0 else {
+                    return Err(Corruption::Encoding);
+                };
+                mem::take(items)
+                    .into_iter()
+                    .map(|value| Item(value).into_text())
+                    .collect()
+            })
+            .transpose()
+    }
+
     fn int<T: TryFrom<i128>>(&mut self, key: u64) -> Result<T, Corruption> {
         let integer = self.required(key)?.into_integer()?;
         T::try_from(i128::from(integer)).map_err(|_| Corruption::Encoding)
@@ -458,7 +526,70 @@ mod tests {
             pin_retries: 5,
             consecutive_failures: 2,
             pin_auth_blocked: true,
+            min_pin_length_rp_ids: Vec::new(),
+            ..PinStateRecord::default()
         }
+    }
+
+    #[test]
+    fn pin_policy_known_answers_and_legacy_defaults() {
+        let legacy = unhex("a4015000112233445566778899aabbccddeeff0205030204f5");
+        assert_eq!(decode_pin_state(&legacy).unwrap(), pin_state());
+        let mut record = pin_state();
+        record.min_pin_length = 8;
+        record.min_pin_length_rp_ids = vec!["example.com".into(), "a".into()];
+        record.force_pin_change = true;
+        record.pin_code_point_length = 6;
+        record.always_uv = true;
+        let complete = unhex(concat!(
+            "a9015000112233445566778899aabbccddeeff0205030204f5",
+            "050806826b6578616d706c652e636f6d616107f5080609f5"
+        ));
+        assert_eq!(encode_pin_state(&record).unwrap().as_slice(), complete);
+        assert_eq!(decode_pin_state(&complete).unwrap(), record);
+        for key in 5..=9 {
+            let missing = edited(&complete, |entries| remove(entries, key));
+            assert!(decode_pin_state(&missing).is_ok(), "optional field {key}");
+            let invalid = edited(&complete, |entries| set(entries, key, Value::Null));
+            assert_eq!(decode_pin_state(&invalid), Err(Corruption::Encoding));
+        }
+    }
+
+    #[test]
+    fn invalid_pin_policy_is_corrupt_and_cannot_be_written() {
+        let valid = encode_pin_state(&pin_state()).unwrap();
+        for (key, value) in [
+            (5, Value::Integer(3.into())),
+            (5, Value::Integer(64.into())),
+            (8, Value::Integer(3.into())),
+            (8, Value::Integer(64.into())),
+            (6, Value::Array(vec![Value::Text("a".into()); 9])),
+            (6, Value::Array(vec![Value::Text("a".repeat(254))])),
+        ] {
+            assert_eq!(
+                decode_pin_state(&edited(&valid, |e| set(e, key, value))),
+                Err(Corruption::Inconsistent)
+            );
+        }
+        assert_eq!(
+            decode_pin_state(&edited(&valid, |e| {
+                set(e, 6, Value::Array(vec![Value::Bool(false)]));
+            })),
+            Err(Corruption::Encoding)
+        );
+        let mut record = pin_state();
+        record.min_pin_length = 3;
+        assert!(matches!(
+            encode_pin_state(&record),
+            Err(StoreError::InvalidRecord(_))
+        ));
+        record.min_pin_length = 63;
+        record.pin_code_point_length = 63;
+        record.min_pin_length_rp_ids = vec!["a".repeat(253); 8];
+        assert_eq!(
+            decode_pin_state(&encode_pin_state(&record).unwrap()).unwrap(),
+            record
+        );
     }
 
     fn attestation() -> AttestationRecord {
@@ -525,7 +656,8 @@ mod tests {
         let pin = encode_pin_state(&pin_state()).unwrap();
         assert_eq!(
             pin.as_slice(),
-            unhex("a4015000112233445566778899aabbccddeeff0205030204f5").as_slice()
+            unhex("a9015000112233445566778899aabbccddeeff0205030204f50504068007f4080409f4")
+                .as_slice()
         );
 
         let counter = encode_signature_counter(70_000).unwrap();

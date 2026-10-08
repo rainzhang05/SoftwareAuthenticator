@@ -30,6 +30,16 @@ pub struct PersistentPinState {
     pub pin_hash: Option<[u8; 16]>,
     /// pinRetries.
     pub pin_retries: u8,
+    /// The minimum PIN length in Unicode code points.
+    pub min_pin_length: u8,
+    /// RP IDs authorized for the `minPinLength` extension.
+    pub min_pin_length_rp_ids: Vec<String>,
+    /// Whether the PIN must be replaced before issuing a token.
+    pub force_pin_change: bool,
+    /// The PIN's code-point length; legacy records conservatively use 4.
+    pub pin_code_point_length: u8,
+    /// Always require UV for registration and sign-in with user presence.
+    pub always_uv: bool,
 }
 
 impl Default for PersistentPinState {
@@ -37,6 +47,11 @@ impl Default for PersistentPinState {
         Self {
             pin_hash: None,
             pin_retries: MAX_PIN_RETRIES,
+            min_pin_length: 4,
+            min_pin_length_rp_ids: Vec::new(),
+            force_pin_change: false,
+            pin_code_point_length: 4,
+            always_uv: false,
         }
     }
 }
@@ -46,6 +61,11 @@ impl fmt::Debug for PersistentPinState {
         f.debug_struct("PersistentPinState")
             .field("pin_hash", &self.pin_hash.map(|_| "<redacted>"))
             .field("pin_retries", &self.pin_retries)
+            .field("min_pin_length", &self.min_pin_length)
+            .field("min_pin_length_rp_ids", &self.min_pin_length_rp_ids)
+            .field("force_pin_change", &self.force_pin_change)
+            .field("pin_code_point_length", &self.pin_code_point_length)
+            .field("always_uv", &self.always_uv)
             .finish()
     }
 }
