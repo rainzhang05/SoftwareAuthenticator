@@ -311,7 +311,7 @@ fn exclude_list_only_matches_credentials_of_the_same_relying_party() {
     assert!(app.handle_make_credential(&payload).is_ok());
 }
 
-/// Only the PIN hash and the retry counter survive a restart; the
+/// PIN settings and the retry counter survive a restart; the
 /// consecutive-mismatch lockout is volatile.
 #[test]
 fn only_the_pin_hash_and_retry_counter_are_persisted() {

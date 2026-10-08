@@ -87,8 +87,8 @@ impl CtapApp<'_> {
     /// authenticatorMakeCredential, following the steps of CTAP 2.3 §6.1.2.
     ///
     /// This authenticator supports clientPin and pinUvAuthToken but no
-    /// built-in user verification, alwaysUv, noMcGaPermissionsWithClientPin or
-    /// enterprise attestation, and advertises makeCredUvNotRqd.  It "is
+    /// built-in user verification, noMcGaPermissionsWithClientPin or
+    /// enterprise attestation. It "is
     /// protected by some form of user verification" exactly when a PIN is
     /// set.
     pub(super) fn handle_make_credential(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
@@ -175,16 +175,15 @@ impl CtapApp<'_> {
             return Err(CTAP2_ERR_INVALID_OPTION);
         }
 
-        // Step 7, with makeCredUvNotRqd true: "If the following statements are
-        // all true: The authenticator is protected by some form of user
-        // verification. The "uv" option is set to false. The pinUvAuthParam
-        // parameter is not present. The "rk" option is present and set to
-        // true. Then: If ClientPin option ID is true and the
-        // noMcGaPermissionsWithClientPin option ID is absent or false, end the
-        // operation by returning CTAP2_ERR_PUAT_REQUIRED."  A non-discoverable
-        // credential needs no user verification (step 10).
+        // Step 6: always-UV requires a token even before a PIN is set.
         let protected = self.pin_state.is_set();
-        if protected && pin_uv_auth.is_none() && rk {
+        let always_uv = self.pin_state.persistent().always_uv;
+        if always_uv && (!protected || pin_uv_auth.is_none()) {
+            return Err(CTAP2_ERR_PUAT_REQUIRED);
+        }
+        // Steps 7 and 8: without always-UV only discoverable credentials
+        // require UV when protected; with it every credential requires UV.
+        if protected && pin_uv_auth.is_none() && (rk || always_uv) {
             return Err(CTAP2_ERR_PUAT_REQUIRED);
         }
 
@@ -211,6 +210,7 @@ impl CtapApp<'_> {
             Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
         };
 
+        let mut min_pin_length_requested = false;
         let mut hmac_secret_requested = false;
         let mut hmac_secret_mc_input = None;
         let mut cred_blob_input = None;
@@ -224,6 +224,10 @@ impl CtapApp<'_> {
             };
             for (key, value) in extension_map.iter() {
                 match key {
+                    Value::Text(text) if text == "minPinLength" => match value {
+                        Value::Bool(flag) => min_pin_length_requested = *flag,
+                        _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+                    },
                     Value::Text(text) if text == "hmac-secret" => match value {
                         Value::Bool(flag) => {
                             hmac_secret_requested = *flag;
@@ -381,6 +385,18 @@ impl CtapApp<'_> {
         })?;
 
         let mut extension_entries = Vec::new();
+        if min_pin_length_requested
+            && self
+                .pin_state
+                .persistent()
+                .min_pin_length_rp_ids
+                .contains(&record.rp_id)
+        {
+            extension_entries.push((
+                Value::Text("minPinLength".into()),
+                Value::Integer(Integer::from(self.pin_state.persistent().min_pin_length)),
+            ));
+        }
         if cred_blob_input.is_some() {
             extension_entries.push((
                 Value::Text("credBlob".into()),

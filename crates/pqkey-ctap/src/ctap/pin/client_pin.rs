@@ -2,7 +2,7 @@
 
 use super::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC, requested_pin_permissions};
 use super::protocol::{PinProtocol, decrypt, parse_required_pin_uv_auth_protocol, verify};
-use super::state::{MAX_PIN_RETRIES, PinState};
+use super::state::MAX_PIN_RETRIES;
 use crate::PinUvSessionKeys;
 use crate::ctap::CtapApp;
 use crate::ctap::cbor::{self, canonical_map, required_bytes, required_map};
@@ -12,6 +12,7 @@ use ciborium::{
     value::{Integer, Value},
 };
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::ctap::constants::*;
@@ -73,7 +74,7 @@ const MAX_PIN_BYTES: usize = 63;
 /// bytes").  A newPin that is not UTF-8 has no length in code points, so it is
 /// refused too ("An authenticator MAY impose arbitrary, additional constraints
 /// on PINs").
-fn decode_new_pin(padded_new_pin: &[u8]) -> Result<Zeroizing<Vec<u8>>, u8> {
+fn decode_new_pin(padded_new_pin: &[u8], minimum: u8) -> Result<(Zeroizing<Vec<u8>>, u8), u8> {
     if padded_new_pin.len() != PADDED_PIN_LENGTH {
         return Err(CTAP1_ERR_INVALID_PARAMETER);
     }
@@ -89,10 +90,10 @@ fn decode_new_pin(padded_new_pin: &[u8]) -> Result<Zeroizing<Vec<u8>>, u8> {
         .map_err(|_| CTAP2_ERR_PIN_POLICY_VIOLATION)?
         .chars()
         .count();
-    if code_points < PinState::MIN_PIN_LENGTH {
+    if code_points < usize::from(minimum) {
         return Err(CTAP2_ERR_PIN_POLICY_VIOLATION);
     }
-    Ok(Zeroizing::new(new_pin.to_vec()))
+    Ok((Zeroizing::new(new_pin.to_vec()), code_points as u8))
 }
 
 /// CurrentStoredPIN for `pin`: `LEFT(SHA-256(pin), 16)`.
@@ -109,14 +110,16 @@ impl CtapApp<'_> {
     /// error results, it returns CTAP2_ERR_PIN_AUTH_INVALID." (CTAP 2.3
     /// §6.5.5.5, §6.5.5.6)
     fn new_pin_hash(
+        &self,
         protocol: PinProtocol,
         keys: &PinUvSessionKeys,
         new_pin_enc: &[u8],
-    ) -> Result<Zeroizing<[u8; 16]>, u8> {
+    ) -> Result<(Zeroizing<[u8; 16]>, u8), u8> {
         let padded_new_pin =
             decrypt(protocol, keys, new_pin_enc).ok_or(CTAP2_ERR_PIN_AUTH_INVALID)?;
-        let new_pin = decode_new_pin(&padded_new_pin)?;
-        Ok(hash_pin(&new_pin))
+        let (new_pin, length) =
+            decode_new_pin(&padded_new_pin, self.pin_state.persistent().min_pin_length)?;
+        Ok((hash_pin(&new_pin), length))
     }
 
     /// The PIN check of changePIN (CTAP 2.3 §6.5.5.6), getPinToken
@@ -185,8 +188,8 @@ impl CtapApp<'_> {
 
         let keys = self.decapsulate(protocol, key_agreement)?;
         verify(protocol, &keys.auth_key, new_pin_enc, pin_auth_param)?;
-        let hash = Self::new_pin_hash(protocol, &keys, new_pin_enc)?;
-        self.store_new_pin(&hash)?;
+        let (hash, length) = self.new_pin_hash(protocol, &keys, new_pin_enc)?;
+        self.store_new_pin(&hash, length)?;
         Ok(vec![CTAP2_OK])
     }
 
@@ -194,12 +197,15 @@ impl CtapApp<'_> {
     /// the pinRetries counter to maximum count" (CTAP 2.3 §6.5.5.5,
     /// §6.5.5.6).  The new PIN is written first and only then used, so a
     /// failed write leaves the old PIN in force, in memory as on disk.
-    fn store_new_pin(&mut self, hash: &[u8; 16]) -> Result<(), u8> {
+    fn store_new_pin(&mut self, hash: &[u8; 16], length: u8) -> Result<(), u8> {
         let mut persistent = self.pin_state.persistent().clone();
         persistent.pin_hash = Some(*hash);
         persistent.pin_retries = MAX_PIN_RETRIES;
+        persistent.pin_code_point_length = length;
+        persistent.force_pin_change = false;
         self.save_pin_state(&persistent)?;
         self.pin_state.set_pin(*hash);
+        self.pin_state.adopt_persistent(persistent);
         Ok(())
     }
 
@@ -224,8 +230,18 @@ impl CtapApp<'_> {
         verify(protocol, &keys.auth_key, &auth_data, pin_auth_param)?;
         self.verify_pin_hash_enc(protocol, &keys, pin_hash_enc)?;
 
-        let hash = Self::new_pin_hash(protocol, &keys, new_pin_enc)?;
-        self.store_new_pin(&hash)?;
+        let (hash, length) = self.new_pin_hash(protocol, &keys, new_pin_enc)?;
+        if self.pin_state.persistent().force_pin_change
+            && self
+                .pin_state
+                .persistent()
+                .pin_hash
+                .as_ref()
+                .is_some_and(|stored| bool::from(stored.ct_eq(&*hash)))
+        {
+            return Err(CTAP2_ERR_PIN_POLICY_VIOLATION);
+        }
+        self.store_new_pin(&hash, length)?;
         Ok(vec![CTAP2_OK])
     }
 
@@ -241,11 +257,15 @@ impl CtapApp<'_> {
         pin_hash_enc: &[u8],
         permissions: u8,
         rp_id: Option<String>,
+        force_change_error: u8,
     ) -> Result<Vec<u8>, u8> {
         // "If the pinRetries counter is 0, return CTAP2_ERR_PIN_BLOCKED error."
         self.pin_state.check_pin_attempt_allowed()?;
         let keys = self.decapsulate(protocol, key_agreement)?;
         self.verify_pin_hash_enc(protocol, &keys, pin_hash_enc)?;
+        if self.pin_state.persistent().force_pin_change {
+            return Err(force_change_error);
+        }
 
         let token = Zeroizing::new(self.random_array::<32>());
         let encrypted = self.encrypt_for_platform(protocol, &keys, &token[..])?;
@@ -284,7 +304,14 @@ impl CtapApp<'_> {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
         let permissions = PIN_PERMISSION_MC | PIN_PERMISSION_GA;
-        self.client_pin_get_token_common(protocol, key_agreement, pin_hash_enc, permissions, None)
+        self.client_pin_get_token_common(
+            protocol,
+            key_agreement,
+            pin_hash_enc,
+            permissions,
+            None,
+            CTAP2_ERR_PIN_INVALID,
+        )
     }
 
     /// getPinUvAuthTokenUsingPinWithPermissions (CTAP 2.3 §6.5.5.7.2).
@@ -319,7 +346,14 @@ impl CtapApp<'_> {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
         let permissions = requested_pin_permissions(permissions)?;
-        self.client_pin_get_token_common(protocol, key_agreement, pin_hash_enc, permissions, rp_id)
+        self.client_pin_get_token_common(
+            protocol,
+            key_agreement,
+            pin_hash_enc,
+            permissions,
+            rp_id,
+            CTAP2_ERR_PIN_POLICY_VIOLATION,
+        )
     }
 
     pub(crate) fn handle_client_pin(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {

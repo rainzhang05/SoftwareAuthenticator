@@ -416,7 +416,7 @@ fn restart_keeps_an_exhausted_pin_blocked() {
     assert_eq!(last, Err(CTAP2_ERR_PIN_BLOCKED));
     let file = store.pin_state_writes().pop().expect("PIN state persisted");
     assert_eq!(file.pin_retries, 0);
-    // Only the PIN hash and pinRetries are persistent state.
+    // PIN settings and pinRetries persist; consecutive mismatches do not.
     assert!(!file.pin_auth_blocked);
     assert_eq!(file.consecutive_failures, 0);
 

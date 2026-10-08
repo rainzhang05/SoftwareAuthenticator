@@ -106,7 +106,7 @@ impl CtapApp<'_> {
 
     /// authenticatorGetAssertion, following the steps of CTAP 2.3 §6.2.2 for
     /// an authenticator with clientPin and pinUvAuthToken, no built-in user
-    /// verification, no alwaysUv and no display (see [`CtapApp`]).  It "is
+    /// verification and no display (see [`CtapApp`]).  It "is
     /// protected by some form of user verification" exactly when a PIN is
     /// set.
     pub(super) fn handle_get_assertion(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
@@ -177,6 +177,15 @@ impl CtapApp<'_> {
             return Err(CTAP2_ERR_UNSUPPORTED_OPTION);
         }
         let up_option = options.up.unwrap_or(true);
+
+        // Step 5 applies only with user presence. Without built-in UV,
+        // always-UV requires a token, including before a PIN is set.
+        if self.pin_state.persistent().always_uv
+            && up_option
+            && (!self.pin_state.is_set() || pin_uv_auth.is_none())
+        {
+            return Err(CTAP2_ERR_PUAT_REQUIRED);
+        }
 
         // Step 6.  Without a PIN the step is skipped, so a pinUvAuthParam is
         // not verified and the "uv" bit stays false.

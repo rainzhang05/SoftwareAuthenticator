@@ -76,7 +76,14 @@ sensor software cannot press.
   program that can open the device can set one.
 - **Some registrations need no PIN.** A site may register a non-discoverable
   credential without the PIN even when one is set, as getInfo's
-  `makeCredUvNotRqd` announces. It still needs your approval.
+  `makeCredUvNotRqd` announces. It still needs your approval. Enabling
+  always-UV requires verification for every registration and every sign-in
+  with user presence; the CTAP `up=false` exemption still applies.
+- **Configuration follows the PIN protection.** A PIN guards configuration
+  with an `acfg` token. Before one is set, device access allows changing
+  configuration too. Without a PIN, always-UV can still be disabled, so the
+  initial-configuration exception cannot strand the key. A required PIN
+  change blocks new tokens until a different PIN meets the current minimum.
 - **Reset is only possible within 10 seconds of the key starting** (CTAP 2.3
   §6.6), as with a hardware key that has just been plugged in.
 

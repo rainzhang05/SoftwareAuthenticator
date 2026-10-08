@@ -161,14 +161,32 @@ protocol logic.
 - A PIN, with PIN/UV auth protocols 1 and 2 and pinUvAuthTokens. After 8
   wrong PINs the PIN is blocked, and after 3 in a row the key must be
   restarted. There is no built-in user verification.
+- authenticatorConfig toggles always-UV and raises the minimum PIN length.
+  Configuration uses an `acfg` token when a PIN is set. Always-UV requires
+  verification for registration and assertions with user presence; assertions
+  with `up=false` keep the CTAP exemption. A raised minimum or an explicit
+  force-change request can require a different PIN before tokens are issued.
+  Only reset restores the minimum of four code points and disables always-UV.
+  The key stores up to eight authorized RP IDs, each at most 253 bytes.
+  An empty replacement list preserves the current list (§6.11.4).
+  PIN complexity policy is not implemented: false is accepted and true is
+  refused with `INVALID_PARAMETER`; the draft lacks an unsupported-policy
+  rejection branch.
 - Up to 1,000 stored credentials. Credential management lists and counts
   discoverable credentials only. Non-discoverable credentials are sealed
   into their own ID when their key fits; RSA credentials are stored and
   consume a slot too.
-- The `credBlob`, `credProtect`, `hmac-secret` and `hmac-secret-mc`
-  extensions. `credBlob` stores up to 32 bytes with a stored credential;
+- The `credBlob`, `credProtect`, `hmac-secret`, `hmac-secret-mc` and
+  `minPinLength` extensions. `credBlob` stores up to 32 bytes with a stored credential;
   sealed credentials refuse it.
   `hmac-secret-mc` evaluates the PRF when a credential is created.
+  `minPinLength` returns the minimum only in requested, signed registration
+  output for an RP ID on the configured list.
+- getInfo reports `authnrCfg`, `alwaysUv`, `setMinPINLength` and
+  `makeCredUvNotRqd` (the inverse of `alwaysUv`), with no `uvAcfg`.
+  `forcePINChange` and `minPINLength` always report the current policy;
+  `maxRPIDsForSetMinPINLength` is eight and `authenticatorConfigCommands`
+  lists toggleAlwaysUv (2) and setMinPINLength (3).
 - Packed self attestation: each credential signs its own registration.
 - A reset only within 10 seconds of the key starting (§6.6), approved in a
   notification.
@@ -187,13 +205,13 @@ protocol logic.
 Every file above except the root keys is encrypted and authenticated with
 XChaCha20-Poly1305, under keys derived from a root key with HKDF-SHA-256.
 Credential records can also hold an opaque blob of at most 32 bytes,
-protected by the same encryption as their private keys. PIN records also keep the minimum PIN length, authorized `minPinLength` RP
-IDs, force-change flag, stored PIN length and always-UV setting. Old records
+protected by the same encryption as their private keys. PIN records also keep
+the minimum PIN length, authorized `minPinLength` RP IDs, force-change flag,
+stored PIN length and always-UV setting. Old records
 use defaults for the added fields; an old PIN is treated as four code points.
 Files are replaced atomically, never changed in place. A directory flush can
 fail after replacement, leaving the new file installed despite a reported
-write error. A reset deletes the
-stored credentials and replaces `credential.key`, so old copies of files and
+write error. A reset deletes the stored credentials and replaces `credential.key`, so old copies of files and
 every sealed credential ID can no longer be decrypted.
 [SECURITY.md](../SECURITY.md) describes what this protects against.
 

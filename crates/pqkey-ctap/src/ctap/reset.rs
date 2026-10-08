@@ -44,7 +44,7 @@ impl CtapApp<'_> {
         self.store
             .clear()
             .map_err(|err| store_status("reset the credential store", err))?;
-        // The PIN, pinRetries, the pinUvAuthToken and each protocol's key
+        // PIN and UV policy, pinRetries, the token and each protocol's key
         // agreement key go back to their initial values, as at power-up
         // (CTAP 2.3 §6.5.5.1).  The store already holds the default PIN state.
         self.pin_state.reset();

@@ -1,10 +1,9 @@
 //! The authenticatorGetInfo command.
 
 use super::cbor::{canonical_map, canonical_sort};
-use super::pin::state::PinState;
 use super::{AttestationMode, CtapApp};
 use crate::CoseAlg;
-use crate::store::MAX_CRED_BLOB_LENGTH;
+use crate::store::{MAX_CRED_BLOB_LENGTH, PinStateRecord};
 
 use ciborium::{
     ser::into_writer,
@@ -54,7 +53,8 @@ impl CtapApp<'_> {
         // the mandatory hmac-secret and credProtect are supported; rk comes
         // with clientPin (true or false as a PIN is or is not set) and credMgmt
         // true, pinUvAuthToken is true, and pinUvAuthProtocols includes 2.
-        // There is no minPinLength extension and no ep option ID.  "The
+        // minPinLength comes with setMinPINLength; there is no ep option ID.
+        // "The
         // string "FIDO_2_2" was not defined for CTAP2.2 and MUST not be
         // present in versions member."
         map.push((
@@ -68,6 +68,7 @@ impl CtapApp<'_> {
                 text("credProtect"),
                 text("hmac-secret"),
                 text("hmac-secret-mc"),
+                text("minPinLength"),
             ]),
         ));
         map.push((uint(3), Value::Bytes(self.aaguid.to_vec())));
@@ -82,8 +83,16 @@ impl CtapApp<'_> {
             (text("credMgmt"), Value::Bool(true)),
             (text("pinUvAuthToken"), Value::Bool(true)),
             (text("clientPin"), Value::Bool(self.pin_state.is_set())),
-            // "Authenticators SHOULD include this option with the value true."
-            (text("makeCredUvNotRqd"), Value::Bool(true)),
+            (text("authnrCfg"), Value::Bool(true)),
+            (
+                text("alwaysUv"),
+                Value::Bool(self.pin_state.persistent().always_uv),
+            ),
+            (text("setMinPINLength"), Value::Bool(true)),
+            (
+                text("makeCredUvNotRqd"),
+                Value::Bool(!self.pin_state.persistent().always_uv),
+            ),
         ]);
         map.push((uint(4), options));
 
@@ -113,7 +122,19 @@ impl CtapApp<'_> {
             .collect();
         map.push((uint(10), Value::Array(algorithms)));
 
-        map.push((uint(13), uint(PinState::MIN_PIN_LENGTH as u64)));
+        map.push((
+            uint(0x0C),
+            Value::Bool(self.pin_state.persistent().force_pin_change),
+        ));
+        map.push((
+            uint(0x0D),
+            uint(u64::from(self.pin_state.persistent().min_pin_length)),
+        ));
+        map.push((
+            uint(0x10),
+            uint(PinStateRecord::MAX_MIN_PIN_LENGTH_RP_IDS as u64),
+        ));
+        map.push((uint(0x1F), Value::Array(vec![uint(2), uint(3)])));
         // maxCredBlobLength (CTAP 2.3 §6.4), required by §12.2.1.
         map.push((uint(0x0F), uint(MAX_CRED_BLOB_LENGTH as u64)));
 

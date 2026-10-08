@@ -1,5 +1,6 @@
 //! Unit tests for `ctap`, one module per area of the handler code.
 
+mod authenticator_config;
 mod cred_blob;
 mod credential_management;
 mod discoverable;

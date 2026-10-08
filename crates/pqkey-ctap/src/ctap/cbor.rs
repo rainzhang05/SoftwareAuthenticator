@@ -202,8 +202,8 @@ fn item_end(bytes: &[u8], pos: usize, depth: usize) -> Option<usize> {
 /// no such key; `Err(())` if `bytes` is not a single well-formed definite
 /// length map.
 ///
-/// authenticatorCredentialManagement authenticates `subCommandParams` as the
-/// platform encoded them (CTAP 2.3 §6.8.4 to §6.8.6), which a decoded
+/// Credential management and authenticatorConfig authenticate
+/// `subCommandParams` as sent (CTAP 2.3 §§6.8.4–6.8.6, 6.11), which a decoded
 /// [`Value`] re-encoded would not reproduce for a non-canonical encoding.
 pub(super) fn raw_map_value(bytes: &[u8], key: u64) -> Result<Option<&[u8]>, ()> {
     let (major, entries, mut pos) = header(bytes, 0).ok_or(())?;

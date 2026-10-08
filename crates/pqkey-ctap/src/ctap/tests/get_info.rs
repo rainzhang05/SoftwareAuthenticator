@@ -38,6 +38,9 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         (text("pinUvAuthToken"), Value::Bool(true)),
         (text("clientPin"), Value::Bool(pin_set)),
         (text("makeCredUvNotRqd"), Value::Bool(true)),
+        (text("authnrCfg"), Value::Bool(true)),
+        (text("alwaysUv"), Value::Bool(false)),
+        (text("setMinPINLength"), Value::Bool(true)),
     ]);
 
     let extensions = Value::Array(vec![
@@ -45,6 +48,7 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         text("credProtect"),
         text("hmac-secret"),
         text("hmac-secret-mc"),
+        text("minPinLength"),
     ]);
 
     let algorithms = Value::Array(
@@ -82,8 +86,11 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         (uint(8), uint(128)),
         (uint(9), Value::Array(vec![text("usb")])),
         (uint(10), algorithms),
+        (uint(12), Value::Bool(false)),
         (uint(13), uint(PinState::MIN_PIN_LENGTH as u64)),
         (uint(0x0F), uint(32)),
+        (uint(0x10), uint(8)),
+        (uint(0x1F), Value::Array(vec![uint(2), uint(3)])),
         (uint(0x14), uint(remaining)),
         (uint(0x16), Value::Array(vec![text("packed")])),
     ]);

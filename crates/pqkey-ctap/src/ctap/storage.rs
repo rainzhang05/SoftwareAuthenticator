@@ -41,8 +41,8 @@ pub(super) fn store_status(action: &str, err: StoreError) -> u8 {
 /// A PIN state that cannot be read fails closed: the PIN is treated as set,
 /// with a random hash nobody knows, and blocked with no retries left, so PIN
 /// checks are refused with CTAP2_ERR_PIN_BLOCKED before any comparison and
-/// only authenticatorReset recovers.  Nothing is written back over the
-/// unreadable record until then.
+/// always-UV conservatively remains required. Only reset recovers, and
+/// nothing is written back over the unreadable record until then.
 pub(super) fn load_pin_state(store: &dyn CredentialStore, rng: &mut dyn Rng) -> (PinState, bool) {
     match store.pin_state() {
         Ok(Some(record)) => (
@@ -77,6 +77,7 @@ fn unreadable_pin_state(rng: &mut dyn Rng) -> PinState {
     let state = PinState::from_persistent(PersistentPinState {
         pin_hash: Some(hash),
         pin_retries: 0,
+        always_uv: true,
         min_pin_length_rp_ids: Vec::new(),
         ..PersistentPinState::default()
     });

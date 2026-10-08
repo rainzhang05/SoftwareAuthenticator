@@ -21,6 +21,7 @@ pub const MAX_CONSECUTIVE_PIN_MISMATCHES: u8 = 3;
 
 /// The part of the PIN state that must survive a power cycle.
 ///
+/// PIN policy and always-UV settings survive power cycles too.
 /// pinRetries has to be persistent: once it "reaches 0, both ClientPin as well
 /// as built-in user verification are disabled and can only be enabled if the
 /// authenticator is reset" (CTAP 2.3 §6.5.2.3), which a power cycle is not.
@@ -219,6 +220,7 @@ pub(crate) struct PinState {
 }
 
 impl PinState {
+    #[cfg(test)]
     pub(crate) const MIN_PIN_LENGTH: usize = 4;
 
     pub(crate) fn new() -> Self {
@@ -256,6 +258,16 @@ impl PinState {
 
     pub(crate) fn persistent(&self) -> &PersistentPinState {
         self.pin.persistent()
+    }
+
+    /// Adopt saved settings without resetting retries, key agreement or timers.
+    pub(crate) fn adopt_persistent(&mut self, persistent: PersistentPinState) {
+        self.pin.persistent = persistent;
+    }
+
+    /// Invalidate the token for every supported PIN/UV auth protocol.
+    pub(crate) fn invalidate_pin_uv_auth_tokens(&mut self) {
+        self.token.stop_using();
     }
 
     pub(crate) fn is_set(&self) -> bool {

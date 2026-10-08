@@ -11,6 +11,7 @@ use crate::ctap::constants::*;
 pub(crate) const PIN_PERMISSION_MC: u8 = 0x01;
 pub(crate) const PIN_PERMISSION_GA: u8 = 0x02;
 pub(crate) const PIN_PERMISSION_CM: u8 = 0x04;
+pub(crate) const PIN_PERMISSION_ACFG: u8 = 0x20;
 
 /// Every pinUvAuthToken permission CTAP 2.3 §6.5.5.7 defines: mc (0x01),
 /// ga (0x02), cm (0x04), be (0x08), lbw (0x10), acfg (0x20) and pcmr (0x40).
@@ -18,8 +19,9 @@ const DEFINED_PIN_PERMISSIONS: u8 = 0x7F;
 
 /// The permissions this authenticator can grant.  The others need a feature
 /// its authenticatorGetInfo does not advertise (bioEnroll, largeBlobs,
-/// authnrCfg, perCredMgmtRO), and credMgmt is true, so cm is authorized.
-const SUPPORTED_PIN_PERMISSIONS: u8 = PIN_PERMISSION_MC | PIN_PERMISSION_GA | PIN_PERMISSION_CM;
+/// perCredMgmtRO); credMgmt and authnrCfg are true.
+const SUPPORTED_PIN_PERMISSIONS: u8 =
+    PIN_PERMISSION_MC | PIN_PERMISSION_GA | PIN_PERMISSION_CM | PIN_PERMISSION_ACFG;
 
 /// The permissions to assign for a getPinUvAuthTokenUsingPinWithPermissions
 /// permissions parameter (already checked to be non-zero), per CTAP 2.3

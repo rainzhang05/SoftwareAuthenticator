@@ -43,6 +43,7 @@
 //! worker thread while the transport keeps serving the device and passes
 //! cancellations on through the [`InterruptFlag`].
 
+mod authenticator_config;
 mod cbor;
 pub mod constants;
 mod credential_id;
@@ -158,6 +159,17 @@ pub struct CtapApp<'interrupt> {
 }
 
 impl<'interrupt> CtapApp<'interrupt> {
+    /// Decode a request as the engine does, for stateful fuzz models.
+    ///
+    /// This shares canonical CBOR validation and the treatment of unknown
+    /// simple values, so a model observes every request the engine accepts.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn decode_request_parameters(payload: &[u8]) -> Option<Value> {
+        cbor::request_parameters(payload)
+            .ok()
+            .map(|parameters| Value::Map(parameters.to_vec()))
+    }
+
     /// Create the engine.
     ///
     /// * `store` holds credentials, the PIN state and the attestation key.
@@ -298,7 +310,8 @@ impl<'interrupt> CtapApp<'interrupt> {
     /// log.  The two parameters sit under different keys per command:
     /// authenticatorClientPIN has pinUvAuthProtocol (0x01) and subCommand
     /// (0x02) (CTAP 2.3 §6.5.5), authenticatorCredentialManagement has
-    /// subCommand (0x01) and pinUvAuthProtocol (0x03) (§6.8).  Other commands
+    /// subCommand (0x01) and pinUvAuthProtocol (0x03) (§6.8), as does
+    /// authenticatorConfig (§6.11). Other commands
     /// log neither.
     fn subcommand_and_pin_protocol_for_logging(
         ctap_cmd: u8,
@@ -306,7 +319,7 @@ impl<'interrupt> CtapApp<'interrupt> {
     ) -> (Option<u8>, Option<u8>) {
         let (sub_command_key, pin_protocol_key) = match ctap_cmd {
             CTAP_CMD_CLIENT_PIN => (2, 1),
-            CTAP_CMD_CREDENTIAL_MANAGEMENT => (1, 3),
+            CTAP_CMD_CREDENTIAL_MANAGEMENT | CTAP_CMD_AUTHENTICATOR_CONFIG => (1, 3),
             _ => return (None, None),
         };
         let Ok(Value::Map(entries)) = from_reader::<Value, _>(payload) else {
@@ -370,6 +383,7 @@ impl<'interrupt> CtapApp<'interrupt> {
             CTAP_CMD_RESET => self.handle_reset(),
             CTAP_CMD_CREDENTIAL_MANAGEMENT => self.handle_credential_management(payload),
             CTAP_CMD_SELECTION => self.handle_selection(),
+            CTAP_CMD_AUTHENTICATOR_CONFIG => self.handle_authenticator_config(payload),
             // Neither authenticatorBioEnrollment (0x09) nor its prototype
             // (0x40) is implemented: "If an authenticator receives a command
             // code it does not implement, it MUST return

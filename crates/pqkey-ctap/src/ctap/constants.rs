@@ -35,6 +35,8 @@ pub const CTAP_CMD_BIO_ENROLLMENT: u8 = 0x09;
 pub const CTAP_CMD_CREDENTIAL_MANAGEMENT: u8 = 0x0A;
 /// `authenticatorSelection`, CTAP 2.3 § 6.9.
 pub const CTAP_CMD_SELECTION: u8 = 0x0B;
+/// `authenticatorConfig`, CTAP 2.3 §6.11.
+pub const CTAP_CMD_AUTHENTICATOR_CONFIG: u8 = 0x0D;
 /// Prototype `authenticatorBioEnrollment`, CTAP 2.3 § 6.12 (`FIDO_2_1_PRE`
 /// backwards compatibility).  Not implemented either.
 pub const CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE: u8 = 0x40;
