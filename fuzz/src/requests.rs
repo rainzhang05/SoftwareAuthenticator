@@ -224,6 +224,7 @@ pub struct Overrides {
     pub hmac_secret_mc: Option<Value>,
     pub cred_blob: Option<Value>,
     pub min_pin_length: Option<Value>,
+    pub large_blob_key: Option<Value>,
     /// The options map, instead of a generated one.
     pub options: Option<Value>,
     /// Leave the allowList out.
@@ -308,6 +309,7 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
             let cred_protect = field(u, |u| Ok(int(u.int_in_range(0..=4)?)))?;
             let hmac_secret_mc = optional(u, hmac_secret_input)?;
             let min_pin_length = optional(u, |u| Ok(Value::Bool(u.arbitrary()?)))?;
+            let large_blob_key = optional(u, extension_bool)?;
             map(
                 u,
                 vec![
@@ -316,6 +318,7 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
                     (text("hmac-secret-mc"), hmac_secret_mc),
                     (text("credBlob"), cred_blob),
                     (text("minPinLength"), min_pin_length),
+                    (text("largeBlobKey"), large_blob_key),
                 ],
             )
         })?
@@ -329,6 +332,7 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
             _ => extensions = Some(Value::Map(vec![(text("minPinLength"), input)])),
         }
     }
+    extension_override(&mut extensions, "largeBlobKey", overrides.large_blob_key);
     let options = match overrides.options {
         Some(options) => Some(options),
         None => optional(u, options)?,
@@ -386,7 +390,7 @@ pub fn get_assertion(u: &mut Unstructured<'_>, overrides: Overrides) -> Result<V
         Some(blob) => Some(blob),
         None => optional(u, |u| Ok(Value::Bool(u.arbitrary()?)))?,
     };
-    let extensions = match overrides.hmac_secret {
+    let mut extensions = match overrides.hmac_secret {
         Some(hmac_secret) => {
             let mut entries = vec![(text("hmac-secret"), hmac_secret)];
             if let Some(blob) = cred_blob {
@@ -402,15 +406,18 @@ pub fn get_assertion(u: &mut Unstructured<'_>, overrides: Overrides) -> Result<V
         )),
         None => optional(u, |u| {
             let hmac_secret = field(u, hmac_secret_input)?;
+            let large_blob_key = optional(u, extension_bool)?;
             map(
                 u,
                 vec![
                     (text("hmac-secret"), hmac_secret),
                     (text("credBlob"), cred_blob),
+                    (text("largeBlobKey"), large_blob_key),
                 ],
             )
         })?,
     };
+    extension_override(&mut extensions, "largeBlobKey", overrides.large_blob_key);
     let options = match overrides.options {
         Some(options) => Some(options),
         None => optional(u, options)?,
@@ -564,14 +571,81 @@ pub fn authenticator_config(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
     Ok(command(CTAP_CMD_AUTHENTICATOR_CONFIG, &request))
 }
 
+/// authenticatorLargeBlobs (CTAP 2.3 §6.10.2), including boundary lengths,
+/// missing parameters, mutually exclusive operations and malformed types.
+pub fn large_blobs(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
+    let unsigned = |u: &mut Unstructured<'_>| {
+        Ok(if u.ratio(7, 8)? {
+            int(*u.choose(&[
+                0,
+                1,
+                16,
+                17,
+                1_024,
+                1_703,
+                1_704,
+                1_705,
+                16_383,
+                16_384,
+                16_385,
+                i64::from(u32::MAX),
+            ])?)
+        } else {
+            Value::Integer(crate::cbor::arbitrary_integer(u)?)
+        })
+    };
+    let get = field(u, unsigned)?;
+    let set = field(u, |u| {
+        if u.ratio(1, 4)? {
+            return Ok(Value::Bytes(arbitrary_bytes(u)?));
+        }
+        let len = *u.choose(&[0, 1, 16, 17, 1_703, 1_704, 1_705])?;
+        Ok(bytes(&vec![u.arbitrary()?; len]))
+    })?;
+    let mode = u.int_in_range(0u8..=7)?;
+    let entries = vec![
+        (int(1), get.filter(|_| !matches!(mode, 2..=5))),
+        (int(2), set.filter(|_| !matches!(mode, 0 | 1 | 6))),
+        (int(3), field(u, unsigned)?),
+        (int(4), optional(u, unsigned)?),
+        (
+            int(5),
+            optional(u, |u| Ok(Value::Bytes(arbitrary_bytes(u)?)))?,
+        ),
+        (int(6), optional(u, pin_uv_auth_protocol)?),
+    ];
+    Ok(command(CTAP_CMD_LARGE_BLOBS, &map(u, entries)?))
+}
+
+fn extension_override(extensions: &mut Option<Value>, name: &str, input: Option<Value>) {
+    if let Some(input) = input {
+        match extensions {
+            Some(Value::Map(entries)) => {
+                entries.retain(|(key, _)| *key != text(name));
+                entries.push((text(name), input));
+            }
+            _ => *extensions = Some(Value::Map(vec![(text(name), input)])),
+        }
+    }
+}
+
+fn extension_bool(u: &mut Unstructured<'_>) -> Result<Value> {
+    if u.ratio(1, 8)? {
+        arbitrary_value(u, 1)
+    } else {
+        Ok(Value::Bool(u.arbitrary()?))
+    }
+}
+
 /// Any CTAP2 request, structure-aware.
 pub fn any_request(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
-    Ok(match u.int_in_range(0u8..=12)? {
+    Ok(match u.int_in_range(0u8..=14)? {
         0 | 1 => make_credential(u, Overrides::default())?,
         2 | 3 => get_assertion(u, Overrides::default())?,
         4 | 5 => client_pin(u)?,
         6 | 7 => credential_management(u)?,
         11 | 12 => authenticator_config(u)?,
+        13 | 14 => large_blobs(u)?,
         8 => vec![*u.choose(&[
             CTAP_CMD_GET_INFO,
             CTAP_CMD_RESET,
@@ -600,6 +674,7 @@ pub fn any_request(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
                 CTAP_CMD_CLIENT_PIN,
                 CTAP_CMD_CREDENTIAL_MANAGEMENT,
                 CTAP_CMD_AUTHENTICATOR_CONFIG,
+                CTAP_CMD_LARGE_BLOBS,
             ])?;
             command(code, &arbitrary_value(u, MAX_DEPTH)?)
         }

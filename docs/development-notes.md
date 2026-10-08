@@ -23,6 +23,11 @@ retains freed blocks until they have been scanned, and live controls prove
 that the scan finds each secret pattern. CI and `scripts/check.sh` run it in
 debug and release, as they do the stack residue tests.
 The final cleanup scan also checks blocks released by the last controls.
+Large-blob tests cover fragmented writes, interrupted staging and restart
+persistence; the fuzz sequence model checks committed-array visibility and
+the lifetime of pending writes, and that credential keys are stable and
+returned only when requested. Heap residue tests include those keys and
+their registration, assertion and enumeration response copies.
 
 ## Running your changes
 

@@ -1,6 +1,7 @@
 //! Structure-aware CTAP requests: up to four syntactically valid CBOR maps
 //! under the parameter keys of makeCredential, getAssertion, clientPIN and
-//! credentialManagement and authenticatorConfig (plus parameterless and
+//! credentialManagement, authenticatorConfig and authenticatorLargeBlobs
+//! (plus parameterless and
 //! unimplemented command codes), sent to one engine, with presence as the input
 //! chooses.
 //!

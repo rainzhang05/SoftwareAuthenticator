@@ -1,8 +1,8 @@
 //! Stateful CTAP: a sequence of requests against one engine, the harness
 //! acting as a platform that can set and change a PIN, obtain
 //! pinUvAuthTokens and authenticate makeCredential, getAssertion and
-//! credentialManagement and authenticatorConfig with them, and use credBlob,
-//! minPinLength, hmac-secret and
+//! credentialManagement, authenticatorConfig and authenticatorLargeBlobs
+//! with them, and use credBlob, largeBlobKey, minPinLength, hmac-secret and
 //! hmac-secret-mc, while the fuzzer chooses the parameters (right, wrong or
 //! missing) and mixes in structure-aware and raw requests and presence
 //! denials.
@@ -23,6 +23,11 @@
 //!   succeeds right after a getAssertion that reported more credentials;
 //! * hmac-secret and hmac-secret-mc return one output per salt;
 //! * credBlob returns the blob accepted at creation, or an empty byte string;
+//! * largeBlobKey is returned only when requested, only for discoverable
+//!   credentials, outside authenticator data, and remains the same for every
+//!   assertion and credential enumeration;
+//! * reads return only the last committed large-blob array, with its valid
+//!   trailing hash; partial and abandoned writes never become visible;
 //! * the minimum PIN length never falls without reset;
 //! * alwaysUv prevents makeCredential and getAssertion with up=true from
 //!   succeeding without pinUvAuthParam.
@@ -33,11 +38,14 @@ use crate::platform::{Session, authenticate, pin_hash, protocol_value};
 use crate::requests::{self, Overrides, command};
 use arbitrary::{Arbitrary, Result, Unstructured};
 use ciborium::value::Value;
+use p256::elliptic_curve::{subtle::ConstantTimeEq, zeroize::Zeroizing};
+use pqkey_ctap::ctap::Clock;
 use pqkey_ctap::ctap::CtapApp;
 use pqkey_ctap::ctap::constants::*;
-use pqkey_ctap::store::MemoryStore;
+use pqkey_ctap::store::{INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY, MemoryStore};
 use pqkey_ctap::{ClassicPinProtocol, CoseAlg};
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 const MAX_STEPS: usize = 24;
 
@@ -84,6 +92,7 @@ enum Op {
     },
     MakeCredential {
         cred_blob: Option<u8>,
+        large_blob_key: Option<bool>,
         min_pin_length: bool,
         hmac_secret_mc: Option<(bool, bool)>,
         auth: Auth,
@@ -96,6 +105,7 @@ enum Op {
     },
     GetAssertion {
         cred_blob: bool,
+        large_blob_key: Option<bool>,
         auth: Auth,
         rp: u8,
         hmac_secret: Option<(bool, bool)>,
@@ -129,12 +139,71 @@ enum Op {
     Presence(u8),
     Structured,
     Raw,
+    LargeBlobBegin {
+        auth: Auth,
+        length: u16,
+        fragment: u16,
+        valid_hash: bool,
+        fill: u8,
+    },
+    LargeBlobContinue {
+        auth: Auth,
+        offset: Option<u16>,
+        length: Option<u16>,
+        fragment: u16,
+    },
+    LargeBlobGet {
+        offset: u16,
+        length: u16,
+        extra: u8,
+    },
+    /// Advance without issuing a command, including timeout boundaries.
+    Advance(u16),
+    /// Complete one fragmented write; begin/continue also expose partial
+    /// transfers to arbitrary intervening operations.
+    LargeBlobWrite {
+        auth: Auth,
+        length: u16,
+        fragment: u16,
+        valid_hash: bool,
+    },
+    /// A complete registration, alongside the parameter-mutating generator.
+    CreateCredential {
+        large_blob_key: Option<bool>,
+        rk: bool,
+        user: u8,
+    },
+    AssertCredentials {
+        large_blob_key: Option<bool>,
+        discoverable: bool,
+    },
+    EnumerateCredentials {
+        auth: Auth,
+        next: bool,
+    },
 }
 
 struct Credential {
     cred_blob: Option<Vec<u8>>,
+    large_blob_key: Option<LargeBlobKey>,
+    discoverable: bool,
     id: Vec<u8>,
     rp_id: String,
+}
+
+/// Keep observed keys wiped and out of a failed invariant's debug output.
+struct LargeBlobKey(Zeroizing<[u8; 32]>);
+
+impl PartialEq for LargeBlobKey {
+    fn eq(&self, other: &Self) -> bool {
+        bool::from(self.0[..].ct_eq(&other.0[..]))
+    }
+}
+
+impl std::fmt::Debug for LargeBlobKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LargeBlobKey(<redacted>)")
+    }
 }
 
 type HmacInput = (Option<Value>, Option<(Session, usize)>);
@@ -148,10 +217,26 @@ struct Platform {
     /// The RP ID of the getAssertion whose further credentials
     /// getNextAssertion may return.
     assertion_rp: Option<String>,
+    assertion_large_blob_key: bool,
     minimum: u8,
     always_uv: bool,
     force_change: bool,
     min_pin_length_rp_ids: Vec<String>,
+    committed: Vec<u8>,
+    pending: PendingArray,
+    proposed: Vec<u8>,
+    token_issued_at: Duration,
+    token_id: u64,
+    token_permissions: u8,
+}
+
+#[derive(Default)]
+struct PendingArray {
+    next: u64,
+    length: u64,
+    bytes: Vec<u8>,
+    last_fragment: Option<Duration>,
+    token_id: Option<u64>,
 }
 
 fn protocol(v2: bool) -> ClassicPinProtocol {
@@ -174,7 +259,9 @@ fn rp_id(choice: u8) -> &'static str {
 
 /// Mostly the permission sets a platform asks for, sometimes any.
 fn permission_set(choice: u8) -> u8 {
-    const SETS: [u8; 8] = [0x04, 0x01, 0x02, 0x03, 0x05, 0x07, 0x20, 0x27];
+    const SETS: [u8; 11] = [
+        0x04, 0x01, 0x02, 0x03, 0x05, 0x07, 0x20, 0x27, 0x10, 0x13, 0x14,
+    ];
     if choice < 0xC0 {
         SETS[usize::from(choice) % SETS.len()]
     } else {
@@ -200,6 +287,83 @@ fn acceptable_pin(pin: &[u8], minimum: u8) -> bool {
         && std::str::from_utf8(pin).is_ok_and(|pin| pin.chars().count() >= usize::from(minimum))
 }
 
+fn extension_requested(parameters: &[(Value, Value)], key: i64, name: &str) -> bool {
+    matches!(
+        get_int(parameters, key),
+        Some(Value::Map(inputs)) if matches!(get_text(inputs, name), Some(Value::Bool(true)))
+    )
+}
+
+fn valid_key_request(parameters: &[(Value, Value)], key: i64) {
+    if let Some(Value::Map(inputs)) = get_int(parameters, key)
+        && let Some(input) = get_text(inputs, "largeBlobKey")
+    {
+        assert_eq!(
+            input,
+            &Value::Bool(true),
+            "invalid largeBlobKey input accepted"
+        );
+    }
+}
+
+fn response_key(body: &[(Value, Value)], key: i64) -> Option<LargeBlobKey> {
+    get_int(body, key).map(|value| {
+        let Value::Bytes(bytes) = value else {
+            panic!("largeBlobKey is a byte string");
+        };
+        LargeBlobKey(Zeroizing::new(
+            bytes
+                .as_slice()
+                .try_into()
+                .expect("largeBlobKey is 32 bytes"),
+        ))
+    })
+}
+
+fn unsigned(value: Option<&Value>) -> Option<u64> {
+    match value {
+        Some(Value::Integer(value)) => u64::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn valid_array(array: &[u8]) -> bool {
+    array.len() >= 17
+        && array[array.len() - 16..] == Sha256::digest(&array[..array.len() - 16])[..16]
+}
+
+fn array_length(choice: u16) -> usize {
+    const LENGTHS: [usize; 11] = [
+        0, 16, 17, 18, 1_703, 1_704, 1_705, 3_424, 16_384, 16_385, 32,
+    ];
+    if choice < 0xC000 {
+        LENGTHS[usize::from(choice) % LENGTHS.len()]
+    } else {
+        usize::from(choice) % 16_386
+    }
+}
+
+fn fragment_length(choice: u16) -> usize {
+    const LENGTHS: [usize; 7] = [0, 1, 16, 17, 1_703, 1_704, 1_705];
+    if choice < 0xC000 {
+        LENGTHS[usize::from(choice) % LENGTHS.len()]
+    } else {
+        usize::from(choice) % 1_706
+    }
+}
+
+fn proposed_array(length: usize, fill: u8, valid_hash: bool) -> Vec<u8> {
+    let mut array = vec![fill; length];
+    if length >= 17 {
+        let hash = Sha256::digest(&array[..length - 16]);
+        array[length - 16..].copy_from_slice(&hash[..16]);
+        if !valid_hash {
+            array[length - 1] ^= 1;
+        }
+    }
+    array
+}
+
 impl Platform {
     fn new(engine: Engine) -> Self {
         Self {
@@ -208,10 +372,17 @@ impl Platform {
             token: None,
             credentials: Vec::new(),
             assertion_rp: None,
+            assertion_large_blob_key: false,
             minimum: 4,
             always_uv: false,
             force_change: false,
             min_pin_length_rp_ids: Vec::new(),
+            committed: INITIAL_LARGE_BLOB_ARRAY.to_vec(),
+            pending: PendingArray::default(),
+            proposed: Vec::new(),
+            token_issued_at: Duration::ZERO,
+            token_id: 0,
+            token_permissions: 0,
         }
     }
 
@@ -231,9 +402,167 @@ impl Platform {
         self.credentials.iter().map(|c| c.id.clone()).collect()
     }
 
+    /// Model the protocol's volatile counters separately from the engine.
+    /// Only accepted fragments can change the committed array; reads compare
+    /// against that model even after a partial transfer was discarded.
+    fn observe_array(&mut self, request: &[u8], response: &[u8]) {
+        let now = self.engine.clock().now();
+        if request.first() != Some(&CTAP_CMD_LARGE_BLOBS)
+            || self
+                .pending
+                .last_fragment
+                .is_some_and(|last| now.saturating_sub(last) >= Duration::from_secs(30))
+            || self.pending.token_id.is_some_and(|id| {
+                id != self.token_id
+                    || self.token.is_none()
+                    || now.saturating_sub(self.token_issued_at) >= Duration::from_secs(600)
+            })
+        {
+            self.pending = PendingArray::default();
+        }
+        if request.first() != Some(&CTAP_CMD_LARGE_BLOBS) {
+            return;
+        }
+        let Some(Value::Map(parameters)) = CtapApp::decode_request_parameters(&request[1..]) else {
+            self.pending = PendingArray::default();
+            return;
+        };
+        if status(response) == CTAP2_ERR_INVALID_CBOR {
+            self.pending = PendingArray::default();
+            return;
+        }
+        let get = get_int(&parameters, 1);
+        let set = get_int(&parameters, 2);
+        let offset = unsigned(get_int(&parameters, 3));
+        if get.is_some() || set.is_none() || offset.is_none() {
+            self.pending = PendingArray::default();
+        }
+        if let Some(get) = get {
+            if status(response) == CTAP2_OK {
+                assert!(set.is_none(), "get and set accepted together");
+                assert!(get_int(&parameters, 4).is_none(), "get accepted length");
+                assert!(get_int(&parameters, 5).is_none(), "get accepted auth param");
+                assert!(
+                    get_int(&parameters, 6).is_none(),
+                    "get accepted auth protocol"
+                );
+                let count = unsigned(Some(get)).expect("get is unsigned") as usize;
+                let offset = offset.expect("offset is required") as usize;
+                assert!(count <= 1_704, "oversized get accepted");
+                assert!(
+                    offset <= self.committed.len(),
+                    "get past the array accepted"
+                );
+                let body = decode_map(&response[1..]).expect("large-blob response");
+                assert_eq!(
+                    get_int(&body, 1),
+                    Some(&bytes(
+                        &self.committed
+                            [offset..offset.saturating_add(count).min(self.committed.len())]
+                    )),
+                    "read exposed bytes outside the last committed array"
+                );
+                assert!(valid_array(&self.committed), "committed hash is valid");
+            }
+            return;
+        }
+        let (Some(Value::Bytes(fragment)), Some(offset)) = (set, offset) else {
+            self.pending = PendingArray::default();
+            return;
+        };
+        if fragment.len() > 1_704 {
+            assert_ne!(status(response), CTAP2_OK, "oversized set accepted");
+            return;
+        }
+        if offset == 0 {
+            let length = unsigned(get_int(&parameters, 4));
+            let Some(length) = length.filter(|length| (17..=16_384).contains(length)) else {
+                assert_ne!(
+                    status(response),
+                    CTAP2_OK,
+                    "invalid initial length accepted"
+                );
+                return;
+            };
+            self.pending.next = 0;
+            self.pending.length = length;
+        } else if get_int(&parameters, 4).is_some() {
+            assert_ne!(status(response), CTAP2_OK, "continuation accepted length");
+            return;
+        }
+        if offset != self.pending.next {
+            assert_eq!(
+                status(response),
+                CTAP1_ERR_INVALID_SEQ,
+                "out-of-order fragment"
+            );
+            self.pending = PendingArray::default();
+            return;
+        }
+        if !matches!(status(response), CTAP2_OK | CTAP2_ERR_INTEGRITY_FAILURE) {
+            return;
+        }
+        assert!(offset + fragment.len() as u64 <= self.pending.length);
+        let protected = self.pin.is_some() || self.always_uv;
+        if protected {
+            assert!(
+                get_int(&parameters, 5).is_some(),
+                "unauthenticated protected write"
+            );
+            assert!(get_int(&parameters, 6).is_some(), "auth protocol missing");
+            let (protocol, token) = self.token.expect("protected write needs a token");
+            assert!(
+                now.saturating_sub(self.token_issued_at) < Duration::from_secs(600),
+                "expired token accepted"
+            );
+            assert_ne!(self.token_permissions & 0x10, 0, "write without lbw");
+            assert_eq!(get_int(&parameters, 6), Some(&protocol_value(protocol)));
+            let mut message = vec![0xff; 32];
+            message.extend_from_slice(&[CTAP_CMD_LARGE_BLOBS, 0]);
+            message.extend_from_slice(&(offset as u32).to_le_bytes());
+            message.extend_from_slice(&Sha256::digest(fragment));
+            assert_eq!(
+                get_int(&parameters, 5),
+                Some(&bytes(&authenticate(protocol, &token, &message))),
+                "write authenticated with the wrong parameter"
+            );
+        }
+        if offset == 0 {
+            self.pending.bytes.clear();
+            self.pending.token_id = protected.then_some(self.token_id);
+        }
+        self.pending.bytes.extend_from_slice(fragment);
+        self.pending.next = self.pending.bytes.len() as u64;
+        self.pending.last_fragment = Some(now);
+        if self.pending.next == self.pending.length {
+            if valid_array(&self.pending.bytes) {
+                assert_eq!(
+                    status(response),
+                    CTAP2_OK,
+                    "valid array failed integrity check"
+                );
+                self.committed.clone_from(&self.pending.bytes);
+            } else {
+                assert_eq!(
+                    status(response),
+                    CTAP2_ERR_INTEGRITY_FAILURE,
+                    "bad hash committed"
+                );
+                self.pending = PendingArray::default();
+            }
+        } else {
+            assert_eq!(
+                status(response),
+                CTAP2_OK,
+                "partial array checked for integrity"
+            );
+        }
+    }
+
     /// Check what a successful response says against what the platform
     /// knows, and learn from it.
     fn observe(&mut self, request: &[u8], response: &[u8]) {
+        self.observe_array(request, response);
         let Some(&code) = request.first() else {
             return;
         };
@@ -242,9 +571,14 @@ impl Platform {
         } else {
             self.assertion_rp.take()
         };
+        let assertion_large_blob_key = self.assertion_large_blob_key;
+        if code != CTAP_CMD_GET_NEXT_ASSERTION {
+            self.assertion_large_blob_key = false;
+        }
         if status(response) != CTAP2_OK {
             if code == CTAP_CMD_GET_NEXT_ASSERTION {
                 self.assertion_rp = None;
+                self.assertion_large_blob_key = false;
             }
             return;
         }
@@ -305,6 +639,22 @@ impl Platform {
                 let mut remaining = &auth_data[55 + length..];
                 let _: Value = ciborium::de::from_reader(&mut remaining).expect("public key");
                 let outputs = decode_map(remaining).unwrap_or_default();
+                assert!(
+                    get_text(&outputs, "largeBlobKey").is_none(),
+                    "largeBlobKey leaked into authenticator data"
+                );
+                let key_requested = extension_requested(&parameters, 6, "largeBlobKey");
+                valid_key_request(&parameters, 6);
+                assert!(
+                    !key_requested || discoverable,
+                    "largeBlobKey with rk=false accepted"
+                );
+                let key = response_key(&body, 5);
+                assert_eq!(
+                    key.is_some(),
+                    key_requested && discoverable,
+                    "largeBlobKey creation output"
+                );
                 let requested = matches!(
                     get_int(&parameters, 6),
                     Some(Value::Map(inputs))
@@ -325,6 +675,8 @@ impl Platform {
                     );
                 }
                 self.credentials.push(Credential {
+                    large_blob_key: key,
+                    discoverable,
                     cred_blob: match (get_int(&parameters, 6), auth_data.get(55 + length..)) {
                         (Some(Value::Map(inputs)), Some(mut rest)) => {
                             let _: Value =
@@ -379,6 +731,21 @@ impl Platform {
                     .known(id)
                     .expect("an assertion with a credential this engine does not have");
                 assert_eq!(credential.rp_id, rp_id, "an assertion for another RP");
+                let key_requested = if code == CTAP_CMD_GET_ASSERTION {
+                    valid_key_request(&parameters, 4);
+                    extension_requested(&parameters, 4, "largeBlobKey")
+                } else {
+                    assertion_large_blob_key
+                };
+                let key = response_key(&body, 7);
+                assert_eq!(
+                    key.as_ref(),
+                    key_requested
+                        .then_some(credential.large_blob_key.as_ref())
+                        .flatten(),
+                    "assertion largeBlobKey differs from the credential"
+                );
+                assert!(key.is_none() || credential.discoverable);
                 let Some(Value::Bytes(auth_data)) = get_int(&body, 2) else {
                     panic!("assertion without authData");
                 };
@@ -389,6 +756,7 @@ impl Platform {
                 );
                 if auth_data[32] & 0x80 != 0 {
                     let outputs = decode_map(&auth_data[37..]).expect("extensions");
+                    assert!(get_text(&outputs, "largeBlobKey").is_none());
                     if let Some(Value::Bytes(blob)) = get_text(&outputs, "credBlob") {
                         assert_eq!(
                             blob.as_slice(),
@@ -400,9 +768,11 @@ impl Platform {
                 if code == CTAP_CMD_GET_ASSERTION {
                     if get_int(&body, 5).is_some() {
                         self.assertion_rp = Some(rp_id);
+                        self.assertion_large_blob_key = key_requested;
                     }
                 } else {
                     self.assertion_rp = assertion_rp;
+                    self.assertion_large_blob_key = assertion_large_blob_key;
                 }
             }
             CTAP_CMD_CREDENTIAL_MANAGEMENT => match get_int(&parameters, 1) {
@@ -413,7 +783,15 @@ impl Platform {
                     let Some(Value::Bytes(id)) = get_text(descriptor, "id") else {
                         panic!("enumerated credential without id");
                     };
-                    assert!(self.known(id).is_some(), "enumerated an unknown credential");
+                    let credential = self.known(id).expect("enumerated an unknown credential");
+                    assert!(
+                        credential.discoverable,
+                        "enumerated a non-discoverable credential"
+                    );
+                    assert_eq!(
+                        response_key(&body, 11).as_ref(),
+                        credential.large_blob_key.as_ref()
+                    );
                 }
                 Some(v) if *v == int(6) => {
                     let id = match get_int(&parameters, 2) {
@@ -438,6 +816,8 @@ impl Platform {
                 self.always_uv = false;
                 self.force_change = false;
                 self.min_pin_length_rp_ids.clear();
+                self.committed = INITIAL_LARGE_BLOB_ARRAY.to_vec();
+                self.pending = PendingArray::default();
             }
             CTAP_CMD_AUTHENTICATOR_CONFIG => match get_int(&parameters, 1) {
                 Some(subcommand) if *subcommand == int(2) => {
@@ -517,6 +897,11 @@ impl Platform {
                 assert_eq!(
                     get_text(options, "makeCredUvNotRqd"),
                     Some(&Value::Bool(!self.always_uv))
+                );
+                assert_eq!(get_text(options, "largeBlobs"), Some(&Value::Bool(true)));
+                assert_eq!(
+                    get_int(&body, 0x0B),
+                    Some(&int(MAX_SERIALIZED_LARGE_BLOB_ARRAY as i64))
                 );
             }
             _ => {}
@@ -767,10 +1152,18 @@ impl Platform {
                     let token = session.decrypt(encrypted).expect("the token decrypts");
                     let token: [u8; 32] = token.try_into().expect("a 32-byte pinUvAuthToken");
                     self.token = Some((protocol, token));
+                    self.token_issued_at = self.engine.clock().now();
+                    self.token_id = self.token_id.wrapping_add(1);
+                    self.token_permissions = if legacy {
+                        0x03
+                    } else {
+                        permission_set(permissions)
+                    };
                 }
             }
             Op::MakeCredential {
                 cred_blob,
+                large_blob_key,
                 min_pin_length,
                 auth,
                 rp,
@@ -801,6 +1194,7 @@ impl Platform {
                         hmac_secret_mc,
                         cred_blob,
                         min_pin_length: min_pin_length.then_some(Value::Bool(true)),
+                        large_blob_key: large_blob_key.map(Value::Bool),
                         options: rk.then(|| Value::Map(vec![(text("rk"), Value::Bool(true))])),
                         no_allow_list: false,
                         credential_parameters: alg.map(|alg| {
@@ -834,6 +1228,7 @@ impl Platform {
             }
             Op::GetAssertion {
                 cred_blob,
+                large_blob_key,
                 auth,
                 rp,
                 hmac_secret,
@@ -856,6 +1251,7 @@ impl Platform {
                         hmac_secret_mc: None,
                         cred_blob: cred_blob.then_some(Value::Bool(true)),
                         min_pin_length: None,
+                        large_blob_key: large_blob_key.map(Value::Bool),
                         options: Some(Value::Map(vec![(text("up"), Value::Bool(up))])),
                         no_allow_list: discoverable,
                         credential_parameters: None,
@@ -1006,8 +1402,195 @@ impl Platform {
                 let request: Vec<u8> = u.arbitrary()?;
                 self.call(&request);
             }
+            Op::LargeBlobBegin {
+                auth,
+                length,
+                fragment,
+                valid_hash,
+                fill,
+            } => {
+                self.proposed = proposed_array(array_length(length), fill, valid_hash);
+                let end = fragment_length(fragment).min(self.proposed.len());
+                let fragment = self.proposed[..end].to_vec();
+                self.write_fragment(auth, 0, Some(self.proposed.len() as u64), &fragment);
+            }
+            Op::LargeBlobContinue {
+                auth,
+                offset,
+                length,
+                fragment,
+            } => {
+                let offset = offset.map_or(self.pending.next, u64::from);
+                let start = usize::try_from(offset)
+                    .unwrap_or(usize::MAX)
+                    .min(self.proposed.len());
+                let end = start
+                    .saturating_add(fragment_length(fragment))
+                    .min(self.proposed.len());
+                let fragment = self.proposed[start..end].to_vec();
+                self.write_fragment(auth, offset, length.map(u64::from), &fragment);
+            }
+            Op::LargeBlobWrite {
+                auth,
+                length,
+                fragment,
+                valid_hash,
+            } => {
+                let array = proposed_array(array_length(length), u.arbitrary()?, valid_hash);
+                let chunk = fragment_length(fragment)
+                    .max(array.len().div_ceil(12))
+                    .max(1);
+                for (index, fragment) in array.chunks(chunk).enumerate() {
+                    let offset = (index * chunk) as u64;
+                    let response = self.write_fragment(
+                        auth,
+                        offset,
+                        (index == 0).then_some(array.len() as u64),
+                        fragment,
+                    );
+                    if status(&response) != CTAP2_OK {
+                        break;
+                    }
+                }
+            }
+            Op::LargeBlobGet {
+                offset,
+                length,
+                extra,
+            } => {
+                let mut entries = vec![
+                    (int(1), int(fragment_length(length) as i64)),
+                    (int(3), int(i64::from(offset))),
+                ];
+                if extra == 1 {
+                    entries.push((int(4), int(17)));
+                } else if extra == 2 {
+                    entries.push((int(5), bytes(&[])));
+                } else if extra == 3 {
+                    entries.push((int(6), int(1)));
+                }
+                self.call(&command(CTAP_CMD_LARGE_BLOBS, &Value::Map(entries)));
+            }
+            Op::Advance(choice) => {
+                const TIMES: [u64; 11] = [
+                    0, 1, 9_999, 10_000, 20_000, 29_999, 30_000, 30_001, 580_000, 590_000, 600_000,
+                ];
+                let millis = if choice < 0xC000 {
+                    TIMES[usize::from(choice) % TIMES.len()]
+                } else {
+                    u64::from(choice) * 10
+                };
+                self.engine.clock().advance(millis);
+            }
+            Op::CreateCredential {
+                large_blob_key,
+                rk,
+                user,
+            } => {
+                let mut entries = vec![
+                    (int(1), bytes(&[0x55; 32])),
+                    (int(2), Value::Map(vec![(text("id"), text("example.com"))])),
+                    (int(3), Value::Map(vec![(text("id"), bytes(&[user]))])),
+                    (
+                        int(4),
+                        Value::Array(vec![Value::Map(vec![
+                            (text("alg"), int(-7)),
+                            (text("type"), text("public-key")),
+                        ])]),
+                    ),
+                    (int(7), Value::Map(vec![(text("rk"), Value::Bool(rk))])),
+                ];
+                if let Some(requested) = large_blob_key {
+                    entries.push((
+                        int(6),
+                        Value::Map(vec![(text("largeBlobKey"), Value::Bool(requested))]),
+                    ));
+                }
+                self.call(&command(CTAP_CMD_MAKE_CREDENTIAL, &Value::Map(entries)));
+            }
+            Op::AssertCredentials {
+                large_blob_key,
+                discoverable,
+            } => {
+                let mut entries = vec![
+                    (int(1), text("example.com")),
+                    (int(2), bytes(&[0x55; 32])),
+                    (int(5), Value::Map(vec![(text("up"), Value::Bool(false))])),
+                ];
+                if !discoverable {
+                    entries.push((
+                        int(3),
+                        Value::Array(
+                            self.known_ids()
+                                .iter()
+                                .map(|id| {
+                                    Value::Map(vec![
+                                        (text("id"), bytes(id)),
+                                        (text("type"), text("public-key")),
+                                    ])
+                                })
+                                .collect(),
+                        ),
+                    ));
+                }
+                if let Some(requested) = large_blob_key {
+                    entries.push((
+                        int(4),
+                        Value::Map(vec![(text("largeBlobKey"), Value::Bool(requested))]),
+                    ));
+                }
+                self.call(&command(CTAP_CMD_GET_ASSERTION, &Value::Map(entries)));
+            }
+            Op::EnumerateCredentials { auth, next } => {
+                let subcommand = if next { 5 } else { 4 };
+                let params = Value::Map(vec![(int(1), bytes(&Sha256::digest(b"example.com")))]);
+                let mut message = vec![subcommand];
+                if !next {
+                    message.extend(cbor::encode(&params));
+                }
+                let (param, protocol) = self.pin_uv_auth(auth, &message);
+                let mut entries = vec![(int(1), int(i64::from(subcommand)))];
+                if !next {
+                    entries.push((int(2), params));
+                }
+                if let Some(Some(param)) = param {
+                    entries.push((int(4), param));
+                }
+                if let Some(Some(protocol)) = protocol {
+                    entries.push((int(3), protocol));
+                }
+                self.call(&command(
+                    CTAP_CMD_CREDENTIAL_MANAGEMENT,
+                    &Value::Map(entries),
+                ));
+            }
         }
         Ok(())
+    }
+
+    fn write_fragment(
+        &mut self,
+        auth: Auth,
+        offset: u64,
+        length: Option<u64>,
+        fragment: &[u8],
+    ) -> Vec<u8> {
+        let mut message = vec![0xff; 32];
+        message.extend_from_slice(&[CTAP_CMD_LARGE_BLOBS, 0]);
+        message.extend_from_slice(&(offset as u32).to_le_bytes());
+        message.extend_from_slice(&Sha256::digest(fragment));
+        let (param, protocol) = self.pin_uv_auth(auth, &message);
+        let mut entries = vec![(int(2), bytes(fragment)), (int(3), int(offset as i64))];
+        if let Some(length) = length {
+            entries.push((int(4), int(length as i64)));
+        }
+        if let Some(Some(param)) = param {
+            entries.push((int(5), param));
+        }
+        if let Some(Some(protocol)) = protocol {
+            entries.push((int(6), protocol));
+        }
+        self.call(&command(CTAP_CMD_LARGE_BLOBS, &Value::Map(entries)))
     }
 }
 
@@ -1035,9 +1618,422 @@ pub fn run_traced(data: &[u8]) -> Vec<(u8, u8)> {
     platform.engine.into_trace()
 }
 
+/// Deterministic successful and interrupted transfers supplement the random
+/// search corpus. Each uses the target's normal operation encoding.
+pub fn seed_corpus() -> Vec<Vec<u8>> {
+    let get = || Op::LargeBlobGet {
+        offset: 0,
+        length: 5,
+        extra: 0,
+    };
+    let begin = |auth, valid_hash| Op::LargeBlobBegin {
+        auth,
+        length: 6,
+        fragment: 5,
+        valid_hash,
+        fill: 0xA6,
+    };
+    let continuation = |auth| Op::LargeBlobContinue {
+        auth,
+        offset: Some(1_704),
+        length: None,
+        fragment: 5,
+    };
+    let enroll = |v2| Op::Enroll {
+        v2,
+        permissions: 8,
+        rp: None,
+    };
+    let mut cases = vec![
+        vec![
+            Op::LargeBlobWrite {
+                auth: Auth::None,
+                length: 2,
+                fragment: 5,
+                valid_hash: true,
+            },
+            get(),
+        ],
+        vec![
+            Op::LargeBlobWrite {
+                auth: Auth::None,
+                length: 5,
+                fragment: 5,
+                valid_hash: true,
+            },
+            get(),
+        ],
+        vec![
+            Op::LargeBlobWrite {
+                auth: Auth::None,
+                length: 6,
+                fragment: 5,
+                valid_hash: true,
+            },
+            get(),
+        ],
+        vec![
+            Op::LargeBlobWrite {
+                auth: Auth::None,
+                length: 8,
+                fragment: 5,
+                valid_hash: true,
+            },
+            get(),
+        ],
+        vec![begin(Auth::None, false), continuation(Auth::None), get()],
+        vec![
+            begin(Auth::None, true),
+            Op::GetInfo,
+            continuation(Auth::None),
+            get(),
+        ],
+        vec![
+            begin(Auth::None, true),
+            get(),
+            continuation(Auth::None),
+            get(),
+        ],
+        vec![
+            begin(Auth::None, true),
+            Op::Advance(6),
+            continuation(Auth::None),
+            get(),
+        ],
+    ];
+    for v2 in [false, true] {
+        cases.push(vec![
+            enroll(v2),
+            begin(Auth::Token, true),
+            continuation(Auth::Wrong),
+            continuation(Auth::Token),
+            get(),
+        ]);
+        cases.push(vec![
+            enroll(v2),
+            begin(Auth::Token, true),
+            enroll(v2),
+            continuation(Auth::Token),
+            get(),
+        ]);
+        cases.push(vec![
+            enroll(v2),
+            Op::LargeBlobWrite {
+                auth: Auth::Token,
+                length: 2,
+                fragment: 5,
+                valid_hash: true,
+            },
+            Op::Advance(9),
+            begin(Auth::Token, true),
+            Op::Advance(4),
+            continuation(Auth::Token),
+            get(),
+        ]);
+        cases.push(vec![
+            enroll(v2),
+            Op::CreateCredential {
+                large_blob_key: None,
+                rk: false,
+                user: 9,
+            },
+            Op::LargeBlobWrite {
+                auth: Auth::Token,
+                length: 6,
+                fragment: 5,
+                valid_hash: true,
+            },
+            get(),
+        ]);
+        cases.push(vec![
+            Op::CreateCredential {
+                large_blob_key: Some(true),
+                rk: true,
+                user: 1,
+            },
+            Op::CreateCredential {
+                large_blob_key: None,
+                rk: true,
+                user: 2,
+            },
+            Op::CreateCredential {
+                large_blob_key: Some(true),
+                rk: true,
+                user: 3,
+            },
+            Op::CreateCredential {
+                large_blob_key: None,
+                rk: false,
+                user: 4,
+            },
+            Op::CreateCredential {
+                large_blob_key: Some(true),
+                rk: false,
+                user: 5,
+            },
+            Op::CreateCredential {
+                large_blob_key: Some(false),
+                rk: true,
+                user: 6,
+            },
+            Op::AssertCredentials {
+                large_blob_key: Some(true),
+                discoverable: true,
+            },
+            Op::GetNextAssertion,
+            Op::GetNextAssertion,
+            Op::AssertCredentials {
+                large_blob_key: None,
+                discoverable: true,
+            },
+            Op::GetNextAssertion,
+            Op::AssertCredentials {
+                large_blob_key: Some(false),
+                discoverable: true,
+            },
+            Op::AssertCredentials {
+                large_blob_key: Some(true),
+                discoverable: false,
+            },
+            Op::Enroll {
+                v2,
+                permissions: 10,
+                rp: None,
+            },
+            Op::EnumerateCredentials {
+                auth: Auth::Token,
+                next: false,
+            },
+            Op::EnumerateCredentials {
+                auth: Auth::None,
+                next: true,
+            },
+            Op::EnumerateCredentials {
+                auth: Auth::None,
+                next: true,
+            },
+            Op::Reset,
+            get(),
+        ]);
+    }
+    cases.iter().map(|ops| encode_fixture(ops)).collect()
+}
+
+fn encode_fixture(ops: &[Op]) -> Vec<u8> {
+    fn variant(output: &mut Vec<u8>, index: u32, count: u32) {
+        let value = ((u64::from(index) << 32).div_ceil(u64::from(count))) as u32;
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    fn auth(output: &mut Vec<u8>, value: Auth) {
+        variant(
+            output,
+            match value {
+                Auth::None => 0,
+                Auth::Token => 1,
+                Auth::Wrong => 2,
+                Auth::Empty => 3,
+            },
+            4,
+        );
+    }
+    fn option_bool(output: &mut Vec<u8>, value: Option<bool>) {
+        output.push(u8::from(value.is_some()));
+        if let Some(value) = value {
+            output.push(u8::from(value));
+        }
+    }
+    fn option_u16(output: &mut Vec<u8>, value: Option<u16>) {
+        output.push(u8::from(value.is_some()));
+        if let Some(value) = value {
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    let mut output = 0x5EED_u64.to_le_bytes().to_vec();
+    output.push(7);
+    let mut auxiliary = Vec::new();
+    let mut pin_set = false;
+    for op in ops {
+        let start = output.len();
+        let mut extra = 0;
+        match op {
+            Op::Enroll {
+                v2,
+                permissions,
+                rp: None,
+            } => {
+                variant(&mut output, 6, 23);
+                output.extend_from_slice(&[u8::from(*v2), *permissions, 0]);
+                extra = if pin_set { 17 } else { 34 };
+                pin_set = true;
+            }
+            Op::GetNextAssertion => variant(&mut output, 5, 23),
+            Op::GetInfo => variant(&mut output, 9, 23),
+            Op::Reset => {
+                variant(&mut output, 11, 23);
+                pin_set = false;
+            }
+            Op::LargeBlobBegin {
+                auth: value,
+                length,
+                fragment,
+                valid_hash,
+                fill,
+            } => {
+                variant(&mut output, 15, 23);
+                auth(&mut output, *value);
+                output.extend_from_slice(&length.to_le_bytes());
+                output.extend_from_slice(&fragment.to_le_bytes());
+                output.extend_from_slice(&[u8::from(*valid_hash), *fill]);
+            }
+            Op::LargeBlobContinue {
+                auth: value,
+                offset,
+                length,
+                fragment,
+            } => {
+                variant(&mut output, 16, 23);
+                auth(&mut output, *value);
+                option_u16(&mut output, *offset);
+                option_u16(&mut output, *length);
+                output.extend_from_slice(&fragment.to_le_bytes());
+            }
+            Op::LargeBlobGet {
+                offset,
+                length,
+                extra,
+            } => {
+                variant(&mut output, 17, 23);
+                output.extend_from_slice(&offset.to_le_bytes());
+                output.extend_from_slice(&length.to_le_bytes());
+                output.push(*extra);
+            }
+            Op::Advance(millis) => {
+                variant(&mut output, 18, 23);
+                output.extend_from_slice(&millis.to_le_bytes());
+            }
+            Op::LargeBlobWrite {
+                auth: value,
+                length,
+                fragment,
+                valid_hash,
+            } => {
+                variant(&mut output, 19, 23);
+                auth(&mut output, *value);
+                output.extend_from_slice(&length.to_le_bytes());
+                output.extend_from_slice(&fragment.to_le_bytes());
+                output.push(u8::from(*valid_hash));
+                extra = 1;
+            }
+            Op::CreateCredential {
+                large_blob_key,
+                rk,
+                user,
+            } => {
+                variant(&mut output, 20, 23);
+                option_bool(&mut output, *large_blob_key);
+                output.extend_from_slice(&[u8::from(*rk), *user]);
+            }
+            Op::AssertCredentials {
+                large_blob_key,
+                discoverable,
+            } => {
+                variant(&mut output, 21, 23);
+                option_bool(&mut output, *large_blob_key);
+                output.push(u8::from(*discoverable));
+            }
+            Op::EnumerateCredentials { auth: value, next } => {
+                variant(&mut output, 22, 23);
+                auth(&mut output, *value);
+                output.push(u8::from(*next));
+            }
+            _ => panic!("operation has no fixture encoder"),
+        }
+        let mut input = Unstructured::new(&output[start..]);
+        let decoded = input.arbitrary::<Op>().expect("fixture operation");
+        assert_eq!(
+            format!("{decoded:?}"),
+            format!("{op:?}"),
+            "fixture round trip"
+        );
+        assert!(input.is_empty());
+        output.extend(std::iter::repeat_n(0x11, extra));
+        auxiliary.push(extra);
+    }
+    let mut input = Unstructured::new(&output);
+    let (seed, capacity) = input.arbitrary::<(u64, u8)>().expect("fixture engine");
+    assert_eq!((seed, capacity), (0x5EED, 7));
+    let mut platform = Platform::new(Engine::with_store(
+        seed,
+        MemoryStore::new().with_max_credentials(8),
+    ));
+    for (op, extra) in ops.iter().zip(auxiliary) {
+        let decoded = input.arbitrary::<Op>().expect("fixture operation");
+        assert_eq!(format!("{decoded:?}"), format!("{op:?}"));
+        let before = input.len();
+        platform
+            .step(decoded, &mut input)
+            .expect("fixture parameters");
+        assert_eq!(before - input.len(), extra, "fixture auxiliary encoding");
+    }
+    assert!(input.is_empty());
+    assert_eq!(run_traced(&output), platform.engine.into_trace());
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeds_exercise_commits_abandoned_writes_and_stable_keys() {
+        let seeds = seed_corpus();
+        assert_eq!(seeds.len(), 18);
+        let traces: Vec<_> = seeds.iter().map(|seed| run_traced(seed)).collect();
+        let large_blob_ok = |trace: &Vec<(u8, u8)>| {
+            trace
+                .iter()
+                .filter(|pair| **pair == (CTAP_CMD_LARGE_BLOBS, CTAP2_OK))
+                .count()
+        };
+        assert_eq!(large_blob_ok(&traces[0]), 2, "single fragment");
+        assert_eq!(large_blob_ok(&traces[1]), 2, "exact fragment boundary");
+        assert_eq!(large_blob_ok(&traces[2]), 3, "multiple fragments");
+        assert_eq!(large_blob_ok(&traces[3]), 11, "capacity write");
+        assert!(traces[4].contains(&(CTAP_CMD_LARGE_BLOBS, CTAP2_ERR_INTEGRITY_FAILURE)));
+        for trace in &traces[5..8] {
+            assert!(trace.contains(&(CTAP_CMD_LARGE_BLOBS, CTAP1_ERR_INVALID_SEQ)));
+        }
+        for base in [8, 13] {
+            assert!(traces[base].contains(&(CTAP_CMD_LARGE_BLOBS, CTAP2_ERR_PIN_AUTH_INVALID)));
+            assert_eq!(large_blob_ok(&traces[base]), 3, "retry authenticates");
+            for trace in &traces[base + 1..base + 3] {
+                assert!(trace.contains(&(CTAP_CMD_LARGE_BLOBS, CTAP1_ERR_INVALID_SEQ)));
+            }
+            assert_eq!(large_blob_ok(&traces[base + 3]), 3, "lbw survives presence");
+            let key_trace = &traces[base + 4];
+            assert_eq!(
+                key_trace
+                    .iter()
+                    .filter(|pair| **pair == (CTAP_CMD_MAKE_CREDENTIAL, CTAP2_OK))
+                    .count(),
+                4
+            );
+            assert_eq!(
+                key_trace
+                    .iter()
+                    .filter(|pair| **pair == (CTAP_CMD_MAKE_CREDENTIAL, CTAP2_ERR_INVALID_OPTION))
+                    .count(),
+                2
+            );
+            assert_eq!(
+                key_trace
+                    .iter()
+                    .filter(|pair| **pair == (CTAP_CMD_CREDENTIAL_MANAGEMENT, CTAP2_OK))
+                    .count(),
+                3
+            );
+        }
+    }
 
     /// The platform side of the harness is right: it sets a PIN, gets a
     /// token with the credential management permission and authenticates

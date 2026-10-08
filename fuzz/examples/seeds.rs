@@ -13,7 +13,9 @@
 //! * `ctap_request_structured` and `ctap_sequence`: inputs picked from a
 //!   deterministic random search, each kept because it reached a command and
 //!   status no earlier one did (for the sequence target: PIN set, tokens,
-//!   credentials made, asserted and managed).
+//!   credentials made, asserted and managed). The sequence corpus also
+//!   contains explicit large-blob commits, abandoned writes, expiration and
+//!   stable credential keys under both PIN/UV auth protocols.
 //! * `credential_key`: valid and invalid key material for every algorithm.
 
 use std::collections::BTreeSet;
@@ -50,6 +52,14 @@ fn main() {
         24,
         sequence::run_traced,
     );
+    let sequence_dir = root.join("ctap_sequence");
+    let explicit = sequence::seed_corpus();
+    write_more(&sequence_dir, &explicit);
+    println!(
+        "{}: {} explicit sequences",
+        sequence_dir.display(),
+        explicit.len()
+    );
     credential_key(&root.join("credential_key"));
 }
 
@@ -60,6 +70,11 @@ fn write_all(dir: &Path, seeds: &[Vec<u8>]) {
         fs::remove_dir_all(dir).expect("remove old seeds");
     }
     fs::create_dir_all(dir).expect("create the seed directory");
+    write_more(dir, seeds);
+    println!("{}: {} seeds", dir.display(), seeds.len());
+}
+
+fn write_more(dir: &Path, seeds: &[Vec<u8>]) {
     for seed in seeds {
         let name: String = Sha256::digest(seed)[..10]
             .iter()
@@ -67,7 +82,6 @@ fn write_all(dir: &Path, seeds: &[Vec<u8>]) {
             .collect();
         fs::write(dir.join(name), seed).expect("write a seed");
     }
-    println!("{}: {} seeds", dir.display(), seeds.len());
 }
 
 fn map(entries: Vec<(Value, Value)>) -> Value {
@@ -121,7 +135,76 @@ fn ctap_request(dir: &Path) {
         vec![0x04, 0xA0],
         vec![0x0D],
         vec![0x0D, 0xA0],
+        vec![0x0C],
+        vec![0x0C, 0xA0],
     ];
+    for get in [0, 1, 17, 1_704, 1_705] {
+        for offset in [0, 17, 18, i64::from(u32::MAX)] {
+            seeds.push(command(
+                0x0C,
+                &map(vec![(int(1), int(get)), (int(3), int(offset))]),
+            ));
+        }
+    }
+    for length in [0, 16, 17, 1_704, 16_384, 16_385] {
+        for fragment in [0, 17, 1_704, 1_705] {
+            let mut array = vec![0x55; fragment];
+            if fragment >= 17 {
+                let hash = Sha256::digest(&array[..fragment - 16]);
+                array[fragment - 16..].copy_from_slice(&hash[..16]);
+            }
+            seeds.push(command(
+                0x0C,
+                &map(vec![
+                    (int(2), bytes(&array)),
+                    (int(3), int(0)),
+                    (int(4), int(length)),
+                ]),
+            ));
+        }
+    }
+    for key in 1..=6 {
+        for input in [
+            Value::Null,
+            Value::Bool(false),
+            text("wrong type"),
+            bytes(&[]),
+            int(-1),
+            Value::Integer(u64::MAX.into()),
+        ] {
+            seeds.push(command(
+                0x0C,
+                &map(vec![
+                    (int(2), bytes(&[0x80])),
+                    (int(3), int(0)),
+                    (int(4), int(17)),
+                    (int(key), input),
+                ]),
+            ));
+        }
+    }
+    for extra in [(int(4), int(17)), (int(5), bytes(&[])), (int(6), int(1))] {
+        seeds.push(command(
+            0x0C,
+            &map(vec![(int(1), int(17)), (int(3), int(0)), extra]),
+        ));
+    }
+    seeds.push(command(
+        0x0C,
+        &map(vec![
+            (int(1), int(1)),
+            (int(2), bytes(&[])),
+            (int(3), int(0)),
+        ]),
+    ));
+    seeds.push(command(
+        0x0C,
+        &map(vec![
+            (int(2), bytes(&[])),
+            (int(3), int(1_704)),
+            (int(4), int(17)),
+        ]),
+    ));
     for subcommand in [0, 1, 2, 3, 4, 255] {
         seeds.push(command(0x0D, &map(vec![(int(1), int(subcommand))])));
     }
@@ -267,6 +350,35 @@ fn ctap_request(dir: &Path) {
                 (int(3), user.clone()),
                 (int(4), params(-7)),
                 (int(6), map(vec![(text("credBlob"), input)])),
+            ]),
+        ));
+    }
+    for input in [
+        Value::Bool(true),
+        Value::Bool(false),
+        Value::Null,
+        int(1),
+        bytes(&[1]),
+    ] {
+        for rk in [false, true] {
+            seeds.push(command(
+                0x01,
+                &map(vec![
+                    (int(1), bytes(&hash)),
+                    (int(2), rp.clone()),
+                    (int(3), user.clone()),
+                    (int(4), params(-7)),
+                    (int(6), map(vec![(text("largeBlobKey"), input.clone())])),
+                    (int(7), map(vec![(text("rk"), Value::Bool(rk))])),
+                ]),
+            ));
+        }
+        seeds.push(command(
+            0x02,
+            &map(vec![
+                (int(1), text("example.com")),
+                (int(2), bytes(&hash)),
+                (int(4), map(vec![(text("largeBlobKey"), input)])),
             ]),
         ));
     }
@@ -764,7 +876,7 @@ fn ctaphid_packets(dir: &Path) {
     write_all(dir, &seeds);
 }
 
-const IMPLEMENTED: &[u8] = &[0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x0D];
+const IMPLEMENTED: &[u8] = &[0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x0C, 0x0D];
 
 /// Keep inputs from a deterministic random search that reach a command and
 /// status pair no earlier input reached, at most `max` of them.

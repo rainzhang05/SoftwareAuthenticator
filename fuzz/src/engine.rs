@@ -3,13 +3,14 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicU8, AtomicU64, Ordering},
 };
+use std::time::Duration;
 
 use ciborium::value::Value;
 use pqkey_ctap::ctap::constants::*;
 use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest, UserPresence};
-use pqkey_ctap::ctap::{CtapApp, InterruptFlag};
+use pqkey_ctap::ctap::{Clock, CtapApp, InterruptFlag};
 use pqkey_ctap::store::MemoryStore;
 
 use crate::rng::SplitMix;
@@ -35,6 +36,7 @@ pub const STATUS_CODES: &[u8] = &[
     CTAP2_ERR_INVALID_CBOR,
     CTAP2_ERR_MISSING_PARAMETER,
     CTAP2_ERR_LIMIT_EXCEEDED,
+    CTAP2_ERR_LARGE_BLOB_STORAGE_FULL,
     CTAP2_ERR_CREDENTIAL_EXCLUDED,
     CTAP2_ERR_PROCESSING,
     CTAP2_ERR_INVALID_CREDENTIAL,
@@ -60,6 +62,7 @@ pub const STATUS_CODES: &[u8] = &[
     CTAP2_ERR_UP_REQUIRED,
     CTAP2_ERR_INVALID_SUBCOMMAND,
     CTAP2_ERR_UNAUTHORIZED_PERMISSION,
+    CTAP2_ERR_INTEGRITY_FAILURE,
     CTAP1_ERR_OTHER,
 ];
 
@@ -73,6 +76,34 @@ impl FuzzPresence {
     /// approval unless it is one of the last three byte values.
     pub fn select(&self, selector: u8) {
         self.0.store(selector, Ordering::Relaxed);
+    }
+}
+
+/// A deterministic clock shared by the engine and the platform model.
+#[derive(Clone, Default)]
+pub struct FuzzClock(Arc<AtomicU64>);
+
+impl FuzzClock {
+    /// Move time forward without making a CTAP request.
+    pub fn advance(&self, millis: u64) {
+        let mut now = self.0.load(Ordering::Relaxed);
+        loop {
+            match self.0.compare_exchange_weak(
+                now,
+                now.saturating_add(millis),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => now = observed,
+            }
+        }
+    }
+}
+
+impl Clock for FuzzClock {
+    fn now(&self) -> Duration {
+        Duration::from_millis(self.0.load(Ordering::Relaxed))
     }
 }
 
@@ -95,6 +126,7 @@ impl UserPresence for FuzzPresence {
 pub struct Engine {
     app: CtapApp<'static>,
     presence: FuzzPresence,
+    clock: FuzzClock,
     /// The command byte and response status of every request so far.
     pub(crate) trace: Vec<(u8, u8)>,
 }
@@ -114,6 +146,8 @@ impl Engine {
             &NEVER_INTERRUPTED,
             [0xA5; 16],
         );
+        let clock = FuzzClock::default();
+        app.set_clock(clock.clone());
         // Repeated registrations exercise storage and signatures with the
         // fixed RSA key, without generating expensive primes in a fuzz loop.
         app.set_key_generator(|alg| match alg.key_kind() {
@@ -129,12 +163,17 @@ impl Engine {
         Self {
             app,
             presence,
+            clock,
             trace: Vec::new(),
         }
     }
 
     pub fn presence(&self) -> &FuzzPresence {
         &self.presence
+    }
+
+    pub fn clock(&self) -> &FuzzClock {
+        &self.clock
     }
 
     /// The command byte and response status of every request so far.
