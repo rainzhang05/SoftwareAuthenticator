@@ -133,6 +133,7 @@ fn the_largest_make_credential_response_fits() {
         (text("credBlob"), Value::Bytes(vec![0x73; 32])),
         (text("credProtect"), int(1)),
         (text("hmac-secret"), Value::Bool(true)),
+        (text("largeBlobKey"), Value::Bool(true)),
         (
             text("hmac-secret-mc"),
             super::hmac_secret_mc::hmac_input(&session, &[0x55; 64], ClassicPinProtocol::V2),
@@ -151,6 +152,7 @@ fn the_largest_make_credential_response_fits() {
     );
     assert_eq!(member(&response, 1), text("packed"));
     assert!(att_stmt_keys(&response).contains(&text("sig")));
+    assert!(matches!(member(&response, 5), Value::Bytes(key) if key.len() == 32));
     assert!(
         response.len() <= MAX_RESPONSE_SIZE,
         "{} bytes",
@@ -189,7 +191,7 @@ fn attestation_that_would_not_fit_gives_way() {
 /// The largest getAssertion response: an ML-DSA-87 signature, user
 /// verification (so the user's name and display name are returned), two
 /// hmac-secret salts under PIN/UV auth protocol two, a 32-byte credBlob,
-/// and numberOfCredentials.
+/// a largeBlobKey and numberOfCredentials.
 #[test]
 fn the_largest_get_assertion_response_fits() {
     let mut app: TestApp = test_app([0x84; 16]);
@@ -210,6 +212,15 @@ fn the_largest_get_assertion_response_fits() {
                 user_id,
                 vec![
                     (int(7), canonical_map(vec![(text("rk"), Value::Bool(true))])),
+                    (
+                        int(6),
+                        canonical_map(vec![
+                            (text("hmac-secret"), Value::Bool(true)),
+                            (text("credProtect"), int(1)),
+                            (text("credBlob"), Value::Bytes(vec![0x73; 32])),
+                            (text("largeBlobKey"), Value::Bool(true)),
+                        ]),
+                    ),
                     (int(8), Value::Bytes(param)),
                     (int(9), int(2)),
                 ],
@@ -236,6 +247,7 @@ fn the_largest_get_assertion_response_fits() {
             int(4),
             canonical_map(vec![
                 (text("credBlob"), Value::Bool(true)),
+                (text("largeBlobKey"), Value::Bool(true)),
                 (
                     text("hmac-secret"),
                     canonical_map(vec![
@@ -261,6 +273,7 @@ fn the_largest_get_assertion_response_fits() {
     payload.extend(encode(&request));
     let response = call(&mut app, &payload);
     assert_eq!(member(&response, 5), int(2), "numberOfCredentials");
+    assert!(matches!(member(&response, 7), Value::Bytes(key) if key.len() == 32));
     let Value::Map(user) = member(&response, 4) else {
         panic!("user must be a map");
     };
@@ -273,5 +286,6 @@ fn the_largest_get_assertion_response_fits() {
 
     let next = call(&mut app, &[CTAP_CMD_GET_NEXT_ASSERTION]);
     assert_eq!(next[0], CTAP2_OK);
+    assert!(matches!(member(&next, 7), Value::Bytes(key) if key.len() == 32));
     assert!(next.len() <= MAX_RESPONSE_SIZE);
 }

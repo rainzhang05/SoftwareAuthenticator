@@ -10,14 +10,27 @@ use std::{
     sync::atomic::{AtomicPtr, Ordering},
 };
 
+use ciborium::{
+    de::from_reader,
+    ser::into_writer,
+    value::{Integer, Value},
+};
 use p256::elliptic_curve::subtle::ConstantTimeEq;
 use pqkey::allocator::WipingAllocator;
 use pqkey_ctap::{
-    CoseAlg, rsa_fixture,
+    ClassicPinProtocol, CoseAlg,
+    ctap::{AttestationMode, CtapApp, InterruptFlag, constants::*, presence::AutoApprove},
+    platform::{PlatformKeyAgreement, authenticate, pin_hash},
+    rsa_fixture,
     rsa_fixture::PrivateValue,
-    store::{CredentialRecord, CredentialStore, FileStore, PrivateKeyMaterial},
+    store::{
+        AttestationRecord, CredentialRecord, CredentialStore, FileStore, MemoryStore,
+        PinStateRecord, PrivateKeyMaterial,
+    },
     try_credential_secret_from_bytes, try_sign_challenge, verify_signature,
 };
+use rand_core::{Infallible, TryCryptoRng, TryRng};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 struct Block {
@@ -182,6 +195,11 @@ fn exercise(alg: CoseAlg, material: PrivateKeyMaterial) {
         name: "credential blob",
         bytes: Zeroizing::new(blob.clone()),
     });
+    let large_blob_key = core::array::from_fn(|index| 0xa0 + index as u8);
+    needles.push(PrivateValue {
+        name: "large-blob key",
+        bytes: Zeroizing::new(large_blob_key.to_vec()),
+    });
     {
         let dir = TempDir::new();
         let record = CredentialRecord {
@@ -195,7 +213,7 @@ fn exercise(alg: CoseAlg, material: PrivateKeyMaterial) {
             cred_random_with_uv: [0x33; 32],
             cred_random_without_uv: [0x44; 32],
             cred_blob: Some(blob),
-            large_blob_key: None,
+            large_blob_key: Some(large_blob_key),
             cred_protect: 1,
             sign_count: 0,
             created_at: 0,
@@ -223,6 +241,214 @@ fn exercise(alg: CoseAlg, material: PrivateKeyMaterial) {
     scan_freed(alg.name(), &needles);
 }
 
+/// Every random array is recognizable to the scan, including the key made
+/// by largeBlobKey. Private signing keys still use the operating system RNG.
+struct CanaryRng;
+
+impl TryRng for CanaryRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        Ok(u32::from_le_bytes([0xb3; 4]))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        Ok(u64::from_le_bytes([0xb3; 8]))
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Infallible> {
+        dest.fill(0xb3);
+        Ok(())
+    }
+}
+
+impl TryCryptoRng for CanaryRng {}
+
+fn int(value: i64) -> Value {
+    Value::Integer(Integer::from(value))
+}
+
+fn text(value: &str) -> Value {
+    Value::Text(value.into())
+}
+
+fn member(value: &Value, key: i64) -> &Value {
+    &value
+        .as_map()
+        .unwrap()
+        .iter()
+        .find(|(existing, _)| *existing == int(key))
+        .unwrap()
+        .1
+}
+
+fn engine_request(app: &mut CtapApp<'_>, command: u8, entries: Vec<(Value, Value)>) -> Value {
+    let mut request = vec![command];
+    into_writer(&Value::Map(entries), &mut request).unwrap();
+    let response = app.call(&request);
+    assert_eq!(response[0], CTAP2_OK);
+    from_reader(&response[1..]).unwrap()
+}
+
+fn engine_token(
+    app: &mut CtapApp<'_>,
+    session: &PlatformKeyAgreement,
+    key_agreement: &Value,
+) -> Zeroizing<Vec<u8>> {
+    let response = engine_request(
+        app,
+        CTAP_CMD_CLIENT_PIN,
+        vec![
+            (int(1), int(2)),
+            (int(2), int(9)),
+            (int(3), key_agreement.clone()),
+            (
+                int(6),
+                Value::Bytes(session.encrypt(&pin_hash(b"1234")[..], [0x71; 16]).unwrap()),
+            ),
+            (int(9), int(0x07)),
+            (int(10), text("example.com")),
+        ],
+    );
+    session
+        .decrypt(member(&response, 2).as_bytes().unwrap())
+        .unwrap()
+}
+
+fn exercise_large_blob_key_responses() {
+    let needles = [PrivateValue {
+        name: "large-blob key",
+        bytes: Zeroizing::new(vec![0xb3; 32]),
+    }];
+    {
+        let mut store = MemoryStore::new();
+        let mut pin_state = PinStateRecord::default();
+        pin_state.pin_hash = Some(*pin_hash(b"1234"));
+        store.set_pin_state(&pin_state).unwrap();
+        // The first encoded attestation contains the key but cannot fit. Its
+        // secret CBOR and serialization are discarded before self attestation.
+        store
+            .set_attestation(&AttestationRecord {
+                private_key: [0x11; 32],
+                certificate_chain: vec![vec![0x30; MAX_RESPONSE_SIZE]],
+            })
+            .unwrap();
+        let interrupt = InterruptFlag::new();
+        let mut app = CtapApp::new(store, CanaryRng, AutoApprove, &interrupt, [0; 16]);
+        app.set_attestation_mode(AttestationMode::Certificate);
+        let response = engine_request(
+            &mut app,
+            CTAP_CMD_CLIENT_PIN,
+            vec![(int(1), int(2)), (int(2), int(2))],
+        );
+        let peer_key = member(&response, 1);
+        let x: [u8; 32] = member(peer_key, -2).as_bytes().unwrap()[..]
+            .try_into()
+            .unwrap();
+        let y: [u8; 32] = member(peer_key, -3).as_bytes().unwrap()[..]
+            .try_into()
+            .unwrap();
+        let session =
+            PlatformKeyAgreement::new(ClassicPinProtocol::V2, &x, &y, &[0x71; 32]).unwrap();
+        let (x, y) = session.public_key();
+        let key_agreement = Value::Map(vec![
+            (int(1), int(2)),
+            (int(3), int(-25)),
+            (int(-1), int(1)),
+            (int(-2), Value::Bytes(x.to_vec())),
+            (int(-3), Value::Bytes(y.to_vec())),
+        ]);
+        let token = engine_token(&mut app, &session, &key_agreement);
+        let hash = [0x44; 32];
+        let extensions = Value::Map(vec![(text("largeBlobKey"), Value::Bool(true))]);
+        let response = engine_request(
+            &mut app,
+            CTAP_CMD_MAKE_CREDENTIAL,
+            vec![
+                (int(1), Value::Bytes(hash.to_vec())),
+                (int(2), Value::Map(vec![(text("id"), text("example.com"))])),
+                (
+                    int(3),
+                    Value::Map(vec![(text("id"), Value::Bytes(vec![1]))]),
+                ),
+                (
+                    int(4),
+                    Value::Array(vec![Value::Map(vec![
+                        (text("alg"), int(-7)),
+                        (text("type"), text("public-key")),
+                    ])]),
+                ),
+                (int(6), extensions.clone()),
+                (int(7), Value::Map(vec![(text("rk"), Value::Bool(true))])),
+                (
+                    int(8),
+                    Value::Bytes(authenticate(ClassicPinProtocol::V2, &token, &hash)),
+                ),
+                (int(9), int(2)),
+            ],
+        );
+        assert!(bool::from(
+            member(&response, 5).as_bytes().unwrap()[..].ct_eq(&needles[0].bytes)
+        ));
+        assert!(
+            !member(&response, 3)
+                .as_map()
+                .unwrap()
+                .iter()
+                .any(|(key, _)| *key == text("x5c"))
+        );
+        let data = member(&response, 2).as_bytes().unwrap();
+        let length = usize::from(u16::from_be_bytes([data[53], data[54]]));
+        let descriptor = Value::Map(vec![
+            (text("id"), Value::Bytes(data[55..55 + length].to_vec())),
+            (text("type"), text("public-key")),
+        ]);
+        let token = engine_token(&mut app, &session, &key_agreement);
+        let response = engine_request(
+            &mut app,
+            CTAP_CMD_GET_ASSERTION,
+            vec![
+                (int(1), text("example.com")),
+                (int(2), Value::Bytes(hash.to_vec())),
+                (int(3), Value::Array(vec![descriptor])),
+                (int(4), extensions),
+                (
+                    int(6),
+                    Value::Bytes(authenticate(ClassicPinProtocol::V2, &token, &hash)),
+                ),
+                (int(7), int(2)),
+            ],
+        );
+        assert!(bool::from(
+            member(&response, 7).as_bytes().unwrap()[..].ct_eq(&needles[0].bytes)
+        ));
+        let token = engine_token(&mut app, &session, &key_agreement);
+        let params = Value::Map(vec![(
+            int(1),
+            Value::Bytes(Sha256::digest(b"example.com").to_vec()),
+        )]);
+        let mut message = vec![4];
+        into_writer(&params, &mut message).unwrap();
+        let response = engine_request(
+            &mut app,
+            CTAP_CMD_CREDENTIAL_MANAGEMENT,
+            vec![
+                (int(1), int(4)),
+                (int(2), params),
+                (int(3), int(2)),
+                (
+                    int(4),
+                    Value::Bytes(authenticate(ClassicPinProtocol::V2, &token, &message)),
+                ),
+            ],
+        );
+        assert!(bool::from(
+            member(&response, 11).as_bytes().unwrap()[..].ct_eq(&needles[0].bytes)
+        ));
+    }
+    scan_freed("large-blob key responses", &needles);
+}
+
 fn main() {
     exercise(
         CoseAlg::RS256,
@@ -245,8 +471,9 @@ fn main() {
     ] {
         exercise(alg, PrivateKeyMaterial::try_generate(alg).unwrap());
     }
+    exercise_large_blob_key_responses();
     // The last case's control buffers were dropped after its secret scan.
     // Inspect their retained blocks too, before the program exits.
     scan_freed("final cleanup", &[]);
-    println!("heap residue: 8 cases passed, including live controls");
+    println!("heap residue: 9 cases passed, including live controls");
 }

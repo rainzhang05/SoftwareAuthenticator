@@ -18,8 +18,8 @@ your presence waits for you to approve it in a desktop notification.
   PS256, PS384 and PS512).
 - **CTAP 2.3:** PIN (protocols 1 and 2), passkeys with credential management,
   always-UV and minimum PIN length configuration, `minPinLength`, `credBlob`,
-  `hmac-secret`, `hmac-secret-mc`, `credProtect`, fragmented large-blob storage,
-  and packed self-attestation.
+  `hmac-secret`, `hmac-secret-mc`, `credProtect`, `largeBlobKey`, fragmented
+  large-blob storage, and packed self-attestation.
 - **Rust throughout:** pure-Rust cryptography, and `unsafe` code only where
   pqkey calls into the operating system.
 
@@ -103,7 +103,8 @@ FIDO clients can store a serialized large-blob array of up to 16,384 bytes,
 transferred in fragments of at most 1,704 bytes. Writes require the PIN's
 large-blob write permission when a PIN is set or always-UV is on. Reset
 restores the empty array; deleting a credential leaves blob collection to
-the client.
+the client. Discoverable credentials registered with `largeBlobKey` keep a
+secret 32-byte key for platforms to encrypt and decrypt their blobs.
 
 ## Clients
 

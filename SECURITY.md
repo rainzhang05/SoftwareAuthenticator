@@ -44,7 +44,8 @@ sensor software cannot press.
 ### What it does not protect against
 
 - **Anything running as you, or as root.** It can read the root keys and so
-  every private key, or use the key while a prompt is up, or interfere with the
+  every private key and large-blob key, or use the key while a prompt is up,
+  or interfere with the
   notification. A single copy of `keys/credential.key` also opens every
   sealed non-discoverable credential until the next reset; RSA credentials
   require their encrypted stored records as well.
@@ -94,6 +95,8 @@ sensor software cannot press.
   either, device access permits writes. Any client can read the serialized
   array without presence or verification; platforms encrypt blob contents.
   Only a complete write with a valid trailing hash replaces the array.
+  Reading a credential's blob plaintext requires its secret large-blob key,
+  returned by a permitted assertion or credential management operation.
 - **Reset is only possible within 10 seconds of the key starting** (CTAP 2.3
   §6.6), as with a hardware key that has just been plugged in.
 

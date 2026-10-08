@@ -48,6 +48,7 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         text("credProtect"),
         text("hmac-secret"),
         text("hmac-secret-mc"),
+        text("largeBlobKey"),
         text("minPinLength"),
     ]);
 

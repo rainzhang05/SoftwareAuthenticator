@@ -186,11 +186,15 @@ protocol logic.
   Another command, a read, 30 idle seconds or the initializing token's
   expiry discards the staged write. Credential deletion leaves the array
   for platforms to collect. Reset restores the initial empty array.
-- The `credBlob`, `credProtect`, `hmac-secret`, `hmac-secret-mc` and
+- The `credBlob`, `credProtect`, `hmac-secret`, `hmac-secret-mc`, `largeBlobKey` and
   `minPinLength` extensions. `credBlob` stores up to 32 bytes with a stored
   credential; sealed credentials refuse it. `hmac-secret-mc` evaluates the
   PRF when a credential is created. `minPinLength` reports the minimum PIN
   length at registration, only to the RP IDs on the stored list.
+  `largeBlobKey` creates a random 32-byte key only when requested with
+  `rk` true. Registration, requested assertions and credential enumeration
+  return it outside authenticator data. Platforms use it to encrypt blobs;
+  it is erased with the credential, while the array remains for collection.
 - getInfo reports `largeBlobs` true and `maxSerializedLargeBlobArray` 16,384,
   and the options `authnrCfg`, `setMinPINLength`, `alwaysUv` and
   `makeCredUvNotRqd` (the opposite of `alwaysUv`), and no `uvAcfg`. It always

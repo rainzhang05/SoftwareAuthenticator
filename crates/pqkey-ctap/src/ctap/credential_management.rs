@@ -6,6 +6,7 @@ use super::credential_id::is_discoverable;
 use super::pin::protocol::parse_pin_uv_auth_param;
 use super::request::{self, truncate_utf8};
 use super::storage::store_status;
+use crate::cbor::{SecretValue, encoded_len_bound};
 use crate::store::CredentialRecord;
 
 use ciborium::{
@@ -14,6 +15,7 @@ use ciborium::{
     value::{Integer, Value},
 };
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use crate::ctap::constants::*;
 
@@ -211,8 +213,8 @@ impl CtapApp<'_> {
 
     /// One credential of an enumeration.  `total` is totalCredentials, which
     /// only enumerateCredentialsBegin reports: the enumerateCredentialsGetNext
-    /// response is user, credentialID, publicKey and credProtect (CTAP 2.3
-    /// §6.8.4).
+    /// response is user, credentialID, publicKey, credProtect and an optional
+    /// largeBlobKey (CTAP 2.3 §6.8.4).
     fn cm_credential_response(
         credential: &CredentialRecord,
         total: Option<usize>,
@@ -258,6 +260,12 @@ impl CtapApp<'_> {
             entries.push((
                 Value::Integer(Integer::from(9)),
                 Value::Integer(Integer::from(total as u64)),
+            ));
+        }
+        if let Some(key) = &credential.large_blob_key {
+            entries.push((
+                Value::Integer(Integer::from(11)),
+                Value::Bytes(key.to_vec()),
             ));
         }
         Ok(entries)
@@ -486,9 +494,9 @@ impl CtapApp<'_> {
 
         if let Some(mut entries) = response_entries {
             canonical_sort(&mut entries);
-            let value = Value::Map(entries);
-            let mut encoded = Vec::new();
-            into_writer(&value, &mut encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
+            let value = SecretValue(Value::Map(entries));
+            let mut encoded = Zeroizing::new(Vec::with_capacity(encoded_len_bound(&value.0)));
+            into_writer(&value.0, &mut *encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
             let mut out = Vec::with_capacity(1 + encoded.len());
             out.push(CTAP2_OK);
             out.extend_from_slice(&encoded);

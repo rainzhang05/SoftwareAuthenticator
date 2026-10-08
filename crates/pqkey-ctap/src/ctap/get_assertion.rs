@@ -1,5 +1,5 @@
 //! The authenticatorGetAssertion and authenticatorGetNextAssertion commands,
-//! including hmac-secret and credBlob extension processing.
+//! including hmac-secret, credBlob and largeBlobKey extension processing.
 
 use super::CtapApp;
 use super::cbor::{self, canonical_map, canonical_sort};
@@ -43,6 +43,7 @@ pub(super) struct PendingAssertion {
     remaining_credentials: VecDeque<Vec<u8>>,
     hmac_secret: Option<PendingHmacSecret>,
     cred_blob: bool,
+    large_blob_key: bool,
     /// When authenticatorGetAssertion or the last
     /// authenticatorGetNextAssertion was answered.
     timer_started: Duration,
@@ -143,6 +144,7 @@ impl CtapApp<'_> {
 
         let mut hmac_secret_request: Option<HmacSecretRequest> = None;
         let mut cred_blob_requested = false;
+        let mut large_blob_key_input = None;
         if let Some(value) = parameter(4) {
             let Value::Map(extension_map) = value else {
                 return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
@@ -157,6 +159,9 @@ impl CtapApp<'_> {
                             return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
                         };
                         cred_blob_requested = *requested;
+                    }
+                    Value::Text(text) if text == "largeBlobKey" => {
+                        large_blob_key_input = Some(value);
                     }
                     _ => {}
                 }
@@ -268,6 +273,14 @@ impl CtapApp<'_> {
             return Err(CTAP2_ERR_UNSUPPORTED_OPTION);
         }
 
+        // Step 10: §12.3 requires true. Authentication, credential lookup
+        // and user presence precede extension processing.
+        let large_blob_key_requested = match large_blob_key_input {
+            Some(Value::Bool(true)) => true,
+            Some(_) => return Err(CTAP2_ERR_INVALID_OPTION),
+            None => false,
+        };
+
         // Step 11.  With an allowList: "Select any credential from the
         // applicable credentials list. Delete the numberOfCredentials member."
         // Step 12, without one: the most recently created credential (step
@@ -323,6 +336,7 @@ impl CtapApp<'_> {
                 remaining_credentials,
                 hmac_secret: pending_hmac_secret,
                 cred_blob: cred_blob_requested,
+                large_blob_key: large_blob_key_requested,
                 timer_started: self.pin_state.now(),
                 token,
             });
@@ -335,6 +349,7 @@ impl CtapApp<'_> {
             signature,
             user_verified,
             number_of_credentials,
+            large_blob_key_requested,
         )
     }
 
@@ -404,6 +419,7 @@ impl CtapApp<'_> {
         // verification was not done by the authenticator in the original
         // authenticatorGetAssertion call."
         let user_verified = pending.user_verified;
+        let large_blob_key_requested = pending.large_blob_key;
 
         // "Reset the timer."
         if !pending.remaining_credentials.is_empty() {
@@ -411,7 +427,14 @@ impl CtapApp<'_> {
             self.pending_assertion = Some(pending);
         }
 
-        assertion_response(&credential, auth_data, signature, user_verified, None)
+        assertion_response(
+            &credential,
+            auth_data,
+            signature,
+            user_verified,
+            None,
+            large_blob_key_requested,
+        )
     }
 
     /// Increment the signature counter `credential` counts on, persist it,
@@ -500,6 +523,7 @@ fn assertion_response(
     signature: Vec<u8>,
     user_verified: bool,
     number_of_credentials: Option<usize>,
+    large_blob_key_requested: bool,
 ) -> Result<Vec<u8>, u8> {
     let credential_map = canonical_map(vec![
         (Value::Text("type".into()), Value::Text("public-key".into())),
@@ -541,6 +565,13 @@ fn assertion_response(
             Value::Integer(Integer::from(5)),
             Value::Integer(Integer::from(total as u64)),
         ));
+    }
+
+    if large_blob_key_requested
+        && is_discoverable(&credential.credential_id)
+        && let Some(key) = &credential.large_blob_key
+    {
+        response.push((Value::Integer(Integer::from(7)), Value::Bytes(key.to_vec())));
     }
 
     canonical_sort(&mut response);

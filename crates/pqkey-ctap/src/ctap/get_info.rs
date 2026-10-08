@@ -67,6 +67,7 @@ impl CtapApp<'_> {
                 text("credProtect"),
                 text("hmac-secret"),
                 text("hmac-secret-mc"),
+                text("largeBlobKey"),
                 text("minPinLength"),
             ]),
         ));

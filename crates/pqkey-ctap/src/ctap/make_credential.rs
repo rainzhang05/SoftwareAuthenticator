@@ -10,9 +10,10 @@ use super::request;
 use super::storage::store_status;
 use super::{AttestationMode, CtapApp};
 use crate::CoseAlg;
+use crate::cbor::{SecretValue, encoded_len_bound};
 use crate::store::{AttestationRecord, CredentialRecord, MAX_CRED_BLOB_LENGTH, StoreError};
 use crate::try_sign_challenge;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use ciborium::{
     ser::into_writer,
@@ -214,10 +215,11 @@ impl CtapApp<'_> {
         let mut hmac_secret_requested = false;
         let mut hmac_secret_mc_input = None;
         let mut cred_blob_input = None;
+        let mut large_blob_key_input = None;
         let mut cred_protect_requested: Option<u8> = None;
 
-        // A wrongly typed extensions map or extension input is
-        // CTAP2_ERR_CBOR_UNEXPECTED_TYPE (CTAP 2.3 §8).
+        // A wrongly typed extensions map is CTAP2_ERR_CBOR_UNEXPECTED_TYPE
+        // (§8). The largeBlobKey input is checked at step 15 (§12.3).
         if let Some(value) = parameter(6) {
             let Value::Map(extension_map) = value else {
                 return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
@@ -242,6 +244,9 @@ impl CtapApp<'_> {
                             return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
                         };
                         cred_blob_input = Some(blob.as_slice());
+                    }
+                    Value::Text(text) if text == "largeBlobKey" => {
+                        large_blob_key_input = Some(value);
                     }
                     Value::Text(text) if text == "credProtect" => {
                         let policy_value = match value {
@@ -334,6 +339,15 @@ impl CtapApp<'_> {
         self.pin_state
             .consume_pin_uv_auth_token_after_user_presence();
 
+        // Step 15: §12.3 requires true and an explicitly discoverable
+        // credential. Extension processing follows authentication,
+        // exclusion and user presence.
+        let large_blob_key_requested = match large_blob_key_input {
+            Some(Value::Bool(true)) if rk => true,
+            Some(_) => return Err(CTAP2_ERR_INVALID_OPTION),
+            None => false,
+        };
+
         // ML-DSA keys are kept as their 32-byte seed (RFC 9964 §4).  A
         // discoverable credential is stored; a non-discoverable one is sealed
         // into its credential ID if its key fits, and stored otherwise (see
@@ -355,7 +369,7 @@ impl CtapApp<'_> {
             cred_random_with_uv: [0; 32],
             cred_random_without_uv: [0; 32],
             cred_blob: None,
-            large_blob_key: None,
+            large_blob_key: large_blob_key_requested.then(|| self.random_array()),
             cred_protect: cred_protect_value,
             sign_count: 0,
             created_at: 0,
@@ -527,20 +541,22 @@ impl CtapApp<'_> {
                 ),
                 (Value::Integer(Integer::from(3)), att_stmt),
             ];
+            if let Some(key) = &record.large_blob_key {
+                // §12.3 returns this secret in the response, outside the
+                // authenticator data and its extension outputs.
+                response_map.push((Value::Integer(Integer::from(5)), Value::Bytes(key.to_vec())));
+            }
             canonical_sort(&mut response_map);
-            let mut encoded = Vec::new();
-            into_writer(&Value::Map(response_map), &mut encoded)
-                .map_err(|_| CTAP2_ERR_PROCESSING)?;
-            let mut out = Vec::with_capacity(1 + encoded.len());
-            out.push(CTAP2_OK);
-            out.extend_from_slice(&encoded);
+            let response = SecretValue(Value::Map(response_map));
+            let mut encoded = Zeroizing::new(Vec::with_capacity(encoded_len_bound(&response.0)));
+            into_writer(&response.0, &mut *encoded).map_err(|_| CTAP2_ERR_PROCESSING)?;
 
-            if out.len() > MAX_RESPONSE_SIZE {
+            if 1 + encoded.len() > MAX_RESPONSE_SIZE {
                 log::warn!(
                     "{} attestation would make the makeCredential response {} bytes, more than \
                      the {MAX_RESPONSE_SIZE} a response can have",
                     kind.name(),
-                    out.len()
+                    1 + encoded.len()
                 );
                 continue;
             }
@@ -551,6 +567,9 @@ impl CtapApp<'_> {
             if stored {
                 self.store_new_credential(&record)?;
             }
+            let mut out = Vec::with_capacity(1 + encoded.len());
+            out.push(CTAP2_OK);
+            out.extend_from_slice(&encoded);
             return Ok(out);
         }
         log::error!("the makeCredential response does not fit even without attestation");
