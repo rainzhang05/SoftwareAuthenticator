@@ -603,7 +603,7 @@ fn configure<L: ReportLink>(
             if !yes
                 && !confirmation(&format!(
                     "Set the minimum PIN length to {minimum}? Only a reset, which erases every \
-                 passkey, can lower it again."
+                     passkey, can lower it again."
                 ))?
             {
                 return Ok(vec!["Nothing was changed.".into()]);
