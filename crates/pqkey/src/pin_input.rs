@@ -1,5 +1,5 @@
-//! Reading PINs for `pqkey pin` and `pqkey passkeys`, and the rules a new
-//! PIN must meet.
+//! Reading PINs for `pqkey pin`, `pqkey config` and `pqkey passkeys`, and
+//! the rules a new PIN must meet.
 //!
 //! When stdin is a terminal the PIN is read with echo turned off, so it never
 //! appears on screen or in scrollback, and a new PIN has to be typed twice.
@@ -54,15 +54,19 @@ pub const MIN_PIN_CODE_POINTS: usize = 4;
 /// Maximum PIN length in bytes of UTF-8 (CTAP 2.1 section 6.5.1).
 pub const MAX_PIN_BYTES: usize = 63;
 
-/// Check a new PIN against the CTAP 2.1 composition rules: at least
-/// [`MIN_PIN_CODE_POINTS`] code points, at most [`MAX_PIN_BYTES`] bytes, and no
-/// trailing NUL (CTAP pads PINs with NUL bytes, so a platform could never send
-/// such a PIN).
+/// Check a current PIN against the absolute CTAP minimum. It may have been
+/// set before the key's minimum rose.
 pub fn validate_pin(pin: &str) -> io::Result<()> {
-    if pin.chars().count() < MIN_PIN_CODE_POINTS {
+    validate_new_pin(pin, MIN_PIN_CODE_POINTS)
+}
+
+/// Check a new PIN against the key's current minimum, in Unicode code
+/// points, and CTAP's UTF-8 byte limit and trailing-NUL rule (§6.5.1).
+pub fn validate_new_pin(pin: &str, minimum: usize) -> io::Result<()> {
+    if pin.chars().count() < minimum {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("PIN must be at least {MIN_PIN_CODE_POINTS} characters long"),
+            format!("PIN must be at least {minimum} characters long"),
         ));
     }
     if pin.len() > MAX_PIN_BYTES {
@@ -90,8 +94,8 @@ pub trait PinSource {
     fn pin(&mut self) -> io::Result<Pin>;
     /// The PIN that is set, to change it.
     fn current_pin(&mut self) -> io::Result<Pin>;
-    /// A new PIN, which meets [`validate_pin`]'s rules.
-    fn new_pin(&mut self) -> io::Result<Pin>;
+    /// A new PIN, checked against the key's current `minimum`.
+    fn new_pin(&mut self, minimum: usize) -> io::Result<Pin>;
 }
 
 /// Reads PINs from stdin, interactively or not depending on what stdin is.
@@ -125,14 +129,18 @@ impl PinSource for PinReader {
     }
 
     /// Read and validate a new PIN, asking for it twice on a terminal.
-    fn new_pin(&mut self) -> io::Result<Pin> {
-        read_new_pin(self.interactive, |prompt| self.read(prompt))
+    fn new_pin(&mut self, minimum: usize) -> io::Result<Pin> {
+        read_new_pin(self.interactive, minimum, |prompt| self.read(prompt))
     }
 }
 
-fn read_new_pin(confirm: bool, mut read: impl FnMut(&str) -> io::Result<Pin>) -> io::Result<Pin> {
+fn read_new_pin(
+    confirm: bool,
+    minimum: usize,
+    mut read: impl FnMut(&str) -> io::Result<Pin>,
+) -> io::Result<Pin> {
     let pin = read("New PIN: ")?;
-    validate_pin(&pin)?;
+    validate_new_pin(&pin, minimum)?;
     if confirm {
         let again = read("Confirm new PIN: ")?;
         if *again != *pin {
@@ -491,7 +499,7 @@ mod tests {
     #[test]
     fn new_pin_is_confirmed_when_interactive() {
         let (mut lines, mut prompts) = scripted(&["1234", "1234"]);
-        let result = read_new_pin(true, |prompt| {
+        let result = read_new_pin(true, MIN_PIN_CODE_POINTS, |prompt| {
             prompts.push(prompt.to_owned());
             Ok(lines.pop_front().unwrap())
         });
@@ -500,23 +508,44 @@ mod tests {
     }
 
     #[test]
+    fn a_raised_minimum_is_checked_before_confirmation() {
+        let mut reads = 0;
+        let err = read_new_pin(true, 6, |_| {
+            reads += 1;
+            Ok(pin("12345"))
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(err.to_string(), "PIN must be at least 6 characters long");
+        assert_eq!(reads, 1);
+        assert!(validate_pin("1234").is_ok());
+        assert!(validate_new_pin("éééééé", 6).is_ok());
+        assert!(validate_new_pin("ééééé", 6).is_err());
+    }
+
+    #[test]
     fn mismatched_confirmation_is_rejected() {
         let (mut lines, _) = scripted(&["1234", "1243"]);
-        let err = read_new_pin(true, |_| Ok(lines.pop_front().unwrap())).unwrap_err();
+        let err = read_new_pin(true, MIN_PIN_CODE_POINTS, |_| {
+            Ok(lines.pop_front().unwrap())
+        })
+        .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
     fn new_pin_is_read_once_when_not_interactive() {
         let (mut lines, _) = scripted(&["1234"]);
-        let result = read_new_pin(false, |_| Ok(lines.pop_front().unwrap()));
+        let result = read_new_pin(false, MIN_PIN_CODE_POINTS, |_| {
+            Ok(lines.pop_front().unwrap())
+        });
         assert_eq!(&*result.unwrap(), "1234");
     }
 
     #[test]
     fn invalid_new_pin_is_rejected_before_confirmation() {
         let mut reads = 0;
-        let err = read_new_pin(true, |_| {
+        let err = read_new_pin(true, MIN_PIN_CODE_POINTS, |_| {
             reads += 1;
             Ok(pin("12"))
         })

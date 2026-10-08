@@ -6,11 +6,12 @@
 //! pqkey start | stop          plug the key in / pull it out
 //! pqkey status                the key and everything it needs (the default)
 //! pqkey pin                   set the PIN, or change it
+//! pqkey config [COMMAND]      show or change the key's UV and PIN settings
 //! pqkey passkeys [delete Q]   list the passkeys stored on the key, or delete one
 //! pqkey reset [--yes]         erase every passkey and the PIN
 //! ```
 //!
-//! While the key runs, `pin`, `passkeys` and `reset` talk to it over CTAP,
+//! While the key runs, `pin`, `config`, `passkeys` and `reset` talk over CTAP,
 //! through its platform client link, as a key's management application does
 //! ([`crate::client`]): the key itself checks the PIN, counts retries and asks
 //! the user to approve a reset.  The hidden `run` command is the daemon
@@ -99,6 +100,11 @@ enum Command {
     /// input gives one PIN per line: the current PIN first, if one is set,
     /// then the new one.
     Pin,
+    /// Show or change always-UV and minimum PIN length settings
+    Config {
+        #[clap(subcommand)]
+        action: Option<ConfigAction>,
+    },
     /// List the passkeys stored on the key, or delete one (needs the PIN)
     Passkeys {
         #[clap(subcommand)]
@@ -127,6 +133,42 @@ enum PasskeysAction {
         #[clap(long)]
         yes: bool,
     },
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub(super) enum ConfigAction {
+    /// Require the PIN for every registration and sign-in with user presence
+    AlwaysUv {
+        #[clap(value_enum)]
+        setting: AlwaysUv,
+    },
+    /// Raise the minimum PIN length; only a reset can lower it again
+    MinPinLength {
+        /// Minimum number of Unicode code points in a new PIN (4 to 63)
+        #[clap(value_parser = clap::value_parser!(u8).range(4..=63))]
+        minimum: u8,
+        /// RP ID allowed to receive the minPinLength extension; repeatable.
+        /// If omitted, the current list is kept
+        #[clap(long = "rp", value_name = "RP_ID")]
+        rp_ids: Vec<String>,
+        /// Do not ask for confirmation on the terminal
+        #[clap(long)]
+        yes: bool,
+    },
+    /// Require a different PIN before the key can issue another token
+    ForcePinChange,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub(super) enum AlwaysUv {
+    On,
+    Off,
+}
+
+impl AlwaysUv {
+    fn enabled(self) -> bool {
+        self == Self::On
+    }
 }
 
 /// The daemon's options, for test rigs: hidden from help, and taken by `run`
@@ -404,6 +446,7 @@ pub fn run_cli() -> io::Result<()> {
         Command::Stop => daemon::stop(&state_dir),
         Command::Status => key::status(&state_dir),
         Command::Pin => key::pin(&state_dir),
+        Command::Config { action } => key::config(&state_dir, action.as_ref()),
         Command::Passkeys { action: None } => key::list_passkeys(&state_dir),
         Command::Passkeys {
             action: Some(PasskeysAction::Delete { query, yes }),
@@ -438,7 +481,7 @@ mod tests {
     fn help_lists_the_commands_of_a_security_key() {
         let help = Cli::command().render_help().to_string();
         for command in [
-            "setup", "start", "stop", "status", "pin", "passkeys", "reset",
+            "setup", "start", "stop", "status", "pin", "config", "passkeys", "reset",
         ] {
             assert!(
                 help.contains(&format!("  {command} ")),
@@ -468,6 +511,8 @@ mod tests {
             &["pin", "--pin", "1234"],
             &["pin", "--current", "1234", "--new", "5678"],
             &["passkeys", "--pin", "1234"],
+            &["config", "always-uv", "on", "--pin", "1234"],
+            &["config", "force-pin-change", "1234"],
             &["reset", "1234"],
         ] {
             let err = parse(args)
@@ -482,6 +527,65 @@ mod tests {
             );
         }
         assert!(parse(&["pin", "--state-dir", "/tmp/x"]).is_ok());
+    }
+
+    #[test]
+    fn config_parses_display_and_each_change() {
+        assert!(matches!(
+            parse(&["config"]).unwrap().command,
+            Some(Command::Config { action: None })
+        ));
+        for (setting, expected) in [("on", AlwaysUv::On), ("off", AlwaysUv::Off)] {
+            assert!(matches!(
+                parse(&["config", "always-uv", setting]).unwrap().command,
+                Some(Command::Config {
+                    action: Some(ConfigAction::AlwaysUv { setting })
+                }) if setting == expected
+            ));
+        }
+        assert!(matches!(
+            parse(&["config", "force-pin-change"]).unwrap().command,
+            Some(Command::Config {
+                action: Some(ConfigAction::ForcePinChange)
+            })
+        ));
+        let Some(Command::Config {
+            action: Some(action),
+        }) = parse(&[
+            "config",
+            "min-pin-length",
+            "6",
+            "--rp",
+            "example.com",
+            "--rp",
+            "other.example",
+            "--yes",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("minimum action did not parse");
+        };
+        assert_eq!(
+            action,
+            ConfigAction::MinPinLength {
+                minimum: 6,
+                rp_ids: vec!["example.com".into(), "other.example".into()],
+                yes: true,
+            }
+        );
+        assert!(parse(&["config", "min-pin-length", "4"]).is_ok());
+        assert!(parse(&["config", "min-pin-length", "63"]).is_ok());
+        for args in [
+            &["config", "always-uv", "yes"][..],
+            &["config", "always-uv"],
+            &["config", "min-pin-length", "3"],
+            &["config", "min-pin-length", "64"],
+            &["config", "min-pin-length", "6", "--rp"],
+            &["config", "force-pin-change", "--yes"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?} parsed");
+        }
     }
 
     /// The commands of the earlier command line are gone.

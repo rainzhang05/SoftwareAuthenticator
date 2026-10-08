@@ -17,8 +17,8 @@ your presence waits for you to approve it in a desktop notification.
   EdDSA (EdDSA, Ed25519 and Ed448), and RSA-2048 (RS256, RS384, RS512,
   PS256, PS384 and PS512).
 - **CTAP 2.3:** PIN (protocols 1 and 2), passkeys with credential management,
-  `credBlob`, `hmac-secret`, `hmac-secret-mc`, `credProtect`, and packed
-  self-attestation.
+  always-UV and minimum PIN length configuration, `minPinLength`, `credBlob`,
+  `hmac-secret`, `hmac-secret-mc`, `credProtect`, and packed self-attestation.
 - **Rust throughout:** pure-Rust cryptography, and `unsafe` code only where
   pqkey calls into the operating system.
 
@@ -67,10 +67,27 @@ the notification that appears.
 |---|---|
 | `pqkey` | Shows the key's status, its PIN, its free passkey slots and anything to fix |
 | `pqkey pin` | Sets or changes the PIN |
+| `pqkey config` | Shows always-UV and PIN policy settings |
+| `pqkey config always-uv on\|off` | Requires or stops requiring the PIN |
+| `pqkey config min-pin-length N [--rp RP_ID]...` | Raises the PIN minimum |
+| `pqkey config force-pin-change` | Requires a different PIN |
 | `pqkey passkeys` | Lists the passkeys stored on the key |
 | `pqkey passkeys delete QUERY` | Deletes the passkey whose site, user or ID contains `QUERY` |
-| `pqkey reset` | Erases every credential and the PIN |
+| `pqkey reset` | Erases every credential and the PIN; resets configuration |
 | `pqkey stop`, `pqkey start` | Unplugs and plugs in the key |
+
+Configuration changes ask for the current PIN when one is set. Always-UV
+requires the PIN for registrations and sign-ins that ask for user presence.
+Without a PIN, turn always-UV off or set one with `pqkey pin` before using
+the key in a browser.
+
+The minimum PIN length counts Unicode code points, from 4 to 63, with a
+separate limit of 63 UTF-8 bytes. Raising it asks for confirmation, unless
+`--yes` is given: only `pqkey reset`, which erases every passkey, can lower
+it again. Repeated `--rp` options replace the RP IDs allowed to receive the
+`minPinLength` extension; omitting them keeps the list. A key can remember
+8 RP IDs, each up to 253 bytes. If a PIN change becomes required, run
+`pqkey pin` and choose a different PIN meeting the current minimum.
 
 `pqkey passkeys` lists only passkeys, which are discoverable credentials. A
 site that registers the key as a second factor keeps the credential's ID and

@@ -298,3 +298,80 @@ fn a_request_waiting_for_the_user_is_cancelled() {
     );
     assert!(statuses.contains(&super::ctaphid::STATUS_UPNEEDED));
 }
+
+#[test]
+fn configuration_uses_its_permission_and_survives_a_restart() {
+    let dir = TempDir::new("client-config");
+    {
+        let (_daemon, mut key) = start(&dir);
+        let info = key.info().unwrap();
+        assert_eq!(info.authenticator_config, Some(true));
+        assert_eq!(info.always_uv, Some(false));
+        assert_eq!(info.set_min_pin_length, Some(true));
+        assert_eq!(info.force_pin_change, Some(false));
+        assert_eq!(info.min_pin_length, Some(4));
+        assert_eq!(info.max_rp_ids_for_min_pin_length, Some(8));
+        assert_eq!(info.config_commands, [2, 3]);
+        key.toggle_always_uv(None).unwrap();
+        assert_eq!(key.info().unwrap().always_uv, Some(true));
+        assert!(matches!(
+            key.set_min_pin_length(None, Some(6), None, None),
+            Err(ClientError::Status(0x36))
+        ));
+        key.toggle_always_uv(None).unwrap();
+        let rps = vec!["example.com".into(), "other.example".into()];
+        key.set_min_pin_length(None, Some(6), Some(&rps), None)
+            .unwrap();
+        key.set_pin(b"123456").unwrap();
+        let management = key.management_token(b"123456").unwrap();
+        assert!(matches!(
+            key.toggle_always_uv(Some(&management)),
+            Err(ClientError::Status(0x33))
+        ));
+        let config = key.config_token(b"123456").unwrap();
+        key.set_min_pin_length(Some(&config), None, Some(&[]), None)
+            .unwrap();
+        key.toggle_always_uv(Some(&config)).unwrap();
+    }
+    let store = FileStore::open(dir.path()).unwrap();
+    let record = store.pin_state().unwrap().unwrap();
+    assert!(record.always_uv);
+    assert_eq!(record.min_pin_length, 6);
+    assert_eq!(
+        record.min_pin_length_rp_ids,
+        ["example.com", "other.example"]
+    );
+    drop(store);
+    let (_daemon, mut key) = start(&dir);
+    let info = key.info().unwrap();
+    assert_eq!(info.always_uv, Some(true));
+    assert_eq!(info.min_pin_length, Some(6));
+    let token = key.config_token(b"123456").unwrap();
+    key.set_min_pin_length(Some(&token), Some(7), None, None)
+        .unwrap();
+    assert_eq!(key.info().unwrap().force_pin_change, Some(true));
+    assert!(matches!(
+        key.config_token(b"123456"),
+        Err(ClientError::Status(0x37))
+    ));
+    assert!(matches!(
+        key.management_token(b"123456"),
+        Err(ClientError::Status(0x37))
+    ));
+    key.change_pin(b"123456", b"1234567").unwrap();
+    assert_eq!(key.info().unwrap().force_pin_change, Some(false));
+    let token = key.config_token(b"1234567").unwrap();
+    key.set_min_pin_length(Some(&token), None, None, Some(true))
+        .unwrap();
+    assert!(matches!(
+        key.change_pin(b"1234567", b"1234567"),
+        Err(ClientError::Status(0x37))
+    ));
+    key.change_pin(b"1234567", b"7654321").unwrap();
+    key.reset(&mut |_| {}).unwrap();
+    let info = key.info().unwrap();
+    assert_eq!(info.always_uv, Some(false));
+    assert_eq!(info.min_pin_length, Some(4));
+    assert_eq!(info.force_pin_change, Some(false));
+    assert_eq!(info.pin_set, Some(false));
+}

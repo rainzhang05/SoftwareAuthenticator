@@ -1,5 +1,5 @@
-//! The commands that manage the running key: `status`, `pin`, `passkeys` and
-//! `reset`.
+//! The commands that manage the running key: `status`, `pin`, `config`,
+//! `passkeys` and `reset`.
 //!
 //! They talk to the key over CTAP through its platform client link, as a
 //! security
@@ -16,16 +16,18 @@ use std::{
 
 use pqkey_ctap::CoseAlg;
 use pqkey_ctap::ctap::constants::{
-    CTAP2_ERR_KEEPALIVE_CANCEL, CTAP2_ERR_NOT_ALLOWED, CTAP2_ERR_OPERATION_DENIED,
-    CTAP2_ERR_PIN_AUTH_BLOCKED, CTAP2_ERR_PIN_BLOCKED, CTAP2_ERR_PIN_INVALID,
-    CTAP2_ERR_PIN_NOT_SET, CTAP2_ERR_PIN_POLICY_VIOLATION, CTAP2_ERR_USER_ACTION_TIMEOUT,
+    CTAP2_ERR_KEEPALIVE_CANCEL, CTAP2_ERR_KEY_STORE_FULL, CTAP2_ERR_NOT_ALLOWED,
+    CTAP2_ERR_OPERATION_DENIED, CTAP2_ERR_PIN_AUTH_BLOCKED, CTAP2_ERR_PIN_BLOCKED,
+    CTAP2_ERR_PIN_INVALID, CTAP2_ERR_PIN_NOT_SET, CTAP2_ERR_PIN_POLICY_VIOLATION,
+    CTAP2_ERR_PUAT_REQUIRED, CTAP2_ERR_USER_ACTION_TIMEOUT,
 };
 use signal_hook::{consts::SIGINT, flag};
 
+use super::ConfigAction;
 use super::checks::Problem;
 use super::daemon::{self, Running};
 use super::output::{self, errln, outln};
-use crate::client::ctap2::{Authenticator, ClientError, Passkey, PinRetries, Token};
+use crate::client::ctap2::{Authenticator, ClientError, Info, Passkey, PinRetries, Token};
 use crate::client::ctaphid::{ReportLink, STATUS_UPNEEDED};
 use crate::pin_input::{MIN_PIN_CODE_POINTS, Pin, PinReader, PinSource, validate_pin};
 use crate::platform::{self, ClientLink};
@@ -181,10 +183,30 @@ fn show_key(running: Running) -> io::Result<()> {
         }
         None => outln!("PIN:      not supported")?,
     }
+    for line in policy_status(&info) {
+        outln!("{line}")?;
+    }
     if let Some(remaining) = info.remaining_discoverable {
         outln!("Passkeys: room for {remaining} more")?;
     }
     Ok(())
+}
+
+fn policy_status(info: &Info) -> Vec<&'static str> {
+    let mut lines = Vec::new();
+    if info.always_uv == Some(true) {
+        lines.push("Always UV: on; registrations and sign-ins require the PIN");
+    }
+    if info.force_pin_change == Some(true) {
+        lines.push("PIN change required; run `pqkey pin`");
+    }
+    lines
+}
+
+fn minimum_pin_length(info: &Info) -> usize {
+    info.min_pin_length
+        .and_then(|minimum| usize::try_from(minimum).ok())
+        .unwrap_or(MIN_PIN_CODE_POINTS)
 }
 
 /// What keeps browsers from using the key `running`, waiting up to `wait`
@@ -252,8 +274,13 @@ pub fn ensure_pin(running: Running, interactive: bool) -> io::Result<bool> {
         )?;
         return Ok(false);
     };
-    match key.info().map_err(client_error)?.pin_set {
+    let info = key.info().map_err(client_error)?;
+    match info.pin_set {
         Some(true) => {
+            if info.force_pin_change == Some(true) {
+                output::problem("the key requires a new PIN", "run `pqkey pin`")?;
+                return Ok(false);
+            }
             output::done("PIN is set")?;
             return Ok(true);
         }
@@ -269,8 +296,9 @@ pub fn ensure_pin(running: Running, interactive: bool) -> io::Result<bool> {
         return Ok(false);
     }
     outln!()?;
+    let minimum = minimum_pin_length(&info);
     outln!(
-        "Choose a PIN for the key, at least {MIN_PIN_CODE_POINTS} characters. Browsers ask for it \
+        "Choose a PIN for the key, at least {minimum} characters. Browsers ask for it \
          before they use passkeys."
     )?;
     set_first_pin(&mut key, &mut PinReader::from_stdin())?;
@@ -331,19 +359,22 @@ fn set_or_change_pin<L: ReportLink>(
     key: &mut Authenticator<L>,
     pins: &mut dyn PinSource,
 ) -> io::Result<PinChange> {
-    match key.info().map_err(client_error)?.pin_set {
+    let info = key.info().map_err(client_error)?;
+    let minimum = minimum_pin_length(&info);
+    match info.pin_set {
         Some(false) => {
-            let new = pins.new_pin()?;
+            let new = pins.new_pin(minimum)?;
             key.set_pin(new.as_bytes())
-                .map_err(|err| pin_error(key, err))?;
+                .map_err(|err| new_pin_error(key, err, minimum, false))?;
             Ok(PinChange::Set)
         }
         Some(true) => {
             check_pin_usable(key)?;
             let current = plausible_pin(pins.current_pin()?)?;
-            let new = pins.new_pin()?;
+            let new = pins.new_pin(minimum)?;
+            let same_pin = *current == *new;
             key.change_pin(current.as_bytes(), new.as_bytes())
-                .map_err(|err| pin_error(key, err))?;
+                .map_err(|err| new_pin_error(key, err, minimum, same_pin))?;
             Ok(PinChange::Changed)
         }
         None => Err(io::Error::new(
@@ -351,6 +382,41 @@ fn set_or_change_pin<L: ReportLink>(
             "the key does not support a PIN",
         )),
     }
+}
+
+fn new_pin_error<L: ReportLink>(
+    key: &mut Authenticator<L>,
+    err: ClientError,
+    minimum: usize,
+    same_pin: bool,
+) -> io::Error {
+    if matches!(err, ClientError::Status(CTAP2_ERR_PIN_POLICY_VIOLATION)) {
+        let updated = key.info().ok();
+        let message = if same_pin
+            && updated
+                .as_ref()
+                .is_some_and(|info| info.force_pin_change == Some(true))
+        {
+            "the new PIN must differ from the current PIN when a change is required; \
+             run `pqkey pin` and choose another PIN"
+                .into()
+        } else {
+            let minimum = updated.as_ref().map_or(minimum, minimum_pin_length);
+            format!("the new PIN is too short; choose at least {minimum} characters")
+        };
+        return io::Error::new(io::ErrorKind::InvalidInput, message);
+    }
+    pin_error(key, err)
+}
+
+fn token_error<L: ReportLink>(key: &mut Authenticator<L>, err: ClientError) -> io::Error {
+    if matches!(err, ClientError::Status(CTAP2_ERR_PIN_POLICY_VIOLATION)) {
+        return io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the key requires a PIN change; run `pqkey pin` before trying again",
+        );
+    }
+    pin_error(key, err)
 }
 
 /// Refuse before asking for the PIN when the key would refuse any PIN.
@@ -437,6 +503,170 @@ fn pin_error_message(err: &ClientError, retries: Option<PinRetries>) -> io::Erro
 }
 
 // ---------------------------------------------------------------------------
+// config
+
+/// `pqkey config`, and its authenticated configuration changes.
+pub(super) fn config(state_dir: &Path, action: Option<&ConfigAction>) -> io::Result<()> {
+    let mut key = connect(state_dir)?;
+    for line in configure(&mut key, &mut PinReader::from_stdin(), action, &mut confirm)? {
+        outln!("{line}")?;
+    }
+    Ok(())
+}
+
+fn config_lines(info: &Info) -> Vec<String> {
+    vec![
+        format!("Always UV: {}", on_off(info.always_uv == Some(true))),
+        format!("Minimum PIN length: {}", minimum_pin_length(info)),
+        format!(
+            "PIN change required: {}",
+            if info.force_pin_change == Some(true) {
+                "yes"
+            } else {
+                "no"
+            }
+        ),
+    ]
+}
+
+fn on_off(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
+}
+
+fn config_token<L: ReportLink>(
+    key: &mut Authenticator<L>,
+    pins: &mut dyn PinSource,
+    info: &Info,
+) -> io::Result<Option<Token>> {
+    if info.pin_set != Some(true) {
+        return Ok(None);
+    }
+    acquire_pin_token(key, pins, Authenticator::config_token).map(Some)
+}
+
+fn acquire_pin_token<L: ReportLink>(
+    key: &mut Authenticator<L>,
+    pins: &mut dyn PinSource,
+    request: fn(&mut Authenticator<L>, &[u8]) -> Result<Token, ClientError>,
+) -> io::Result<Token> {
+    check_pin_usable(key)?;
+    let pin = plausible_pin(pins.pin()?)?;
+    request(key, pin.as_bytes()).map_err(|err| token_error(key, err))
+}
+
+fn configure<L: ReportLink>(
+    key: &mut Authenticator<L>,
+    pins: &mut dyn PinSource,
+    action: Option<&ConfigAction>,
+    confirmation: &mut dyn FnMut(&str) -> io::Result<bool>,
+) -> io::Result<Vec<String>> {
+    let info = key.info().map_err(client_error)?;
+    let Some(action) = action else {
+        return Ok(config_lines(&info));
+    };
+    let subcommand = match action {
+        ConfigAction::AlwaysUv { .. } => 2,
+        ConfigAction::MinPinLength { .. } | ConfigAction::ForcePinChange => 3,
+    };
+    if info.authenticator_config != Some(true) || !info.config_commands.contains(&subcommand) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the key does not support this configuration command; update pqkey and restart it",
+        ));
+    }
+    let mut lines = Vec::new();
+    match action {
+        ConfigAction::AlwaysUv { setting } => {
+            if (info.always_uv == Some(true)) != setting.enabled() {
+                let token = config_token(key, pins, &info)?;
+                key.toggle_always_uv(token.as_ref())
+                    .map_err(|err| config_error(key, err, &info))?;
+            }
+            let updated = key.info().map_err(client_error)?;
+            lines.push(format!(
+                "Always UV: {}.",
+                on_off(updated.always_uv == Some(true))
+            ));
+            if updated.pin_set == Some(false) {
+                lines.push(
+                    "Browsers will need a PIN before they can register or sign in; \
+                     `pqkey pin` sets one."
+                        .into(),
+                );
+            }
+        }
+        ConfigAction::MinPinLength {
+            minimum,
+            rp_ids,
+            yes,
+        } => {
+            if !yes
+                && !confirmation(&format!(
+                    "Set the minimum PIN length to {minimum}? Only a reset, which erases every \
+                 passkey, can lower it again."
+                ))?
+            {
+                return Ok(vec!["Nothing was changed.".into()]);
+            }
+            let token = config_token(key, pins, &info)?;
+            let rp_ids = if rp_ids.is_empty() {
+                None
+            } else {
+                Some(rp_ids.as_slice())
+            };
+            key.set_min_pin_length(token.as_ref(), Some(*minimum), rp_ids, None)
+                .map_err(|err| config_error(key, err, &info))?;
+            let updated = key.info().map_err(client_error)?;
+            lines.push(format!(
+                "Minimum PIN length: {}.",
+                minimum_pin_length(&updated)
+            ));
+            if updated.force_pin_change == Some(true) {
+                lines.push("A PIN change is required; run `pqkey pin`.".into());
+            }
+        }
+        ConfigAction::ForcePinChange => {
+            if info.pin_set != Some(true) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the key has no PIN to change; `pqkey pin` sets one",
+                ));
+            }
+            let token = config_token(key, pins, &info)?;
+            key.set_min_pin_length(token.as_ref(), None, None, Some(true))
+                .map_err(|err| config_error(key, err, &info))?;
+            lines.push("A PIN change is required; run `pqkey pin`.".into());
+        }
+    }
+    Ok(lines)
+}
+
+fn config_error<L: ReportLink>(
+    key: &mut Authenticator<L>,
+    err: ClientError,
+    info: &Info,
+) -> io::Error {
+    let message = match err {
+        ClientError::Status(CTAP2_ERR_PIN_POLICY_VIOLATION) => format!(
+            "the minimum PIN length cannot be lowered below {}; only `pqkey reset` lowers \
+             it, and erases every passkey",
+            minimum_pin_length(info)
+        ),
+        ClientError::Status(CTAP2_ERR_KEY_STORE_FULL) => format!(
+            "the key cannot store that RP ID list; use at most {} RP IDs, each at most 253 bytes",
+            info.max_rp_ids_for_min_pin_length.unwrap_or(8)
+        ),
+        ClientError::Status(CTAP2_ERR_PUAT_REQUIRED) if info.pin_set == Some(false) => {
+            "always-UV requires a PIN for this change; set one with `pqkey pin`, or turn \
+             always-UV off with `pqkey config always-uv off` first"
+                .into()
+        }
+        _ => return pin_error(key, err),
+    };
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+// ---------------------------------------------------------------------------
 // passkeys
 
 /// A pinUvAuthToken with the credential management permission, for which
@@ -451,10 +681,7 @@ fn management_token<L: ReportLink>(
             "passkeys are managed with the key's PIN, and it has none; `pqkey pin` sets one",
         ));
     }
-    check_pin_usable(key)?;
-    let pin = plausible_pin(pins.pin()?)?;
-    key.management_token(pin.as_bytes())
-        .map_err(|err| pin_error(key, err))
+    acquire_pin_token(key, pins, Authenticator::management_token)
 }
 
 /// `pqkey passkeys`.
@@ -722,9 +949,9 @@ mod tests {
             self.next()
         }
 
-        fn new_pin(&mut self) -> io::Result<Pin> {
+        fn new_pin(&mut self, minimum: usize) -> io::Result<Pin> {
             let pin = self.next()?;
-            validate_pin(&pin)?;
+            crate::pin_input::validate_new_pin(&pin, minimum)?;
             Ok(pin)
         }
     }
@@ -823,6 +1050,326 @@ mod tests {
         let left = key.passkeys(&token).unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].user_name.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn config_displays_defaults_and_toggles_without_a_pin() {
+        let dir = TempDir::new("cli-config-no-pin");
+        let (_daemon, mut key) = start(&dir);
+        let mut no_confirmation = |_: &str| -> io::Result<bool> {
+            panic!("this action must not ask for confirmation");
+        };
+        let lines = configure(&mut key, &mut Script::of(&[]), None, &mut no_confirmation).unwrap();
+        assert_eq!(
+            lines,
+            [
+                "Always UV: off",
+                "Minimum PIN length: 4",
+                "PIN change required: no",
+            ]
+        );
+        assert!(policy_status(&key.info().unwrap()).is_empty());
+        for setting in [
+            super::super::AlwaysUv::Off,
+            super::super::AlwaysUv::On,
+            super::super::AlwaysUv::On,
+            super::super::AlwaysUv::Off,
+        ] {
+            let action = ConfigAction::AlwaysUv { setting };
+            let lines = configure(
+                &mut key,
+                &mut Script::of(&[]),
+                Some(&action),
+                &mut no_confirmation,
+            )
+            .unwrap();
+            assert_eq!(
+                lines[0],
+                format!("Always UV: {}.", on_off(setting.enabled()))
+            );
+            assert!(lines[1].contains("`pqkey pin` sets one"), "{lines:?}");
+            assert_eq!(key.info().unwrap().always_uv, Some(setting.enabled()));
+        }
+        let err = configure(
+            &mut key,
+            &mut Script::of(&[]),
+            Some(&ConfigAction::ForcePinChange),
+            &mut no_confirmation,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no PIN to change"), "{err}");
+        assert!(err.to_string().contains("pqkey pin"), "{err}");
+    }
+
+    #[test]
+    fn a_minimum_change_is_confirmed_before_reading_the_pin() {
+        let dir = TempDir::new("cli-config-confirm");
+        let (_daemon, mut key) = start(&dir);
+        key.set_pin(b"1234").unwrap();
+        let action = ConfigAction::MinPinLength {
+            minimum: 6,
+            rp_ids: Vec::new(),
+            yes: false,
+        };
+        let mut questions = Vec::new();
+        let lines = configure(
+            &mut key,
+            &mut Script::of(&[]),
+            Some(&action),
+            &mut |question| {
+                questions.push(question.to_owned());
+                Ok(false)
+            },
+        )
+        .unwrap();
+        assert_eq!(lines, ["Nothing was changed."]);
+        assert_eq!(key.info().unwrap().min_pin_length, Some(4));
+        assert_eq!(retries(&mut key), 8);
+        assert_eq!(questions.len(), 1);
+        assert!(questions[0].contains("Only a reset"), "{questions:?}");
+        assert!(
+            questions[0].contains("erases every passkey"),
+            "{questions:?}"
+        );
+        let lines = configure(
+            &mut key,
+            &mut Script::of(&["1234"]),
+            Some(&action),
+            &mut |_| Ok(true),
+        )
+        .unwrap();
+        assert_eq!(
+            lines,
+            [
+                "Minimum PIN length: 6.",
+                "A PIN change is required; run `pqkey pin`."
+            ]
+        );
+        assert_eq!(key.info().unwrap().min_pin_length, Some(6));
+        assert_eq!(
+            policy_status(&key.info().unwrap()),
+            ["PIN change required; run `pqkey pin`"]
+        );
+        let err = management_token(&mut key, &mut Script::of(&["1234"])).unwrap_err();
+        assert!(err.to_string().contains("PIN change"), "{err}");
+        assert!(err.to_string().contains("pqkey pin"), "{err}");
+        let err = set_or_change_pin(&mut key, &mut Script::of(&["1234", "12345"])).unwrap_err();
+        assert_eq!(err.to_string(), "PIN must be at least 6 characters long");
+        assert_eq!(retries(&mut key), 8);
+        assert_eq!(
+            set_or_change_pin(&mut key, &mut Script::of(&["1234", "123456"])).unwrap(),
+            PinChange::Changed
+        );
+        assert!(management_token(&mut key, &mut Script::of(&["123456"])).is_ok());
+    }
+
+    #[test]
+    fn minimum_changes_preserve_rps_when_omitted_and_report_capacity() {
+        let dir = TempDir::new("cli-config-rps");
+        let (_daemon, mut key) = start(&dir);
+        let change = |minimum, rp_ids| ConfigAction::MinPinLength {
+            minimum,
+            rp_ids,
+            yes: true,
+        };
+        let mut no_confirmation = |_: &str| -> io::Result<bool> {
+            panic!("--yes must skip confirmation");
+        };
+        let action = change(6, vec!["example.com".into(), "other.example".into()]);
+        assert_eq!(
+            configure(
+                &mut key,
+                &mut Script::of(&[]),
+                Some(&action),
+                &mut no_confirmation
+            )
+            .unwrap(),
+            ["Minimum PIN length: 6."]
+        );
+        let stored = || {
+            FileStore::open(dir.path())
+                .unwrap()
+                .pin_state()
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(
+            stored().min_pin_length_rp_ids,
+            ["example.com", "other.example"]
+        );
+        configure(
+            &mut key,
+            &mut Script::of(&[]),
+            Some(&change(7, Vec::new())),
+            &mut no_confirmation,
+        )
+        .unwrap();
+        assert_eq!(
+            stored().min_pin_length_rp_ids,
+            ["example.com", "other.example"]
+        );
+        let unchanged = stored();
+        let err = configure(
+            &mut key,
+            &mut Script::of(&[]),
+            Some(&change(6, Vec::new())),
+            &mut no_confirmation,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be lowered below 7"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("erases every passkey"), "{err}");
+        assert_eq!(stored(), unchanged);
+        for rp_ids in [vec!["example.com".into(); 9], vec!["a".repeat(254)]] {
+            let err = configure(
+                &mut key,
+                &mut Script::of(&[]),
+                Some(&change(8, rp_ids)),
+                &mut no_confirmation,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("at most 8 RP IDs"), "{err}");
+            assert!(err.to_string().contains("at most 253 bytes"), "{err}");
+            assert_eq!(stored(), unchanged);
+        }
+        let err = set_or_change_pin(&mut key, &mut Script::of(&["1234"])).unwrap_err();
+        assert_eq!(err.to_string(), "PIN must be at least 7 characters long");
+        set_first_pin(&mut key, &mut Script::of(&["123456", "1234567"])).unwrap();
+        assert!(key.config_token(b"1234567").is_ok());
+    }
+
+    #[test]
+    fn forced_pin_change_refuses_reuse_and_explains_token_errors() {
+        let dir = TempDir::new("cli-config-force");
+        let (_daemon, mut key) = start(&dir);
+        key.set_pin(b"1234").unwrap();
+        let mut no_confirmation = |_: &str| -> io::Result<bool> {
+            panic!("force-pin-change does not ask for confirmation");
+        };
+        assert_eq!(
+            configure(
+                &mut key,
+                &mut Script::of(&["1234"]),
+                Some(&ConfigAction::ForcePinChange),
+                &mut no_confirmation
+            )
+            .unwrap(),
+            ["A PIN change is required; run `pqkey pin`."]
+        );
+        let on = ConfigAction::AlwaysUv {
+            setting: super::super::AlwaysUv::On,
+        };
+        let off = ConfigAction::AlwaysUv {
+            setting: super::super::AlwaysUv::Off,
+        };
+        assert_eq!(
+            configure(
+                &mut key,
+                &mut Script::of(&[]),
+                Some(&off),
+                &mut no_confirmation
+            )
+            .unwrap(),
+            ["Always UV: off."]
+        );
+        let err = configure(
+            &mut key,
+            &mut Script::of(&["1234"]),
+            Some(&on),
+            &mut no_confirmation,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("run `pqkey pin`"), "{err}");
+        let err = set_or_change_pin(&mut key, &mut Script::of(&["1234", "1234"])).unwrap_err();
+        assert!(
+            err.to_string().contains("must differ from the current PIN"),
+            "{err}"
+        );
+        assert_eq!(key.info().unwrap().force_pin_change, Some(true));
+        set_or_change_pin(&mut key, &mut Script::of(&["1234", "5678"])).unwrap();
+        assert_eq!(key.info().unwrap().force_pin_change, Some(false));
+        configure(
+            &mut key,
+            &mut Script::of(&["5678"]),
+            Some(&on),
+            &mut no_confirmation,
+        )
+        .unwrap();
+        assert_eq!(
+            policy_status(&key.info().unwrap()),
+            ["Always UV: on; registrations and sign-ins require the PIN"]
+        );
+        assert_eq!(
+            configure(
+                &mut key,
+                &mut Script::of(&[]),
+                Some(&on),
+                &mut no_confirmation
+            )
+            .unwrap(),
+            ["Always UV: on."]
+        );
+    }
+
+    #[test]
+    fn config_displays_persisted_settings_after_a_restart() {
+        let dir = TempDir::new("cli-config-restart");
+        {
+            let (_daemon, mut key) = start(&dir);
+            key.set_min_pin_length(None, Some(6), None, None).unwrap();
+            key.set_pin(b"123456").unwrap();
+            let token = key.config_token(b"123456").unwrap();
+            key.toggle_always_uv(Some(&token)).unwrap();
+            key.set_min_pin_length(Some(&token), None, None, Some(true))
+                .unwrap();
+        }
+        let (_daemon, mut key) = start(&dir);
+        let lines = configure(&mut key, &mut Script::of(&[]), None, &mut |_| {
+            panic!("display must not ask for confirmation")
+        })
+        .unwrap();
+        assert_eq!(
+            lines,
+            [
+                "Always UV: on",
+                "Minimum PIN length: 6",
+                "PIN change required: yes"
+            ]
+        );
+        assert_eq!(
+            policy_status(&key.info().unwrap()),
+            [
+                "Always UV: on; registrations and sign-ins require the PIN",
+                "PIN change required; run `pqkey pin`",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_no_pin_minimum_change_explains_always_uv_recovery() {
+        let dir = TempDir::new("cli-config-no-pin-always-uv");
+        let (_daemon, mut key) = start(&dir);
+        key.toggle_always_uv(None).unwrap();
+        let action = ConfigAction::MinPinLength {
+            minimum: 6,
+            rp_ids: Vec::new(),
+            yes: true,
+        };
+        let err = configure(&mut key, &mut Script::of(&[]), Some(&action), &mut |_| {
+            panic!("--yes must skip confirmation")
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("set one with `pqkey pin`"),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains("pqkey config always-uv off"),
+            "{err}"
+        );
+        assert_eq!(key.info().unwrap().min_pin_length, Some(4));
     }
 
     fn passkey(rp_id: &str, name: Option<&str>, display: Option<&str>, id: u8) -> Passkey {

@@ -1,6 +1,7 @@
 //! The CTAP2 requests a security key's management application sends: what
-//! `pqkey pin`, `pqkey passkeys`, `pqkey reset` and `pqkey status` do with
-//! the running key, through the same commands a browser uses.
+//! `pqkey pin`, `pqkey config`, `pqkey passkeys`, `pqkey reset` and
+//! `pqkey status` do with the running key, through the same commands a
+//! browser uses.
 
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -16,12 +17,15 @@ const GET_INFO: u8 = 0x04;
 const CLIENT_PIN: u8 = 0x06;
 const RESET: u8 = 0x07;
 const CREDENTIAL_MANAGEMENT: u8 = 0x0A;
+const AUTHENTICATOR_CONFIG: u8 = 0x0D;
 
 /// The PIN/UV auth protocol `pqkey` uses: two, the one every CTAP 2.1 key
 /// supports.
 const PROTOCOL: ClassicPinProtocol = ClassicPinProtocol::V2;
 /// The cm permission of a pinUvAuthToken (CTAP 2.3 §6.5.5.7).
 const PERMISSION_CM: u8 = 0x04;
+/// The acfg permission of a pinUvAuthToken (§6.11).
+const PERMISSION_ACFG: u8 = 0x20;
 
 /// CTAP2_ERR_NO_CREDENTIALS.
 pub const NO_CREDENTIALS: u8 = 0x2E;
@@ -68,6 +72,20 @@ pub struct Info {
     pub versions: Vec<String>,
     /// The clientPin option: whether a PIN is set.
     pub pin_set: Option<bool>,
+    /// The authnrCfg option: configuration is supported.
+    pub authenticator_config: Option<bool>,
+    /// The alwaysUv option: registration and present assertions require UV.
+    pub always_uv: Option<bool>,
+    /// The setMinPINLength option: the minimum can be raised.
+    pub set_min_pin_length: Option<bool>,
+    /// forcePINChange: a new PIN is required before issuing tokens.
+    pub force_pin_change: Option<bool>,
+    /// minPINLength, in Unicode code points.
+    pub min_pin_length: Option<u64>,
+    /// maxRPIDsForSetMinPINLength.
+    pub max_rp_ids_for_min_pin_length: Option<u64>,
+    /// authenticatorConfigCommands.
+    pub config_commands: Vec<u8>,
     /// remainingDiscoverableCredentials.
     pub remaining_discoverable: Option<u64>,
 }
@@ -178,7 +196,16 @@ impl<L: ReportLink> Authenticator<L> {
         if let Some(parameters) = &parameters {
             request.extend(encode(parameters));
         }
-        let response = self.hid.cbor(&request, keepalive)?;
+        self.call_encoded(&request, keepalive)
+    }
+
+    /// Send an already encoded request, preserving authenticated CBOR bytes.
+    fn call_encoded(
+        &mut self,
+        request: &[u8],
+        keepalive: &mut dyn FnMut(u8),
+    ) -> Result<Value, ClientError> {
+        let response = self.hid.cbor(request, keepalive)?;
         match response.split_first() {
             Some((0, [])) => Ok(Value::Null),
             Some((0, body)) => {
@@ -198,20 +225,42 @@ impl<L: ReportLink> Authenticator<L> {
                 .collect(),
             _ => Vec::new(),
         };
-        let pin_set = member(&info, 4).and_then(|options| match options {
-            Value::Map(entries) => entries
+        let option = |name| {
+            member(&info, 4).and_then(|options| match options {
+                Value::Map(entries) => entries
+                    .iter()
+                    .find(|(k, _)| *k == text(name))
+                    .and_then(|(_, v)| v.as_bool()),
+                _ => None,
+            })
+        };
+        let number = |key| {
+            member(&info, key)
+                .and_then(Value::as_integer)
+                .and_then(|count| u64::try_from(count).ok())
+        };
+        let config_commands = match member(&info, 0x1F) {
+            Some(Value::Array(commands)) => commands
                 .iter()
-                .find(|(k, _)| *k == text("clientPin"))
-                .and_then(|(_, v)| v.as_bool()),
-            _ => None,
-        });
-        let remaining_discoverable = member(&info, 0x14)
-            .and_then(Value::as_integer)
-            .and_then(|count| u64::try_from(count).ok());
+                .filter_map(|command| {
+                    command
+                        .as_integer()
+                        .and_then(|value| u8::try_from(value).ok())
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         Ok(Info {
             versions,
-            pin_set,
-            remaining_discoverable,
+            pin_set: option("clientPin"),
+            authenticator_config: option("authnrCfg"),
+            always_uv: option("alwaysUv"),
+            set_min_pin_length: option("setMinPINLength"),
+            force_pin_change: member(&info, 0x0C).and_then(Value::as_bool),
+            min_pin_length: number(0x0D),
+            max_rp_ids_for_min_pin_length: number(0x10),
+            config_commands,
+            remaining_discoverable: number(0x14),
         })
     }
 
@@ -315,6 +364,15 @@ impl<L: ReportLink> Authenticator<L> {
     /// getPinUvAuthTokenUsingPinWithPermissions (§6.5.5.7.2) with the cm
     /// permission and no RP ID.
     pub fn management_token(&mut self, pin: &[u8]) -> Result<Token, ClientError> {
+        self.permission_token(pin, PERMISSION_CM)
+    }
+
+    /// A token with the acfg permission and no RP ID (§6.11).
+    pub fn config_token(&mut self, pin: &[u8]) -> Result<Token, ClientError> {
+        self.permission_token(pin, PERMISSION_ACFG)
+    }
+
+    fn permission_token(&mut self, pin: &[u8], permission: u8) -> Result<Token, ClientError> {
         let (shared, key) = self.shared_secret()?;
         let pin_hash_enc = shared.encrypt(&pin_hash(pin)[..], Self::iv()?)?;
         let body = self.call(
@@ -324,12 +382,73 @@ impl<L: ReportLink> Authenticator<L> {
                 (int(2), int(9)),
                 (int(3), key),
                 (int(6), Value::Bytes(pin_hash_enc)),
-                (int(9), int(PERMISSION_CM.into())),
+                (int(9), int(permission.into())),
             ])),
             &mut |_| {},
         )?;
         let token = shared.decrypt(bytes_of(member(&body, 2))?)?;
         Ok(Token(token))
+    }
+
+    /// authenticatorConfig (§6.11). Encode the parameters once, then put the
+    /// same bytes in both the authenticated message and the request.
+    fn configuration(
+        &mut self,
+        token: Option<&Token>,
+        subcommand: u8,
+        parameters: Option<Value>,
+    ) -> Result<(), ClientError> {
+        let parameters = parameters.as_ref().map(encode);
+        let fields = 1 + u8::from(parameters.is_some()) + 2 * u8::from(token.is_some());
+        let mut request = vec![AUTHENTICATOR_CONFIG, 0xA0 + fields, 0x01, subcommand];
+        if let Some(parameters) = &parameters {
+            request.push(0x02);
+            request.extend_from_slice(parameters);
+        }
+        if let Some(token) = token {
+            let mut message = vec![0xFF; 32];
+            message.extend([AUTHENTICATOR_CONFIG, subcommand]);
+            if let Some(parameters) = &parameters {
+                message.extend_from_slice(parameters);
+            }
+            request.push(0x03);
+            request.extend(encode(&int(PROTOCOL.identifier().into())));
+            request.push(0x04);
+            request.extend(encode(&Value::Bytes(authenticate(
+                PROTOCOL, &token.0, &message,
+            ))));
+        }
+        self.call_encoded(&request, &mut |_| {}).map(drop)
+    }
+
+    /// toggleAlwaysUv (§6.11.2). The caller checks the current setting first.
+    pub fn toggle_always_uv(&mut self, token: Option<&Token>) -> Result<(), ClientError> {
+        self.configuration(token, 0x02, None)
+    }
+
+    /// setMinPINLength (§6.11.4). Omitted values leave their settings alone;
+    /// an empty RP list also preserves the authorized relying parties.
+    pub fn set_min_pin_length(
+        &mut self,
+        token: Option<&Token>,
+        minimum: Option<u8>,
+        rp_ids: Option<&[String]>,
+        force_change: Option<bool>,
+    ) -> Result<(), ClientError> {
+        let mut parameters = Vec::new();
+        if let Some(minimum) = minimum {
+            parameters.push((int(1), int(minimum.into())));
+        }
+        if let Some(rp_ids) = rp_ids {
+            parameters.push((
+                int(2),
+                Value::Array(rp_ids.iter().map(|rp| text(rp)).collect()),
+            ));
+        }
+        if let Some(force_change) = force_change {
+            parameters.push((int(3), Value::Bool(force_change)));
+        }
+        self.configuration(token, 0x03, Some(Value::Map(parameters)))
     }
 
     /// An authenticated authenticatorCredentialManagement request
