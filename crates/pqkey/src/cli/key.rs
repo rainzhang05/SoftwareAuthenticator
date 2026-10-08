@@ -486,7 +486,7 @@ fn pin_error_message(err: &ClientError, retries: Option<PinRetries>) -> io::Erro
         CTAP2_ERR_PIN_BLOCKED => (
             PermissionDenied,
             "the PIN is blocked: it was entered wrongly too often. Only a reset makes the key \
-             usable again (`pqkey reset`), and it erases every passkey on it"
+             usable again (`pqkey reset`), and it erases every passkey and large blob on it"
                 .into(),
         ),
         CTAP2_ERR_PIN_POLICY_VIOLATION => (
@@ -603,7 +603,7 @@ fn configure<L: ReportLink>(
             if !yes
                 && !confirmation(&format!(
                     "Set the minimum PIN length to {minimum}? Only a reset, which erases every \
-                     passkey, can lower it again."
+                     passkey and large blob, can lower it again."
                 ))?
             {
                 return Ok(vec!["Nothing was changed.".into()]);
@@ -649,7 +649,7 @@ fn config_error<L: ReportLink>(
     let message = match err {
         ClientError::Status(CTAP2_ERR_PIN_POLICY_VIOLATION) => format!(
             "the minimum PIN length cannot be lowered below {}; only `pqkey reset` lowers \
-             it, and erases every passkey",
+             it, and erases every passkey and large blob",
             minimum_pin_length(info)
         ),
         ClientError::Status(CTAP2_ERR_KEY_STORE_FULL) => format!(
@@ -1131,6 +1131,7 @@ mod tests {
             questions[0].contains("erases every passkey"),
             "{questions:?}"
         );
+        assert!(questions[0].contains("large blob"), "{questions:?}");
         let lines = configure(
             &mut key,
             &mut Script::of(&["1234"]),
@@ -1221,6 +1222,7 @@ mod tests {
             "{err}"
         );
         assert!(err.to_string().contains("erases every passkey"), "{err}");
+        assert!(err.to_string().contains("large blob"), "{err}");
         assert_eq!(stored(), unchanged);
         for rp_ids in [vec!["example.com".into(); 9], vec!["a".repeat(254)]] {
             let err = configure(
@@ -1473,6 +1475,7 @@ mod tests {
         let status = |code| pin_error_message(&ClientError::Status(code), None).to_string();
         assert!(status(CTAP2_ERR_PIN_AUTH_BLOCKED).contains(REPLUG));
         assert!(status(CTAP2_ERR_PIN_BLOCKED).contains("pqkey reset"));
+        assert!(status(CTAP2_ERR_PIN_BLOCKED).contains("large blob"));
         assert!(status(CTAP2_ERR_PIN_NOT_SET).contains("pqkey pin"));
         let last = PinRetries {
             retries: 1,

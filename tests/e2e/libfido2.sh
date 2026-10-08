@@ -66,15 +66,19 @@ test_token_info() {
   grep -qE '^version strings: .*FIDO_2_1' <<<"$info" || fail "FIDO_2_1 is not advertised"
   grep -qE '^version strings: .*FIDO_2_0' <<<"$info" || fail "FIDO_2_0 is not advertised"
   grep -qE '^version strings: .*FIDO_2_3' <<<"$info" || fail "FIDO_2_3 is not advertised"
-  # libfido2 1.16.0 tools/token.c prints false option values with a "no"
-  # prefix, and these three getInfo members with the following exact labels.
+  # libfido2 1.14.0 tools/token.c prints false option values with a "no"
+  # prefix and the getInfo members with the following exact labels.
   local option
-  for option in authnrCfg setMinPINLength noalwaysUv makeCredUvNotRqd; do
+  for option in authnrCfg setMinPINLength noalwaysUv makeCredUvNotRqd largeBlobs; do
     grep -qE "^options: (.*, )?${option}(,|$)" <<<"$info" \
       || fail "$option is not advertised"
   done
   grep -qE '^extension strings: (.*, )?minPinLength(,|$)' <<<"$info" \
     || fail "minPinLength is not advertised"
+  grep -qE '^extension strings: (.*, )?largeBlobKey(,|$)' <<<"$info" \
+    || fail "largeBlobKey is not advertised"
+  grep -qxF 'maxlargeblob: 16384' <<<"$info" \
+    || fail "unexpected large-blob array capacity"
   grep -qxF 'minpinlen: 4' <<<"$info" || fail "unexpected minimum PIN length"
   grep -qxF 'maxrpids in minpinlen: 8' <<<"$info" || fail "unexpected RP ID capacity"
   grep -qxF 'pin change required: false' <<<"$info" || fail "a PIN change is required after reset"

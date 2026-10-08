@@ -186,8 +186,9 @@ protocol logic.
   Another command, a read, 30 idle seconds or the initializing token's
   expiry discards the staged write. Credential deletion leaves the array
   for platforms to collect. Reset restores the initial empty array.
-- The `credBlob`, `credProtect`, `hmac-secret`, `hmac-secret-mc`, `largeBlobKey` and
-  `minPinLength` extensions. `credBlob` stores up to 32 bytes with a stored
+- The `credBlob`, `credProtect`, `hmac-secret`, `hmac-secret-mc`,
+  `largeBlobKey` and `minPinLength` extensions. `credBlob` stores up to 32
+  bytes with a stored
   credential; sealed credentials refuse it. `hmac-secret-mc` evaluates the
   PRF when a credential is created. `minPinLength` reports the minimum PIN
   length at registration, only to the RP IDs on the stored list.

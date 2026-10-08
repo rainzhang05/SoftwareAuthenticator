@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Iterator
 
 import pytest
+from fido2.ctap import CtapError
 from fido2.ctap2 import ClientPin, Ctap2
+from fido2.ctap2.blob import LargeBlobs
 
 import ctap as client
 
@@ -290,7 +292,7 @@ def test_config_minimum_confirmation_and_rp_ids(pqkey: Pqkey):
     pqkey.start()
     declined = pqkey.run("config", "min-pin-length", "6", stdin="n\n")
     assert declined.returncode == 0, declined
-    assert "Only a reset, which erases every passkey, can lower it again." in declined.stderr
+    assert "Only a reset, which erases every passkey and large blob, can lower it again." in declined.stderr
     assert "Nothing was changed." in declined.stdout
     assert pqkey.config()["Minimum PIN length"] == "4"
     assert pqkey.ok("config", "min-pin-length", "6", "--rp", "a.config.example",
@@ -356,6 +358,7 @@ def test_config_reports_irreversible_minimum_and_rp_capacity_errors(pqkey: Pqkey
     pqkey.ok("config", "min-pin-length", "6", "--yes")
     error = pqkey.error("config", "min-pin-length", "4", "--yes")
     assert "reset" in error and "every passkey" in error, error
+    assert "large blob" in error, error
     assert pqkey.config()["Minimum PIN length"] == "6"
     args = ["config", "min-pin-length", "7", "--yes"]
     for number in range(9):
@@ -403,3 +406,55 @@ def test_config_survives_restart_and_reset_restores_defaults(pqkey: Pqkey):
             extensions={"minPinLength": True},
         )
         assert credential.auth_data.extensions is None
+
+
+def test_large_blobs_and_keys_survive_restart_and_reset_erases_them(pqkey: Pqkey):
+    """Close each HID handle before restarting and rediscover the new node.
+
+    The test uses the CLI's product 0005 key and its own state directory;
+    restarting it cannot interrupt another test's channel.
+    """
+    pqkey.start()
+    rp_id = "restart.large-blobs.example"
+    value = os.urandom(4096)
+    with client.open_device(pqkey.status()["Device"]) as device:
+        ctap = Ctap2(device)
+        ctap.reset()
+        ctap = Ctap2(device)
+        credential = client.register(
+            ctap, rp_id, client.ES256, options={"rk": True},
+            extensions={"largeBlobKey": True},
+        )
+        assert len(credential.large_blob_key) == 32
+        blobs = LargeBlobs(ctap)
+        blobs.put_blob(credential.large_blob_key, value)
+        array = blobs.read_blob_array()
+        assert blobs.get_blob(credential.large_blob_key) == value
+        assert len(array[0][1]) > blobs.max_fragment_length
+    assert (pqkey.state_dir / "large-blobs").is_file()
+    pqkey.ok("stop")
+    pqkey.start()
+    with client.open_device(pqkey.status()["Device"]) as device:
+        ctap = Ctap2(device)
+        blobs = LargeBlobs(ctap)
+        assert blobs.read_blob_array() == array
+        assert blobs.get_blob(credential.large_blob_key) == value
+        response, _ = client.authenticate(
+            ctap, credential, extensions={"largeBlobKey": True}
+        )
+        assert response[7] == credential.large_blob_key
+    pqkey.ok("reset", "--yes")
+    with client.open_device(pqkey.status()["Device"]) as device:
+        ctap = Ctap2(device)
+        assert LargeBlobs(ctap).read_blob_array() == []
+        assert ctap.large_blobs(0, get=1704)[1] == bytes.fromhex(
+            "8076be8b528d0075f7aae98d6fa57a6d3c"
+        )
+        with pytest.raises(CtapError) as error:
+            client.authenticate(ctap, credential, extensions={"largeBlobKey": True})
+        assert error.value.code == CtapError.ERR.NO_CREDENTIALS
+        replacement = client.register(
+            ctap, rp_id, client.ES256, options={"rk": True},
+            extensions={"largeBlobKey": True},
+        )
+        assert replacement.large_blob_key != credential.large_blob_key

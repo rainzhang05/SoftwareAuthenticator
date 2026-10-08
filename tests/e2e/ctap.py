@@ -398,6 +398,7 @@ class Credential:
     credential_id: bytes
     public_key: dict
     auth_data: AuthData
+    large_blob_key: bytes | None = None
 
 
 def register(
@@ -413,7 +414,10 @@ def register(
     assert auth_data.credential_id, "empty credential ID"
     check_public_key(auth_data.public_key, alg)
     verify_attestation(response, auth_data.public_key, client_data_hash)
-    return Credential(rp_id, alg, auth_data.credential_id, auth_data.public_key, auth_data)
+    return Credential(
+        rp_id, alg, auth_data.credential_id, auth_data.public_key, auth_data,
+        response.get(5),
+    )
 
 
 def authenticate(

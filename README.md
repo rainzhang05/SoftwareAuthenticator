@@ -1,6 +1,7 @@
 # pqkey
 
-**A FIDO2 security key in software for Linux, with post-quantum ML-DSA passkeys.**
+**A FIDO2 security key in software for Linux, with post-quantum ML-DSA
+passkeys.**
 
 [![CI](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/ci.yml)
 [![E2E](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/e2e.yml/badge.svg?branch=main)](https://github.com/rainzhang05/SoftwareAuthenticator/actions/workflows/e2e.yml)
@@ -84,11 +85,11 @@ the key in a browser.
 
 The minimum PIN length counts Unicode code points, from 4 to 63, with a
 separate limit of 63 UTF-8 bytes. Raising it asks for confirmation, unless
-`--yes` is given: only `pqkey reset`, which erases every passkey, can lower
-it again. Repeated `--rp` options replace the RP IDs allowed to receive the
-`minPinLength` extension; omitting them keeps the list. A key can remember
-8 RP IDs, each up to 253 bytes. If a PIN change becomes required, run
-`pqkey pin` and choose a different PIN meeting the current minimum.
+`--yes` is given: only `pqkey reset`, which erases every passkey and large
+blob, can lower it again. Repeated `--rp` options replace the RP IDs allowed
+to receive the `minPinLength` extension; omitting them keeps the list. A key
+can remember 8 RP IDs, each up to 253 bytes. If a PIN change becomes required,
+run `pqkey pin` and choose a different PIN meeting the current minimum.
 
 `pqkey passkeys` lists only passkeys, which are discoverable credentials. A
 site that registers the key as a second factor keeps the credential's ID and

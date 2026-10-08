@@ -23,12 +23,19 @@ def test_get_info(ctap: Ctap2):
 
     assert "FIDO_2_3" in info[1] and "FIDO_2_1" in info[1] and "FIDO_2_0" in info[1], info[1]
     assert "FIDO_2_2" not in info[1], "CTAP 2.3 6.4: FIDO_2_2 MUST not be present"
-    assert set(info[2]) >= {"credBlob", "credProtect", "hmac-secret", "hmac-secret-mc", "minPinLength"}, info[2]
+    assert set(info[2]) >= {
+        "credBlob", "credProtect", "hmac-secret", "hmac-secret-mc",
+        "largeBlobKey", "minPinLength",
+    }, info[2]
+    assert "largeBlob" not in info[2]
     assert "pinComplexityPolicy" not in info[2]
     assert info[3] == client.DEFAULT_AAGUID
 
     options = info[4]
-    for option in ("rk", "up", "pinUvAuthToken", "credMgmt", "makeCredUvNotRqd", "authnrCfg", "setMinPINLength"):
+    for option in (
+        "rk", "up", "pinUvAuthToken", "credMgmt", "makeCredUvNotRqd",
+        "authnrCfg", "setMinPINLength", "largeBlobs",
+    ):
         assert options.get(option) is True, f"{option}: {options}"
     # CTAP 2.3 6.4: clientPin is false while no PIN is set (the fixture has just
     # reset the authenticator), and uv is absent without built-in user
@@ -50,7 +57,9 @@ def test_get_info(ctap: Ctap2):
 
     assert info[0x0F] == 32, "maxCredBlobLength"
     assert ctap.info.max_cred_blob_length == 32
-    assert info[5] >= 1024, "maxMsgSize"
+    assert info[0x0B] == 16_384, "maxSerializedLargeBlobArray"
+    assert ctap.info.max_large_blob == 16_384
+    assert info[5] == 1768, "maxMsgSize"
     assert sorted(info[6]) == [1, 2], f"pinUvAuthProtocols {info[6]}"
     assert info[9] == ["usb"]
     assert info[10] == [
