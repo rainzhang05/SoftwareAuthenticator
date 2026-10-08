@@ -203,7 +203,10 @@ protocol logic.
 Every file above except the root keys is encrypted and authenticated with
 XChaCha20-Poly1305, under keys derived from a root key with HKDF-SHA-256.
 Credential records can also hold an opaque blob of at most 32 bytes,
-protected by the same encryption as their private keys. The PIN state also
+protected by the same encryption as their private keys, and an optional
+32-byte large-blob key on discoverable credentials. The key is wiped on drop,
+redacted from debug output and compared in constant time. Older records read
+without a large-blob key. The PIN state also
 keeps the configuration: the minimum PIN length and its RP IDs, whether a PIN
 change is required, the PIN's length and always-UV. A PIN state written
 before these fields existed reads with their defaults, and its PIN counts as

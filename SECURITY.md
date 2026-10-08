@@ -29,6 +29,8 @@ sensor software cannot press.
   XChaCha20-Poly1305 under keys derived from two root keys in `keys/`. A
   modified, truncated or swapped file is reported as corrupt and never used.
   File names are HMACs, so they reveal neither credentials nor sites.
+  Discoverable credentials' optional large-blob keys receive the same
+  encryption and erasure protections as their private keys.
 - **Old data after a reset.** A reset replaces the credential root key, so
   leftover copies of files, and the credential IDs that sites hold, can no
   longer be decrypted.

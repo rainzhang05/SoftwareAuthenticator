@@ -195,6 +195,7 @@ fn exercise(alg: CoseAlg, material: PrivateKeyMaterial) {
             cred_random_with_uv: [0x33; 32],
             cred_random_without_uv: [0x44; 32],
             cred_blob: Some(blob),
+            large_blob_key: None,
             cred_protect: 1,
             sign_count: 0,
             created_at: 0,

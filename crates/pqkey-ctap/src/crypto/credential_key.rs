@@ -299,6 +299,7 @@ mod tests {
             cred_random_with_uv: [0; 32],
             cred_random_without_uv: [0; 32],
             cred_blob: None,
+            large_blob_key: None,
             cred_protect: 1,
             sign_count: 0,
             created_at: 0,

@@ -125,7 +125,7 @@ pub trait CredentialStore {
     /// succeeds.  Returns [`StoreError::InvalidRecord`], and stores nothing,
     /// if `record` is inconsistent: an empty credential ID, an `alg` that does
     /// not match the key material, an invalid P-256 scalar, or a `cred_protect`
-    /// outside 1–3.
+    /// outside 1–3, or a large-blob key on a non-discoverable credential.
     fn put(&mut self, record: &CredentialRecord) -> Result<(), StoreError>;
 
     /// Delete the credential with this ID, returning whether one was stored.
@@ -370,6 +370,13 @@ pub(crate) fn validate_credential(record: &CredentialRecord) -> Result<(), Store
     {
         return Err(StoreError::InvalidRecord(
             "credential blob exceeds 32 bytes",
+        ));
+    }
+    if record.large_blob_key.is_some()
+        && !crate::credential_id::is_discoverable(&record.credential_id)
+    {
+        return Err(StoreError::InvalidRecord(
+            "large-blob key requires a discoverable credential",
         ));
     }
     if !(1..=3).contains(&record.cred_protect) {

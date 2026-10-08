@@ -261,6 +261,9 @@ pub struct CredentialRecord {
     pub cred_random_without_uv: [u8; 32],
     /// The opaque credential blob, if stored (CTAP 2.3 §12.2).
     pub cred_blob: Option<Vec<u8>>,
+    /// The secret large-blob encryption key of a discoverable credential
+    /// (CTAP 2.3 §12.3), if requested at registration.
+    pub large_blob_key: Option<[u8; 32]>,
     /// The `credProtect` level: 1 (`userVerificationOptional`), 2
     /// (`userVerificationOptionalWithCredentialIDList`), or 3
     /// (`userVerificationRequired`).  Credentials created without the
@@ -321,7 +324,13 @@ impl PartialEq for CredentialRecord {
             (None, None) => true,
             _ => false,
         };
+        let keys_equal = match (&self.large_blob_key, &other.large_blob_key) {
+            (Some(left), Some(right)) => bool::from(left.ct_eq(right)),
+            (None, None) => true,
+            _ => false,
+        };
         let secrets_equal = blobs_equal
+            & keys_equal
             & (self.private_key == other.private_key)
             & bool::from(
                 self.cred_random_with_uv[..].ct_eq(&other.cred_random_with_uv[..])
@@ -342,7 +351,8 @@ impl PartialEq for CredentialRecord {
 
 impl Eq for CredentialRecord {}
 
-/// The private key, both `CredRandom` values and credential blob are redacted.
+/// The private key, both `CredRandom` values, credential blob and large-blob
+/// key are redacted.
 impl fmt::Debug for CredentialRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CredentialRecord")
@@ -356,6 +366,7 @@ impl fmt::Debug for CredentialRecord {
             .field("cred_random_with_uv", &Redacted)
             .field("cred_random_without_uv", &Redacted)
             .field("cred_blob", &Redacted)
+            .field("large_blob_key", &Redacted)
             .field("cred_protect", &self.cred_protect)
             .field("sign_count", &self.sign_count)
             .field("created_at", &self.created_at)
@@ -603,6 +614,7 @@ mod tests {
             cred_random_with_uv: [0x33; 32],
             cred_random_without_uv: [0x44; 32],
             cred_blob: None,
+            large_blob_key: None,
             cred_protect: 1,
             sign_count: 7,
             created_at: 0,
@@ -798,6 +810,16 @@ mod tests {
         changed.zeroize();
         assert!(changed.cred_blob.is_none());
 
+        let mut with_key = original.clone();
+        with_key.large_blob_key = Some([0x77; 32]);
+        assert_ne!(original, with_key, "absent and present keys differ");
+        let mut changed = with_key.clone();
+        assert_eq!(with_key, changed);
+        changed.large_blob_key.as_mut().unwrap()[31] ^= 1;
+        assert_ne!(with_key, changed);
+        changed.zeroize();
+        assert!(changed.large_blob_key.is_none());
+
         let es256 = PrivateKeyMaterial::P256Scalar { scalar: [1; 32] };
         let mldsa = PrivateKeyMaterial::Seed { seed: [1; 32] };
         assert_ne!(es256, mldsa, "same bytes, different key types");
@@ -820,6 +842,7 @@ mod tests {
             cred_random_with_uv: [secret; 32],
             cred_random_without_uv: [secret; 32],
             cred_blob: Some(vec![secret; 32]),
+            large_blob_key: Some([secret; 32]),
             cred_protect: 2,
             sign_count: 5,
             created_at: 9,

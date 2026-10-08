@@ -139,6 +139,7 @@ const ATTESTATION_FILE: &str = "attestation";
 ///   12  sign_count              unsigned, 32 bits
 ///   13  created_at              unsigned, 64 bits
 ///   14  cred_blob               byte string, at most 32 bytes, optional
+///   15  large_blob_key          byte string, 32 bytes, optional
 ///
 /// PIN state record (type 2)
 ///    1  pin_hash                byte string, 16 bytes, optional
@@ -647,6 +648,7 @@ mod tests {
             cred_random_with_uv: [1; 32],
             cred_random_without_uv: [2; 32],
             cred_blob: None,
+            large_blob_key: None,
             cred_protect: 1,
             sign_count: 0,
             created_at: 0,

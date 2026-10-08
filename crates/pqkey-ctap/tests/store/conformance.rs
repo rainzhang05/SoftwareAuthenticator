@@ -115,6 +115,32 @@ fn every_algorithm_round_trips<B: Backend>() {
     }
 }
 
+fn large_blob_keys_round_trip_only_for_discoverable_credentials<B: Backend>() {
+    let mut fixture = fresh::<B>();
+    let store = &mut fixture.store;
+    let mut record = new_record(CoseAlg::ES256);
+    record.credential_id = vec![0x01; 33];
+    record.large_blob_key = Some(random_bytes());
+    let mut stored = insert(store, &record);
+    assert_eq!(stored.large_blob_key, record.large_blob_key);
+    stored.user_name = Some("updated".into());
+    store.put(&stored).unwrap();
+    assert_eq!(store.get(&record.credential_id).unwrap().unwrap(), stored);
+    record.credential_id = vec![0; 33];
+    assert!(matches!(
+        store.put(&record),
+        Err(StoreError::InvalidRecord(_))
+    ));
+    assert!(store.get(&record.credential_id).unwrap().is_none());
+    // Legacy IDs were all discoverable.
+    record.credential_id = vec![0; 32];
+    insert(store, &record);
+    assert!(store.delete(&stored.credential_id).unwrap());
+    assert!(store.get(&stored.credential_id).unwrap().is_none());
+    store.clear().unwrap();
+    assert!(store.list().unwrap().is_empty());
+}
+
 fn unusual_field_values_round_trip<B: Backend>() {
     let mut fixture = fresh::<B>();
     let store = &mut fixture.store;
@@ -805,6 +831,7 @@ fn clear_ends_sealed_credential_ids<B: Backend>() {
 conformance_suite!(
     empty_store_holds_nothing,
     every_algorithm_round_trips,
+    large_blob_keys_round_trip_only_for_discoverable_credentials,
     unusual_field_values_round_trip,
     returned_records_are_copies,
     inserts_get_increasing_creation_order_regardless_of_input,

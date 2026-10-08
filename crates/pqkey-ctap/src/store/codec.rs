@@ -23,6 +23,7 @@
 //!   12  sign_count              unsigned integer, 32 bits
 //!   13  created_at              unsigned integer, 64 bits
 //!   14  cred_blob               byte string, at most 32 bytes, optional
+//!   15  large_blob_key          byte string, 32 bytes, optional
 //!
 //! PIN state record (record type 2)
 //!    1  pin_hash                byte string, 16 bytes, omitted when no PIN is set
@@ -120,6 +121,9 @@ pub(crate) fn encode_credential(
     if let Some(blob) = &record.cred_blob {
         entries.push((14, Value::Bytes(blob.clone())));
     }
+    if let Some(key) = &record.large_blob_key {
+        entries.push((15, Value::Bytes(key.to_vec())));
+    }
     encode_map(entries)
 }
 
@@ -155,6 +159,7 @@ pub(crate) fn decode_credential(bytes: &[u8]) -> Result<CredentialRecord, Corrup
         sign_count: fields.uint(12)?,
         created_at: fields.uint(13)?,
         cred_blob: fields.optional_bytes(14)?,
+        large_blob_key: fields.optional_array(15)?,
     };
     fields.finish()?;
     validate_credential(&record).map_err(|_| Corruption::Inconsistent)?;
@@ -468,6 +473,7 @@ mod tests {
             cred_random_with_uv: [0xaa; 32],
             cred_random_without_uv: [0xbb; 32],
             cred_blob: None,
+            large_blob_key: None,
             cred_protect: 2,
             sign_count: 300,
             created_at: 70_000,
@@ -522,6 +528,57 @@ mod tests {
         assert_eq!(decode_credential(&wrong_type), Err(Corruption::Encoding));
         let overlong = edited(&valid, |e| set(e, 14, Value::Bytes(vec![0x55; 33])));
         assert_eq!(decode_credential(&overlong), Err(Corruption::Inconsistent));
+    }
+
+    /// Field 15 uses an independent RFC 8949 vector; the earlier record
+    /// vectors remain unchanged and decode without a large-blob key.
+    #[test]
+    fn large_blob_key_known_answer_and_legacy_default() {
+        let mut record = credential();
+        record.large_blob_key = Some(core::array::from_fn(|i| i as u8));
+        let expected = unhex(concat!(
+            "ad",
+            "0150000102030405060708090a0b0c0d0e0f",
+            "026b6578616d706c652e636f6d",
+            "03420102",
+            "0465616c696365",
+            "06382f0702",
+            "085820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+            "095820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "0a5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "0b020c19012c0d1a00011170",
+            "0f5820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        ));
+        assert_eq!(
+            encode_credential(&record, 70_000).unwrap().as_slice(),
+            expected
+        );
+        assert_eq!(decode_credential(&expected).unwrap(), record);
+        let legacy = edited(&expected, |entries| remove(entries, 15));
+        assert!(decode_credential(&legacy).unwrap().large_blob_key.is_none());
+    }
+
+    #[test]
+    fn malformed_large_blob_keys_are_corrupt() {
+        let valid = encode_credential(&credential(), 1).unwrap();
+        for value in std::iter::once(Value::Bool(true)).chain(
+            [0, 1, 16, 31, 33, 64]
+                .into_iter()
+                .map(|length| Value::Bytes(vec![0; length])),
+        ) {
+            assert_eq!(
+                decode_credential(&edited(&valid, |entries| set(entries, 15, value))),
+                Err(Corruption::Encoding),
+            );
+        }
+        let non_discoverable = edited(&valid, |entries| {
+            set(entries, 1, Value::Bytes(vec![0; 33]));
+            set(entries, 15, Value::Bytes(vec![0; 32]));
+        });
+        assert_eq!(
+            decode_credential(&non_discoverable),
+            Err(Corruption::Inconsistent)
+        );
     }
 
     fn pin_state() -> PinStateRecord {
