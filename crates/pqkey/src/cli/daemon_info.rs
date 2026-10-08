@@ -211,7 +211,7 @@ mod tests {
             state_lock::write_pid_file(&path, &lock).unwrap();
             nix::sys::prctl::set_dumpable(false).unwrap();
             assert!(!nix::sys::prctl::get_dumpable().unwrap());
-            writeln!(io::stdout(), "ready").unwrap();
+            println!("ready");
             io::stdout().flush().unwrap();
             let _ = io::stdin().read_line(&mut String::new());
             state_lock::remove_pid_file(&path, &lock).unwrap();

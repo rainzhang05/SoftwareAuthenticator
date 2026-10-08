@@ -67,7 +67,7 @@ pub(crate) fn is_sealed(credential_id: &[u8]) -> bool {
 /// authenticates each record together with its credential ID, and a
 /// credential is only ever found by its exact ID.
 pub(crate) fn is_discoverable(credential_id: &[u8]) -> bool {
-    !is_sealed(credential_id)
-        && !(credential_id.len() == CREDENTIAL_ID_LENGTH
+    !(is_sealed(credential_id)
+        || credential_id.len() == CREDENTIAL_ID_LENGTH
             && credential_id[0] == NON_DISCOVERABLE_MARKER)
 }
