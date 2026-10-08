@@ -856,8 +856,8 @@ fn get_pin_uv_auth_token_grants_cm_scoped_to_an_rp_id() {
 }
 
 #[test]
-fn get_pin_uv_auth_token_refuses_permissions_it_cannot_grant() {
-    // be, lbw and pcmr need features this authenticator does not have.
+fn get_pin_uv_auth_token_grants_lbw_and_refuses_unsupported_permissions() {
+    // be and pcmr need features this authenticator does not have.
     for permissions in [0x08, 0x10, 0x40, 0x04 | 0x40, 0x01 | 0x02 | 0x08] {
         let mut app = new_app(TestStore::new(), [0x46; 16]);
         app.pin_state.set_pin(pin_hash(b"1234"));
@@ -868,6 +868,13 @@ fn get_pin_uv_auth_token_refuses_permissions_it_cannot_grant() {
             permissions,
             Some("example.com"),
         );
+        if permissions == 0x10 {
+            let token = result.expect("large-blob write permission is supported");
+            assert_eq!(app.pin_state.pin_uv_auth_token(), Some(token));
+            assert_eq!(app.pin_state.pin_uv_auth_permissions(), 0x10);
+            assert_eq!(app.pin_state.retries(), MAX_PIN_RETRIES);
+            continue;
+        }
         assert_eq!(
             result,
             Err(CTAP2_ERR_UNAUTHORIZED_PERMISSION),

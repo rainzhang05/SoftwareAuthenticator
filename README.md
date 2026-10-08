@@ -18,7 +18,8 @@ your presence waits for you to approve it in a desktop notification.
   PS256, PS384 and PS512).
 - **CTAP 2.3:** PIN (protocols 1 and 2), passkeys with credential management,
   always-UV and minimum PIN length configuration, `minPinLength`, `credBlob`,
-  `hmac-secret`, `hmac-secret-mc`, `credProtect`, and packed self-attestation.
+  `hmac-secret`, `hmac-secret-mc`, `credProtect`, fragmented large-blob storage,
+  and packed self-attestation.
 - **Rust throughout:** pure-Rust cryptography, and `unsafe` code only where
   pqkey calls into the operating system.
 
@@ -73,7 +74,7 @@ the notification that appears.
 | `pqkey config force-pin-change` | Requires a different PIN |
 | `pqkey passkeys` | Lists the passkeys stored on the key |
 | `pqkey passkeys delete QUERY` | Deletes the passkey whose site, user or ID contains `QUERY` |
-| `pqkey reset` | Erases every credential and the PIN; resets configuration |
+| `pqkey reset` | Erases credentials, large blobs and PIN; resets settings |
 | `pqkey stop`, `pqkey start` | Unplugs and plugs in the key |
 
 Configuration changes ask for the current PIN when one is set. Always-UV
@@ -97,6 +98,12 @@ security key".
 Like a hardware key, pqkey accepts a reset only within 10 seconds of being
 plugged in, so `pqkey reset` restarts it first. The key's state lives in
 `~/.local/share/pqkey`.
+
+FIDO clients can store a serialized large-blob array of up to 16,384 bytes,
+transferred in fragments of at most 1,704 bytes. Writes require the PIN's
+large-blob write permission when a PIN is set or always-UV is on. Reset
+restores the empty array; deleting a credential leaves blob collection to
+the client.
 
 ## Clients
 

@@ -13,6 +13,7 @@ use std::time::Instant;
 use zeroize::Zeroizing;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use super::permissions::PIN_PERMISSION_LBW;
 use super::protocol::{PinProtocol, verify};
 
 use crate::ctap::constants::*;
@@ -31,13 +32,9 @@ pub(crate) const USER_PRESENT_TIME_LIMIT: Duration = Duration::from_secs(30);
 /// minutes (600 seconds)" (CTAP 2.3 §6.5.2.1).
 pub(crate) const MAX_USAGE_TIME_PERIOD: Duration = Duration::from_secs(600);
 
-/// lbw, the one permission that survives a user presence test (CTAP 2.3
-/// §6.5.5.7).  This authenticator never grants it.
-const PIN_PERMISSION_LBW: u8 = 0x10;
-
 /// The time source of the engine's timers: the pinUvAuthToken usage timer
 /// (CTAP 2.3 §6.5.2.1), the authenticatorGetNextAssertion timer (§6.3) and the
-/// reset window after power-up (§6.6).
+/// reset window after power-up (§6.6) and large-blob write lifetime (§6.10.2).
 ///
 /// [`CtapApp`](crate::ctap::CtapApp) uses the system's monotonic clock unless
 /// given another with [`set_clock`](crate::ctap::CtapApp::set_clock).

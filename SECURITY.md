@@ -25,8 +25,8 @@ sensor software cannot press.
   are `0600`, and udev gives the key's device only to the user of the active
   local session.
 - **Copies of the files without the keys.** The credential, PIN, counter and
-  large-blob files in `~/.local/share/pqkey` are encrypted and authenticated with
-  XChaCha20-Poly1305 under keys derived from two root keys in `keys/`. A
+  large-blob files in `~/.local/share/pqkey` are encrypted and authenticated
+  with XChaCha20-Poly1305 under keys derived from two root keys in `keys/`. A
   modified, truncated or swapped file is reported as corrupt and never used.
   File names are HMACs, so they reveal neither credentials nor sites.
   Discoverable credentials' optional large-blob keys receive the same
@@ -89,6 +89,11 @@ sensor software cannot press.
   configuration too. Without a PIN, always-UV can still be disabled, so the
   initial-configuration exception cannot strand the key. A required PIN
   change blocks new tokens until a different PIN meets the current minimum.
+- **Large-blob writes follow the PIN protection.** A PIN or always-UV
+  requires a token with the `lbw` permission for each fragment. Without
+  either, device access permits writes. Any client can read the serialized
+  array without presence or verification; platforms encrypt blob contents.
+  Only a complete write with a valid trailing hash replaces the array.
 - **Reset is only possible within 10 seconds of the key starting** (CTAP 2.3
   §6.6), as with a hardware key that has just been plugged in.
 

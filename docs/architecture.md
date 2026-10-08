@@ -177,17 +177,28 @@ protocol logic.
   discoverable credentials only. Non-discoverable credentials are sealed
   into their own ID when their key fits; RSA credentials are stored and
   consume a slot too.
+- authenticatorLargeBlobs (§6.10), with a serialized-array capacity of
+  16,384 bytes and fragments of up to 1,704 bytes, maxMsgSize minus 64.
+  Reads return committed bytes. Writes use a separate in-memory buffer and
+  commit only after the final fragment's trailing hash verifies; the key
+  otherwise leaves the contents opaque. A PIN or always-UV requires a
+  pinUvAuthToken with the `lbw` permission for each write fragment.
+  Another command, a read, 30 idle seconds or the initializing token's
+  expiry discards the staged write. Credential deletion leaves the array
+  for platforms to collect. Reset restores the initial empty array.
 - The `credBlob`, `credProtect`, `hmac-secret`, `hmac-secret-mc` and
   `minPinLength` extensions. `credBlob` stores up to 32 bytes with a stored
   credential; sealed credentials refuse it. `hmac-secret-mc` evaluates the
   PRF when a credential is created. `minPinLength` reports the minimum PIN
   length at registration, only to the RP IDs on the stored list.
-- getInfo reports the options `authnrCfg`, `setMinPINLength`, `alwaysUv` and
+- getInfo reports `largeBlobs` true and `maxSerializedLargeBlobArray` 16,384,
+  and the options `authnrCfg`, `setMinPINLength`, `alwaysUv` and
   `makeCredUvNotRqd` (the opposite of `alwaysUv`), and no `uvAcfg`. It always
   reports `forcePINChange` and `minPINLength`.
 - Packed self attestation: each credential signs its own registration.
 - A reset only within 10 seconds of the key starting (§6.6), approved in a
-  notification.
+  notification. It erases credentials, their large-blob keys, the large-blob
+  array and the PIN, and resets configuration and signature counters.
 
 ## Credential store
 
@@ -222,8 +233,7 @@ power failure. All errors before the rename keep the previous array.
 A missing or unreadable large-blob file is served as the initial array;
 the next committed write replaces it. A reset deletes the array and the
 stored credentials and replaces `credential.key`, so old copies of files
-and every sealed credential
-ID can no longer be decrypted.
+and every sealed credential ID can no longer be decrypted.
 [SECURITY.md](../SECURITY.md) describes what this protects against.
 
 Discoverable credential IDs are `0x01` and 32 random bytes. Sealed IDs are
@@ -238,7 +248,8 @@ are excluded by an excludeList, consume a slot, and are erased by reset.
 ## User presence
 
 Each registration, sign-in that needs your presence, reset and authenticator
-selection asks for your approval in a desktop notification with Approve and Deny buttons, sent through
+selection asks for your approval in a desktop notification with Approve and
+Deny buttons, sent through
 `org.freedesktop.Notifications` on the session bus.
 
 - Anything that stops the notification from showing denies the request.

@@ -1,10 +1,11 @@
 //! Persistence through the [`CredentialStore`]: credentials, the persistent
-//! part of the PIN state, and attestation material.
+//! part of the PIN state, the large-blob array and attestation material.
 //!
 //! Store errors are never mistaken for an empty store.  Reading or writing
 //! fails the command with CTAP2_ERR_PROCESSING (CTAP2_ERR_KEY_STORE_FULL for
 //! a full store), and corrupt individual credentials are skipped by
 //! [`CredentialStore::list`] itself.
+//! An unreadable large-blob array instead uses its initial value (§6.10.2).
 
 use super::CtapApp;
 use super::pin::state::{PersistentPinState, PinState};

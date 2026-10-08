@@ -3,7 +3,7 @@
 use super::cbor::{canonical_map, canonical_sort};
 use super::{AttestationMode, CtapApp};
 use crate::CoseAlg;
-use crate::store::{MAX_CRED_BLOB_LENGTH, PinStateRecord};
+use crate::store::{MAX_CRED_BLOB_LENGTH, MAX_SERIALIZED_LARGE_BLOB_ARRAY, PinStateRecord};
 
 use ciborium::{
     ser::into_writer,
@@ -80,6 +80,7 @@ impl CtapApp<'_> {
             (text("rk"), Value::Bool(true)),
             (text("up"), Value::Bool(true)),
             (text("credMgmt"), Value::Bool(true)),
+            (text("largeBlobs"), Value::Bool(true)),
             (text("pinUvAuthToken"), Value::Bool(true)),
             (text("clientPin"), Value::Bool(self.pin_state.is_set())),
             (text("authnrCfg"), Value::Bool(true)),
@@ -120,6 +121,7 @@ impl CtapApp<'_> {
             })
             .collect();
         map.push((uint(10), Value::Array(algorithms)));
+        map.push((uint(0x0B), uint(MAX_SERIALIZED_LARGE_BLOB_ARRAY as u64)));
 
         // forcePINChange and minPINLength, the current PIN policy.
         let persistent = self.pin_state.persistent();

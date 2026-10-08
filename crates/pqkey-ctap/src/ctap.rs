@@ -51,6 +51,7 @@ mod credential_management;
 mod get_assertion;
 mod get_info;
 mod hmac_secret;
+mod large_blobs;
 mod make_credential;
 mod pin;
 pub mod presence;
@@ -68,6 +69,7 @@ pub use self::reset::RESET_WINDOW_AFTER_POWER_UP;
 
 use self::credential_management::CredentialManagementState;
 use self::get_assertion::PendingAssertion;
+use self::large_blobs::LargeBlobState;
 use self::pin::state::PinState;
 use self::presence::{DEFAULT_PRESENCE_TIMEOUT, UserPresence};
 use crate::store::{CredentialStore, FileStore, PrivateKeyMaterial};
@@ -147,6 +149,7 @@ pub struct CtapApp<'interrupt> {
     attestation_mode: AttestationMode,
     cred_mgmt_state: CredentialManagementState,
     pending_assertion: Option<PendingAssertion>,
+    large_blob_state: LargeBlobState,
     presence_timeout: Duration,
     /// How long after power-up authenticatorReset is accepted, if limited.
     reset_window: Option<Duration>,
@@ -210,6 +213,7 @@ impl<'interrupt> CtapApp<'interrupt> {
             attestation_mode: AttestationMode::default(),
             cred_mgmt_state: CredentialManagementState::new(),
             pending_assertion: None,
+            large_blob_state: LargeBlobState::default(),
             presence_timeout: DEFAULT_PRESENCE_TIMEOUT,
             reset_window: Some(RESET_WINDOW_AFTER_POWER_UP),
             keepalive: Box::new(|_| {}),
@@ -311,15 +315,16 @@ impl<'interrupt> CtapApp<'interrupt> {
     /// authenticatorClientPIN has pinUvAuthProtocol (0x01) and subCommand
     /// (0x02) (CTAP 2.3 §6.5.5), authenticatorCredentialManagement has
     /// subCommand (0x01) and pinUvAuthProtocol (0x03) (§6.8), as does
-    /// authenticatorConfig (§6.11). Other commands
-    /// log neither.
+    /// authenticatorConfig (§6.11). authenticatorLargeBlobs logs only
+    /// pinUvAuthProtocol (0x06, §6.10.2). Other commands log neither.
     fn subcommand_and_pin_protocol_for_logging(
         ctap_cmd: u8,
         payload: &[u8],
     ) -> (Option<u8>, Option<u8>) {
         let (sub_command_key, pin_protocol_key) = match ctap_cmd {
-            CTAP_CMD_CLIENT_PIN => (2, 1),
-            CTAP_CMD_CREDENTIAL_MANAGEMENT | CTAP_CMD_AUTHENTICATOR_CONFIG => (1, 3),
+            CTAP_CMD_CLIENT_PIN => (Some(2), 1),
+            CTAP_CMD_CREDENTIAL_MANAGEMENT | CTAP_CMD_AUTHENTICATOR_CONFIG => (Some(1), 3),
+            CTAP_CMD_LARGE_BLOBS => (None, 6),
             _ => return (None, None),
         };
         let Ok(Value::Map(entries)) = from_reader::<Value, _>(payload) else {
@@ -337,7 +342,7 @@ impl<'interrupt> CtapApp<'interrupt> {
                     _ => None,
                 })
         };
-        (byte_at(sub_command_key), byte_at(pin_protocol_key))
+        (sub_command_key.and_then(byte_at), byte_at(pin_protocol_key))
     }
 }
 
@@ -355,6 +360,7 @@ impl<'interrupt> CtapApp<'interrupt> {
     /// The answer is a status byte, followed by the response parameters when
     /// the status is CTAP2_OK.
     pub fn call(&mut self, request: &[u8]) -> Vec<u8> {
+        self.observe_large_blob_state(request.first().copied());
         // authenticatorGetNextAssertion is a stateful command: "The
         // authenticator MAY maintain state based on the assumption that each
         // stateful command is exclusively preceded by either another instance
@@ -384,6 +390,7 @@ impl<'interrupt> CtapApp<'interrupt> {
             CTAP_CMD_CREDENTIAL_MANAGEMENT => self.handle_credential_management(payload),
             CTAP_CMD_SELECTION => self.handle_selection(),
             CTAP_CMD_AUTHENTICATOR_CONFIG => self.handle_authenticator_config(payload),
+            CTAP_CMD_LARGE_BLOBS => self.handle_large_blobs(payload),
             // Neither authenticatorBioEnrollment (0x09) nor its prototype
             // (0x40) is implemented: "If an authenticator receives a command
             // code it does not implement, it MUST return

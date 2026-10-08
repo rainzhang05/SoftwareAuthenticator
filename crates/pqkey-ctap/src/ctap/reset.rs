@@ -28,8 +28,9 @@ impl CtapApp<'_> {
     /// the authenticator returns CTAP2_ERR_USER_ACTION_TIMEOUT."
     ///
     /// [`CredentialStore::clear`](crate::store::CredentialStore::clear)
-    /// deletes every credential, writes the default PIN state and, for the
-    /// file store, replaces the key protecting both.  If it fails, the
+    /// deletes every credential, restores the initial large-blob array,
+    /// writes the default PIN state and, for the file store, replaces their
+    /// root key. If it fails, the
     /// in-memory PIN state is kept, so a PIN still guards whatever is left.
     pub(super) fn handle_reset(&mut self) -> Result<Vec<u8>, u8> {
         // The clock the engine's timers share starts at power-up.

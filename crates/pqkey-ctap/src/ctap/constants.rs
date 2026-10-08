@@ -35,6 +35,8 @@ pub const CTAP_CMD_BIO_ENROLLMENT: u8 = 0x09;
 pub const CTAP_CMD_CREDENTIAL_MANAGEMENT: u8 = 0x0A;
 /// `authenticatorSelection`, CTAP 2.3 § 6.9.
 pub const CTAP_CMD_SELECTION: u8 = 0x0B;
+/// `authenticatorLargeBlobs`, CTAP 2.3 §6.10.
+pub const CTAP_CMD_LARGE_BLOBS: u8 = 0x0C;
 /// `authenticatorConfig`, CTAP 2.3 §6.11.
 pub const CTAP_CMD_AUTHENTICATOR_CONFIG: u8 = 0x0D;
 /// Prototype `authenticatorBioEnrollment`, CTAP 2.3 § 6.12 (`FIDO_2_1_PRE`
@@ -64,6 +66,7 @@ pub const CTAP2_ERR_CBOR_UNEXPECTED_TYPE: u8 = 0x11;
 pub const CTAP2_ERR_INVALID_CBOR: u8 = 0x12;
 pub const CTAP2_ERR_MISSING_PARAMETER: u8 = 0x14;
 pub const CTAP2_ERR_LIMIT_EXCEEDED: u8 = 0x15;
+pub const CTAP2_ERR_LARGE_BLOB_STORAGE_FULL: u8 = 0x18;
 pub const CTAP2_ERR_CREDENTIAL_EXCLUDED: u8 = 0x19;
 pub const CTAP2_ERR_PROCESSING: u8 = 0x21;
 pub const CTAP2_ERR_INVALID_CREDENTIAL: u8 = 0x22;
@@ -89,6 +92,7 @@ pub const CTAP2_ERR_REQUEST_TOO_LARGE: u8 = 0x39;
 pub const CTAP2_ERR_ACTION_TIMEOUT: u8 = 0x3A;
 /// Note `0x3B`, not `0x39`: `0x39` is [`CTAP2_ERR_REQUEST_TOO_LARGE`].
 pub const CTAP2_ERR_UP_REQUIRED: u8 = 0x3B;
+pub const CTAP2_ERR_INTEGRITY_FAILURE: u8 = 0x3D;
 /// "The requested subcommand is either invalid or not implemented." Required
 /// for any subcommand a command does not implement (CTAP 2.3 § 8.1).
 pub const CTAP2_ERR_INVALID_SUBCOMMAND: u8 = 0x3E;
@@ -118,6 +122,10 @@ mod tests {
         ("CTAP2_ERR_INVALID_CBOR", CTAP2_ERR_INVALID_CBOR),
         ("CTAP2_ERR_MISSING_PARAMETER", CTAP2_ERR_MISSING_PARAMETER),
         ("CTAP2_ERR_LIMIT_EXCEEDED", CTAP2_ERR_LIMIT_EXCEEDED),
+        (
+            "CTAP2_ERR_LARGE_BLOB_STORAGE_FULL",
+            CTAP2_ERR_LARGE_BLOB_STORAGE_FULL,
+        ),
         (
             "CTAP2_ERR_CREDENTIAL_EXCLUDED",
             CTAP2_ERR_CREDENTIAL_EXCLUDED,
@@ -156,6 +164,7 @@ mod tests {
         ("CTAP2_ERR_REQUEST_TOO_LARGE", CTAP2_ERR_REQUEST_TOO_LARGE),
         ("CTAP2_ERR_ACTION_TIMEOUT", CTAP2_ERR_ACTION_TIMEOUT),
         ("CTAP2_ERR_UP_REQUIRED", CTAP2_ERR_UP_REQUIRED),
+        ("CTAP2_ERR_INTEGRITY_FAILURE", CTAP2_ERR_INTEGRITY_FAILURE),
         ("CTAP2_ERR_INVALID_SUBCOMMAND", CTAP2_ERR_INVALID_SUBCOMMAND),
         (
             "CTAP2_ERR_UNAUTHORIZED_PERMISSION",
@@ -181,6 +190,7 @@ mod tests {
         assert_eq!(CTAP2_ERR_INVALID_CBOR, 0x12);
         assert_eq!(CTAP2_ERR_MISSING_PARAMETER, 0x14);
         assert_eq!(CTAP2_ERR_LIMIT_EXCEEDED, 0x15);
+        assert_eq!(CTAP2_ERR_LARGE_BLOB_STORAGE_FULL, 0x18);
         assert_eq!(CTAP2_ERR_CREDENTIAL_EXCLUDED, 0x19);
         assert_eq!(CTAP2_ERR_PROCESSING, 0x21);
         assert_eq!(CTAP2_ERR_INVALID_CREDENTIAL, 0x22);
@@ -204,6 +214,7 @@ mod tests {
         assert_eq!(CTAP2_ERR_REQUEST_TOO_LARGE, 0x39);
         assert_eq!(CTAP2_ERR_ACTION_TIMEOUT, 0x3A);
         assert_eq!(CTAP2_ERR_UP_REQUIRED, 0x3B);
+        assert_eq!(CTAP2_ERR_INTEGRITY_FAILURE, 0x3D);
         assert_eq!(CTAP2_ERR_INVALID_SUBCOMMAND, 0x3E);
         assert_eq!(CTAP2_ERR_UNAUTHORIZED_PERMISSION, 0x40);
         assert_eq!(CTAP1_ERR_OTHER, 0x7F);
@@ -267,6 +278,7 @@ mod tests {
         assert_eq!(CTAP_CMD_BIO_ENROLLMENT, 0x09);
         assert_eq!(CTAP_CMD_CREDENTIAL_MANAGEMENT, 0x0A);
         assert_eq!(CTAP_CMD_SELECTION, 0x0B);
+        assert_eq!(CTAP_CMD_LARGE_BLOBS, 0x0C);
         // § 6.12 prototype command.
         assert_eq!(CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE, 0x40);
     }
