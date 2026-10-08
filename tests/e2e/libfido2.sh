@@ -10,9 +10,9 @@
 # prints them as "unknown", and the Python suite checks their exact COSE IDs.
 # ES256, ES384, EdDSA and RS256 credentials are registered and asserted here
 # too.
-# The tests do not reset the authenticator: each registers a non-discoverable
-# credential and asserts with that credential's ID in the allow list, so they do
-# not depend on anything else stored on the key.
+# Every test resets the authenticator first, so configuration, PINs and
+# credentials from one test never affect the next. The test key must run with
+# --allow-late-reset and --presence auto-approve.
 
 set -euo pipefail
 
@@ -29,7 +29,7 @@ run_test() {
   # Not inside `if`: errexit is ignored in a condition, even in a subshell.
   local status=0
   set +e
-  (set -euo pipefail; "$@")
+  (set -euo pipefail; fido2-token -R "$device"; "$@")
   status=$?
   set -e
   if [ "$status" -eq 0 ]; then
@@ -65,6 +65,19 @@ test_token_info() {
   echo "$info"
   grep -qE '^version strings: .*FIDO_2_1' <<<"$info" || fail "FIDO_2_1 is not advertised"
   grep -qE '^version strings: .*FIDO_2_0' <<<"$info" || fail "FIDO_2_0 is not advertised"
+  grep -qE '^version strings: .*FIDO_2_3' <<<"$info" || fail "FIDO_2_3 is not advertised"
+  # libfido2 1.16.0 tools/token.c prints false option values with a "no"
+  # prefix, and these three getInfo members with the following exact labels.
+  local option
+  for option in authnrCfg setMinPINLength noalwaysUv makeCredUvNotRqd; do
+    grep -qE "^options: (.*, )?${option}(,|$)" <<<"$info" \
+      || fail "$option is not advertised"
+  done
+  grep -qE '^extension strings: (.*, )?minPinLength(,|$)' <<<"$info" \
+    || fail "minPinLength is not advertised"
+  grep -qxF 'minpinlen: 4' <<<"$info" || fail "unexpected minimum PIN length"
+  grep -qxF 'maxrpids in minpinlen: 8' <<<"$info" || fail "unexpected RP ID capacity"
+  grep -qxF 'pin change required: false' <<<"$info" || fail "a PIN change is required after reset"
   # The key's algorithms in getInfo order (ALGORITHMS in tests/e2e/ctap.py).
   # libfido2 names only the algorithms it implements (print_algorithms in
   # libfido2's tools/token.c, which calls EdDSA "eddsa"); the three ML-DSA

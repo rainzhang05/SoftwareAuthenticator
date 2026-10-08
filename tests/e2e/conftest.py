@@ -143,7 +143,10 @@ def ctap(device) -> Ctap2:
     """
     session = Ctap2(device)
     session.reset()
-    return session
+    # python-fido2 caches getInfo at construction. Refresh it after reset so
+    # the previous test's minimum, always-UV and force-change state cannot
+    # leak through the platform's cached capabilities.
+    return Ctap2(device)
 
 
 @pytest.fixture
@@ -153,6 +156,6 @@ def certificate_ctap(certificate_hidraw_path) -> Iterator[Ctap2]:
     try:
         session = Ctap2(dev)
         session.reset()
-        yield session
+        yield Ctap2(dev)
     finally:
         dev.close()

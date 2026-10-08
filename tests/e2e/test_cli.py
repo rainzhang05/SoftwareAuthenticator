@@ -1,6 +1,6 @@
 """The pqkey command line: start, status and stop of a key of the tests' own,
-and pin, passkeys and reset, which manage it over CTAP through its hidraw
-node as a security key's management application does.
+and config, pin, passkeys and reset, which manage it over CTAP through its
+hidraw node as a security key's management application does.
 
 Every test has a state directory of its own under pytest's tmp_path. The key
 is started with product ID 0005, so it never touches the keys the other tests
@@ -42,6 +42,7 @@ class Pqkey:
 
     def __init__(self, state_dir: Path):
         self.state_dir = state_dir
+        self.initialized = False
 
     def command(self, *args: str) -> list[str]:
         return [PQKEY, *args, "--state-dir", str(self.state_dir)]
@@ -76,7 +77,11 @@ class Pqkey:
         problems it lists after them (here: the CI's own udev rule is not
         pqkey's) are left out."""
         key = self.ok("status").split("\n\n")[0]
-        return dict(re.findall(r"^(\w+): +(.*)$", key, re.M))
+        return dict(re.findall(r"^([\w ]+): +(.*)$", key, re.M))
+
+    def config(self) -> dict[str, str]:
+        """The advertised settings from `pqkey config`."""
+        return dict(line.split(": ", 1) for line in self.ok("config").splitlines())
 
     def passkeys(self) -> list[list[str]]:
         """The rows of `pqkey passkeys`, whose columns are at least two spaces
@@ -90,6 +95,15 @@ class Pqkey:
         started = re.fullmatch(r"Key started \(pid (\d+)\); logging to (.+)\n", output)
         assert started, output
         assert started[2] == str(self.state_dir / "authenticator.log")
+        if not self.initialized:
+            # Configuration tests start with a reset key. Later startups in
+            # the same test must preserve settings to check persistence. An
+            # unanswered key already has an empty state directory and could
+            # never approve reset.
+            if presence == "auto-approve":
+                with client.open_device(self.status()["Device"]) as device:
+                    Ctap2(device).reset()
+            self.initialized = True
         return int(started[1])
 
 
@@ -139,7 +153,7 @@ def test_start_status_and_stop(pqkey: Pqkey):
 
 
 def test_commands_need_a_running_key(pqkey: Pqkey):
-    for command in (["pin"], ["passkeys"], ["passkeys", "delete", "x", "--yes"]):
+    for command in (["pin"], ["passkeys"], ["passkeys", "delete", "x", "--yes"], ["config"]):
         assert pqkey.error(*command, stdin=f"{PIN}\n") == "the key is not running; start it with `pqkey start`"
     # setup installs the key for the default state directory only.
     assert pqkey.error("setup") == "pqkey setup only sets up the key in the default state directory"
@@ -259,3 +273,143 @@ def test_ctrl_c_cancels_a_reset_waiting_for_approval(pqkey: Pqkey):
         process.kill()
     assert process.returncode == 1, stderr
     assert stderr.splitlines()[-1] == "pqkey: the reset was cancelled; nothing was erased"
+
+
+def test_config_without_a_pin_and_idempotent_always_uv(pqkey: Pqkey):
+    pqkey.start()
+    assert pqkey.config() == {
+        "Always UV": "off", "Minimum PIN length": "4", "PIN change required": "no",
+    }
+    assert pqkey.ok("config", "always-uv", "off").startswith("Always UV: off.\n")
+    output = pqkey.ok("config", "always-uv", "on")
+    assert output.startswith("Always UV: on.\n"), output
+    assert "Browsers will need a PIN before they can register or sign in" in output
+    assert "`pqkey pin`" in output
+    assert pqkey.config()["Always UV"] == "on"
+    assert pqkey.status()["Always UV"] == "on; registrations and sign-ins require the PIN"
+    assert "`pqkey pin`" in pqkey.error("config", "min-pin-length", "6", "--yes")
+    assert pqkey.config()["Minimum PIN length"] == "4"
+    assert pqkey.ok("config", "always-uv", "on").startswith("Always UV: on.\n")
+    # The no-PIN exception lets the CLI recover without acquiring a token.
+    assert pqkey.ok("config", "always-uv", "off").startswith("Always UV: off.\n")
+    assert "`pqkey pin`" in pqkey.error("config", "force-pin-change")
+    assert pqkey.config()["PIN change required"] == "no"
+
+
+def test_config_minimum_confirmation_and_rp_ids(pqkey: Pqkey):
+    pqkey.start()
+    declined = pqkey.run("config", "min-pin-length", "6", stdin="n\n")
+    assert declined.returncode == 0, declined
+    assert "Only a reset, which erases every passkey, can lower it again." in declined.stderr
+    assert "Nothing was changed." in declined.stdout
+    assert pqkey.config()["Minimum PIN length"] == "4"
+    assert pqkey.ok("config", "min-pin-length", "6", "--rp", "a.config.example",
+                    "--rp", "b.config.example", stdin="y\n") == "Minimum PIN length: 6.\n"
+    assert pqkey.config()["Minimum PIN length"] == "6"
+    assert pqkey.error("pin", stdin=f"{PIN}\n") == "PIN must be at least 6 characters long"
+
+    # --yes skips confirmation, and omitting --rp preserves the previous list.
+    assert pqkey.ok("config", "min-pin-length", "7", "--yes") == "Minimum PIN length: 7.\n"
+    with client.open_device(pqkey.status()["Device"]) as device:
+        ctap = Ctap2(device)
+        for rp_id in ("a.config.example", "b.config.example"):
+            credential = client.register(ctap, rp_id, client.ES256, extensions={"minPinLength": True})
+            assert credential.auth_data.extensions == {"minPinLength": 7}
+    assert pqkey.ok("pin", stdin="7309152\n") == "PIN set.\n"
+    assert pqkey.config()["PIN change required"] == "no"
+
+
+def test_config_with_pin_authentication_and_recovery(pqkey: Pqkey):
+    pqkey.start()
+    pqkey.ok("pin", stdin=f"{PIN}\n")
+    assert pqkey.ok("config", "always-uv", "on", stdin=f"{PIN}\n") == "Always UV: on.\n"
+    # An idempotent command needs no PIN and consumes no retries.
+    assert pqkey.ok("config", "always-uv", "on", stdin=f"{WRONG_PIN}\n") == "Always UV: on.\n"
+    assert pqkey.status()["PIN"] == f"set ({MAX_RETRIES} retries left)"
+    assert pqkey.error("config", "always-uv", "off", stdin=f"{WRONG_PIN}\n") == f"wrong PIN; {MAX_RETRIES - 1} retries left"
+    assert pqkey.ok("config", "always-uv", "off", stdin=f"{PIN}\n") == "Always UV: off.\n"
+
+    # Confirmation precedes the PIN prompt, so declining reads only one line.
+    declined = pqkey.run("config", "min-pin-length", "6", stdin="n\n")
+    assert declined.returncode == 0 and "Nothing was changed." in declined.stdout, declined
+    assert pqkey.status()["PIN"] == f"set ({MAX_RETRIES} retries left)"
+    result = pqkey.ok("config", "min-pin-length", "6", stdin=f"y\n{PIN}\n")
+    assert result == "Minimum PIN length: 6.\nA PIN change is required; run `pqkey pin`.\n"
+    assert pqkey.config()["PIN change required"] == "yes"
+    status = pqkey.ok("status")
+    assert "PIN change required; run `pqkey pin`" in status, status
+    for args in (("passkeys",), ("config", "always-uv", "on")):
+        assert "`pqkey pin`" in pqkey.error(*args, stdin=f"{PIN}\n")
+    # A current four-character PIN remains valid below the raised minimum.
+    assert pqkey.error("pin", stdin=f"{PIN}\n12345\n") == "PIN must be at least 6 characters long"
+    assert pqkey.ok("pin", stdin=f"{PIN}\n{NEW_PIN}\n") == "PIN changed.\n"
+    assert pqkey.config()["PIN change required"] == "no"
+    assert pqkey.ok("passkeys", stdin=f"{NEW_PIN}\n") == "No passkeys are stored on the key.\n"
+
+
+def test_config_force_change_rejects_reusing_the_pin(pqkey: Pqkey):
+    pqkey.start()
+    pqkey.ok("pin", stdin=f"{NEW_PIN}\n")
+    assert pqkey.ok("config", "force-pin-change", stdin=f"{NEW_PIN}\n") == "A PIN change is required; run `pqkey pin`.\n"
+    assert pqkey.config()["PIN change required"] == "yes"
+    assert pqkey.error("pin", stdin=f"{NEW_PIN}\n{NEW_PIN}\n") == (
+        "the new PIN must differ from the current PIN when a change is required; "
+        "run `pqkey pin` and choose another PIN"
+    )
+    assert pqkey.config()["PIN change required"] == "yes"
+    assert pqkey.ok("pin", stdin=f"{NEW_PIN}\n{PIN}\n") == "PIN changed.\n"
+    assert pqkey.config()["PIN change required"] == "no"
+
+
+def test_config_reports_irreversible_minimum_and_rp_capacity_errors(pqkey: Pqkey):
+    pqkey.start()
+    pqkey.ok("config", "min-pin-length", "6", "--yes")
+    error = pqkey.error("config", "min-pin-length", "4", "--yes")
+    assert "reset" in error and "every passkey" in error, error
+    assert pqkey.config()["Minimum PIN length"] == "6"
+    args = ["config", "min-pin-length", "7", "--yes"]
+    for number in range(9):
+        args += ["--rp", f"{number}.config.example"]
+    error = pqkey.error(*args)
+    assert "8" in error and "RP" in error, error
+    assert pqkey.config()["Minimum PIN length"] == "6"
+    error = pqkey.error("config", "min-pin-length", "7", "--rp", "x" * 254, "--yes")
+    assert "253" in error, error
+    assert pqkey.config()["Minimum PIN length"] == "6"
+
+
+def test_config_survives_restart_and_reset_restores_defaults(pqkey: Pqkey):
+    pqkey.start()
+    pqkey.ok("pin", stdin=f"{PIN}\n")
+    pqkey.ok("config", "always-uv", "on", stdin=f"{PIN}\n")
+    pqkey.ok("config", "min-pin-length", "6", "--rp", "restart.config.example", "--yes", stdin=f"{PIN}\n")
+    settings = pqkey.config()
+    assert settings == {
+        "Always UV": "on", "Minimum PIN length": "6", "PIN change required": "yes",
+    }
+    pqkey.ok("stop")
+    pqkey.start()
+    assert pqkey.config() == settings
+    pqkey.ok("pin", stdin=f"{PIN}\n{NEW_PIN}\n")
+    with client.open_device(pqkey.status()["Device"]) as device:
+        ctap = Ctap2(device)
+        protocol = ClientPin(ctap).protocol
+        auth = client.pin_uv_auth(
+            ctap, protocol, NEW_PIN, ClientPin.PERMISSION.MAKE_CREDENTIAL,
+            "restart.config.example",
+        )
+        credential = client.register(
+            ctap, "restart.config.example", client.ES256, uv=True,
+            extensions={"minPinLength": True}, **auth,
+        )
+        assert credential.auth_data.extensions == {"minPinLength": 6}
+    pqkey.ok("reset", "--yes")
+    assert pqkey.config() == {
+        "Always UV": "off", "Minimum PIN length": "4", "PIN change required": "no",
+    }
+    with client.open_device(pqkey.status()["Device"]) as device:
+        credential = client.register(
+            Ctap2(device), "restart.config.example", client.ES256,
+            extensions={"minPinLength": True},
+        )
+        assert credential.auth_data.extensions is None
