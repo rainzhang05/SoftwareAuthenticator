@@ -42,7 +42,6 @@ class Pqkey:
 
     def __init__(self, state_dir: Path):
         self.state_dir = state_dir
-        self.initialized = False
 
     def command(self, *args: str) -> list[str]:
         return [PQKEY, *args, "--state-dir", str(self.state_dir)]
@@ -95,15 +94,6 @@ class Pqkey:
         started = re.fullmatch(r"Key started \(pid (\d+)\); logging to (.+)\n", output)
         assert started, output
         assert started[2] == str(self.state_dir / "authenticator.log")
-        if not self.initialized:
-            # Configuration tests start with a reset key. Later startups in
-            # the same test must preserve settings to check persistence. An
-            # unanswered key already has an empty state directory and could
-            # never approve reset.
-            if presence == "auto-approve":
-                with client.open_device(self.status()["Device"]) as device:
-                    Ctap2(device).reset()
-            self.initialized = True
         return int(started[1])
 
 
