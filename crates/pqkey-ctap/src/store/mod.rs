@@ -1,4 +1,5 @@
-//! Persistent storage for credentials, PIN state, and attestation material.
+//! Persistent storage for credentials, PIN state, attestation material and
+//! the serialized large-blob array.
 //!
 //! [`CredentialStore`] is the interface the CTAP engine talks to.  It has two
 //! implementations with the same observable behaviour:
@@ -39,8 +40,8 @@
 //!   made since the last reset, which rolls back a signature counter or the PIN
 //!   retry counter.  Anyone holding the keys can of course forge records.
 //! * **Crypto-shredding on reset.**  [`CredentialStore::clear`] replaces the key
-//!   that protects credentials and PIN state, and the key that seals
-//!   credential IDs with it.  Overwriting files does not
+//!   that protects credentials, PIN state and the large-blob array, and the key
+//!   that seals credential IDs with it. Overwriting files does not
 //!   reliably destroy data on SSDs or copy-on-write filesystems, but old
 //!   ciphertext left in free blocks, snapshots, or backups is useless once its
 //!   key is gone.  The old key file is overwritten before it is released, as a
@@ -58,7 +59,8 @@
 //!
 //! A record that fails authentication or decoding never crashes the
 //! authenticator and is never deleted automatically.  [`CredentialStore::get`],
-//! [`CredentialStore::pin_state`], and [`CredentialStore::attestation`] report
+//! [`CredentialStore::pin_state`], [`CredentialStore::large_blob_array`], and
+//! [`CredentialStore::attestation`] report
 //! it as [`StoreError::Corrupt`]; [`CredentialStore::list`] and
 //! [`CredentialStore::count`] skip it with a logged warning, so one bad file
 //! cannot hide the others.  It stays on disk until it is overwritten, deleted
@@ -84,6 +86,7 @@ mod envelope;
 mod file;
 mod fsio;
 mod keys;
+mod large_blobs;
 mod memory;
 mod record;
 pub(crate) use record::MAX_CRED_BLOB_LENGTH;
@@ -94,14 +97,16 @@ mod test_support;
 pub use envelope::SEALED_ID_OVERHEAD;
 pub use file::FileStore;
 pub use keys::{FileKeySource, KeyDomain, KeySource, RootKey};
+pub(crate) use large_blobs::validate_large_blob_array;
+pub use large_blobs::{INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY};
 pub use memory::MemoryStore;
 pub use record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKeyMaterial};
 
 /// The credential limit a store uses unless configured otherwise.
 pub const DEFAULT_MAX_CREDENTIALS: usize = 1000;
 
-/// Storage for credentials, the persistent PIN state, and the attestation key,
-/// and the key that seals credential IDs.
+/// Storage for credentials, PIN state, the attestation key, the serialized
+/// large-blob array and the key that seals credential IDs.
 ///
 /// Every implementation must behave identically; the conformance tests in
 /// `crates/pqkey-ctap/tests/store` run the same cases against each of them.
@@ -146,7 +151,8 @@ pub trait CredentialStore {
     fn max_credentials(&self) -> usize;
 
     /// Factory reset: delete every credential, reset the PIN state to
-    /// [`PinStateRecord::default`] and the global signature counter to 0.  The
+    /// [`PinStateRecord::default`], the global signature counter to 0 and the
+    /// serialized large-blob array to [`INITIAL_LARGE_BLOB_ARRAY`]. The
     /// attestation record is kept.
     ///
     /// Afterwards [`Self::pin_state`] returns the default state, not `None`.
@@ -168,6 +174,23 @@ pub trait CredentialStore {
 
     /// Atomically replace the global signature counter.
     fn set_signature_counter(&mut self, value: u32) -> Result<(), StoreError>;
+
+    /// The last committed serialized large-blob array (CTAP 2.3 §6.10).
+    ///
+    /// Returns [`INITIAL_LARGE_BLOB_ARRAY`] when none has been written. An
+    /// unreadable or invalid stored array returns an error and remains in
+    /// place; the engine logs the error and serves the initial array.
+    fn large_blob_array(&self) -> Result<Vec<u8>, StoreError>;
+
+    /// Atomically replace the serialized large-blob array.
+    ///
+    /// The array must be 17–[`MAX_SERIALIZED_LARGE_BLOB_ARRAY`] bytes long
+    /// and end with the first 16 bytes of SHA-256 of its preceding bytes;
+    /// invalid input returns [`StoreError::InvalidRecord`]. No other content
+    /// validation is performed. Failure before replacement preserves the
+    /// preceding array. [`FileStore`] treats rename as commitment, so a
+    /// subsequent directory-flush failure is logged and returns success.
+    fn set_large_blob_array(&mut self, array: &[u8]) -> Result<(), StoreError>;
 
     /// The attestation record, or `None` if none has been provisioned.
     fn attestation(&self) -> Result<Option<AttestationRecord>, StoreError>;

@@ -24,16 +24,19 @@ sensor software cannot press.
 - **Other users on the computer.** The state directory is `0700`, its files
   are `0600`, and udev gives the key's device only to the user of the active
   local session.
-- **Copies of the files without the keys.** The credential, PIN and counter
-  files in `~/.local/share/pqkey` are encrypted and authenticated with
+- **Copies of the files without the keys.** The credential, PIN, counter and
+  large-blob files in `~/.local/share/pqkey` are encrypted and authenticated with
   XChaCha20-Poly1305 under keys derived from two root keys in `keys/`. A
   modified, truncated or swapped file is reported as corrupt and never used.
   File names are HMACs, so they reveal neither credentials nor sites.
   Discoverable credentials' optional large-blob keys receive the same
   encryption and erasure protections as their private keys.
+  An unreadable large-blob array is logged and served as its initial value;
+  it is replaced only by a committed write or a reset.
 - **Old data after a reset.** A reset replaces the credential root key, so
   leftover copies of files, and the credential IDs that sites hold, can no
-  longer be decrypted.
+  longer be decrypted. It erases credential large-blob keys and restores the
+  initial large-blob array.
 - **PIN guessing through the key.** The retry count is saved before each
   comparison. After 8 wrong PINs the PIN is blocked until a reset, and after 3
   in a row the key must be restarted.

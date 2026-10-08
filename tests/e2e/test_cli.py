@@ -226,7 +226,7 @@ def test_reset_replugs_the_key_and_erases_it(pqkey: Pqkey):
     old_info = (pqkey.state_dir / "authenticator.info").read_bytes().split(b"\n", 1)
     assert old_info[0].split()[1] == str(old_pid).encode()
     pqkey.ok("pin", stdin=f"{PIN}\n")
-    assert pqkey.ok("reset", "--yes") == "The key is reset: its passkeys and its PIN are erased.\n"
+    assert pqkey.ok("reset", "--yes") == "The key is reset: its passkeys, large blobs and PIN are erased.\n"
     status = pqkey.status()
     assert status["PIN"].startswith("not set"), status
     pid = int(re.fullmatch(r"running \(pid (\d+)\)", status["Key"])[1])

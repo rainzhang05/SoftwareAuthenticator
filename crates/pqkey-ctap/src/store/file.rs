@@ -15,14 +15,15 @@ use super::keys::{
 };
 use super::{
     AttestationRecord, Corruption, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS,
-    PinStateRecord, StoreError, next_created_at, sort_newest_first, validate_attestation,
-    validate_credential,
+    INITIAL_LARGE_BLOB_ARRAY, PinStateRecord, StoreError, next_created_at, sort_newest_first,
+    validate_attestation, validate_credential,
 };
 
 const CREDENTIALS_DIR: &str = "credentials";
 const KEYS_DIR: &str = "keys";
 const PIN_STATE_FILE: &str = "pin-state";
 const SIGNATURE_COUNTER_FILE: &str = "signature-counter";
+const LARGE_BLOBS_FILE: &str = "large-blobs";
 const ATTESTATION_FILE: &str = "attestation";
 
 /// The production [`CredentialStore`]: authenticated, encrypted files in a
@@ -34,7 +35,8 @@ const ATTESTATION_FILE: &str = "attestation";
 /// Every operation reads the directory afresh; nothing is cached between
 /// calls except the configuration.  An object that fails authentication or
 /// decoding is reported (by [`get`](CredentialStore::get),
-/// [`pin_state`](CredentialStore::pin_state), and
+/// [`pin_state`](CredentialStore::pin_state),
+/// [`large_blob_array`](CredentialStore::large_blob_array), and
 /// [`attestation`](CredentialStore::attestation)) or skipped with a warning
 /// (by [`list`](CredentialStore::list) and [`count`](CredentialStore::count)),
 /// and never deleted except by [`delete`](CredentialStore::delete) or
@@ -51,6 +53,7 @@ const ATTESTATION_FILE: &str = "attestation";
 /// │   └── <64 hex digits>     0600  one envelope per credential, record type 1
 /// ├── pin-state               0600  envelope, record type 2
 /// ├── signature-counter       0600  envelope, record type 4
+/// ├── large-blobs             0600  envelope, record type 5
 /// └── attestation             0600  envelope, record type 3
 /// ```
 ///
@@ -67,8 +70,8 @@ const ATTESTATION_FILE: &str = "attestation";
 /// * the **device** key protects the attestation record and survives
 ///   [`clear`](CredentialStore::clear);
 /// * the **credential** key protects credential records, credential file
-///   names, the PIN state, and sealed credential IDs, and is replaced by
-///   [`clear`](CredentialStore::clear).
+///   names, the PIN state, signature counter, large-blob array and sealed
+///   credential IDs, and is replaced by [`clear`](CredentialStore::clear).
 ///
 /// Root keys are never used directly.  Subkeys are HKDF-SHA-256 (RFC 5869)
 /// with no salt, the root key as input keying material, a 32-byte output, and
@@ -77,7 +80,7 @@ const ATTESTATION_FILE: &str = "attestation";
 /// ```text
 /// root key    info string                                 subkey
 /// device      ftsa-store/v1/device/record-encryption      encrypts the attestation record
-/// credential  ftsa-store/v1/credential/record-encryption  encrypts credentials and PIN state
+/// credential  ftsa-store/v1/credential/record-encryption  encrypts credentials, PIN state, counters and blobs
 /// credential  ftsa-store/v1/credential/index-hmac         keys the credential file names
 /// credential  ftsa-store/v1/credential/id-encryption      seals credential IDs
 /// ```
@@ -96,7 +99,8 @@ const ATTESTATION_FILE: &str = "attestation";
 /// offset  length  field
 ///      0       4  magic, ASCII "FTSA"
 ///      4       1  format version, 1
-///      5       1  record type: 1 credential, 2 PIN state, 3 attestation
+///      5       1  record type: 1 credential, 2 PIN state, 3 attestation,
+///                             4 signature counter, 5 large-blob array
 ///      6      24  XChaCha20-Poly1305 nonce, freshly random for every write
 ///     30       n  ciphertext of the n-byte record encoding
 ///   30+n      16  Poly1305 tag
@@ -109,8 +113,9 @@ const ATTESTATION_FILE: &str = "attestation";
 /// ```
 ///
 /// where `name` is the object's path relative to the state directory:
-/// `pin-state`, `attestation`, or `credentials/<64 hex digits>`.  Copying one
-/// file over another therefore fails authentication even under the same key.
+/// `pin-state`, `attestation`, `signature-counter`, `large-blobs`, or
+/// `credentials/<64 hex digits>`. Copying one file over another therefore
+/// fails authentication even under the same key.
 /// Envelopes are at most 1 MiB.
 ///
 /// # Records
@@ -156,6 +161,12 @@ const ATTESTATION_FILE: &str = "attestation";
 /// attestation record (type 3)
 ///    1  private_key             byte string, 32 bytes
 ///    2  certificate_chain       array of byte strings, at least one, none empty
+///
+/// signature counter record (type 4)
+///    1  signature_counter       unsigned integer, 32 bits
+///
+/// large-blob array record (type 5)
+///    1  serialized_array        byte string, 17–16,384 bytes, trailing hash
 /// ```
 ///
 /// # Durability
@@ -164,7 +175,10 @@ const ATTESTATION_FILE: &str = "attestation";
 /// write goes to a temporary file that is flushed, renamed over its target,
 /// and followed by a flush of the directory.  See
 /// [`put`](CredentialStore::put) and [`clear`](CredentialStore::clear) in
-/// the source for the crash analysis.
+/// the source for the crash analysis. A large-blob array write commits when
+/// renamed: a later directory-flush failure is logged and returns success,
+/// although a power failure may then restore the preceding file. Other
+/// writers report that failure even though the replacement is visible.
 #[derive(Debug)]
 pub struct FileStore<K = FileKeySource> {
     root: PathBuf,
@@ -265,6 +279,7 @@ impl<K: KeySource> FileStore<K> {
             KeyDomain::Device => exists(&self.root.join(ATTESTATION_FILE)),
             KeyDomain::Credential => Ok(exists(&self.root.join(PIN_STATE_FILE))?
                 || exists(&self.root.join(SIGNATURE_COUNTER_FILE))?
+                || exists(&self.root.join(LARGE_BLOBS_FILE))?
                 || !self.credential_file_names()?.is_empty()),
         }
     }
@@ -472,8 +487,9 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
         // completes.
         //
         // 1. Delete every file in `credentials/`, then flush the directory, and
-        //    delete the global signature counter.  A crash part-way leaves
-        //    some credentials, still guarded by the unchanged PIN state.
+        //    delete the global signature counter and large-blob array. A crash
+        //    part-way leaves some credentials, still guarded by the unchanged
+        //    PIN state.
         //    Nothing is exposed.
         // 2. Rotate the credential key: the new key is written to a flushed
         //    temporary file and renamed over the old one, the directory is
@@ -493,7 +509,10 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
         // store whose credential key is lost or malformed.
         fsio::remove_all_files(&self.credentials_dir)?;
         fsio::ensure_private_dir(&self.credentials_dir)?;
-        if fsio::remove_file_if_present(&self.root.join(SIGNATURE_COUNTER_FILE))? {
+        let counter_removed =
+            fsio::remove_file_if_present(&self.root.join(SIGNATURE_COUNTER_FILE))?;
+        let array_removed = fsio::remove_file_if_present(&self.root.join(LARGE_BLOBS_FILE))?;
+        if counter_removed || array_removed {
             fsio::sync_dir(&self.root)?;
         }
         let root_key = self.keys.rotate(KeyDomain::Credential)?;
@@ -541,6 +560,35 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
             SIGNATURE_COUNTER_FILE,
             &plaintext,
         )
+    }
+
+    fn large_blob_array(&self) -> Result<Vec<u8>, StoreError> {
+        if !exists(&self.root.join(LARGE_BLOBS_FILE))? {
+            return Ok(INITIAL_LARGE_BLOB_ARRAY.to_vec());
+        }
+        let Some(keys) = self.credential_keys()? else {
+            return Ok(INITIAL_LARGE_BLOB_ARRAY.to_vec());
+        };
+        Ok(self
+            .read_object(
+                &keys.record,
+                RecordType::LargeBlobArray,
+                LARGE_BLOBS_FILE,
+                codec::decode_large_blob_array,
+            )?
+            .unwrap_or_else(|| INITIAL_LARGE_BLOB_ARRAY.to_vec()))
+    }
+
+    fn set_large_blob_array(&mut self, array: &[u8]) -> Result<(), StoreError> {
+        let plaintext = codec::encode_large_blob_array(array)?;
+        let keys = CredentialKeys::derive(&self.root_key_for_write(KeyDomain::Credential)?)?;
+        let sealed = envelope::seal(
+            &keys.record,
+            RecordType::LargeBlobArray,
+            LARGE_BLOBS_FILE,
+            &plaintext,
+        )?;
+        fsio::replace_file_committed(&self.root, LARGE_BLOBS_FILE, &sealed)
     }
 
     fn attestation(&self) -> Result<Option<AttestationRecord>, StoreError> {
@@ -635,6 +683,37 @@ mod tests {
     use crate::CoseAlg;
     use crate::store::PrivateKeyMaterial;
     use crate::store::test_support::TempDir;
+
+    #[test]
+    fn authenticated_invalid_arrays_are_reported_and_replaceable() {
+        let scratch = TempDir::new();
+        let mut store = FileStore::open(scratch.path().join("state")).unwrap();
+        let keys = store.credential_keys().unwrap().unwrap();
+        for plaintext in [
+            vec![0xa1, 0x01, 0xf5],
+            vec![0xa1, 0x01, 0x40],
+            [vec![0xa1, 0x01, 0x51], vec![0; 17]].concat(),
+            [vec![0xa1, 0x01, 0x59, 0x40, 0x01], vec![0; 16_385]].concat(),
+        ] {
+            let sealed = envelope::seal(
+                &keys.record,
+                RecordType::LargeBlobArray,
+                LARGE_BLOBS_FILE,
+                &plaintext,
+            )
+            .unwrap();
+            fs::write(store.root.join(LARGE_BLOBS_FILE), &sealed).unwrap();
+            assert!(matches!(
+                store.large_blob_array(),
+                Err(StoreError::Corrupt { .. })
+            ));
+            assert_eq!(fs::read(store.root.join(LARGE_BLOBS_FILE)).unwrap(), sealed);
+            store
+                .set_large_blob_array(&INITIAL_LARGE_BLOB_ARRAY)
+                .unwrap();
+            assert_eq!(store.large_blob_array().unwrap(), INITIAL_LARGE_BLOB_ARRAY);
+        }
+    }
 
     fn record(credential_id: &[u8]) -> CredentialRecord {
         CredentialRecord {

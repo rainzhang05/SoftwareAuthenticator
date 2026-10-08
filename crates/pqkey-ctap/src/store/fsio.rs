@@ -111,13 +111,57 @@ pub(crate) fn read_file(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, Stor
 
 /// Atomically replace `dir/name` with `contents`.
 pub(crate) fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> Result<(), StoreError> {
+    replace_file_with(
+        dir,
+        name,
+        contents,
+        false,
+        |from, to| fs::rename(from, to),
+        sync_dir,
+    )
+}
+
+/// Atomically replace an array, treating rename as commitment. A directory
+/// flush failure after rename is logged and returns success, so a failed
+/// command never makes a new array visible.
+pub(crate) fn replace_file_committed(
+    dir: &Path,
+    name: &str,
+    contents: &[u8],
+) -> Result<(), StoreError> {
+    replace_file_with(
+        dir,
+        name,
+        contents,
+        true,
+        |from, to| fs::rename(from, to),
+        sync_dir,
+    )
+}
+
+fn replace_file_with(
+    dir: &Path,
+    name: &str,
+    contents: &[u8],
+    rename_commits: bool,
+    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    flush: impl FnOnce(&Path) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
     let target = dir.join(name);
     let temp = write_temp_file(dir, contents)?;
-    if let Err(err) = fs::rename(&temp, &target) {
+    if let Err(err) = rename(&temp, &target) {
         let _ = fs::remove_file(&temp);
         return Err(io_error(&target, err));
     }
-    sync_dir(dir)
+    match flush(dir) {
+        Err(err) if rename_commits => {
+            log::warn!(
+                "credential store: large-blob array committed but directory flush failed: {err}"
+            );
+            Ok(())
+        }
+        result => result,
+    }
 }
 
 /// Atomically create `dir/name` with `contents` unless it already exists.
@@ -339,6 +383,59 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, ["object"], "no temporary file may be left behind");
+    }
+
+    #[test]
+    fn failed_array_rename_keeps_the_previous_file() {
+        let scratch = scratch_dir();
+        replace_file(scratch.path(), "large-blobs", b"previous").unwrap();
+        let result = replace_file_with(
+            scratch.path(),
+            "large-blobs",
+            b"pending",
+            true,
+            |_, _| Err(io::Error::other("injected rename failure")),
+            |_| panic!("flush must not run when rename failed"),
+        );
+        assert!(matches!(result, Err(StoreError::Io { .. })));
+        assert_eq!(
+            fs::read(scratch.path().join("large-blobs")).unwrap(),
+            b"previous"
+        );
+        assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn array_rename_commits_even_when_directory_flush_fails() {
+        let scratch = scratch_dir();
+        replace_file(scratch.path(), "large-blobs", b"previous").unwrap();
+        let result = replace_file_with(
+            scratch.path(),
+            "large-blobs",
+            b"committed",
+            true,
+            |from, to| fs::rename(from, to),
+            |path| Err(io_error(path, io::Error::other("injected flush failure"))),
+        );
+        assert!(result.is_ok());
+        assert_eq!(
+            fs::read(scratch.path().join("large-blobs")).unwrap(),
+            b"committed"
+        );
+        assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 1);
+        // Existing writers retain their previous failure semantics.
+        assert!(
+            replace_file_with(
+                scratch.path(),
+                "other",
+                b"visible",
+                false,
+                |from, to| fs::rename(from, to),
+                |path| Err(io_error(path, io::Error::other("injected flush failure"))),
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(scratch.path().join("other")).unwrap(), b"visible");
     }
 
     #[test]

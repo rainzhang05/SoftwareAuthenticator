@@ -7,9 +7,9 @@ use zeroize::Zeroizing;
 use super::envelope;
 use super::keys::{CredentialKeys, RootKey};
 use super::{
-    AttestationRecord, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS, PinStateRecord,
-    StoreError, next_created_at, sort_newest_first, validate_attestation, validate_credential,
-    validate_pin_state,
+    AttestationRecord, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS,
+    INITIAL_LARGE_BLOB_ARRAY, PinStateRecord, StoreError, next_created_at, sort_newest_first,
+    validate_attestation, validate_credential, validate_large_blob_array, validate_pin_state,
 };
 
 /// A [`CredentialStore`] that keeps everything in memory.
@@ -18,7 +18,8 @@ use super::{
 /// ordering with store-assigned creation order, the credential limit applies to
 /// inserts but not to replacements, records are validated before they are
 /// accepted, and [`clear`](CredentialStore::clear) keeps the attestation record
-/// and leaves a default PIN state behind.  Nothing is ever corrupt, and there
+/// and leaves a default PIN state and initial large-blob array behind.
+/// Nothing is ever corrupt, and there
 /// is no size limit on individual records.  Credential IDs are sealed as the
 /// file store seals them, under a random key made on first use and dropped by
 /// [`clear`](CredentialStore::clear).
@@ -27,6 +28,7 @@ pub struct MemoryStore {
     credentials: BTreeMap<Vec<u8>, CredentialRecord>,
     pin_state: Option<PinStateRecord>,
     signature_counter: u32,
+    large_blob_array: Vec<u8>,
     attestation: Option<AttestationRecord>,
     max_credentials: usize,
     credential_key: Option<RootKey>,
@@ -40,6 +42,7 @@ impl MemoryStore {
             credentials: BTreeMap::new(),
             pin_state: None,
             signature_counter: 0,
+            large_blob_array: INITIAL_LARGE_BLOB_ARRAY.to_vec(),
             attestation: None,
             max_credentials: DEFAULT_MAX_CREDENTIALS,
             credential_key: None,
@@ -107,6 +110,7 @@ impl CredentialStore for MemoryStore {
         self.credentials.clear();
         self.pin_state = Some(PinStateRecord::default());
         self.signature_counter = 0;
+        self.large_blob_array = INITIAL_LARGE_BLOB_ARRAY.to_vec();
         self.credential_key = None;
         Ok(())
     }
@@ -127,6 +131,16 @@ impl CredentialStore for MemoryStore {
 
     fn set_signature_counter(&mut self, value: u32) -> Result<(), StoreError> {
         self.signature_counter = value;
+        Ok(())
+    }
+
+    fn large_blob_array(&self) -> Result<Vec<u8>, StoreError> {
+        Ok(self.large_blob_array.clone())
+    }
+
+    fn set_large_blob_array(&mut self, array: &[u8]) -> Result<(), StoreError> {
+        validate_large_blob_array(array)?;
+        self.large_blob_array = array.to_vec();
         Ok(())
     }
 

@@ -43,6 +43,9 @@
 //!
 //! signature counter record (record type 4)
 //!    1  signature_counter       unsigned integer, 32 bits
+//!
+//! large-blob array record (record type 5)
+//!    1  serialized_array        byte string, 17–16,384 bytes, trailing hash
 //! ```
 //!
 //! Decoding is strict.  Trailing bytes, a non-map, keys that are not unsigned
@@ -67,7 +70,8 @@ use zeroize::Zeroizing;
 
 use super::record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKeyMaterial};
 use super::{
-    Corruption, StoreError, validate_attestation, validate_credential, validate_pin_state,
+    Corruption, StoreError, validate_attestation, validate_credential, validate_large_blob_array,
+    validate_pin_state,
 };
 use crate::{CoseAlg, KeyKind};
 
@@ -220,6 +224,21 @@ pub(crate) fn decode_pin_state(bytes: &[u8]) -> Result<PinStateRecord, Corruptio
     fields.finish()?;
     validate_pin_state(&state).map_err(|_| Corruption::Inconsistent)?;
     Ok(state)
+}
+
+/// Encode a valid serialized large-blob array.
+pub(crate) fn encode_large_blob_array(array: &[u8]) -> Result<Zeroizing<Vec<u8>>, StoreError> {
+    validate_large_blob_array(array)?;
+    encode_map(vec![(1, Value::Bytes(array.to_vec()))])
+}
+
+/// Decode a serialized large-blob array, checking only its length and hash.
+pub(crate) fn decode_large_blob_array(bytes: &[u8]) -> Result<Vec<u8>, Corruption> {
+    let mut fields = Fields::parse(bytes)?;
+    let array = fields.bytes(1)?;
+    fields.finish()?;
+    validate_large_blob_array(&array).map_err(|_| Corruption::Inconsistent)?;
+    Ok(array)
 }
 
 /// Encode a signature counter record.
@@ -578,6 +597,33 @@ mod tests {
         assert_eq!(
             decode_credential(&non_discoverable),
             Err(Corruption::Inconsistent)
+        );
+    }
+
+    #[test]
+    fn large_blob_array_known_answer() {
+        let expected = unhex("a101518076be8b528d0075f7aae98d6fa57a6d3c");
+        let array = super::super::INITIAL_LARGE_BLOB_ARRAY;
+        assert_eq!(
+            encode_large_blob_array(&array).unwrap().as_slice(),
+            expected
+        );
+        assert_eq!(decode_large_blob_array(&expected).unwrap(), array);
+        for value in [
+            Value::Bool(true),
+            Value::Bytes(vec![0; 16]),
+            Value::Bytes(vec![0; 17]),
+        ] {
+            let malformed = edited(&expected, |entries| set(entries, 1, value));
+            assert!(decode_large_blob_array(&malformed).is_err());
+        }
+        assert_eq!(
+            decode_large_blob_array(&unhex("a0")),
+            Err(Corruption::Encoding)
+        );
+        assert_eq!(
+            decode_large_blob_array(&edited(&expected, |entries| set(entries, 2, Value::Null))),
+            Err(Corruption::Encoding),
         );
     }
 

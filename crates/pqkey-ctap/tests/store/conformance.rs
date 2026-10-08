@@ -10,12 +10,13 @@
 use pqkey_ctap::CoseAlg;
 use pqkey_ctap::store::{
     AttestationRecord, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS, FileStore,
-    MemoryStore, PinStateRecord, PrivateKeyMaterial, SEALED_ID_OVERHEAD, StoreError,
+    INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY, MemoryStore, PinStateRecord,
+    PrivateKeyMaterial, SEALED_ID_OVERHEAD, StoreError,
 };
 
 use crate::common::{
     TempDir, assert_signature_verifies, attestation_record, ids, new_record, random_bytes,
-    with_created_at,
+    serialized_large_blob_array, with_created_at,
 };
 
 /// A store under test and whatever has to outlive it.
@@ -76,6 +77,60 @@ fn insert<S: CredentialStore>(store: &mut S, record: &CredentialRecord) -> Crede
 // ---------------------------------------------------------------------------
 // Empty store
 // ---------------------------------------------------------------------------
+
+fn large_blob_array_round_trips_without_interpreting_contents<B: Backend>() {
+    let mut fixture = fresh::<B>();
+    let store = &mut fixture.store;
+    assert_eq!(store.large_blob_array().unwrap(), INITIAL_LARGE_BLOB_ARRAY);
+    for length in [1, 2000, MAX_SERIALIZED_LARGE_BLOB_ARRAY - 16] {
+        let expected = serialized_large_blob_array(&vec![0xff; length]);
+        store.set_large_blob_array(&expected).unwrap();
+        assert_eq!(store.large_blob_array().unwrap(), expected);
+        let mut copy = store.large_blob_array().unwrap();
+        copy[0] ^= 1;
+        assert_eq!(store.large_blob_array().unwrap(), expected);
+    }
+    assert_eq!(
+        store.count().unwrap(),
+        0,
+        "the array consumes no credential slot"
+    );
+    assert_eq!(store.pin_state().unwrap(), None);
+}
+
+fn invalid_large_blob_arrays_preserve_the_committed_array<B: Backend>() {
+    let mut fixture = fresh::<B>();
+    let store = &mut fixture.store;
+    let committed = serialized_large_blob_array(b"opaque contents");
+    store.set_large_blob_array(&committed).unwrap();
+    let mut wrong_hash = committed.clone();
+    *wrong_hash.last_mut().unwrap() ^= 1;
+    for invalid in [
+        Vec::new(),
+        vec![0; 16],
+        wrong_hash,
+        serialized_large_blob_array(&vec![0; MAX_SERIALIZED_LARGE_BLOB_ARRAY - 15]),
+    ] {
+        assert!(matches!(
+            store.set_large_blob_array(&invalid),
+            Err(StoreError::InvalidRecord(_))
+        ));
+        assert_eq!(store.large_blob_array().unwrap(), committed);
+    }
+}
+
+fn deleting_credentials_preserves_the_array_and_clear_restores_it<B: Backend>() {
+    let mut fixture = fresh::<B>();
+    let store = &mut fixture.store;
+    let record = new_record(CoseAlg::ES256);
+    store.put(&record).unwrap();
+    let array = serialized_large_blob_array(b"platform-owned blobs");
+    store.set_large_blob_array(&array).unwrap();
+    assert!(store.delete(&record.credential_id).unwrap());
+    assert_eq!(store.large_blob_array().unwrap(), array);
+    store.clear().unwrap();
+    assert_eq!(store.large_blob_array().unwrap(), INITIAL_LARGE_BLOB_ARRAY);
+}
 
 fn empty_store_holds_nothing<B: Backend>() {
     let mut fixture = fresh::<B>();
@@ -830,6 +885,9 @@ fn clear_ends_sealed_credential_ids<B: Backend>() {
 
 conformance_suite!(
     empty_store_holds_nothing,
+    large_blob_array_round_trips_without_interpreting_contents,
+    invalid_large_blob_arrays_preserve_the_committed_array,
+    deleting_credentials_preserves_the_array_and_clear_restores_it,
     every_algorithm_round_trips,
     large_blob_keys_round_trip_only_for_discoverable_credentials,
     unusual_field_values_round_trip,

@@ -197,6 +197,7 @@ protocol logic.
 ├── keys/credential.key     root key for everything else; a reset replaces it
 ├── credentials/<hash>      one file per stored credential, named by an HMAC of its ID
 ├── pin-state               the PIN hash, retries and configuration
+├── large-blobs             the serialized large-blob array
 └── signature-counter       the counter that sealed credentials share
 ```
 
@@ -206,16 +207,22 @@ Credential records can also hold an opaque blob of at most 32 bytes,
 protected by the same encryption as their private keys, and an optional
 32-byte large-blob key on discoverable credentials. The key is wiped on drop,
 redacted from debug output and compared in constant time. Older records read
-without a large-blob key. The PIN state also
-keeps the configuration: the minimum PIN length and its RP IDs, whether a PIN
+without a large-blob key. The PIN state also keeps the configuration: the
+minimum PIN length and its RP IDs, whether a PIN
 change is required, the PIN's length and always-UV. A PIN state written
 before these fields existed reads with their defaults, and its PIN counts as
 4 code points long.
 
 Files are replaced atomically, never changed in place. If flushing the
 directory fails after the new file is in place, the write reports an error
-although the new file stays. A reset deletes the stored credentials and
-replaces `credential.key`, so old copies of files and every sealed credential
+although the new file stays. Large-blob writes instead treat the atomic
+rename as the commit: a later directory-flush failure is logged and the
+command succeeds. Such a failure can lose an acknowledged write after a
+power failure. All errors before the rename keep the previous array.
+A missing or unreadable large-blob file is served as the initial array;
+the next committed write replaces it. A reset deletes the array and the
+stored credentials and replaces `credential.key`, so old copies of files
+and every sealed credential
 ID can no longer be decrypted.
 [SECURITY.md](../SECURITY.md) describes what this protects against.
 

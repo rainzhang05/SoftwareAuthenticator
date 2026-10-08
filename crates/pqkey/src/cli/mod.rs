@@ -8,7 +8,7 @@
 //! pqkey pin                   set the PIN, or change it
 //! pqkey config [COMMAND]      show or change the key's UV and PIN settings
 //! pqkey passkeys [delete Q]   list the passkeys stored on the key, or delete one
-//! pqkey reset [--yes]         erase every passkey and the PIN
+//! pqkey reset [--yes]         erase passkeys, large blobs and the PIN
 //! ```
 //!
 //! While the key runs, `pin`, `config`, `passkeys` and `reset` talk over CTAP,
@@ -110,8 +110,8 @@ enum Command {
         #[clap(subcommand)]
         action: Option<PasskeysAction>,
     },
-    /// Erase every passkey and the PIN: the key restarts, then asks you to
-    /// approve in a notification
+    /// Erase every passkey, large blob and the PIN, and reset configuration:
+    /// the key restarts, then asks you to approve in a notification
     Reset {
         /// Do not ask for confirmation on the terminal
         #[clap(long)]

@@ -11,13 +11,13 @@ use std::sync::{Arc, Barrier};
 use ciborium::value::Value;
 use pqkey_ctap::CoseAlg;
 use pqkey_ctap::store::{
-    Corruption, CredentialRecord, CredentialStore, FileKeySource, FileStore, KeyDomain, KeySource,
-    PinStateRecord, PrivateKeyMaterial, StoreError,
+    Corruption, CredentialRecord, CredentialStore, FileKeySource, FileStore,
+    INITIAL_LARGE_BLOB_ARRAY, KeyDomain, KeySource, PinStateRecord, PrivateKeyMaterial, StoreError,
 };
 
 use crate::common::{
     TempDir, assert_signature_verifies, attestation_record, hex, ids, logs, new_record,
-    random_bytes, with_created_at,
+    random_bytes, serialized_large_blob_array, with_created_at,
 };
 
 // The envelope layout, restated from the format documentation on purpose: a
@@ -28,6 +28,7 @@ const TYPE_CREDENTIAL: u8 = 1;
 const TYPE_PIN_STATE: u8 = 2;
 const TYPE_ATTESTATION: u8 = 3;
 const TYPE_SIGNATURE_COUNTER: u8 = 4;
+const TYPE_LARGE_BLOB_ARRAY: u8 = 5;
 const NONCE_START: usize = 6;
 const HEADER_LEN: usize = 30;
 const TAG_LEN: usize = 16;
@@ -66,6 +67,10 @@ impl Scratch {
 
     fn signature_counter_path(&self) -> PathBuf {
         self.state().join("signature-counter")
+    }
+
+    fn large_blobs_path(&self) -> PathBuf {
+        self.state().join("large-blobs")
     }
 
     fn attestation_path(&self) -> PathBuf {
@@ -273,6 +278,107 @@ fn a_lost_key_is_reported_when_only_sealed_credentials_depend_on_it() {
 }
 
 #[test]
+fn large_blob_keys_and_arrays_survive_reopen_and_reset_erases_them() {
+    let scratch = Scratch::new();
+    let mut store = scratch.open();
+    let mut record = new_record(CoseAlg::ES256);
+    record.large_blob_key = Some(random_bytes());
+    store.put(&record).unwrap();
+    let array = serialized_large_blob_array(&vec![0x55; 4000]);
+    store.set_large_blob_array(&array).unwrap();
+    let copied_array = fs::read(scratch.large_blobs_path()).unwrap();
+    let credential_path = credential_files(&scratch).into_iter().next().unwrap();
+    let copied_record = fs::read(&credential_path).unwrap();
+    assert!(!contains(
+        &copied_record,
+        record.large_blob_key.as_ref().unwrap()
+    ));
+    assert!(!contains(&copied_array, &array));
+    assert_eq!(mode(&scratch.large_blobs_path()), 0o600);
+    drop(store);
+    let mut reopened = scratch.open();
+    assert_eq!(reopened.large_blob_array().unwrap(), array);
+    assert_eq!(
+        reopened
+            .get(&record.credential_id)
+            .unwrap()
+            .unwrap()
+            .large_blob_key,
+        record.large_blob_key
+    );
+    reopened.clear().unwrap();
+    assert_eq!(
+        reopened.large_blob_array().unwrap(),
+        INITIAL_LARGE_BLOB_ARRAY
+    );
+    assert!(!scratch.large_blobs_path().exists());
+    assert!(reopened.get(&record.credential_id).unwrap().is_none());
+    fs::write(scratch.large_blobs_path(), copied_array).unwrap();
+    assert_corrupt(reopened.large_blob_array(), Corruption::Authentication);
+    reopened
+        .set_large_blob_array(&INITIAL_LARGE_BLOB_ARRAY)
+        .unwrap();
+    fs::write(&credential_path, copied_record).unwrap();
+    assert!(
+        reopened.list().unwrap().is_empty(),
+        "old credential keys are undecryptable"
+    );
+    assert_eq!(
+        reopened.large_blob_array().unwrap(),
+        INITIAL_LARGE_BLOB_ARRAY
+    );
+}
+
+#[test]
+fn corrupt_large_blob_array_is_reported_left_in_place_and_replaceable() {
+    let scratch = Scratch::new();
+    let mut store = scratch.open();
+    assert_eq!(store.large_blob_array().unwrap(), INITIAL_LARGE_BLOB_ARRAY);
+    let array = serialized_large_blob_array(b"opaque platform contents");
+    store.set_large_blob_array(&array).unwrap();
+    edit_file(&scratch.large_blobs_path(), |bytes| {
+        *bytes.last_mut().unwrap() ^= 1
+    });
+    let damaged = fs::read(scratch.large_blobs_path()).unwrap();
+    assert_corrupt(store.large_blob_array(), Corruption::Authentication);
+    assert_eq!(fs::read(scratch.large_blobs_path()).unwrap(), damaged);
+    store.set_large_blob_array(&array).unwrap();
+    assert_eq!(store.large_blob_array().unwrap(), array);
+    fs::remove_file(scratch.large_blobs_path()).unwrap();
+    fs::create_dir(scratch.large_blobs_path()).unwrap();
+    assert!(matches!(
+        store.large_blob_array(),
+        Err(StoreError::Io { .. })
+    ));
+}
+
+#[test]
+fn a_lost_key_is_reported_when_only_the_array_depends_on_it() {
+    let scratch = Scratch::new();
+    let mut store = scratch.open();
+    store
+        .set_large_blob_array(&INITIAL_LARGE_BLOB_ARRAY)
+        .unwrap();
+    assert!(!scratch.pin_state_path().exists());
+    fs::remove_file(scratch.key_path(KeyDomain::Credential)).unwrap();
+    let mut reopened = scratch.open();
+    assert_key_unavailable(reopened.large_blob_array(), KeyDomain::Credential);
+    assert_key_unavailable(
+        reopened.set_large_blob_array(&INITIAL_LARGE_BLOB_ARRAY),
+        KeyDomain::Credential,
+    );
+    assert!(!scratch.key_path(KeyDomain::Credential).exists());
+    reopened.clear().unwrap();
+    assert_eq!(
+        reopened.large_blob_array().unwrap(),
+        INITIAL_LARGE_BLOB_ARRAY
+    );
+    reopened
+        .set_large_blob_array(&INITIAL_LARGE_BLOB_ARRAY)
+        .unwrap();
+}
+
+#[test]
 fn layout_matches_the_documented_format() {
     let scratch = Scratch::new();
     let mut store = scratch.open();
@@ -287,6 +393,9 @@ fn layout_matches_the_documented_format() {
     let credential_path = put_and_locate(&scratch, &mut store, &record);
     store.set_pin_state(&PinStateRecord::default()).unwrap();
     store.set_signature_counter(1).unwrap();
+    store
+        .set_large_blob_array(&INITIAL_LARGE_BLOB_ARRAY)
+        .unwrap();
     store.set_attestation(&attestation_record(&[100])).unwrap();
 
     let credential_name = credential_path
@@ -303,6 +412,7 @@ fn layout_matches_the_documented_format() {
             format!("credentials/{credential_name}"),
             "keys/credential.key".into(),
             "keys/device.key".into(),
+            "large-blobs".into(),
             "pin-state".into(),
             "signature-counter".into(),
         ],
@@ -317,6 +427,7 @@ fn layout_matches_the_documented_format() {
         (scratch.pin_state_path(), TYPE_PIN_STATE),
         (scratch.attestation_path(), TYPE_ATTESTATION),
         (scratch.signature_counter_path(), TYPE_SIGNATURE_COUNTER),
+        (scratch.large_blobs_path(), TYPE_LARGE_BLOB_ARRAY),
     ] {
         let envelope = fs::read(&path).unwrap();
         assert_eq!(&envelope[..4], MAGIC, "{}", path.display());

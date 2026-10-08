@@ -5,7 +5,7 @@
 //! └── HKDF-SHA-256 "ftsa-store/v1/device/record-encryption"      -> attestation record key
 //!
 //! credential root key (32 random bytes, replaced by clear())
-//! ├── HKDF-SHA-256 "ftsa-store/v1/credential/record-encryption"  -> credential + PIN state key
+//! ├── HKDF-SHA-256 "ftsa-store/v1/credential/record-encryption"  -> credential, PIN, counter and blob key
 //! ├── HKDF-SHA-256 "ftsa-store/v1/credential/index-hmac"         -> credential file name key
 //! └── HKDF-SHA-256 "ftsa-store/v1/credential/id-encryption"      -> sealed credential ID key
 //! ```
@@ -36,7 +36,7 @@ pub(crate) const KEY_LEN: usize = 32;
 
 /// HKDF info string for the attestation record encryption key.
 pub(crate) const INFO_DEVICE_RECORD: &[u8] = b"ftsa-store/v1/device/record-encryption";
-/// HKDF info string for the credential and PIN state encryption key.
+/// HKDF info string for the credential, PIN, counter and array encryption key.
 pub(crate) const INFO_CREDENTIAL_RECORD: &[u8] = b"ftsa-store/v1/credential/record-encryption";
 /// HKDF info string for the key that names credential files.
 pub(crate) const INFO_CREDENTIAL_INDEX: &[u8] = b"ftsa-store/v1/credential/index-hmac";
@@ -54,7 +54,8 @@ pub enum KeyDomain {
     /// [`clear`](super::CredentialStore::clear).
     Device,
     /// Protects credential records, the names of credential files, the PIN
-    /// state and sealed credential IDs.  Replaced by
+    /// state, global signature counter, large-blob array and sealed credential
+    /// IDs. Replaced by
     /// [`clear`](super::CredentialStore::clear).
     Credential,
 }
@@ -331,7 +332,7 @@ impl DeviceKeys {
 
 /// Subkeys of the credential domain.
 pub(crate) struct CredentialKeys {
-    /// Encrypts credential records and the PIN state.
+    /// Encrypts credential records, PIN state, signature counter and blob array.
     pub(crate) record: SubKey,
     /// Keys the HMAC that names credential files.
     index: SubKey,

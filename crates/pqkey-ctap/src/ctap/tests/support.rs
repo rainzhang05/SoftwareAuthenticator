@@ -256,6 +256,8 @@ pub(super) struct Faults {
     /// `signature_counter` reports the record as corrupt.
     pub(super) signature_counter: bool,
     pub(super) set_signature_counter: bool,
+    pub(super) large_blob_array: bool,
+    pub(super) set_large_blob_array: bool,
 }
 
 #[derive(Default)]
@@ -396,6 +398,21 @@ impl CredentialStore for TestStore {
     fn set_signature_counter(&mut self, value: u32) -> Result<(), StoreError> {
         self.fail_if(|faults| faults.set_signature_counter)?;
         self.lock().store.set_signature_counter(value)
+    }
+
+    fn large_blob_array(&self) -> Result<Vec<u8>, StoreError> {
+        if self.lock().faults.large_blob_array {
+            return Err(StoreError::Corrupt {
+                object: "large-blobs".into(),
+                reason: Corruption::Authentication,
+            });
+        }
+        self.lock().store.large_blob_array()
+    }
+
+    fn set_large_blob_array(&mut self, array: &[u8]) -> Result<(), StoreError> {
+        self.fail_if(|faults| faults.set_large_blob_array)?;
+        self.lock().store.set_large_blob_array(array)
     }
 
     fn attestation(&self) -> Result<Option<AttestationRecord>, StoreError> {

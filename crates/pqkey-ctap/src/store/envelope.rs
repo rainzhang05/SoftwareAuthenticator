@@ -4,7 +4,8 @@
 //! offset  length  field
 //!      0       4  magic, the ASCII bytes "FTSA"
 //!      4       1  format version, 1
-//!      5       1  record type: 1 credential, 2 PIN state, 3 attestation
+//!      5       1  record type: 1 credential, 2 PIN state, 3 attestation,
+//!                             4 signature counter, 5 large-blob array
 //!      6      24  XChaCha20-Poly1305 nonce, freshly random for every write
 //!     30       n  XChaCha20-Poly1305 ciphertext of the n-byte encoded record
 //!   30+n      16  Poly1305 tag
@@ -17,7 +18,8 @@
 //! ```
 //!
 //! where `name` is the object's logical name in UTF-8: `pin-state`,
-//! `attestation`, or `credentials/` followed by the 64-hex-digit file name.
+//! `attestation`, `signature-counter`, `large-blobs`, or `credentials/`
+//! followed by the 64-hex-digit file name.
 //! Copying one object over another therefore fails authentication even when
 //! both are encrypted under the same key.
 //!
@@ -72,6 +74,7 @@ pub(crate) enum RecordType {
     PinState = 2,
     Attestation = 3,
     SignatureCounter = 4,
+    LargeBlobArray = 5,
 }
 
 /// Encrypt `plaintext` into a new envelope under a fresh random nonce.
@@ -301,6 +304,40 @@ mod tests {
         assert_eq!(sealed, expected);
         let opened = open(&key, RecordType::PinState, "pin-state", &expected).unwrap();
         assert_eq!(opened.as_slice(), plaintext.as_slice());
+    }
+
+    /// Uses the independent HChaCha20/ChaCha20Poly1305 implementation above,
+    /// with the same root key and nonce, name "large-blobs", record type 5,
+    /// and the initial array's codec vector as plaintext.
+    #[test]
+    fn large_blob_array_envelope_matches_independent_implementation() {
+        let key = CredentialKeys::derive(&RootKey::from_bytes(core::array::from_fn(|i| i as u8)))
+            .unwrap()
+            .record;
+        let nonce = core::array::from_fn(|i| 0x40 + i as u8);
+        let plaintext = unhex("a101518076be8b528d0075f7aae98d6fa57a6d3c");
+        let expected = unhex(concat!(
+            "465453410105404142434445464748494a4b4c4d4e4f5051525354555657",
+            "7ff7a5c60bac30bc8978419fb39c472f7e2240e3",
+            "eb4ee47d4023970fb6ccc8dc3f1e79fd",
+        ));
+        assert_eq!(
+            seal_with_nonce(
+                &key,
+                RecordType::LargeBlobArray,
+                "large-blobs",
+                &nonce,
+                &plaintext
+            )
+            .unwrap(),
+            expected,
+        );
+        assert_eq!(
+            open(&key, RecordType::LargeBlobArray, "large-blobs", &expected)
+                .unwrap()
+                .as_slice(),
+            plaintext,
+        );
     }
 
     /// Pins the sealed credential ID format to the independent implementation

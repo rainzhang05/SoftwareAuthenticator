@@ -859,7 +859,7 @@ pub fn reset(state_dir: &Path, yes: bool) -> io::Result<()> {
     let was_running = daemon::running(state_dir)?.is_some();
     if !yes
         && !confirm(
-            "Reset the key? Every passkey on it and its PIN are erased, and signing in with \
+            "Reset the key? Its passkeys, large blobs and PIN are erased, and signing in with \
              those passkeys stops working. This cannot be undone.",
         )?
     {
@@ -875,7 +875,7 @@ pub fn reset(state_dir: &Path, yes: bool) -> io::Result<()> {
     };
     result?;
     restored?;
-    outln!("The key is reset: its passkeys and its PIN are erased.")
+    outln!("The key is reset: its passkeys, large blobs and PIN are erased.")
 }
 
 /// authenticatorReset, which the user approves in a notification; Ctrl-C

@@ -168,3 +168,11 @@ pub mod logs {
             .collect()
     }
 }
+
+/// Contents followed by the serialized large-blob array's truncated hash.
+pub fn serialized_large_blob_array(contents: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut array = contents.to_vec();
+    array.extend_from_slice(&Sha256::digest(contents)[..16]);
+    array
+}
