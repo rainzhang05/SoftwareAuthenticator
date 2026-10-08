@@ -54,8 +54,7 @@ impl CtapApp<'_> {
         // with clientPin (true or false as a PIN is or is not set) and credMgmt
         // true, pinUvAuthToken is true, and pinUvAuthProtocols includes 2.
         // minPinLength comes with setMinPINLength; there is no ep option ID.
-        // "The
-        // string "FIDO_2_2" was not defined for CTAP2.2 and MUST not be
+        // "The string "FIDO_2_2" was not defined for CTAP2.2 and MUST not be
         // present in versions member."
         map.push((
             uint(1),
@@ -122,21 +121,16 @@ impl CtapApp<'_> {
             .collect();
         map.push((uint(10), Value::Array(algorithms)));
 
-        map.push((
-            uint(0x0C),
-            Value::Bool(self.pin_state.persistent().force_pin_change),
-        ));
-        map.push((
-            uint(0x0D),
-            uint(u64::from(self.pin_state.persistent().min_pin_length)),
-        ));
+        // forcePINChange and minPINLength, the current PIN policy.
+        let persistent = self.pin_state.persistent();
+        map.push((uint(0x0C), Value::Bool(persistent.force_pin_change)));
+        map.push((uint(0x0D), uint(u64::from(persistent.min_pin_length))));
+        // maxCredBlobLength (CTAP 2.3 §6.4), required by §12.2.1.
+        map.push((uint(0x0F), uint(MAX_CRED_BLOB_LENGTH as u64)));
         map.push((
             uint(0x10),
             uint(PinStateRecord::MAX_MIN_PIN_LENGTH_RP_IDS as u64),
         ));
-        map.push((uint(0x1F), Value::Array(vec![uint(2), uint(3)])));
-        // maxCredBlobLength (CTAP 2.3 §6.4), required by §12.2.1.
-        map.push((uint(0x0F), uint(MAX_CRED_BLOB_LENGTH as u64)));
 
         // remainingDiscoverableCredentials: the free slots of the store,
         // which holds the discoverable credentials (and non-discoverable ones
@@ -159,6 +153,9 @@ impl CtapApp<'_> {
             }
             AttestationMode::None => {}
         }
+
+        // authenticatorConfigCommands: toggleAlwaysUv and setMinPINLength.
+        map.push((uint(0x1F), Value::Array(vec![uint(2), uint(3)])));
 
         canonical_sort(&mut map);
         let mut encoded = Vec::new();
