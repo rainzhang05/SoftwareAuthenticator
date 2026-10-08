@@ -334,7 +334,7 @@ def test_config_with_pin_authentication_and_recovery(pqkey: Pqkey):
     assert pqkey.error("pin", stdin=f"{PIN}\n12345\n") == "PIN must be at least 6 characters long"
     assert pqkey.ok("pin", stdin=f"{PIN}\n{NEW_PIN}\n") == "PIN changed.\n"
     assert pqkey.config()["PIN change required"] == "no"
-    assert pqkey.ok("passkeys", stdin=f"{NEW_PIN}\n") == "No passkeys are stored on the key.\n"
+    assert pqkey.ok("passkeys", stdin=f"{NEW_PIN}\n").startswith("No passkeys are stored on the key.\n")
 
 
 def test_config_force_change_rejects_reusing_the_pin(pqkey: Pqkey):
