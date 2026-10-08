@@ -1,7 +1,8 @@
 //! Stateful CTAP: a sequence of requests against one engine, the harness
 //! acting as a platform that can set and change a PIN, obtain
 //! pinUvAuthTokens and authenticate makeCredential, getAssertion and
-//! credentialManagement with them, and use credBlob, hmac-secret and
+//! credentialManagement and authenticatorConfig with them, and use credBlob,
+//! minPinLength, hmac-secret and
 //! hmac-secret-mc, while the fuzzer chooses the parameters (right, wrong or
 //! missing) and mixes in structure-aware and raw requests and presence
 //! denials.
@@ -9,7 +10,8 @@
 //! Invariants, besides those of `ctap_request` for every response:
 //! * setPIN only succeeds while no PIN is set, and changePIN and the token
 //!   subcommands only with the right PIN; the right PIN is never answered
-//!   with CTAP2_ERR_PIN_INVALID; a pinUvAuthToken decrypts to 32 bytes;
+//!   with CTAP2_ERR_PIN_INVALID except the legacy forced-change refusal;
+//!   a pinUvAuthToken decrypts to 32 bytes;
 //! * a new credential's authenticator data carries the RP ID hash of the
 //!   request, the AT flag and a credential ID of the form its "rk" option
 //!   asks for: 33 bytes starting 0x01 for a stored discoverable credential,
@@ -20,7 +22,10 @@
 //!   and getNextAssertion only for the RP ID requested; getNextAssertion only
 //!   succeeds right after a getAssertion that reported more credentials;
 //! * hmac-secret and hmac-secret-mc return one output per salt;
-//! * credBlob returns the blob accepted at creation, or an empty byte string.
+//! * credBlob returns the blob accepted at creation, or an empty byte string;
+//! * the minimum PIN length never falls without reset;
+//! * alwaysUv prevents makeCredential and getAssertion with up=true from
+//!   succeeding without pinUvAuthParam.
 
 use crate::cbor::{self, bytes, decode_map, get_int, get_text, int, text};
 use crate::engine::Engine;
@@ -28,6 +33,7 @@ use crate::platform::{Session, authenticate, pin_hash, protocol_value};
 use crate::requests::{self, Overrides, command};
 use arbitrary::{Arbitrary, Result, Unstructured};
 use ciborium::value::Value;
+use pqkey_ctap::ctap::CtapApp;
 use pqkey_ctap::ctap::constants::*;
 use pqkey_ctap::store::MemoryStore;
 use pqkey_ctap::{ClassicPinProtocol, CoseAlg};
@@ -78,6 +84,7 @@ enum Op {
     },
     MakeCredential {
         cred_blob: Option<u8>,
+        min_pin_length: bool,
         hmac_secret_mc: Option<(bool, bool)>,
         auth: Auth,
         rp: u8,
@@ -94,6 +101,7 @@ enum Op {
         hmac_secret: Option<(bool, bool)>,
         /// Leave the allowList out, so every discoverable credential counts.
         discoverable: bool,
+        up: bool,
     },
     GetNextAssertion,
     /// What a platform does before credential management: set a PIN if
@@ -106,6 +114,14 @@ enum Op {
     CredentialManagement {
         auth: Auth,
         subcommand: u8,
+    },
+    AuthenticatorConfig {
+        auth: Auth,
+        subcommand: u8,
+        minimum: Option<u8>,
+        rp_ids: Option<Vec<u8>>,
+        force_change: Option<bool>,
+        complexity: Option<bool>,
     },
     GetInfo,
     GetPinRetries,
@@ -132,6 +148,10 @@ struct Platform {
     /// The RP ID of the getAssertion whose further credentials
     /// getNextAssertion may return.
     assertion_rp: Option<String>,
+    minimum: u8,
+    always_uv: bool,
+    force_change: bool,
+    min_pin_length_rp_ids: Vec<String>,
 }
 
 fn protocol(v2: bool) -> ClassicPinProtocol {
@@ -154,7 +174,7 @@ fn rp_id(choice: u8) -> &'static str {
 
 /// Mostly the permission sets a platform asks for, sometimes any.
 fn permission_set(choice: u8) -> u8 {
-    const SETS: [u8; 6] = [0x04, 0x01, 0x02, 0x03, 0x05, 0x07];
+    const SETS: [u8; 8] = [0x04, 0x01, 0x02, 0x03, 0x05, 0x07, 0x20, 0x27];
     if choice < 0xC0 {
         SETS[usize::from(choice) % SETS.len()]
     } else {
@@ -175,11 +195,26 @@ fn unpadded(padded: &[u8]) -> &[u8] {
     &padded[..end]
 }
 
-fn acceptable_pin(pin: &[u8]) -> bool {
-    pin.len() <= 63 && std::str::from_utf8(pin).is_ok_and(|pin| pin.chars().count() >= 4)
+fn acceptable_pin(pin: &[u8], minimum: u8) -> bool {
+    pin.len() <= 63
+        && std::str::from_utf8(pin).is_ok_and(|pin| pin.chars().count() >= usize::from(minimum))
 }
 
 impl Platform {
+    fn new(engine: Engine) -> Self {
+        Self {
+            engine,
+            pin: None,
+            token: None,
+            credentials: Vec::new(),
+            assertion_rp: None,
+            minimum: 4,
+            always_uv: false,
+            force_change: false,
+            min_pin_length_rp_ids: Vec::new(),
+        }
+    }
+
     fn call(&mut self, request: &[u8]) -> Vec<u8> {
         let response = self.engine.call(request);
         self.observe(request, &response);
@@ -213,10 +248,19 @@ impl Platform {
             }
             return;
         }
-        let parameters = decode_map(&request[1..]).unwrap_or_default();
+        let parameters = match CtapApp::decode_request_parameters(&request[1..]) {
+            Some(Value::Map(parameters)) => parameters,
+            _ => Vec::new(),
+        };
         let body = decode_map(&response[1..]).unwrap_or_default();
         match code {
             CTAP_CMD_MAKE_CREDENTIAL => {
+                if self.always_uv {
+                    assert!(
+                        get_int(&parameters, 8).is_some(),
+                        "alwaysUv makeCredential succeeded without pinUvAuthParam"
+                    );
+                }
                 let Some(Value::Map(rp)) = get_int(&parameters, 2) else {
                     panic!("makeCredential succeeded without rp");
                 };
@@ -258,6 +302,28 @@ impl Platform {
                 };
                 assert_eq!(length, expected_length, "credential ID length");
                 assert_eq!(auth_data[55], marker, "credential ID marker");
+                let mut remaining = &auth_data[55 + length..];
+                let _: Value = ciborium::de::from_reader(&mut remaining).expect("public key");
+                let outputs = decode_map(remaining).unwrap_or_default();
+                let requested = matches!(
+                    get_int(&parameters, 6),
+                    Some(Value::Map(inputs))
+                        if matches!(get_text(inputs, "minPinLength"), Some(Value::Bool(true)))
+                );
+                let authorized = self.min_pin_length_rp_ids.contains(rp_id);
+                if requested && authorized {
+                    assert_eq!(
+                        get_text(&outputs, "minPinLength"),
+                        Some(&int(i64::from(self.minimum))),
+                        "current minimum PIN length"
+                    );
+                    assert_ne!(auth_data[32] & 0x80, 0, "minPinLength without ED flag");
+                } else {
+                    assert!(
+                        get_text(&outputs, "minPinLength").is_none(),
+                        "minimum disclosed without an authorized request"
+                    );
+                }
                 self.credentials.push(Credential {
                     cred_blob: match (get_int(&parameters, 6), auth_data.get(55 + length..)) {
                         (Some(Value::Map(inputs)), Some(mut rest)) => {
@@ -280,6 +346,19 @@ impl Platform {
                 });
             }
             CTAP_CMD_GET_ASSERTION | CTAP_CMD_GET_NEXT_ASSERTION => {
+                if code == CTAP_CMD_GET_ASSERTION && self.always_uv {
+                    let up = !matches!(
+                        get_int(&parameters, 5),
+                        Some(Value::Map(options))
+                            if matches!(get_text(options, "up"), Some(Value::Bool(false)))
+                    );
+                    if up {
+                        assert!(
+                            get_int(&parameters, 6).is_some(),
+                            "alwaysUv getAssertion with up=true succeeded without pinUvAuthParam"
+                        );
+                    }
+                }
                 let rp_id = if code == CTAP_CMD_GET_ASSERTION {
                     match get_int(&parameters, 1) {
                         Some(Value::Text(rp_id)) => rp_id.clone(),
@@ -355,6 +434,90 @@ impl Platform {
                 self.pin = None;
                 self.token = None;
                 self.credentials.clear();
+                self.minimum = 4;
+                self.always_uv = false;
+                self.force_change = false;
+                self.min_pin_length_rp_ids.clear();
+            }
+            CTAP_CMD_AUTHENTICATOR_CONFIG => match get_int(&parameters, 1) {
+                Some(subcommand) if *subcommand == int(2) => {
+                    self.always_uv = !self.always_uv;
+                }
+                Some(subcommand) if *subcommand == int(3) => {
+                    let params = match get_int(&parameters, 2) {
+                        Some(Value::Map(params)) => params.as_slice(),
+                        None => &[],
+                        _ => panic!("config accepted parameters of the wrong type"),
+                    };
+                    if let Some(minimum) = get_int(params, 1) {
+                        let Value::Integer(minimum) = minimum else {
+                            panic!("config accepted a non-integer minimum");
+                        };
+                        let minimum = u8::try_from(i128::from(*minimum)).expect("minimum");
+                        assert!(minimum >= self.minimum, "minimum fell without reset");
+                        assert!(minimum <= 63, "minimum cannot be met by a PIN");
+                        self.minimum = minimum;
+                    }
+                    if matches!(get_int(params, 3), Some(Value::Bool(true))) {
+                        assert!(self.pin.is_some(), "forced change without a PIN");
+                        self.force_change = true;
+                    }
+                    if let Some(pin) = &self.pin {
+                        let length = std::str::from_utf8(pin).expect("PIN").chars().count();
+                        if length < usize::from(self.minimum) {
+                            self.force_change = true;
+                        }
+                    }
+                    if let Some(ids) = get_int(params, 2) {
+                        let Value::Array(ids) = ids else {
+                            panic!("config accepted RP IDs of the wrong type");
+                        };
+                        assert!(ids.len() <= 8, "too many authorized RP IDs");
+                        if !ids.is_empty() {
+                            self.min_pin_length_rp_ids = ids
+                                .iter()
+                                .map(|id| {
+                                    let Value::Text(id) = id else {
+                                        panic!("config accepted a non-string RP ID");
+                                    };
+                                    assert!(id.len() <= 253, "RP ID too long");
+                                    id.clone()
+                                })
+                                .collect();
+                        }
+                    }
+                    assert!(
+                        !matches!(get_int(params, 4), Some(Value::Bool(true))),
+                        "unsupported PIN complexity policy enabled"
+                    );
+                    if self.force_change {
+                        self.token = None;
+                    }
+                }
+                _ => panic!("unsupported config subcommand succeeded"),
+            },
+            CTAP_CMD_GET_INFO => {
+                assert_eq!(
+                    get_int(&body, 0x0D),
+                    Some(&int(i64::from(self.minimum))),
+                    "minimum differs from the model"
+                );
+                assert_eq!(
+                    get_int(&body, 0x0C),
+                    Some(&Value::Bool(self.force_change)),
+                    "forcePINChange differs from the model"
+                );
+                let Some(Value::Map(options)) = get_int(&body, 4) else {
+                    panic!("getInfo without options");
+                };
+                assert_eq!(
+                    get_text(options, "alwaysUv"),
+                    Some(&Value::Bool(self.always_uv))
+                );
+                assert_eq!(
+                    get_text(options, "makeCredUvNotRqd"),
+                    Some(&Value::Bool(!self.always_uv))
+                );
             }
             _ => {}
         }
@@ -483,11 +646,12 @@ impl Platform {
                     );
                     let pin = unpadded(&padded);
                     assert!(
-                        acceptable_pin(pin),
+                        acceptable_pin(pin, self.minimum),
                         "setPIN accepted a PIN the policy forbids"
                     );
                     self.pin = Some(pin.to_vec());
                     self.token = None;
+                    self.force_change = false;
                 }
             }
             Op::ChangePin {
@@ -532,9 +696,17 @@ impl Platform {
                 }
                 if status(&response) == CTAP2_OK {
                     assert!(knows_pin, "changePIN with the wrong PIN");
-                    assert!(acceptable_pin(new));
+                    assert!(acceptable_pin(new, self.minimum));
+                    if self.force_change {
+                        assert_ne!(
+                            self.pin.as_deref(),
+                            Some(new),
+                            "forced change reused the PIN"
+                        );
+                    }
                     self.pin = Some(new.to_vec());
                     self.token = None;
+                    self.force_change = false;
                 }
             }
             Op::GetToken {
@@ -569,7 +741,13 @@ impl Platform {
                 }
                 let response = self.call(&command(CTAP_CMD_CLIENT_PIN, &Value::Map(entries)));
                 let knows_pin = right_pin && self.pin.is_some();
-                if knows_pin {
+                if knows_pin && legacy && self.force_change {
+                    assert_ne!(
+                        status(&response),
+                        CTAP2_OK,
+                        "legacy token issued while a PIN change is required"
+                    );
+                } else if knows_pin {
                     assert_ne!(
                         status(&response),
                         CTAP2_ERR_PIN_INVALID,
@@ -578,6 +756,10 @@ impl Platform {
                 }
                 if status(&response) == CTAP2_OK {
                     assert!(knows_pin, "a pinUvAuthToken for the wrong PIN");
+                    assert!(
+                        !self.force_change,
+                        "token issued while a PIN change is required"
+                    );
                     let body = decode_map(&response[1..]).expect("a map");
                     let Some(Value::Bytes(encrypted)) = get_int(&body, 2) else {
                         panic!("getPinToken without pinUvAuthToken");
@@ -589,6 +771,7 @@ impl Platform {
             }
             Op::MakeCredential {
                 cred_blob,
+                min_pin_length,
                 auth,
                 rp,
                 rk,
@@ -617,6 +800,7 @@ impl Platform {
                         hmac_secret: None,
                         hmac_secret_mc,
                         cred_blob,
+                        min_pin_length: min_pin_length.then_some(Value::Bool(true)),
                         options: rk.then(|| Value::Map(vec![(text("rk"), Value::Bool(true))])),
                         no_allow_list: false,
                         credential_parameters: alg.map(|alg| {
@@ -654,6 +838,7 @@ impl Platform {
                 rp,
                 hmac_secret,
                 discoverable,
+                up,
             } => {
                 let (hmac_secret, salts) = self.hmac_input(hmac_secret, u)?;
                 let rp_id = rp_id(rp);
@@ -670,7 +855,8 @@ impl Platform {
                         hmac_secret,
                         hmac_secret_mc: None,
                         cred_blob: cred_blob.then_some(Value::Bool(true)),
-                        options: None,
+                        min_pin_length: None,
+                        options: Some(Value::Map(vec![(text("up"), Value::Bool(up))])),
                         no_allow_list: discoverable,
                         credential_parameters: None,
                     },
@@ -754,6 +940,53 @@ impl Platform {
                     &Value::Map(entries),
                 ));
             }
+            Op::AuthenticatorConfig {
+                auth,
+                subcommand,
+                minimum,
+                rp_ids,
+                force_change,
+                complexity,
+            } => {
+                let subcommand = match subcommand % 8 {
+                    0..=2 => 2,
+                    3..=5 => 3,
+                    6 => 4,
+                    _ => 255,
+                };
+                let mut params = Vec::new();
+                if let Some(minimum) = minimum {
+                    params.push((int(1), int(i64::from(minimum))));
+                }
+                if let Some(ids) = rp_ids {
+                    params.push((
+                        int(2),
+                        Value::Array(ids.into_iter().map(|id| text(rp_id(id))).collect()),
+                    ));
+                }
+                if let Some(force_change) = force_change {
+                    params.push((int(3), Value::Bool(force_change)));
+                }
+                if let Some(complexity) = complexity {
+                    params.push((int(4), Value::Bool(complexity)));
+                }
+                let params = Value::Map(params);
+                let mut message = vec![0xFF; 32];
+                message.extend_from_slice(&[CTAP_CMD_AUTHENTICATOR_CONFIG, subcommand]);
+                message.extend(cbor::encode(&params));
+                let (param, protocol) = self.pin_uv_auth(auth, &message);
+                let mut entries = vec![(int(1), int(i64::from(subcommand))), (int(2), params)];
+                if let Some(Some(protocol)) = protocol {
+                    entries.push((int(3), protocol));
+                }
+                if let Some(Some(param)) = param {
+                    entries.push((int(4), param));
+                }
+                self.call(&command(
+                    CTAP_CMD_AUTHENTICATOR_CONFIG,
+                    &Value::Map(entries),
+                ));
+            }
             Op::GetInfo => {
                 self.call(&[CTAP_CMD_GET_INFO]);
             }
@@ -790,13 +1023,7 @@ pub fn run_traced(data: &[u8]) -> Vec<(u8, u8)> {
         return Vec::new();
     };
     let store = MemoryStore::new().with_max_credentials(usize::from(max_credentials % 8) + 1);
-    let mut platform = Platform {
-        engine: Engine::with_store(seed, store),
-        pin: None,
-        token: None,
-        credentials: Vec::new(),
-        assertion_rp: None,
-    };
+    let mut platform = Platform::new(Engine::with_store(seed, store));
     for _ in 0..MAX_STEPS {
         let Ok(op) = u.arbitrary::<Op>() else {
             break;
@@ -817,13 +1044,7 @@ mod tests {
     /// a credential management request with it.
     #[test]
     fn authenticates_credential_management() {
-        let mut p = Platform {
-            engine: Engine::new(7),
-            pin: None,
-            token: None,
-            credentials: Vec::new(),
-            assertion_rp: None,
-        };
+        let mut p = Platform::new(Engine::new(7));
         let filler = [0x0Fu8; 1 << 12];
         let mut u = Unstructured::new(&filler);
         let ops = [
@@ -854,5 +1075,147 @@ mod tests {
             Some(&(CTAP_CMD_CREDENTIAL_MANAGEMENT, CTAP2_OK)),
             "{trace:02x?}"
         );
+    }
+
+    #[test]
+    fn models_forced_pin_changes_and_reset_for_both_protocols() {
+        for v2 in [false, true] {
+            let mut p = Platform::new(Engine::new(7));
+            let filler = [0x0Fu8; 1 << 14];
+            let mut u = Unstructured::new(&filler);
+            for op in [
+                Op::SetPin {
+                    v2,
+                    pin: 0,
+                    bad_auth: false,
+                    pad_to: 2,
+                },
+                Op::GetToken {
+                    v2,
+                    right_pin: true,
+                    legacy: false,
+                    permissions: 6,
+                    rp: Some(0),
+                },
+                Op::AuthenticatorConfig {
+                    auth: Auth::Token,
+                    subcommand: 3,
+                    minimum: Some(8),
+                    rp_ids: Some(vec![0]),
+                    force_change: None,
+                    complexity: Some(false),
+                },
+            ] {
+                p.step(op, &mut u).unwrap();
+            }
+            assert_eq!(p.minimum, 8);
+            assert!(p.force_change);
+            assert!(p.token.is_none());
+            p.call(&[CTAP_CMD_GET_INFO]);
+            for legacy in [false, true] {
+                p.step(
+                    Op::GetToken {
+                        v2,
+                        right_pin: true,
+                        legacy,
+                        permissions: 6,
+                        rp: None,
+                    },
+                    &mut u,
+                )
+                .unwrap();
+                assert_eq!(
+                    p.engine.trace.last().unwrap().1,
+                    if legacy {
+                        CTAP2_ERR_PIN_INVALID
+                    } else {
+                        CTAP2_ERR_PIN_POLICY_VIOLATION
+                    }
+                );
+            }
+            p.step(
+                Op::ChangePin {
+                    v2,
+                    right_pin: true,
+                    new_pin: 2,
+                },
+                &mut u,
+            )
+            .unwrap();
+            assert!(!p.force_change);
+            assert_eq!(p.minimum, 8);
+            p.call(&[CTAP_CMD_GET_INFO]);
+            p.call(&[CTAP_CMD_RESET]);
+            p.call(&[CTAP_CMD_GET_INFO]);
+            assert_eq!(p.minimum, 4);
+            assert!(!p.always_uv);
+            assert!(p.min_pin_length_rp_ids.is_empty());
+        }
+    }
+
+    #[test]
+    fn models_raw_configuration_and_the_up_false_exemption() {
+        let mut p = Platform::new(Engine::new(9));
+        let hash = bytes(&[0x55; 32]);
+        let request = command(
+            CTAP_CMD_MAKE_CREDENTIAL,
+            &Value::Map(vec![
+                (int(1), hash.clone()),
+                (int(2), Value::Map(vec![(text("id"), text("example.com"))])),
+                (int(3), Value::Map(vec![(text("id"), bytes(b"user"))])),
+                (
+                    int(4),
+                    Value::Array(vec![Value::Map(vec![
+                        (text("alg"), int(-7)),
+                        (text("type"), text("public-key")),
+                    ])]),
+                ),
+            ]),
+        );
+        assert_eq!(status(&p.call(&request)), CTAP2_OK);
+        let credential = p.credentials[0].id.clone();
+        let configure = command(
+            CTAP_CMD_AUTHENTICATOR_CONFIG,
+            &Value::Map(vec![(int(1), int(2))]),
+        );
+        assert_eq!(status(&p.call(&configure)), CTAP2_OK);
+        assert!(p.always_uv);
+        assert_eq!(status(&p.call(&request)), CTAP2_ERR_PUAT_REQUIRED);
+        for up in [true, false] {
+            let assertion = command(
+                CTAP_CMD_GET_ASSERTION,
+                &Value::Map(vec![
+                    (int(1), text("example.com")),
+                    (int(2), hash.clone()),
+                    (
+                        int(3),
+                        Value::Array(vec![Value::Map(vec![
+                            (text("id"), bytes(&credential)),
+                            (text("type"), text("public-key")),
+                        ])]),
+                    ),
+                    (int(5), Value::Map(vec![(text("up"), Value::Bool(up))])),
+                ]),
+            );
+            assert_eq!(
+                status(&p.call(&assertion)),
+                if up {
+                    CTAP2_ERR_PUAT_REQUIRED
+                } else {
+                    CTAP2_OK
+                }
+            );
+        }
+        assert_eq!(status(&p.call(&configure)), CTAP2_OK);
+        assert!(!p.always_uv);
+    }
+
+    #[test]
+    fn observes_config_with_ignored_unassigned_simple_values() {
+        let mut p = Platform::new(Engine::new(9));
+        let request = [0x0D, 0xA2, 0x01, 0x02, 0x02, 0xA1, 0x05, 0xF0];
+        assert_eq!(status(&p.call(&request)), CTAP2_OK);
+        assert!(p.always_uv);
+        p.call(&[CTAP_CMD_GET_INFO]);
     }
 }

@@ -1,0 +1,2 @@
+# Seeds are encoded inputs, including bytes that look like whitespace.
+seeds/** binary

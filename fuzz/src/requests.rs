@@ -223,6 +223,7 @@ pub struct Overrides {
     pub hmac_secret: Option<Value>,
     pub hmac_secret_mc: Option<Value>,
     pub cred_blob: Option<Value>,
+    pub min_pin_length: Option<Value>,
     /// The options map, instead of a generated one.
     pub options: Option<Value>,
     /// Leave the allowList out.
@@ -285,7 +286,7 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
         Some(blob) => Some(blob),
         None => optional(u, |u| Ok(Value::Bytes(arbitrary_bytes(u)?)))?,
     };
-    let extensions = if let Some(input) = overrides.hmac_secret_mc {
+    let mut extensions = if let Some(input) = overrides.hmac_secret_mc {
         let mut entries = vec![
             (text("hmac-secret"), Value::Bool(true)),
             (text("hmac-secret-mc"), input),
@@ -306,6 +307,7 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
             let hmac_secret = field(u, |u| Ok(Value::Bool(u.arbitrary()?)))?;
             let cred_protect = field(u, |u| Ok(int(u.int_in_range(0..=4)?)))?;
             let hmac_secret_mc = optional(u, hmac_secret_input)?;
+            let min_pin_length = optional(u, |u| Ok(Value::Bool(u.arbitrary()?)))?;
             map(
                 u,
                 vec![
@@ -313,10 +315,20 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
                     (text("credProtect"), cred_protect),
                     (text("hmac-secret-mc"), hmac_secret_mc),
                     (text("credBlob"), cred_blob),
+                    (text("minPinLength"), min_pin_length),
                 ],
             )
         })?
     };
+    if let Some(input) = overrides.min_pin_length {
+        match &mut extensions {
+            Some(Value::Map(entries)) => {
+                entries.retain(|(key, _)| *key != text("minPinLength"));
+                entries.push((text("minPinLength"), input));
+            }
+            _ => extensions = Some(Value::Map(vec![(text("minPinLength"), input)])),
+        }
+    }
     let options = match overrides.options {
         Some(options) => Some(options),
         None => optional(u, options)?,
@@ -510,13 +522,56 @@ pub fn credential_management(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
     Ok(command(CTAP_CMD_CREDENTIAL_MANAGEMENT, &request))
 }
 
+/// subCommandParams of authenticatorConfig (CTAP 2.3 §6.11.4).
+pub fn authenticator_config_params(u: &mut Unstructured<'_>) -> Result<Value> {
+    let minimum = field(u, |u| Ok(int(u.int_in_range(0..=65)?)))?;
+    let rp_ids = field(u, |u| {
+        let len = u.int_in_range(0usize..=10)?;
+        let mut ids = Vec::with_capacity(len);
+        for _ in 0..len {
+            ids.push(field(u, |u| Ok(text(&rp_id(u)?)))?.unwrap_or(Value::Null));
+        }
+        Ok(Value::Array(ids))
+    })?;
+    let force_change = field(u, |u| Ok(Value::Bool(u.arbitrary()?)))?;
+    let complexity = field(u, |u| Ok(Value::Bool(u.arbitrary()?)))?;
+    map(
+        u,
+        vec![
+            (int(1), minimum),
+            (int(2), rp_ids),
+            (int(3), force_change),
+            (int(4), complexity),
+        ],
+    )
+}
+
+/// authenticatorConfig (CTAP 2.3 §6.11), command byte included.
+pub fn authenticator_config(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
+    let subcommand = field(u, |u| Ok(int(*u.choose(&[1, 2, 2, 3, 3, 4, 255])?)))?;
+    let params = field(u, authenticator_config_params)?;
+    let protocol = field(u, pin_uv_auth_protocol)?;
+    let param = field(u, |u| Ok(Value::Bytes(arbitrary_bytes(u)?)))?;
+    let request = map(
+        u,
+        vec![
+            (int(1), subcommand),
+            (int(2), params),
+            (int(3), protocol),
+            (int(4), param),
+        ],
+    )?;
+    Ok(command(CTAP_CMD_AUTHENTICATOR_CONFIG, &request))
+}
+
 /// Any CTAP2 request, structure-aware.
 pub fn any_request(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
-    Ok(match u.int_in_range(0u8..=10)? {
+    Ok(match u.int_in_range(0u8..=12)? {
         0 | 1 => make_credential(u, Overrides::default())?,
         2 | 3 => get_assertion(u, Overrides::default())?,
         4 | 5 => client_pin(u)?,
         6 | 7 => credential_management(u)?,
+        11 | 12 => authenticator_config(u)?,
         8 => vec![*u.choose(&[
             CTAP_CMD_GET_INFO,
             CTAP_CMD_RESET,
@@ -544,6 +599,7 @@ pub fn any_request(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
                 CTAP_CMD_GET_ASSERTION,
                 CTAP_CMD_CLIENT_PIN,
                 CTAP_CMD_CREDENTIAL_MANAGEMENT,
+                CTAP_CMD_AUTHENTICATOR_CONFIG,
             ])?;
             command(code, &arbitrary_value(u, MAX_DEPTH)?)
         }

@@ -119,7 +119,73 @@ fn ctap_request(dir: &Path) {
         vec![0x09],
         vec![0x0B],
         vec![0x04, 0xA0],
+        vec![0x0D],
+        vec![0x0D, 0xA0],
     ];
+    for subcommand in [0, 1, 2, 3, 4, 255] {
+        seeds.push(command(0x0D, &map(vec![(int(1), int(subcommand))])));
+    }
+    for minimum in [0, 3, 4, 5, 8, 63, 64, 255] {
+        seeds.push(command(
+            0x0D,
+            &map(vec![
+                (int(1), int(3)),
+                (int(2), map(vec![(int(1), int(minimum))])),
+            ]),
+        ));
+    }
+    for ids in [
+        vec![],
+        vec![text("example.com")],
+        vec![text("example.com"); 8],
+        vec![text("example.com"); 9],
+        vec![text(&"a".repeat(253))],
+        vec![text(&"a".repeat(254))],
+        vec![Value::Null],
+    ] {
+        seeds.push(command(
+            0x0D,
+            &map(vec![
+                (int(1), int(3)),
+                (int(2), map(vec![(int(2), Value::Array(ids))])),
+            ]),
+        ));
+    }
+    for key in [1, 2, 3, 4] {
+        for input in [
+            Value::Null,
+            text("wrong type"),
+            bytes(&[]),
+            Value::Bool(true),
+            Value::Bool(false),
+        ] {
+            seeds.push(command(
+                0x0D,
+                &map(vec![
+                    (int(1), int(3)),
+                    (int(2), map(vec![(int(key), input)])),
+                ]),
+            ));
+        }
+    }
+    for protocol in [1, 2, 3] {
+        seeds.push(command(
+            0x0D,
+            &map(vec![
+                (int(1), int(3)),
+                (
+                    int(2),
+                    map(vec![(int(1), int(8)), (int(3), Value::Bool(true))]),
+                ),
+                (int(3), int(protocol)),
+                (
+                    int(4),
+                    bytes(&vec![0x77; if protocol == 1 { 16 } else { 32 }]),
+                ),
+            ]),
+        ));
+    }
+    seeds.push(vec![0x0D, 0xA2, 0x01, 0x02, 0x02, 0xA1, 0x05, 0xF0]);
     for alg in CoseAlg::ALL {
         seeds.push(command(
             0x01,
@@ -161,6 +227,7 @@ fn ctap_request(dir: &Path) {
                 map(vec![
                     (text("credProtect"), int(2)),
                     (text("hmac-secret"), Value::Bool(true)),
+                    (text("minPinLength"), Value::Bool(true)),
                 ]),
             ),
             (int(8), bytes(&[0x33; 32])),
@@ -697,7 +764,7 @@ fn ctaphid_packets(dir: &Path) {
     write_all(dir, &seeds);
 }
 
-const IMPLEMENTED: &[u8] = &[0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0A];
+const IMPLEMENTED: &[u8] = &[0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x0D];
 
 /// Keep inputs from a deterministic random search that reach a command and
 /// status pair no earlier input reached, at most `max` of them.
