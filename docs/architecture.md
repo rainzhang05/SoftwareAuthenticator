@@ -188,14 +188,14 @@ protocol logic.
   for platforms to collect. Reset restores the initial empty array.
 - The `credBlob`, `credProtect`, `hmac-secret`, `hmac-secret-mc`,
   `largeBlobKey` and `minPinLength` extensions. `credBlob` stores up to 32
-  bytes with a stored
-  credential; sealed credentials refuse it. `hmac-secret-mc` evaluates the
-  PRF when a credential is created. `minPinLength` reports the minimum PIN
-  length at registration, only to the RP IDs on the stored list.
-  `largeBlobKey` creates a random 32-byte key only when requested with
-  `rk` true. Registration, requested assertions and credential enumeration
-  return it outside authenticator data. Platforms use it to encrypt blobs;
-  it is erased with the credential, while the array remains for collection.
+  bytes with a stored credential; sealed credentials refuse it.
+  `hmac-secret-mc` evaluates the PRF when a credential is created.
+  `minPinLength` reports the minimum PIN length at registration, only to the
+  RP IDs on the stored list. `largeBlobKey` creates a random 32-byte key only
+  when requested with `rk` true. Registration, requested assertions and
+  credential enumeration return it outside the authenticator data.
+  Platforms use it to encrypt blobs; it is erased with the credential, while
+  the array keeps its blobs for platforms to collect.
 - getInfo reports `largeBlobs` true and `maxSerializedLargeBlobArray` 16,384,
   and the options `authnrCfg`, `setMinPINLength`, `alwaysUv` and
   `makeCredUvNotRqd` (the opposite of `alwaysUv`), and no `uvAcfg`. It always
@@ -224,10 +224,9 @@ protected by the same encryption as their private keys, and an optional
 32-byte large-blob key on discoverable credentials. The key is wiped on drop,
 redacted from debug output and compared in constant time. Older records read
 without a large-blob key. The PIN state also keeps the configuration: the
-minimum PIN length and its RP IDs, whether a PIN
-change is required, the PIN's length and always-UV. A PIN state written
-before these fields existed reads with their defaults, and its PIN counts as
-4 code points long.
+minimum PIN length and its RP IDs, whether a PIN change is required, the
+PIN's length and always-UV. A PIN state written before these fields existed
+reads with their defaults, and its PIN counts as 4 code points long.
 
 Files are replaced atomically, never changed in place. If flushing the
 directory fails after the new file is in place, the write reports an error
@@ -254,8 +253,7 @@ are excluded by an excludeList, consume a slot, and are erased by reset.
 
 Each registration, sign-in that needs your presence, reset and authenticator
 selection asks for your approval in a desktop notification with Approve and
-Deny buttons, sent through
-`org.freedesktop.Notifications` on the session bus.
+Deny buttons, sent through `org.freedesktop.Notifications` on the session bus.
 
 - Anything that stops the notification from showing denies the request.
 - No answer within 30 seconds times the request out.

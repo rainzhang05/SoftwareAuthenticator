@@ -45,10 +45,9 @@ sensor software cannot press.
 
 - **Anything running as you, or as root.** It can read the root keys and so
   every private key and large-blob key, or use the key while a prompt is up,
-  or interfere with the
-  notification. A single copy of `keys/credential.key` also opens every
-  sealed non-discoverable credential until the next reset; RSA credentials
-  require their encrypted stored records as well.
+  or interfere with the notification. A single copy of `keys/credential.key`
+  also opens every sealed non-discoverable credential until the next reset;
+  RSA credentials require their encrypted stored records as well.
 - **Offline PIN guessing by such an attacker.** The stored PIN hash is an
   unsalted, truncated SHA-256.
 - **Rolling files back.** Integrity is per file, so an older copy of
