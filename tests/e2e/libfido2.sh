@@ -66,6 +66,7 @@ test_token_info() {
   grep -qE '^version strings: .*FIDO_2_1' <<<"$info" || fail "FIDO_2_1 is not advertised"
   grep -qE '^version strings: .*FIDO_2_0' <<<"$info" || fail "FIDO_2_0 is not advertised"
   grep -qE '^version strings: .*FIDO_2_3' <<<"$info" || fail "FIDO_2_3 is not advertised"
+  grep -qE '^version strings: .*U2F_V2' <<<"$info" || fail "U2F_V2 is not advertised"
   # libfido2 1.14.0 tools/token.c prints false option values with a "no"
   # prefix and the getInfo members with the following exact labels.
   local option
@@ -97,18 +98,28 @@ test_token_info() {
 
 # Register a credential of libfido2 type $1 (es256, es384, eddsa or rs256)
 # and assert with it.
+# Optional second and third arguments select U2F for ES256 registration
+# and assertion respectively.
 test_register_and_assert() {
   local type=$1
+  local registration_mode=${2:-ctap2} assertion_mode=${3:-ctap2}
+  local credential_flags=() assertion_flags=()
+  if [ "$registration_mode" = u2f ]; then credential_flags=(-u); fi
+  if [ "$assertion_mode" = u2f ]; then assertion_flags=(-u); fi
   local rp=libfido2.e2e.example
   local cred="$work/cred" pubkey="$work/pubkey.pem" assertion="$work/assertion"
 
   printf '%s\n%s\n%s\n%s\n' "$(random_b64 32)" "$rp" alice "$(random_b64 16)" \
-    | fido2-cred -M -q "$device" "$type" >"$cred"
+    | fido2-cred -M -q "${credential_flags[@]}" "$device" "$type" >"$cred"
   cat "$cred"
+  if [ "$registration_mode" = u2f ]; then
+    [ "$(sed -n 3p "$cred")" = fido-u2f ] || fail "unexpected U2F attestation format"
+    [ -n "$(sed -n 7p "$cred")" ] || fail "U2F attestation has no certificate"
+  fi
 
-  # Verifies the packed attestation signature (with the x5c certificate if
-  # there is one, else as self attestation with the credential key), the
-  # RP ID hash and the UP flag, and extracts the credential public key.
+  # Verifies packed or fido-u2f attestation with the certificate, or packed
+  # self attestation with the credential key; checks the RP ID hash and UP
+  # flag, and extracts the credential public key.
   fido2-cred -V -o "$work/verified" "$type" <"$cred"
   sed -n 1p "$work/verified" | cmp -s - <(sed -n 5p "$cred") \
     || fail "fido2-cred -V returned a different credential ID"
@@ -118,7 +129,7 @@ test_register_and_assert() {
   local cred_id
   cred_id=$(sed -n 5p "$cred")
   printf '%s\n%s\n%s\n' "$(random_b64 32)" "$rp" "$cred_id" \
-    | fido2-assert -G -p "$device" >"$assertion"
+    | fido2-assert -G -p "${assertion_flags[@]}" "$device" >"$assertion"
   cat "$assertion"
 
   # Checks the signature over authData || clientDataHash, the RP ID hash and
@@ -133,11 +144,14 @@ test_register_and_assert() {
 }
 
 run_test "fido2-token -L lists the virtual key" test_token_list
-run_test "fido2-token -I reports FIDO 2.1, every algorithm and both PIN protocols" test_token_info
+run_test "fido2-token -I reports CTAP2, U2F, algorithms and PIN protocols" test_token_info
 run_test "ES256 fido2-cred -M / -V and fido2-assert -G / -V" test_register_and_assert es256
 run_test "ES384 fido2-cred -M / -V and fido2-assert -G / -V" test_register_and_assert es384
 run_test "EdDSA fido2-cred -M / -V and fido2-assert -G / -V" test_register_and_assert eddsa
 run_test "RS256 fido2-cred -M / -V and fido2-assert -G / -V" test_register_and_assert rs256
+run_test "U2F ES256 fido2-cred -M -u and fido2-assert -G -u" test_register_and_assert es256 u2f u2f
+run_test "U2F registration asserted over CTAP2" test_register_and_assert es256 u2f ctap2
+run_test "CTAP2 registration asserted over U2F" test_register_and_assert es256 ctap2 u2f
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures libfido2 test(s) failed"

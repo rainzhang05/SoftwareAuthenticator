@@ -12,6 +12,7 @@ daemon under test uses (see .github/workflows/e2e.yml).
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from dataclasses import dataclass, field
@@ -59,6 +60,7 @@ class FakeNotificationServer:
         self._next_id = 1
         self._open: set[int] = set()
         self._pending: list[tuple[float, int, str]] = []
+        self._answers: queue.SimpleQueue[tuple[int, str]] = queue.SimpleQueue()
         self._stop = threading.Event()
         self._conn = None
         self._thread: threading.Thread | None = None
@@ -86,6 +88,10 @@ class FakeNotificationServer:
         """The `count`-th notification shown, once it has been."""
         wait_for(lambda: len(self.shown) >= count, timeout, f"notification {count} was never shown")
         return self.shown[count - 1]
+
+    def answer_notification(self, notification_id: int, answer: str) -> None:
+        """Queue an action on the server thread after a test observes a prompt."""
+        self._answers.put((notification_id, answer))
 
     # The server thread.
 
@@ -129,6 +135,12 @@ class FakeNotificationServer:
 
     def _answer_due(self) -> None:
         now = time.monotonic()
+        while True:
+            try:
+                notification_id, answer = self._answers.get_nowait()
+            except queue.Empty:
+                break
+            self._pending.append((now, notification_id, answer))
         due = [entry for entry in self._pending if entry[0] <= now]
         self._pending = [entry for entry in self._pending if entry[0] > now]
         for _, notification_id, answer in due:

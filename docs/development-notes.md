@@ -151,6 +151,13 @@ give a new one layouts in `fuzz/examples/seeds.rs` first), run
 
 ## Clients
 
+The E2E suite also exercises python-fido2 2.2.1's Ctap1 registration and
+signature verification, WebAuthn fido-u2f verification, protocol crossings,
+PIN independence, always-UV and notification polling. A helper repeats only
+presence-required APDUs. libfido2's forced-U2F commands register and assert
+ES256 credentials and verify both directions of protocol compatibility.
+Raw HID tests observe busy replies without the client's automatic retries.
+
 These were tested on 2026-09-30 on Ubuntu 26.04.1 (aarch64, GNOME 50.1).
 
 | Client | ES256 | ML-DSA | Notes |
