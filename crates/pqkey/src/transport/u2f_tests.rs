@@ -202,19 +202,36 @@ fn the_worker_keeps_one_prompt_and_shutdown_cancels_it_before_joining() {
     assert_eq!(receive(&output), (2, Command::Error as u8, vec![6]));
     decision.store(1, Ordering::SeqCst);
     let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
+    let registration = loop {
         send(&input, &peer_wake, 1, Command::Msg, &request);
         let (channel, command, reply) = receive(&output);
         assert_eq!((channel, command), (1, Command::Msg as u8));
         if reply.ends_with(&[0x90, 0]) {
             assert_eq!(reply[66], 107);
-            break;
+            break reply;
         }
         assert_eq!(reply, [0x69, 0x85]);
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(10));
-    }
+    };
     assert_eq!(prompts.load(Ordering::SeqCst), 1);
+    let authentication = [
+        vec![0, 2, 3, 0, 0, 0, 172],
+        vec![0x42; 64],
+        vec![107],
+        registration[67..174].to_vec(),
+    ]
+    .concat();
+    decision.store(2, Ordering::SeqCst);
+    send(&input, &peer_wake, 1, Command::Msg, &authentication);
+    assert_eq!(receive(&output), (1, Command::Msg as u8, vec![0x69, 0x85]));
+    assert_eq!(prompts.load(Ordering::SeqCst), 2);
+    decision.store(1, Ordering::SeqCst);
+    send(&input, &peer_wake, 1, Command::Cbor, &[7]);
+    assert_eq!(receive(&output), (1, Command::Cbor as u8, vec![0]));
+    send(&input, &peer_wake, 1, Command::Msg, &authentication);
+    assert_eq!(receive(&output), (1, Command::Msg as u8, vec![0x6a, 0x80]));
+    assert_eq!(prompts.load(Ordering::SeqCst), 3);
     decision.store(0, Ordering::SeqCst);
     send(&input, &peer_wake, 1, Command::Msg, &request);
     assert_eq!(receive(&output), (1, Command::Msg as u8, vec![0x69, 0x85]));
@@ -223,5 +240,5 @@ fn the_worker_keeps_one_prompt_and_shutdown_cancels_it_before_joining() {
         &worker.join().unwrap().unwrap_err()
     ));
     assert!(destroyed.load(Ordering::SeqCst));
-    assert_eq!(prompts.load(Ordering::SeqCst), 2);
+    assert_eq!(prompts.load(Ordering::SeqCst), 4);
 }

@@ -22,6 +22,9 @@ use std::{
 
 use self::ctaphid_host::{AppRequest, Command, CtaphidHost, MAX_MESSAGE_SIZE, Version};
 use crate::shutdown::ShutdownSignal;
+use pqkey_ctap::ctap::constants::{
+    CTAP_CMD_RESET, CTAP2_ERR_KEY_STORE_FULL, CTAP2_ERR_PROCESSING, CTAP2_OK,
+};
 use pqkey_ctap::ctap::{CtapApp, InterruptFlag};
 
 // CTAPHID capability flags (CTAP spec section 11.2.9.1.3)
@@ -126,6 +129,7 @@ struct AppResponse {
     payload: Vec<u8>,
     presence_finished: Option<Instant>,
     u2f_enabled: bool,
+    reset: bool,
 }
 
 /// The transport thread's end of the app worker: requests go out, answers
@@ -205,10 +209,19 @@ fn run_app<'interrupt, A>(
             app.call(&request.payload)
         };
         let times = waiting.times();
+        // A failed store reset may already have invalidated credentials.
+        // Presence refusal, timeout and cancellation do not reset them.
+        let reset = request.command == Command::Cbor
+            && request.payload.first() == Some(&CTAP_CMD_RESET)
+            && matches!(
+                payload.first().copied(),
+                Some(CTAP2_OK | CTAP2_ERR_PROCESSING | CTAP2_ERR_KEY_STORE_FULL)
+            );
         let response = AppResponse {
             payload,
             presence_finished: if times.0 != before { times.1 } else { None },
             u2f_enabled: app.u2f_enabled(),
+            reset,
         };
         interrupt.set_idle();
         if responses.send(response).is_err() {
@@ -258,6 +271,9 @@ impl<D: HidDevice> Transport<'_, D> {
     fn collect_responses(&mut self) -> io::Result<bool> {
         let mut received = false;
         while let Some(response) = self.app.try_response()? {
+            if response.reset {
+                self.host.reset_u2f();
+            }
             self.host.set_u2f_enabled(response.u2f_enabled);
             let finished = response
                 .presence_finished

@@ -282,6 +282,8 @@ without a repeat cancels the prompt, and denial or timeout suppresses new
 prompts for the same request until its repeats stop for that interval.
 Suppression is bounded without evicting live denials. A policy change,
 reset or another engine operation discards any cached approved result.
+Reset also clears denial suppression, so invalidated handles are checked
+against the new credential key and rejected before asking for presence.
 Always-UV disables U2F registration and authentication and removes U2F_V2
 from getInfo. A PIN alone does not affect U2F.
 

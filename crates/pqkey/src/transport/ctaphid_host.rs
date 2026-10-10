@@ -423,9 +423,15 @@ impl<R: CryptoRng> CtaphidHost<R> {
     /// A policy change must not expose a previously approved U2F answer.
     pub fn set_u2f_enabled(&mut self, enabled: bool) {
         if !enabled {
-            self.u2f = None;
-            self.denied_polls.clear();
+            self.reset_u2f();
         }
+    }
+
+    /// Forget U2F state when credential storage has been reset. A suppressed
+    /// handle must be checked against the new store rather than replayed.
+    pub fn reset_u2f(&mut self) {
+        self.u2f = None;
+        self.denied_polls.clear();
     }
 
     /// Queue a keepalive if one is due for the request being processed:
@@ -945,6 +951,22 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reset_discards_suppression_so_invalidated_handles_reach_the_engine() {
+        let mut host = host();
+        let request = start_u2f(&mut host, 0);
+        host.app_response(vec![0x69, 0x85], 1, Some(1));
+        sent(&mut host);
+        assert_eq!(host.denied_polls.len(), 1);
+        host.reset_u2f();
+        send(&mut host, FIRST, Command::Msg, &request, 2);
+        assert_eq!(host.take_app_request().unwrap().payload, request);
+        host.app_response(vec![0x6a, 0x80], 3, None);
+        assert_eq!(
+            sent(&mut host),
+            [message(FIRST, Command::Msg, &[0x6a, 0x80])]
+        );
+    }
     #[test]
     fn an_unobserved_presence_wait_still_defers_a_late_answer() {
         let mut host = host();
