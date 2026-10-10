@@ -3,7 +3,7 @@
 use super::*;
 use nix::poll::{PollFd, PollFlags, poll};
 use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest, UserPresence};
-use pqkey_ctap::store::MemoryStore;
+use pqkey_ctap::store::{MemoryStore, PrivateKeyMaterial};
 use std::os::fd::BorrowedFd;
 use std::sync::atomic::{AtomicU8, AtomicUsize};
 
@@ -12,6 +12,47 @@ struct Device {
     output: mpsc::Sender<CtapHidFrame>,
     wake: UnixStream,
     destroyed: Arc<AtomicBool>,
+}
+
+#[test]
+fn a_presence_prompt_that_finishes_between_polls_does_not_wait_for_key_generation() {
+    let (input, requests) = mpsc::channel();
+    let (answers, output) = mpsc::channel();
+    let (wake, peer_wake) = UnixStream::pair().unwrap();
+    wake.set_nonblocking(true).unwrap();
+    let device = Device {
+        input: requests,
+        output: answers,
+        wake,
+        destroyed: Arc::new(AtomicBool::new(false)),
+    };
+    let shutdown = ShutdownSignal::new();
+    let stop = shutdown.clone();
+    let worker = thread::spawn(move || {
+        let interrupt = InterruptFlag::new();
+        let waiting = WaitingForUser::new();
+        let mut app = CtapApp::new(
+            MemoryStore::new(),
+            rand_core::UnwrapErr(getrandom::SysRng),
+            pqkey_ctap::ctap::presence::AutoApprove,
+            &interrupt,
+            [0; 16],
+        );
+        app.set_key_generator(|alg| {
+            thread::sleep(Duration::from_millis(800));
+            PrivateKeyMaterial::try_generate(alg)
+        });
+        let signal = waiting.clone();
+        app.set_keepalive_callback(move |value| signal.set(value));
+        exec(device, &mut app, &waiting, shutdown, || Ok(()))
+    });
+    let request = [vec![0, 1, 0, 0, 0, 0, 64], vec![0x42; 64]].concat();
+    send(&input, &peer_wake, 1, Command::Msg, &request);
+    assert_eq!(receive(&output), (1, Command::Msg as u8, vec![0x69, 0x85]));
+    stop.request();
+    assert!(crate::shutdown::is_shutdown(
+        &worker.join().unwrap().unwrap_err()
+    ));
 }
 
 impl HidDevice for Device {

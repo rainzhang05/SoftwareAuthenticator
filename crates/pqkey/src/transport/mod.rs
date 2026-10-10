@@ -136,6 +136,7 @@ struct AppWorker<'interrupt> {
     responses: mpsc::Receiver<AppResponse>,
     wake: UnixStream,
     interrupt: &'interrupt InterruptFlag,
+    presence_before: Option<Instant>,
 }
 
 impl AppWorker<'_> {
@@ -146,7 +147,8 @@ impl AppWorker<'_> {
     /// up is not lost. The worker marks it idle again after the call, before
     /// it answers, and a request is only sent once the previous answer has
     /// arrived, so the two never overlap.
-    fn submit(&mut self, request: AppRequest) -> io::Result<()> {
+    fn submit(&mut self, request: AppRequest, waiting: &WaitingForUser) -> io::Result<()> {
+        self.presence_before = waiting.times().0;
         self.interrupt.set_working();
         self.requests
             .as_ref()
@@ -245,7 +247,7 @@ impl<D: HidDevice> Transport<'_, D> {
         while let Some(frame) = self.device.try_read_frame()? {
             self.collect_responses()?;
             let now = self.now();
-            self.host.app_presence(self.waiting.get());
+            self.observe_presence();
             self.host.handle_timeout(now);
             self.host.handle_frame(&frame, now);
             read = true;
@@ -265,6 +267,18 @@ impl<D: HidDevice> Transport<'_, D> {
             received = true;
         }
         Ok(received)
+    }
+
+    fn observe_presence(&mut self) {
+        let times = self.waiting.times();
+        if times.0.is_some() && times.0 != self.app.presence_before {
+            self.host.app_presence(true);
+            if let Some(finished) = times.1 {
+                self.host.app_presence_finished(
+                    finished.saturating_duration_since(self.epoch).as_millis() as u64,
+                );
+            }
+        }
     }
 
     /// Write queued packets, [`INPUT_REPORT_INTERVAL`] apart. Read output
@@ -299,12 +313,12 @@ impl<D: HidDevice> Transport<'_, D> {
         }
         did_work |= self.collect_responses()?;
         if let Some(request) = self.host.take_app_request() {
-            self.app.submit(request)?;
+            self.app.submit(request, &self.waiting)?;
             did_work = true;
         }
 
         let now = self.now();
-        self.host.app_presence(self.waiting.get());
+        self.observe_presence();
         self.host.handle_timeout(now);
         self.host.send_keepalive(self.waiting.get(), now);
         did_work |= self.flush_pending()?;
@@ -394,6 +408,7 @@ where
                 responses: response_receiver,
                 wake,
                 interrupt,
+                presence_before: None,
             },
             waiting: waiting.clone(),
             epoch: Instant::now(),
@@ -598,6 +613,7 @@ mod tests {
                 responses,
                 wake,
                 interrupt: &interrupt,
+                presence_before: None,
             },
             waiting: WaitingForUser::new(),
             epoch: Instant::now(),

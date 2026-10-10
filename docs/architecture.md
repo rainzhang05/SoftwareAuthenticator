@@ -275,6 +275,8 @@ SW_CONDITIONS_NOT_SATISFIED while keeping the worker request alive. Exact
 repeats on its channel receive that status until the result is ready, then
 receive it once within ten seconds of approval. No eventual answer is
 sent without a repeat. Other requests are busy while the prompt is open.
+Presence transitions are recorded even between transport polls; a finished
+prompt keeps its collection window while the worker prepares its answer.
 INIT cancels it; CANCEL applies only to CBOR. More than three seconds
 without a repeat cancels the prompt, and denial or timeout suppresses new
 prompts for the same request until its repeats stop for that interval.

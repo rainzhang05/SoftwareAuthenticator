@@ -76,7 +76,20 @@ struct U2fPoll {
     last_poll: u64,
     started: u64,
     presence_started: bool,
+    presence_finished: Option<u64>,
     answer: Option<(Vec<u8>, u64)>,
+}
+
+impl U2fPoll {
+    fn deadline(&self) -> u64 {
+        match &self.answer {
+            Some((_, expires)) => expires.saturating_add(1),
+            None => self.presence_finished.map_or_else(
+                || self.last_poll.saturating_add(U2F_POLL_TIMEOUT_MS + 1),
+                |at| at.saturating_add(U2F_APPROVAL_MS + 1),
+            ),
+        }
+    }
 }
 
 struct DeniedPoll {
@@ -350,17 +363,13 @@ impl<R: CryptoRng> CtaphidHost<R> {
     pub fn handle_timeout(&mut self, now: u64) {
         self.denied_polls
             .retain(|poll| now.saturating_sub(poll.last_poll) <= U2F_POLL_TIMEOUT_MS);
-        if let Some(poll) = &self.u2f {
-            let expired = match &poll.answer {
-                Some((_, expires)) => now > *expires,
-                None => now.saturating_sub(poll.last_poll) > U2F_POLL_TIMEOUT_MS,
-            };
-            if expired {
-                if poll.answer.is_none() {
-                    self.interrupt_app = true;
-                }
-                self.u2f = None;
+        if let Some(poll) = &self.u2f
+            && now >= poll.deadline()
+        {
+            if poll.answer.is_none() {
+                self.interrupt_app = true;
             }
+            self.u2f = None;
         }
         if let State::Processing(processing) = &self.state
             && processing.command == Command::Msg
@@ -398,6 +407,16 @@ impl<R: CryptoRng> CtaphidHost<R> {
             && let Some(poll) = &mut self.u2f
         {
             poll.presence_started = true;
+        }
+    }
+
+    /// Retain the ten-second collection window while the worker finishes a
+    /// response after presence, even if it has not produced that reply yet.
+    pub fn app_presence_finished(&mut self, at: u64) {
+        if self.app_command == Some(Command::Msg)
+            && let Some(poll) = &mut self.u2f
+        {
+            poll.presence_finished = Some(at);
         }
     }
 
@@ -453,11 +472,11 @@ impl<R: CryptoRng> CtaphidHost<R> {
             }
             State::Processing(processing) => Some(processing.keepalive_at + KEEPALIVE_INTERVAL_MS),
         };
-        let polling = self.u2f.as_ref().map(|poll| match &poll.answer {
-            Some((_, expires)) => expires.saturating_add(1),
-            None if poll.presence_started && matches!(&self.state, State::Processing(p) if p.command == Command::Msg && p.request.is_none()) =>
-                poll.started.saturating_add(U2F_RESPONSE_WAIT_MS).min(poll.last_poll.saturating_add(U2F_POLL_TIMEOUT_MS + 1)),
-            None => poll.last_poll.saturating_add(U2F_POLL_TIMEOUT_MS + 1),
+        let polling = self.u2f.as_ref().map(|poll| {
+            if poll.answer.is_none() && poll.presence_started
+                && matches!(&self.state, State::Processing(p) if p.command == Command::Msg && p.request.is_none()) {
+                poll.started.saturating_add(U2F_RESPONSE_WAIT_MS).min(poll.deadline())
+            } else { poll.deadline() }
         });
         transaction.into_iter().chain(polling).min()
     }
@@ -481,6 +500,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
                 last_poll: processing.started,
                 started: processing.started,
                 presence_started: false,
+                presence_finished: None,
                 answer: None,
             });
         }
@@ -510,19 +530,30 @@ impl<R: CryptoRng> CtaphidHost<R> {
         {
             let status = response.get(response.len().saturating_sub(2)..);
             let direct = matches!(&self.state, State::Processing(p) if p.command == Command::Msg && p.request.is_none());
+            let late = direct
+                && presence_finished.is_some()
+                && now.saturating_sub(poll.started) > U2F_RESPONSE_WAIT_MS;
             if status == Some(SW_CONDITIONS_NOT_SATISFIED.to_be_bytes().as_slice()) {
                 self.denied_polls.push(DeniedPoll {
                     channel: poll.channel,
                     request: poll.request,
                     last_poll: poll.last_poll,
                 });
-            } else if !direct
+            } else if (!direct || late)
                 && presence_finished.is_some()
                 && now
                     <= presence_finished
                         .unwrap_or(now)
                         .saturating_add(U2F_APPROVAL_MS)
             {
+                if late {
+                    self.state = State::Idle;
+                    self.enqueue_message(
+                        poll.channel,
+                        Command::Msg,
+                        &SW_CONDITIONS_NOT_SATISFIED.to_be_bytes(),
+                    );
+                }
                 poll.answer = Some((
                     response,
                     presence_finished
@@ -531,7 +562,15 @@ impl<R: CryptoRng> CtaphidHost<R> {
                 ));
                 self.u2f = Some(poll);
                 return;
-            } else if !direct {
+            } else if !direct || late {
+                if late {
+                    self.state = State::Idle;
+                    self.enqueue_message(
+                        poll.channel,
+                        Command::Msg,
+                        &SW_CONDITIONS_NOT_SATISFIED.to_be_bytes(),
+                    );
+                }
                 return;
             }
         }
@@ -906,6 +945,39 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unobserved_presence_wait_still_defers_a_late_answer() {
+        let mut host = host();
+        let request = start_u2f(&mut host, 0);
+        host.app_response(vec![5, 0x90, 0], 200, Some(150));
+        assert_eq!(
+            sent(&mut host),
+            [message(FIRST, Command::Msg, &[0x69, 0x85])]
+        );
+        send(&mut host, FIRST, Command::Msg, &request, 201);
+        assert_eq!(
+            sent(&mut host),
+            [message(FIRST, Command::Msg, &[5, 0x90, 0])]
+        );
+    }
+
+    #[test]
+    fn presence_completion_preserves_approval_while_the_worker_prepares_the_answer() {
+        let mut host = host();
+        let request = start_u2f(&mut host, 0);
+        host.app_presence(true);
+        host.app_presence_finished(1);
+        host.handle_timeout(100);
+        sent(&mut host);
+        host.handle_timeout(3_001);
+        assert!(!host.take_interrupt(), "presence has already finished");
+        host.app_response(vec![5, 0x90, 0], 5_000, Some(1));
+        send(&mut host, FIRST, Command::Msg, &request, 5_001);
+        assert_eq!(
+            sent(&mut host),
+            [message(FIRST, Command::Msg, &[5, 0x90, 0])]
+        );
+    }
     fn u2f_register() -> Vec<u8> {
         [vec![0, 1, 0, 0, 0, 0, 64], vec![0x42; 64]].concat()
     }
@@ -1415,11 +1487,13 @@ mod tests {
     /// A CTAPHID_CBOR request carries at least the CTAP command byte (CTAP 2.3
     /// §11.2.9.1.2), so an empty one never reaches the app.
     #[test]
-    fn an_empty_cbor_request_is_an_invalid_length() {
+    fn empty_application_messages_have_an_invalid_hid_length() {
         let mut host = host();
-        send(&mut host, FIRST, Command::Cbor, &[], 0);
-        assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidLength)]);
-        assert!(host.take_app_request().is_none());
+        for command in [Command::Cbor, Command::Msg] {
+            send(&mut host, FIRST, command, &[], 0);
+            assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidLength)]);
+            assert!(host.take_app_request().is_none());
+        }
         // The channel is free again.
         start_cbor(&mut host, FIRST, &[0x04], 1);
     }
