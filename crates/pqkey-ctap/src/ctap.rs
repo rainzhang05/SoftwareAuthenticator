@@ -1,10 +1,12 @@
-//! The CTAP2 authenticator engine.
+//! The CTAP2 and CTAP1/U2F authenticator engine.
 //!
 //! [`CtapApp`] parses CTAP2 commands and answers them.  Everything outside
 //! the protocol is injected: persistence through a [`CredentialStore`],
 //! randomness through an RNG, and user presence through a [`UserPresence`]
 //! implementation.  [`CtapApp::with_file_store`] builds the combination the
 //! daemon runs.
+//! [`CtapApp::call_u2f`] answers CTAPHID_MSG command APDUs; the transport
+//! supplies U2F's presence polling around the blocking engine.
 //!
 //! A request is a CTAPHID_CBOR payload: the command byte, then its CBOR
 //! parameters.  The response is a status byte, then CBOR on success:

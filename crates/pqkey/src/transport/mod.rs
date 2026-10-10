@@ -1,5 +1,7 @@
 pub mod ctaphid_host;
 mod device;
+#[cfg(test)]
+mod u2f_tests;
 pub use device::CTAPHID_REPORT_DESCRIPTOR;
 pub use device::{
     CTAPHID_FRAME_LEN, CtapHidFrame, DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID, HidDevice,
@@ -10,7 +12,7 @@ use std::{
     io::{self, Read, Write},
     os::{fd::AsFd, unix::net::UnixStream},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -18,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use self::ctaphid_host::{CtaphidHost, MAX_MESSAGE_SIZE, Version};
+use self::ctaphid_host::{AppRequest, Command, CtaphidHost, MAX_MESSAGE_SIZE, Version};
 use crate::shutdown::ShutdownSignal;
 use pqkey_ctap::ctap::{CtapApp, InterruptFlag};
 
@@ -40,7 +42,13 @@ const IDLE_WAIT: Duration = Duration::from_millis(10);
 /// keepalive callback and the loop reports it in CTAPHID keepalives. Clones
 /// share the flag, which may be set from another thread.
 #[derive(Clone, Debug, Default)]
-pub struct WaitingForUser(Arc<AtomicBool>);
+pub struct WaitingForUser(Arc<PresenceTiming>);
+
+#[derive(Debug, Default)]
+struct PresenceTiming {
+    waiting: AtomicBool,
+    times: Mutex<(Option<Instant>, Option<Instant>)>,
+}
 
 impl WaitingForUser {
     pub fn new() -> Self {
@@ -48,16 +56,34 @@ impl WaitingForUser {
     }
 
     pub fn set(&self, waiting: bool) {
-        self.0.store(waiting, Ordering::Relaxed);
+        let mut times = self
+            .0
+            .times
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if waiting {
+            *times = (Some(Instant::now()), None);
+        } else {
+            times.1 = Some(Instant::now());
+        }
+        self.0.waiting.store(waiting, Ordering::Relaxed);
     }
 
     pub fn get(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.0.waiting.load(Ordering::Relaxed)
+    }
+
+    fn times(&self) -> (Option<Instant>, Option<Instant>) {
+        *self
+            .0
+            .times
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
 /// What the transport runs on its worker thread: the CTAP app, which answers
-/// complete CTAPHID_CBOR requests.
+/// complete CTAPHID_CBOR requests and CTAPHID_MSG APDUs.
 ///
 /// `'interrupt` is the lifetime of the app's [`InterruptFlag`], apart from any
 /// borrow of the app, so the transport can hold on to the flag while the
@@ -69,6 +95,14 @@ pub trait App<'interrupt> {
 
     /// Answer `request`, the payload of a CTAPHID_CBOR message.
     fn call(&mut self, request: &[u8]) -> Vec<u8>;
+
+    /// Answer the command APDU in a CTAPHID_MSG message.
+    fn call_u2f(&mut self, request: &[u8]) -> Vec<u8>;
+
+    /// Whether policy allows U2F registration and authentication.
+    fn u2f_enabled(&self) -> bool {
+        true
+    }
 }
 
 impl<'interrupt> App<'interrupt> for CtapApp<'interrupt> {
@@ -79,14 +113,27 @@ impl<'interrupt> App<'interrupt> for CtapApp<'interrupt> {
     fn call(&mut self, request: &[u8]) -> Vec<u8> {
         CtapApp::call(self, request)
     }
+
+    fn call_u2f(&mut self, request: &[u8]) -> Vec<u8> {
+        CtapApp::call_u2f(self, request)
+    }
+    fn u2f_enabled(&self) -> bool {
+        CtapApp::u2f_enabled(self)
+    }
+}
+
+struct AppResponse {
+    payload: Vec<u8>,
+    presence_finished: Option<Instant>,
+    u2f_enabled: bool,
 }
 
 /// The transport thread's end of the app worker: requests go out, answers
 /// come back, and the worker writes a byte to `wake` after each answer so the
 /// loop does not sleep through it.
 struct AppWorker<'interrupt> {
-    requests: Option<mpsc::Sender<Vec<u8>>>,
-    responses: mpsc::Receiver<Vec<u8>>,
+    requests: Option<mpsc::Sender<AppRequest>>,
+    responses: mpsc::Receiver<AppResponse>,
     wake: UnixStream,
     interrupt: &'interrupt InterruptFlag,
 }
@@ -99,7 +146,7 @@ impl AppWorker<'_> {
     /// up is not lost. The worker marks it idle again after the call, before
     /// it answers, and a request is only sent once the previous answer has
     /// arrived, so the two never overlap.
-    fn submit(&mut self, request: Vec<u8>) -> io::Result<()> {
+    fn submit(&mut self, request: AppRequest) -> io::Result<()> {
         self.interrupt.set_working();
         self.requests
             .as_ref()
@@ -115,7 +162,7 @@ impl AppWorker<'_> {
     }
 
     /// The app's next answer, if one has arrived.
-    fn try_response(&self) -> io::Result<Option<Vec<u8>>> {
+    fn try_response(&self) -> io::Result<Option<AppResponse>> {
         let mut drained = [0u8; 16];
         while matches!((&self.wake).read(&mut drained), Ok(n) if n > 0) {}
         match self.responses.try_recv() {
@@ -140,15 +187,27 @@ fn app_stopped() -> io::Error {
 /// up.
 fn run_app<'interrupt, A>(
     app: &mut A,
-    requests: mpsc::Receiver<Vec<u8>>,
-    responses: mpsc::Sender<Vec<u8>>,
+    requests: mpsc::Receiver<AppRequest>,
+    responses: mpsc::Sender<AppResponse>,
     wake: UnixStream,
+    waiting: &WaitingForUser,
 ) where
     A: App<'interrupt> + ?Sized,
 {
     let interrupt = app.interrupt();
     for request in requests {
-        let response = app.call(&request);
+        let before = waiting.times().0;
+        let payload = if request.command == Command::Msg {
+            app.call_u2f(&request.payload)
+        } else {
+            app.call(&request.payload)
+        };
+        let times = waiting.times();
+        let response = AppResponse {
+            payload,
+            presence_finished: if times.0 != before { times.1 } else { None },
+            u2f_enabled: app.u2f_enabled(),
+        };
         interrupt.set_idle();
         if responses.send(response).is_err() {
             return;
@@ -184,11 +243,28 @@ impl<D: HidDevice> Transport<'_, D> {
     fn read_frames(&mut self) -> io::Result<bool> {
         let mut read = false;
         while let Some(frame) = self.device.try_read_frame()? {
+            self.collect_responses()?;
             let now = self.now();
+            self.host.app_presence(self.waiting.get());
+            self.host.handle_timeout(now);
             self.host.handle_frame(&frame, now);
             read = true;
         }
         Ok(read)
+    }
+
+    fn collect_responses(&mut self) -> io::Result<bool> {
+        let mut received = false;
+        while let Some(response) = self.app.try_response()? {
+            self.host.set_u2f_enabled(response.u2f_enabled);
+            let finished = response
+                .presence_finished
+                .map(|at| at.saturating_duration_since(self.epoch).as_millis() as u64);
+            self.host
+                .app_response(response.payload, self.now(), finished);
+            received = true;
+        }
+        Ok(received)
     }
 
     /// Write queued packets, [`INPUT_REPORT_INTERVAL`] apart. Read output
@@ -221,16 +297,14 @@ impl<D: HidDevice> Transport<'_, D> {
         if self.host.take_interrupt() {
             self.app.interrupt();
         }
-        while let Some(response) = self.app.try_response()? {
-            self.host.app_response(response);
-            did_work = true;
-        }
+        did_work |= self.collect_responses()?;
         if let Some(request) = self.host.take_app_request() {
             self.app.submit(request)?;
             did_work = true;
         }
 
         let now = self.now();
+        self.host.app_presence(self.waiting.get());
         self.host.handle_timeout(now);
         self.host.send_keepalive(self.waiting.get(), now);
         did_work |= self.flush_pending()?;
@@ -302,7 +376,7 @@ where
         let worker = thread::Builder::new()
             .name("ctap-app".into())
             .spawn_scoped(scope, move || {
-                run_app(app, request_receiver, response_sender, worker_wake)
+                run_app(app, request_receiver, response_sender, worker_wake, waiting)
             })?;
 
         let mut host = CtaphidHost::new();
@@ -311,9 +385,7 @@ where
             minor: 1,
             build: 0,
         });
-        // Setting both capability bits prevents hosts from probing
-        // CTAPHID_MSG and enables proper CTAP2 detection
-        host.set_capabilities(CAPABILITY_CBOR | CAPABILITY_NMSG);
+        host.set_capabilities(CAPABILITY_CBOR);
         let mut transport = Transport {
             device,
             host,
@@ -361,6 +433,10 @@ mod tests {
         fn call(&mut self, request: &[u8]) -> Vec<u8> {
             assert_ne!(request, [0xFF], "the app fails");
             request.to_vec()
+        }
+
+        fn call_u2f(&mut self, request: &[u8]) -> Vec<u8> {
+            self.call(request)
         }
     }
 
@@ -635,6 +711,10 @@ mod callback_tests {
         }
         fn call(&mut self, request: &[u8]) -> Vec<u8> {
             request.to_vec()
+        }
+
+        fn call_u2f(&mut self, request: &[u8]) -> Vec<u8> {
+            self.call(request)
         }
     }
 

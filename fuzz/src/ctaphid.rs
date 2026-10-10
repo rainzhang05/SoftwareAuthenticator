@@ -7,7 +7,7 @@
 //!   length of at most 7,609 bytes followed by exactly the continuation
 //!   packets it needs, on the same channel, numbered from 0, zero padded, and
 //!   never interleaved with another message;
-//! * only INIT, PING, CBOR, KEEPALIVE and ERROR go out, never CANCEL; errors
+//! * only INIT, PING, CBOR, MSG, KEEPALIVE and ERROR go out, never CANCEL; errors
 //!   carry one defined CTAPHID error code and keepalives one defined status;
 //! * messages only go to channels that sent an initialization packet, and
 //!   channels allocated by INIT are neither 0 nor the broadcast channel;
@@ -213,7 +213,7 @@ impl Harness {
                 }
             }
             Command::Ping => assert_ne!(channel, BROADCAST),
-            Command::Cbor => {
+            Command::Cbor | Command::Msg => {
                 assert_ne!(channel, BROADCAST);
                 let answered = self.app_answer.take();
                 assert!(
@@ -307,8 +307,8 @@ impl Harness {
             Action::TakeRequest => {
                 if let Some(request) = self.host.take_app_request() {
                     assert!(!self.app_busy, "a request for a busy app");
-                    assert!(!request.is_empty(), "an empty CBOR request");
-                    assert!(request.len() <= MAX_MESSAGE_SIZE);
+                    assert!(!request.payload.is_empty(), "an empty CBOR request");
+                    assert!(request.payload.len() <= MAX_MESSAGE_SIZE);
                     self.app_busy = true;
                 }
             }
@@ -322,7 +322,7 @@ impl Harness {
                 let length = usize::from(length) % (MAX_MESSAGE_SIZE + 64);
                 let response: Vec<u8> = (0..length).map(|i| fill.wrapping_add(i as u8)).collect();
                 self.app_answer = Some(response.clone());
-                self.host.app_response(response);
+                self.host.app_response(response, self.now, None);
                 assert!(self.drain() <= 1);
             }
             Action::TakeInterrupt => {
@@ -348,7 +348,7 @@ pub fn run(data: &[u8]) {
         app_busy: false,
         app_answer: None,
     };
-    harness.host.set_capabilities(0x0C);
+    harness.host.set_capabilities(0x04);
     while let Ok(action) = u.arbitrary::<Action>() {
         harness.act(action);
         if u.is_empty() {

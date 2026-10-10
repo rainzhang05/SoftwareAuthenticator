@@ -21,6 +21,9 @@ your presence waits for you to approve it in a desktop notification.
   always-UV and minimum PIN length configuration, `minPinLength`, `credBlob`,
   `hmac-secret`, `hmac-secret-mc`, `credProtect`, `largeBlobKey`, fragmented
   large-blob storage, and packed self-attestation.
+- **U2F:** CTAP1 registration and authentication over USB HID, using ES256
+  credentials that also work over CTAP2. U2F uses approval rather than a
+  PIN, and its prompt cannot identify the site. Always-UV disables it.
 - **Rust throughout:** pure-Rust cryptography, and `unsafe` code only where
   pqkey calls into the operating system.
 

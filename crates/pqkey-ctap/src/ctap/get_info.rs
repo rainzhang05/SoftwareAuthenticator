@@ -56,10 +56,11 @@ impl CtapApp<'_> {
         // minPinLength comes with setMinPINLength; there is no ep option ID.
         // "The string "FIDO_2_2" was not defined for CTAP2.2 and MUST not be
         // present in versions member."
-        map.push((
-            uint(1),
-            Value::Array(vec![text("FIDO_2_3"), text("FIDO_2_1"), text("FIDO_2_0")]),
-        ));
+        let mut versions = vec![text("FIDO_2_3"), text("FIDO_2_1"), text("FIDO_2_0")];
+        if self.u2f_enabled() {
+            versions.push(text("U2F_V2"));
+        }
+        map.push((uint(1), Value::Array(versions)));
         map.push((
             uint(2),
             Value::Array(vec![

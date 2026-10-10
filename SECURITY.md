@@ -71,6 +71,18 @@ sensor software cannot press.
 
 ### Limits of the prompt
 
+- **U2F cannot verify the user or name the site.** U2F registration and
+  ordinary authentication ask for presence without the PIN, even when a
+  PIN is set. The request contains an application hash, so the prompt says
+  it is a U2F request and cannot identify the site. The explicit
+  don't-enforce control (`0x08`) permits a silent signature whose presence
+  bit is clear. Enabling always-UV disables U2F registration and every
+  authentication control, including check-only and silent authentication.
+  An approval answers one identical polling request on the same channel
+  within ten seconds. A prompt abandoned for over three seconds is
+  cancelled; denial and timeout suppress further prompts until polling
+  stops for that long.
+
 - **It shows what the client claims.** Site and user names come from the
   request. They are cleaned of control and invisible characters, but a lying
   local program can still claim any site. Browsers check the site; other

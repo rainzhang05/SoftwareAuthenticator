@@ -18,9 +18,11 @@
 //!   processed, keepalives go out every [`KEEPALIVE_INTERVAL_MS`] and
 //!   whenever their status changes.
 //!
-//! CTAPHID_CBOR is the only request the app answers. INIT and PING are
+//! The app answers CTAPHID_CBOR and CTAPHID_MSG. INIT and PING are
 //! answered as soon as they are complete, and every other command with
-//! ERR_INVALID_CMD. While a transaction is under way:
+//! ERR_INVALID_CMD. U2F presence polling retains a worker operation across
+//! completed MSG transactions; identical repeats collect its answer once.
+//! While a transaction or a U2F prompt is under way:
 //!
 //! * a request on any other channel fails with ERR_CHANNEL_BUSY;
 //! * CTAPHID_INIT on the transaction's channel aborts it (resynchronisation);
@@ -50,6 +52,38 @@ use rand_core::{CryptoRng, UnwrapErr};
 type OsRng = UnwrapErr<SysRng>;
 
 use crate::transport::{CTAPHID_FRAME_LEN, CtapHidFrame};
+use pqkey_ctap::ctap::u2f::{SW_CONDITIONS_NOT_SATISFIED, requests_presence};
+
+/// Initial presence requests receive a polling response within this time.
+pub const U2F_RESPONSE_WAIT_MS: u64 = 100;
+/// A client that stops polling relinquishes its pending prompt.
+pub const U2F_POLL_TIMEOUT_MS: u64 = 3_000;
+/// An approved response may be collected once during this interval.
+pub const U2F_APPROVAL_MS: u64 = 10_000;
+
+/// A complete application request, with its HID response command.
+#[derive(Debug)]
+pub struct AppRequest {
+    /// CBOR or MSG.
+    pub command: Command,
+    /// The complete CTAP2 message or U2F APDU.
+    pub payload: Vec<u8>,
+}
+
+struct U2fPoll {
+    channel: u32,
+    request: Vec<u8>,
+    last_poll: u64,
+    started: u64,
+    presence_started: bool,
+    answer: Option<(Vec<u8>, u64)>,
+}
+
+struct DeniedPoll {
+    channel: u32,
+    request: Vec<u8>,
+    last_poll: u64,
+}
 
 const PACKET_SIZE: usize = CTAPHID_FRAME_LEN;
 const INIT_DATA: usize = PACKET_SIZE - 7;
@@ -96,12 +130,13 @@ const LOG_PREVIEW: usize = 8;
 
 /// The CTAPHID commands this transport handles (CTAP 2.3 §11.2.9), with the
 /// code they carry in an initialization packet, high bit cleared. Every other
-/// code, CTAPHID_MSG, CTAPHID_WINK and CTAPHID_LOCK included, is answered with
+/// code, CTAPHID_WINK and CTAPHID_LOCK included, is answered with
 /// ERR_INVALID_CMD.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Command {
     Ping = 0x01,
+    Msg = 0x03,
     Init = 0x06,
     Cbor = 0x10,
     Cancel = 0x11,
@@ -123,6 +158,7 @@ impl TryFrom<u8> for Command {
     fn try_from(code: u8) -> Result<Self, u8> {
         Ok(match code {
             0x01 => Command::Ping,
+            0x03 => Command::Msg,
             0x06 => Command::Init,
             0x10 => Command::Cbor,
             0x11 => Command::Cancel,
@@ -202,10 +238,12 @@ impl Channels {
     }
 }
 
-/// A complete CTAPHID_CBOR request being processed by the app.
+/// A complete CBOR or MSG request being processed by the app.
 #[derive(Debug)]
 struct Processing {
     channel: u32,
+    command: Command,
+    started: u64,
     /// The payload, until the request is handed to the app.
     request: Option<Vec<u8>>,
     /// When the last keepalive was sent, or the request completed.
@@ -241,6 +279,9 @@ pub struct CtaphidHost<R = OsRng> {
     app_busy: bool,
     /// Whether the app should be asked to cancel what it is working on.
     interrupt_app: bool,
+    app_command: Option<Command>,
+    u2f: Option<U2fPoll>,
+    denied_polls: Vec<DeniedPoll>,
 }
 
 impl CtaphidHost<OsRng> {
@@ -267,6 +308,9 @@ impl<R: CryptoRng> CtaphidHost<R> {
             version: Version::default(),
             app_busy: false,
             interrupt_app: false,
+            app_command: None,
+            u2f: None,
+            denied_polls: Vec::new(),
         }
     }
 
@@ -304,6 +348,35 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
     /// Expire a message whose next packet is overdue.
     pub fn handle_timeout(&mut self, now: u64) {
+        self.denied_polls
+            .retain(|poll| now.saturating_sub(poll.last_poll) <= U2F_POLL_TIMEOUT_MS);
+        if let Some(poll) = &self.u2f {
+            let expired = match &poll.answer {
+                Some((_, expires)) => now > *expires,
+                None => now.saturating_sub(poll.last_poll) > U2F_POLL_TIMEOUT_MS,
+            };
+            if expired {
+                if poll.answer.is_none() {
+                    self.interrupt_app = true;
+                }
+                self.u2f = None;
+            }
+        }
+        if let State::Processing(processing) = &self.state
+            && processing.command == Command::Msg
+            && processing.request.is_none()
+            && let Some(poll) = &self.u2f
+            && poll.presence_started
+            && now.saturating_sub(poll.started) >= U2F_RESPONSE_WAIT_MS
+        {
+            let channel = processing.channel;
+            self.state = State::Idle;
+            self.enqueue_message(
+                channel,
+                Command::Msg,
+                &SW_CONDITIONS_NOT_SATISFIED.to_be_bytes(),
+            );
+        }
         if let State::Receiving {
             channel,
             last_packet_at,
@@ -314,6 +387,25 @@ impl<R: CryptoRng> CtaphidHost<R> {
             debug!("message timeout cid={channel:08x}");
             self.state = State::Idle;
             self.enqueue_error(channel, ErrorCode::Timeout);
+        }
+    }
+
+    /// Observe presence while the current MSG operation waits. The worker's
+    /// completed reply separately carries the exact presence-finish time.
+    pub fn app_presence(&mut self, waiting: bool) {
+        if waiting
+            && self.app_command == Some(Command::Msg)
+            && let Some(poll) = &mut self.u2f
+        {
+            poll.presence_started = true;
+        }
+    }
+
+    /// A policy change must not expose a previously approved U2F answer.
+    pub fn set_u2f_enabled(&mut self, enabled: bool) {
+        if !enabled {
+            self.u2f = None;
+            self.denied_polls.clear();
         }
     }
 
@@ -354,19 +446,26 @@ impl<R: CryptoRng> CtaphidHost<R> {
     /// [`send_keepalive`](Self::send_keepalive) next has something to do,
     /// if anything.
     pub fn next_deadline(&self) -> Option<u64> {
-        match &self.state {
+        let transaction = match &self.state {
             State::Idle => None,
             State::Receiving { last_packet_at, .. } => {
                 Some(last_packet_at + CONTINUATION_TIMEOUT_MS)
             }
             State::Processing(processing) => Some(processing.keepalive_at + KEEPALIVE_INTERVAL_MS),
-        }
+        };
+        let polling = self.u2f.as_ref().map(|poll| match &poll.answer {
+            Some((_, expires)) => expires.saturating_add(1),
+            None if poll.presence_started && matches!(&self.state, State::Processing(p) if p.command == Command::Msg && p.request.is_none()) =>
+                poll.started.saturating_add(U2F_RESPONSE_WAIT_MS).min(poll.last_poll.saturating_add(U2F_POLL_TIMEOUT_MS + 1)),
+            None => poll.last_poll.saturating_add(U2F_POLL_TIMEOUT_MS + 1),
+        });
+        transaction.into_iter().chain(polling).min()
     }
 
-    /// The payload of the CTAPHID_CBOR request the app should work on next,
+    /// The CBOR or MSG request the app should work on next,
     /// if the app is free and one is ready. The app must answer it through
     /// [`app_response`](Self::app_response).
-    pub fn take_app_request(&mut self) -> Option<Vec<u8>> {
+    pub fn take_app_request(&mut self) -> Option<AppRequest> {
         if self.app_busy {
             return None;
         }
@@ -374,8 +473,20 @@ impl<R: CryptoRng> CtaphidHost<R> {
             return None;
         };
         let payload = processing.request.take()?;
+        let command = processing.command;
+        if command == Command::Msg && requests_presence(&payload) {
+            self.u2f = Some(U2fPoll {
+                channel: processing.channel,
+                request: payload.clone(),
+                last_poll: processing.started,
+                started: processing.started,
+                presence_started: false,
+                answer: None,
+            });
+        }
         self.app_busy = true;
-        Some(payload)
+        self.app_command = Some(command);
+        Some(AppRequest { command, payload })
     }
 
     /// Whether the app should be asked to cancel the request it is working
@@ -391,8 +502,39 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
     /// The app's answer to the request last taken with
     /// [`take_app_request`](Self::take_app_request).
-    pub fn app_response(&mut self, response: Vec<u8>) {
+    pub fn app_response(&mut self, response: Vec<u8>, now: u64, presence_finished: Option<u64>) {
         self.app_busy = false;
+        let command = self.app_command.take();
+        if command == Some(Command::Msg)
+            && let Some(mut poll) = self.u2f.take()
+        {
+            let status = response.get(response.len().saturating_sub(2)..);
+            let direct = matches!(&self.state, State::Processing(p) if p.command == Command::Msg && p.request.is_none());
+            if status == Some(SW_CONDITIONS_NOT_SATISFIED.to_be_bytes().as_slice()) {
+                self.denied_polls.push(DeniedPoll {
+                    channel: poll.channel,
+                    request: poll.request,
+                    last_poll: poll.last_poll,
+                });
+            } else if !direct
+                && presence_finished.is_some()
+                && now
+                    <= presence_finished
+                        .unwrap_or(now)
+                        .saturating_add(U2F_APPROVAL_MS)
+            {
+                poll.answer = Some((
+                    response,
+                    presence_finished
+                        .unwrap_or(now)
+                        .saturating_add(U2F_APPROVAL_MS),
+                ));
+                self.u2f = Some(poll);
+                return;
+            } else if !direct {
+                return;
+            }
+        }
         let State::Processing(processing) = &self.state else {
             debug!("discarding the app's response to an aborted transaction");
             return;
@@ -404,8 +546,9 @@ impl<R: CryptoRng> CtaphidHost<R> {
             return;
         }
         let channel = processing.channel;
+        let command = processing.command;
         self.state = State::Idle;
-        self.enqueue_message(channel, Command::Cbor, &response);
+        self.enqueue_message(channel, command, &response);
     }
 
     pub fn next_outgoing_frame(&mut self) -> Option<CtapHidFrame> {
@@ -415,7 +558,11 @@ impl<R: CryptoRng> CtaphidHost<R> {
     /// The channel of the transaction under way, if any.
     fn busy_channel(&self) -> Option<u32> {
         match &self.state {
-            State::Idle => None,
+            State::Idle => self
+                .u2f
+                .as_ref()
+                .filter(|poll| poll.answer.is_none())
+                .map(|poll| poll.channel),
             State::Receiving { channel, .. } => Some(*channel),
             State::Processing(processing) => Some(processing.channel),
         }
@@ -432,7 +579,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
         let State::Processing(processing) = &self.state else {
             return;
         };
-        if processing.channel != channel {
+        if processing.channel != channel || processing.command != Command::Cbor {
             return;
         }
         if processing.request.is_some() {
@@ -463,6 +610,17 @@ impl<R: CryptoRng> CtaphidHost<R> {
             self.enqueue_error(channel, ErrorCode::InvalidLength);
             return;
         }
+        if self
+            .u2f
+            .as_ref()
+            .is_some_and(|poll| poll.channel == channel)
+        {
+            if self.u2f.as_ref().is_some_and(|poll| poll.answer.is_none()) {
+                self.interrupt_app = true;
+            }
+            self.u2f = None;
+        }
+        self.denied_polls.retain(|poll| poll.channel != channel);
         // §11.2.5.3: "If the device detects an INIT command during a
         // transaction that has the same channel id as the active transaction,
         // the transaction is aborted (if possible) and all buffered data
@@ -521,16 +679,21 @@ impl<R: CryptoRng> CtaphidHost<R> {
             // different channel while the device is busy with a transaction,
             // that request will immediately fail with a busy-error message
             // sent to the requesting channel."
-            if busy != channel || matches!(self.state, State::Processing(_)) {
+            if busy != channel
+                || matches!(self.state, State::Processing(_))
+                || (matches!(self.state, State::Idle) && command != Some(Command::Msg))
+            {
                 self.enqueue_error(channel, ErrorCode::ChannelBusy);
                 return;
             }
             // A new message on a channel that has not finished sending the
             // last one: §11.2.9.1.6 "ERR_INVALID_SEQ: The sequence does not
             // match expected value". The half-received message is dropped.
-            self.state = State::Idle;
-            self.enqueue_error(channel, ErrorCode::InvalidSeq);
-            return;
+            if matches!(self.state, State::Receiving { .. }) {
+                self.state = State::Idle;
+                self.enqueue_error(channel, ErrorCode::InvalidSeq);
+                return;
+            }
         }
 
         // Any other channel is served, allocated or not (see MAX_CHANNELS).
@@ -539,7 +702,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
             return;
         }
         let command = match command {
-            Some(command @ (Command::Ping | Command::Cbor)) => command,
+            Some(command @ (Command::Ping | Command::Cbor | Command::Msg)) => command,
             _ => {
                 self.enqueue_error(channel, ErrorCode::InvalidCommand);
                 return;
@@ -547,7 +710,9 @@ impl<R: CryptoRng> CtaphidHost<R> {
         };
         // A CTAPHID_CBOR request carries at least the CTAP command byte
         // (§11.2.9.1.2: "BCNT 1..(n + 1)").
-        if length > MAX_MESSAGE_SIZE || (command == Command::Cbor && length == 0) {
+        if length > MAX_MESSAGE_SIZE
+            || (matches!(command, Command::Cbor | Command::Msg) && length == 0)
+        {
             self.enqueue_error(channel, ErrorCode::InvalidLength);
             return;
         }
@@ -604,6 +769,51 @@ impl<R: CryptoRng> CtaphidHost<R> {
     }
 
     fn complete_message(&mut self, channel: u32, command: Command, now: u64) {
+        if command == Command::Msg {
+            if let Some(poll) = &mut self.u2f {
+                if poll.channel == channel && poll.request == self.message {
+                    poll.last_poll = now;
+                    let response = if let Some((_, expires)) = &poll.answer {
+                        if now > *expires {
+                            None
+                        } else {
+                            self.u2f
+                                .take()
+                                .and_then(|poll| poll.answer.map(|(reply, _)| reply))
+                        }
+                    } else {
+                        Some(SW_CONDITIONS_NOT_SATISFIED.to_be_bytes().to_vec())
+                    };
+                    if let Some(response) = response {
+                        self.state = State::Idle;
+                        self.enqueue_message(channel, command, &response);
+                        return;
+                    }
+                } else if poll.answer.is_none() {
+                    self.state = State::Idle;
+                    self.enqueue_error(channel, ErrorCode::ChannelBusy);
+                    return;
+                }
+            }
+            if let Some(poll) = self
+                .denied_polls
+                .iter_mut()
+                .find(|poll| poll.channel == channel && poll.request == self.message)
+                && now.saturating_sub(poll.last_poll) <= U2F_POLL_TIMEOUT_MS
+            {
+                poll.last_poll = now;
+                self.state = State::Idle;
+                self.enqueue_message(channel, command, &SW_CONDITIONS_NOT_SATISFIED.to_be_bytes());
+                return;
+            }
+            self.denied_polls
+                .retain(|poll| now.saturating_sub(poll.last_poll) <= U2F_POLL_TIMEOUT_MS);
+            if requests_presence(&self.message) && self.denied_polls.len() >= MAX_CHANNELS {
+                self.state = State::Idle;
+                self.enqueue_error(channel, ErrorCode::ChannelBusy);
+                return;
+            }
+        }
         if command == Command::Ping {
             // §11.2.9.1.4: the device "immediately echoes the same data back".
             self.state = State::Idle;
@@ -612,6 +822,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
             self.message = message;
             return;
         }
+        self.u2f = None;
         debug!(
             "request cid={channel:08x} ctap=0x{:02x} len={}",
             self.message.first().copied().unwrap_or_default(),
@@ -619,6 +830,8 @@ impl<R: CryptoRng> CtaphidHost<R> {
         );
         self.state = State::Processing(Processing {
             channel,
+            command,
+            started: now,
             request: Some(self.message.clone()),
             keepalive_at: now,
             keepalive_status: KeepaliveStatus::Processing,
@@ -693,6 +906,238 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
 #[cfg(test)]
 mod tests {
+    fn u2f_register() -> Vec<u8> {
+        [vec![0, 1, 0, 0, 0, 0, 64], vec![0x42; 64]].concat()
+    }
+
+    fn start_u2f<R: CryptoRng>(host: &mut CtaphidHost<R>, now: u64) -> Vec<u8> {
+        let request = u2f_register();
+        send(host, FIRST, Command::Msg, &request, now);
+        let submitted = host.take_app_request().unwrap();
+        assert_eq!(submitted.command, Command::Msg);
+        assert_eq!(submitted.payload, request);
+        request
+    }
+
+    #[test]
+    fn msg_replies_preserve_the_command_and_direct_status_words() {
+        let mut host = host();
+        for (request, response) in [
+            (vec![0, 3, 0, 0], b"U2F_V2\x90\0".to_vec()),
+            (vec![0], vec![0x67, 0]),
+            (vec![0, 2, 7, 0], vec![0x69, 0x85]),
+            (vec![0, 2, 3, 0], vec![0x6a, 0x80]),
+        ] {
+            send(&mut host, FIRST, Command::Msg, &request, 0);
+            assert_eq!(host.take_app_request().unwrap().payload, request);
+            host.app_response(response.clone(), 1, None);
+            assert_eq!(sent(&mut host), [message(FIRST, Command::Msg, &response)]);
+            assert!(host.u2f.is_none());
+            assert!(host.denied_polls.is_empty());
+        }
+    }
+
+    #[test]
+    fn pending_u2f_repeats_do_not_resubmit_and_approval_is_delivered_once() {
+        let mut host = host();
+        let request = start_u2f(&mut host, 0);
+        host.app_presence(true);
+        host.handle_timeout(99);
+        assert!(sent(&mut host).is_empty());
+        host.handle_timeout(100);
+        assert_eq!(
+            sent(&mut host),
+            [message(FIRST, Command::Msg, &[0x69, 0x85])]
+        );
+        for now in [200, 300, 400] {
+            send(&mut host, FIRST, Command::Msg, &request, now);
+            assert_eq!(
+                sent(&mut host),
+                [message(FIRST, Command::Msg, &[0x69, 0x85])]
+            );
+            assert!(host.take_app_request().is_none());
+        }
+        host.app_response(vec![5, 0x90, 0], 500, Some(450));
+        assert!(sent(&mut host).is_empty(), "no unsolicited response");
+        send(&mut host, FIRST, Command::Msg, &request, 600);
+        assert_eq!(
+            sent(&mut host),
+            [message(FIRST, Command::Msg, &[5, 0x90, 0])]
+        );
+        send(&mut host, FIRST, Command::Msg, &request, 700);
+        assert_eq!(host.take_app_request().unwrap().payload, request);
+        assert!(sent(&mut host).is_empty(), "approval has been consumed");
+    }
+
+    #[test]
+    fn immediate_approval_answers_the_first_request() {
+        let mut host = host();
+        start_u2f(&mut host, 0);
+        host.app_response(vec![5, 0x90, 0], 1, Some(0));
+        assert_eq!(
+            sent(&mut host),
+            [message(FIRST, Command::Msg, &[5, 0x90, 0])]
+        );
+        assert!(host.u2f.is_none());
+    }
+
+    #[test]
+    fn denied_or_timed_out_polls_stay_denied_until_the_client_is_quiet() {
+        for finished in [1, 30_000] {
+            let mut host = host();
+            let request = start_u2f(&mut host, 0);
+            host.app_presence(true);
+            host.handle_timeout(100);
+            sent(&mut host);
+            // Poll until the configured presence timeout.
+            for now in (200..finished).step_by(100) {
+                send(&mut host, FIRST, Command::Msg, &request, now);
+                sent(&mut host);
+            }
+            host.app_response(vec![0x69, 0x85], finished, Some(finished));
+            for now in [finished + 100, finished + 3_000, finished + 5_000] {
+                send(&mut host, FIRST, Command::Msg, &request, now);
+                assert_eq!(
+                    sent(&mut host),
+                    [message(FIRST, Command::Msg, &[0x69, 0x85])]
+                );
+                assert!(host.take_app_request().is_none());
+            }
+            host.handle_timeout(finished + 8_001);
+            send(&mut host, FIRST, Command::Msg, &request, finished + 8_001);
+            assert_eq!(host.take_app_request().unwrap().payload, request);
+        }
+    }
+
+    #[test]
+    fn an_abandoned_prompt_is_cancelled_and_its_late_reply_is_discarded() {
+        let mut host = host();
+        start_u2f(&mut host, 0);
+        host.app_presence(true);
+        host.handle_timeout(100);
+        sent(&mut host);
+        host.handle_timeout(3_000);
+        assert!(!host.take_interrupt());
+        host.handle_timeout(3_001);
+        assert!(host.take_interrupt());
+        assert!(host.u2f.is_none());
+        host.app_response(vec![5, 0x90, 0], 3_100, Some(3_050));
+        assert!(sent(&mut host).is_empty());
+        start_u2f(&mut host, 3_200);
+    }
+
+    #[test]
+    fn changed_bytes_other_channels_and_other_commands_are_busy_during_u2f() {
+        let mut host = host();
+        let request = start_u2f(&mut host, 0);
+        host.app_presence(true);
+        host.handle_timeout(100);
+        sent(&mut host);
+        let mut changed = request.clone();
+        changed[7] ^= 1;
+        send(&mut host, FIRST, Command::Msg, &changed, 200);
+        send(&mut host, SECOND, Command::Msg, &request, 200);
+        send(&mut host, FIRST, Command::Cbor, &[4], 200);
+        send(&mut host, FIRST, Command::Ping, &[], 200);
+        assert_eq!(
+            sent(&mut host),
+            [
+                error(FIRST, ErrorCode::ChannelBusy),
+                error(SECOND, ErrorCode::ChannelBusy),
+                error(FIRST, ErrorCode::ChannelBusy),
+                error(FIRST, ErrorCode::ChannelBusy)
+            ]
+        );
+        assert_eq!(host.u2f.as_ref().unwrap().last_poll, 0);
+    }
+
+    #[test]
+    fn approval_expiry_is_measured_from_presence_and_other_engine_calls_clear_it() {
+        for now in [10_450, 10_451] {
+            let mut host = host();
+            let request = start_u2f(&mut host, 0);
+            host.app_presence(true);
+            host.handle_timeout(100);
+            sent(&mut host);
+            host.app_response(vec![5, 0x90, 0], 700, Some(450));
+            host.handle_timeout(now);
+            send(&mut host, FIRST, Command::Msg, &request, now);
+            if now == 10_450 {
+                assert_eq!(
+                    sent(&mut host),
+                    [message(FIRST, Command::Msg, &[5, 0x90, 0])]
+                );
+            } else {
+                assert_eq!(host.take_app_request().unwrap().payload, request);
+            }
+        }
+        let mut host = host();
+        start_u2f(&mut host, 0);
+        host.app_presence(true);
+        host.handle_timeout(100);
+        sent(&mut host);
+        host.app_response(vec![5, 0x90, 0], 200, Some(150));
+        start_cbor(&mut host, SECOND, &[4], 300);
+        assert!(host.u2f.is_none());
+    }
+
+    #[test]
+    fn init_cancels_u2f_but_cancel_is_ignored() {
+        let mut host = host_with_channels(&[FIRST]);
+        send(&mut host, BROADCAST_CID, Command::Init, &[0; 8], 0);
+        sent(&mut host);
+        start_u2f(&mut host, 0);
+        send(&mut host, FIRST, Command::Cancel, &[], 50);
+        assert!(!host.take_interrupt());
+        assert!(sent(&mut host).is_empty());
+        host.app_presence(true);
+        host.handle_timeout(100);
+        sent(&mut host);
+        send(&mut host, FIRST, Command::Cancel, &[], 200);
+        assert!(!host.take_interrupt());
+        send(&mut host, FIRST, Command::Init, &[0; 8], 200);
+        assert!(host.take_interrupt());
+        assert!(host.u2f.is_none());
+        assert_eq!(sent(&mut host)[0].command, Command::Init as u8);
+        host.app_response(vec![5, 0x90, 0], 250, Some(220));
+        assert!(sent(&mut host).is_empty());
+    }
+
+    #[test]
+    fn policy_changes_clear_cached_approval_and_denial() {
+        let mut host = host();
+        start_u2f(&mut host, 0);
+        host.app_response(vec![0x69, 0x85], 1, Some(1));
+        sent(&mut host);
+        assert_eq!(host.denied_polls.len(), 1);
+        host.set_u2f_enabled(false);
+        assert!(host.denied_polls.is_empty());
+        start_u2f(&mut host, 10);
+        host.app_presence(true);
+        host.handle_timeout(110);
+        sent(&mut host);
+        host.app_response(vec![5, 0x90, 0], 200, Some(150));
+        host.set_u2f_enabled(false);
+        assert!(host.u2f.is_none());
+    }
+
+    #[test]
+    fn suppression_is_bounded_without_evicting_live_denials() {
+        let mut host = host();
+        for index in 0..MAX_CHANNELS {
+            let mut request = u2f_register();
+            request[7..15].copy_from_slice(&(index as u64).to_be_bytes());
+            send(&mut host, FIRST, Command::Msg, &request, 0);
+            assert!(host.take_app_request().is_some());
+            host.app_response(vec![0x69, 0x85], 1, Some(1));
+            sent(&mut host);
+        }
+        let mut request = u2f_register();
+        request[7] = 255;
+        send(&mut host, FIRST, Command::Msg, &request, 2);
+        assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::ChannelBusy)]);
+        assert_eq!(host.denied_polls.len(), MAX_CHANNELS);
+    }
     use super::*;
     use crate::{CAPABILITY_CBOR, CAPABILITY_NMSG};
     use rand_core::{Infallible, TryCryptoRng, TryRng};
@@ -741,7 +1186,7 @@ mod tests {
 
     fn host_with_channels(ids: &[u32]) -> CtaphidHost<TestRng> {
         let mut host = CtaphidHost::with_rng(TestRng::new(ids));
-        host.set_capabilities(CAPABILITY_CBOR | CAPABILITY_NMSG);
+        host.set_capabilities(CAPABILITY_CBOR);
         host
     }
 
@@ -833,7 +1278,8 @@ mod tests {
     fn start_cbor<R: CryptoRng>(host: &mut CtaphidHost<R>, channel: u32, payload: &[u8], now: u64) {
         send(host, channel, Command::Cbor, payload, now);
         let request = host.take_app_request().expect("a request for the app");
-        assert_eq!(request, payload);
+        assert_eq!(request.command, Command::Cbor);
+        assert_eq!(request.payload, payload);
     }
 
     #[test]
@@ -852,11 +1298,10 @@ mod tests {
             0,
         );
         let mut expected = vec![1, 2, 3, 4, 5, 6, 7, 8, 0x12, 0x34, 0x56, 0x78, 2, 2, 1, 7];
-        expected.push(CAPABILITY_CBOR | CAPABILITY_NMSG);
-        assert_eq!(
-            sent(&mut host),
-            [message(BROADCAST_CID, Command::Init, &expected)]
-        );
+        expected.push(CAPABILITY_CBOR);
+        let actual = sent(&mut host);
+        assert_eq!(actual[0].payload[16] & CAPABILITY_NMSG, 0);
+        assert_eq!(actual, [message(BROADCAST_CID, Command::Init, &expected)]);
     }
 
     #[test]
@@ -961,7 +1406,7 @@ mod tests {
         assert!(host.app_busy());
 
         let response = vec![0x00; 1000];
-        host.app_response(response.clone());
+        host.app_response(response.clone(), 0, None);
         assert!(!host.app_busy());
         assert_eq!(sent(&mut host), [message(FIRST, Command::Cbor, &response)]);
         assert!(!host.send_keepalive(true, 1_000), "no transaction");
@@ -987,13 +1432,13 @@ mod tests {
         let mut host = host();
         let largest: Vec<u8> = (0..=255).cycle().take(MAX_MESSAGE_SIZE).collect();
         start_cbor(&mut host, FIRST, &[0x04], 0);
-        host.app_response(largest.clone());
+        host.app_response(largest.clone(), 0, None);
         assert_eq!(host.pending.len(), 129);
         assert_eq!(sent(&mut host), [message(FIRST, Command::Cbor, &largest)]);
 
         for length in [MAX_MESSAGE_SIZE + 1, usize::from(u16::MAX) + 1] {
             start_cbor(&mut host, FIRST, &[0x04], 0);
-            host.app_response(vec![0; length]);
+            host.app_response(vec![0; length], 0, None);
             assert_eq!(
                 sent(&mut host),
                 [error(FIRST, ErrorCode::Other)],
@@ -1008,9 +1453,9 @@ mod tests {
     #[test]
     fn requests_the_app_does_not_answer_are_invalid_commands() {
         let mut host = host();
-        // CTAPHID_MSG (CAPABILITY_NMSG), WINK and LOCK (not advertised), and
+        // WINK and LOCK (not advertised), and
         // an undefined command code.
-        for command in [0x03, 0x08, 0x04, 0x02] {
+        for command in [0x08, 0x04, 0x02] {
             host.handle_frame(&message_packets(FIRST, command, &[0; 70])[0], 0);
             assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidCommand)]);
         }
@@ -1058,7 +1503,7 @@ mod tests {
         assert_eq!(sent(&mut host), [error(SECOND, ErrorCode::ChannelBusy)]);
 
         host.handle_frame(&packets[1], 2);
-        assert_eq!(host.take_app_request().unwrap(), request);
+        assert_eq!(host.take_app_request().unwrap().payload, request);
     }
 
     /// CTAP 2.3 §11.2.9.1.5: "A CTAPHID_CANCEL received while no
@@ -1077,7 +1522,7 @@ mod tests {
         send(&mut host, FIRST, Command::Cancel, &[], 2);
         assert!(sent(&mut host).is_empty(), "CANCEL while receiving");
         host.handle_frame(&packets[1], 3);
-        assert_eq!(host.take_app_request().unwrap(), request);
+        assert_eq!(host.take_app_request().unwrap().payload, request);
 
         send(&mut host, SECOND, Command::Cancel, &[], 4);
         assert!(sent(&mut host).is_empty(), "CANCEL on another channel");
@@ -1108,7 +1553,7 @@ mod tests {
             ]
         );
 
-        host.app_response(vec![CTAP2_ERR_KEEPALIVE_CANCEL]);
+        host.app_response(vec![CTAP2_ERR_KEEPALIVE_CANCEL], 0, None);
         assert_eq!(
             sent(&mut host),
             [message(FIRST, Command::Cbor, &[CTAP2_ERR_KEEPALIVE_CANCEL])]
@@ -1131,7 +1576,7 @@ mod tests {
             sent(&mut host),
             [message(FIRST, Command::Cbor, &[CTAP2_ERR_KEEPALIVE_CANCEL])]
         );
-        host.app_response(vec![0x00]);
+        host.app_response(vec![0x00], 0, None);
         assert!(sent(&mut host).is_empty());
         assert!(host.take_app_request().is_none());
     }
@@ -1171,7 +1616,7 @@ mod tests {
             ]
         );
 
-        host.app_response(vec![0x00]);
+        host.app_response(vec![0x00], 0, None);
         assert!(
             !host.send_keepalive(true, 2_000),
             "no keepalive after the response"
@@ -1196,7 +1641,7 @@ mod tests {
                 .all(|m| *m == keepalive(FIRST, KeepaliveStatus::UpNeeded))
         );
         assert!(!host.take_interrupt());
-        host.app_response(vec![0x00, 0xA0]);
+        host.app_response(vec![0x00, 0xA0], 0, None);
         assert_eq!(
             sent(&mut host),
             [message(FIRST, Command::Cbor, &[0x00, 0xA0])]
@@ -1296,10 +1741,10 @@ mod tests {
             [keepalive(FIRST, KeepaliveStatus::Processing)]
         );
 
-        host.app_response(vec![CTAP2_ERR_KEEPALIVE_CANCEL]);
+        host.app_response(vec![CTAP2_ERR_KEEPALIVE_CANCEL], 0, None);
         assert!(sent(&mut host).is_empty(), "the late answer is discarded");
-        assert_eq!(host.take_app_request().unwrap(), [0x04]);
-        host.app_response(vec![0x00]);
+        assert_eq!(host.take_app_request().unwrap().payload, [0x04]);
+        host.app_response(vec![0x00], 0, None);
         assert_eq!(sent(&mut host), [message(FIRST, Command::Cbor, &[0x00])]);
     }
 
@@ -1321,7 +1766,7 @@ mod tests {
             ]
         );
         assert!(host.take_app_request().is_none());
-        host.app_response(vec![0x00]);
+        host.app_response(vec![0x00], 0, None);
         assert_eq!(sent(&mut host), [message(FIRST, Command::Cbor, &[0x00])]);
 
         // While receiving, a new message on the same channel replaces nothing.

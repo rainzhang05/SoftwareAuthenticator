@@ -6,10 +6,11 @@ from fido2.hid import CAPABILITY
 import ctap as client
 
 
-def test_ctaphid_init_reports_cbor_and_no_msg(device, ctap):
+def test_ctaphid_init_reports_cbor_and_msg(device, ctap):
     assert device.version == 2
     assert device.capabilities & CAPABILITY.CBOR
-    assert device.capabilities & CAPABILITY.NMSG
+    assert not device.capabilities & CAPABILITY.NMSG
+    assert not device.capabilities & CAPABILITY.WINK
     # The default IDs: pid.codes' open source vendor ID and its first test
     # product ID.
     assert device.descriptor.vid == 0x1209
@@ -22,6 +23,7 @@ def test_get_info(ctap: Ctap2):
     info = ctap.send_cbor(Ctap2.CMD.GET_INFO)
 
     assert "FIDO_2_3" in info[1] and "FIDO_2_1" in info[1] and "FIDO_2_0" in info[1], info[1]
+    assert "U2F_V2" in info[1], info[1]
     assert "FIDO_2_2" not in info[1], "CTAP 2.3 6.4: FIDO_2_2 MUST not be present"
     assert set(info[2]) >= {
         "credBlob", "credProtect", "hmac-secret", "hmac-secret-mc",

@@ -151,7 +151,8 @@ protocol logic.
 
 ## What the key supports
 
-- CTAP 2.3, 2.1 and 2.0 over USB HID.
+- CTAP 2.3, 2.1, 2.0 and CTAP1/U2F over USB HID. CTAPHID_INIT advertises
+  CBOR, with NMSG and WINK clear; WINK and LOCK remain unimplemented.
 - ES256 (-7), ML-DSA-44 (-48), ML-DSA-65 (-49), ML-DSA-87 (-50), ESP256 (-9),
   ES384 (-35), ESP384 (-51), ES512 (-36), ESP512 (-52), ES256K (-47), EdDSA
   (-8), Ed25519 (-19), Ed448 (-53), RS256 (-257), RS384 (-258), RS512 (-259),
@@ -267,6 +268,20 @@ signing through the engine's scrubbed ES256 path.
 Short APDUs and zero Lc followed by Le are accepted for compatibility. Le
 does not truncate HID responses. Signatures use DER's 8–72-byte range,
 which CTAP 2.3 §10.3 corrects in the older U2F raw formats.
+
+CTAPHID_MSG reaches that engine on the same worker as CTAPHID_CBOR. If a
+presence operation has not answered within 100 ms, the transport returns
+SW_CONDITIONS_NOT_SATISFIED while keeping the worker request alive. Exact
+repeats on its channel receive that status until the result is ready, then
+receive it once within ten seconds of approval. No eventual answer is
+sent without a repeat. Other requests are busy while the prompt is open.
+INIT cancels it; CANCEL applies only to CBOR. More than three seconds
+without a repeat cancels the prompt, and denial or timeout suppresses new
+prompts for the same request until its repeats stop for that interval.
+Suppression is bounded without evicting live denials. A policy change,
+reset or another engine operation discards any cached approved result.
+Always-UV disables U2F registration and authentication and removes U2F_V2
+from getInfo. A PIN alone does not affect U2F.
 
 Each registration, sign-in that needs your presence, reset and authenticator
 selection asks for your approval in a desktop notification with Approve and

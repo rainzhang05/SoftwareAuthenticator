@@ -42,7 +42,8 @@ def test_init_allocates_distinct_channels(hid):
     assert cid not in (0, ctaphid.BROADCAST_CID)
     assert protocol == 2
     assert capabilities & 0x04, "CBOR capability"
-    assert capabilities & 0x08, "NMSG capability"
+    assert not capabilities & 0x08, "MSG is implemented"
+    assert not capabilities & 0x01, "WINK is unimplemented"
     assert hid.allocate_channel() != cid
 
 

@@ -120,6 +120,11 @@ fn decode(apdu: &[u8], disabled: bool) -> Result<Request<'_>, u16> {
 }
 
 impl CtapApp<'_> {
+    /// Whether U2F registration and authentication are enabled by policy.
+    pub fn u2f_enabled(&self) -> bool {
+        !self.pin_state.persistent().always_uv
+    }
+
     /// Answer one U2F command APDU with data followed by its status word.
     /// Presence blocks here; the HID transport implements client polling.
     pub fn call_u2f(&mut self, apdu: &[u8]) -> Vec<u8> {

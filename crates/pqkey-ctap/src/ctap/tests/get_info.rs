@@ -24,6 +24,30 @@ fn uint(value: u64) -> Value {
     Value::Integer(Integer::from(value))
 }
 
+#[test]
+fn u2f_version_is_omitted_only_while_always_uv_is_enabled() {
+    let mut app = test_app([0x91; 16]);
+    for always_uv in [false, true, false] {
+        if app.u2f_enabled() == always_uv {
+            assert_eq!(app.call(&[0x0d, 0xa1, 1, 2]), [0]);
+        }
+        assert_eq!(app.u2f_enabled(), !always_uv);
+        let response = app.call(&[4]);
+        let info: Value = from_reader(&response[1..]).unwrap();
+        let versions = info
+            .as_map()
+            .unwrap()
+            .iter()
+            .find(|(k, _)| *k == uint(1))
+            .unwrap()
+            .1
+            .as_array()
+            .unwrap();
+        assert_eq!(versions.contains(&text("U2F_V2")), !always_uv);
+        assert!(versions.contains(&text("FIDO_2_3")));
+    }
+}
+
 /// The exact getInfo response for a PIN that is (`pin_set`) or is not set
 /// and `remaining` free credential slots, in canonical CBOR.
 fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, remaining: u64) {
@@ -70,7 +94,12 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
     let expected_map = canonical_map(vec![
         (
             uint(1),
-            Value::Array(vec![text("FIDO_2_3"), text("FIDO_2_1"), text("FIDO_2_0")]),
+            Value::Array(vec![
+                text("FIDO_2_3"),
+                text("FIDO_2_1"),
+                text("FIDO_2_0"),
+                text("U2F_V2"),
+            ]),
         ),
         (uint(2), extensions),
         (uint(3), Value::Bytes(aaguid.to_vec())),

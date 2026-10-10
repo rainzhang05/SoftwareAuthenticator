@@ -1,4 +1,4 @@
-//! The CTAP2 authenticator: the protocol engine in [`ctap`], the encrypted
+//! The CTAP2 and U2F authenticator: the engine in [`ctap`], the encrypted
 //! credential store in [`store`], the platform half of the PIN/UV auth
 //! protocols in [`platform`], and the cryptography they share, re-exported
 //! here: the signature algorithms ([`CoseAlg`]), credential keys and
