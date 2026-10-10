@@ -243,7 +243,10 @@ and every sealed credential ID can no longer be decrypted.
 Discoverable credential IDs are `0x01` and 32 random bytes. Sealed IDs are
 107 bytes starting with `0x02`, carrying the algorithm, credProtect, 32-byte
 key and a seed for the hmac-secret CredRandom values. Their assertions use
-the global signature counter. RSA non-discoverable credentials instead use
+the global signature counter. Sealing and lookup accept the RP ID hash
+directly; CTAP2 hashes its RP ID before using them. Counter updates share
+one persistence path, which saves the count before signing.
+RSA non-discoverable credentials instead use
 `0x00` and 32 random bytes, like older stored non-discoverable credentials.
 RSA records contain no user ID or names, and keep random CredRandom values,
 credProtect and a counter of their own. They work only through an allowList,

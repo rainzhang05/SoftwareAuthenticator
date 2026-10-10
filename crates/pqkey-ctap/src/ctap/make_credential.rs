@@ -391,7 +391,8 @@ impl CtapApp<'_> {
             record.cred_random_without_uv = self.random_array();
         } else {
             let key = record.private_key.sealable().ok_or(CTAP2_ERR_PROCESSING)?;
-            record.credential_id = self.seal_credential(&mut record, &key)?;
+            let rp_id_hash = Sha256::digest(record.rp_id.as_bytes()).into();
+            record.credential_id = self.seal_credential(&mut record, &key, &rp_id_hash)?;
         }
         // The signing key and the public key in one step.
         let (secret_key, cose_key) = record.keypair().map_err(|err| {

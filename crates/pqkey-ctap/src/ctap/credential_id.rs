@@ -54,6 +54,7 @@ impl CtapApp<'_> {
         &mut self,
         record: &mut CredentialRecord,
         key: &SealableKeyMaterial,
+        rp_id_hash: &[u8; 32],
     ) -> Result<Vec<u8>, u8> {
         let alg = i8::try_from(record.alg.identifier()).map_err(|_| CTAP2_ERR_PROCESSING)?;
         let seed = Zeroizing::new(self.random_array::<32>());
@@ -66,7 +67,7 @@ impl CtapApp<'_> {
         plaintext[2 + SEALED_KEY_LENGTH..].copy_from_slice(&seed[..]);
         let sealed = self
             .store
-            .seal_credential_id(&plaintext[..], &sealed_associated_data(&record.rp_id))
+            .seal_credential_id(&plaintext[..], &sealed_associated_data(rp_id_hash))
             .map_err(|err| store_status("seal a credential ID", err))?;
         if sealed.len() != SEALED_ID_LENGTH - 1 {
             log::error!("the store sealed a credential ID of the wrong length");
@@ -87,19 +88,39 @@ impl CtapApp<'_> {
         credential_id: &[u8],
         rp_id: &str,
     ) -> Result<Option<CredentialRecord>, u8> {
+        let mut credential =
+            self.credential_for_hash(credential_id, &Sha256::digest(rp_id.as_bytes()).into())?;
+        if let Some(record) = &mut credential {
+            if is_sealed(credential_id) {
+                record.rp_id = rp_id.to_owned();
+            } else if record.rp_id != rp_id {
+                return Ok(None);
+            }
+        }
+        Ok(credential)
+    }
+
+    /// Look up a credential bound to a hash, without knowing the RP ID.
+    /// A sealed credential's transient record has no RP ID until the caller
+    /// supplies one; it is never persisted.
+    pub(super) fn credential_for_hash(
+        &self,
+        credential_id: &[u8],
+        rp_id_hash: &[u8; 32],
+    ) -> Result<Option<CredentialRecord>, u8> {
         if !is_sealed(credential_id) {
-            return Ok(self
-                .stored_credential(credential_id)?
-                .filter(|credential| credential.rp_id == rp_id));
+            return Ok(self.stored_credential(credential_id)?.filter(|credential| {
+                Sha256::digest(credential.rp_id.as_bytes()).as_slice() == rp_id_hash
+            }));
         }
         let opened = self
             .store
-            .open_credential_id(&credential_id[1..], &sealed_associated_data(rp_id))
+            .open_credential_id(&credential_id[1..], &sealed_associated_data(rp_id_hash))
             .map_err(|err| store_status("open a credential ID", err))?;
         let Some(plaintext) = opened else {
             return Ok(None);
         };
-        let credential = sealed_credential(credential_id, rp_id, &plaintext);
+        let credential = sealed_credential(credential_id, "", &plaintext);
         if credential.is_none() {
             // Authentic, so sealed by this store, and yet not a credential.
             log::error!("a sealed credential ID holds no usable credential");
@@ -135,10 +156,10 @@ const _: () = assert!(SEALED_ID_LENGTH as u64 <= super::get_info::MAX_CREDENTIAL
 /// longer opened.
 const SEALED_ID_CONTEXT: &[u8] = b"pqkey/v2/sealed-credential-id";
 
-fn sealed_associated_data(rp_id: &str) -> Vec<u8> {
+fn sealed_associated_data(rp_id_hash: &[u8; 32]) -> Vec<u8> {
     let mut associated_data = Vec::with_capacity(SEALED_ID_CONTEXT.len() + 32);
     associated_data.extend_from_slice(SEALED_ID_CONTEXT);
-    associated_data.extend_from_slice(&Sha256::digest(rp_id.as_bytes()));
+    associated_data.extend_from_slice(rp_id_hash);
     associated_data
 }
 

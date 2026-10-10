@@ -24,6 +24,21 @@ use crate::ctap::constants::*;
 const RP_ID: &str = "example.com";
 const PIN: &[u8] = b"1234";
 
+#[test]
+fn credential_binding_accepts_the_rp_hash_without_hashing_it_again() {
+    use sha2::{Digest, Sha256};
+    let mut app = test_app([0x69; 16]);
+    for rk in [false, true] {
+        let id = register(&mut app, RP_ID, &[1], Some(rk));
+        let hash = Sha256::digest(RP_ID.as_bytes()).into();
+        let record = app.credential_for_hash(&id, &hash).unwrap().unwrap();
+        assert_eq!(record.credential_id, id);
+        assert_eq!(record.rp_id, if rk { RP_ID } else { "" });
+        assert!(app.credential_for_hash(&id, &[0; 32]).unwrap().is_none());
+        assert!(app.credential_for_rp(&id, RP_ID).unwrap().is_some());
+    }
+}
+
 fn make_credential_payload(rp_id: &str, user_id: &[u8], rk: Option<bool>) -> Vec<u8> {
     let rp = canonical_map(vec![(Value::Text("id".into()), Value::Text(rp_id.into()))]);
     let user = canonical_map(vec![(

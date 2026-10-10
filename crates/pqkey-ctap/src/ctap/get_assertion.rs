@@ -3,13 +3,12 @@
 
 use super::CtapApp;
 use super::cbor::{self, canonical_map, canonical_sort};
-use super::credential_id::{is_discoverable, is_sealed};
+use super::credential_id::is_discoverable;
 use super::hmac_secret::{HmacSecretRequest, PendingHmacSecret, parse_hmac_secret_request};
 use super::pin::permissions::PIN_PERMISSION_GA;
 use super::pin::protocol::parse_pin_uv_auth_param;
 use super::presence::{PresenceOperation, PresenceRequest};
 use super::request;
-use super::storage::store_status;
 use crate::store::{CredentialRecord, sort_newest_first};
 use crate::try_sign_challenge;
 
@@ -469,22 +468,7 @@ impl CtapApp<'_> {
             log::error!("cannot use a credential's key: {err}");
             CTAP2_ERR_PROCESSING
         })?;
-        if is_sealed(&credential.credential_id) {
-            let count = self
-                .store
-                .signature_counter()
-                .map_err(|err| store_status("read the global signature counter", err))?
-                .saturating_add(1);
-            self.store
-                .set_signature_counter(count)
-                .map_err(|err| store_status("save the global signature counter", err))?;
-            credential.sign_count = count;
-        } else {
-            credential.sign_count = credential.sign_count.saturating_add(1);
-            self.store
-                .put(&credential)
-                .map_err(|err| store_status("save the signature counter", err))?;
-        }
+        self.advance_signature_counter(&mut credential)?;
 
         let mut auth_data = Zeroizing::new(self.assertion_auth_data(
             rp_id,

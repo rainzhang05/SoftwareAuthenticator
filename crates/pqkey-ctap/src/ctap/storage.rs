@@ -87,6 +87,31 @@ fn unreadable_pin_state(rng: &mut dyn Rng) -> PinState {
 }
 
 impl CtapApp<'_> {
+    /// Persist the next count before signing. Sealed credentials share the
+    /// global counter; stored ones count individually. Neither wraps.
+    pub(super) fn advance_signature_counter(
+        &mut self,
+        credential: &mut CredentialRecord,
+    ) -> Result<(), u8> {
+        if super::credential_id::is_sealed(&credential.credential_id) {
+            let count = self
+                .store
+                .signature_counter()
+                .map_err(|err| store_status("read the global signature counter", err))?
+                .saturating_add(1);
+            self.store
+                .set_signature_counter(count)
+                .map_err(|err| store_status("save the global signature counter", err))?;
+            credential.sign_count = count;
+        } else {
+            credential.sign_count = credential.sign_count.saturating_add(1);
+            self.store
+                .put(credential)
+                .map_err(|err| store_status("save the signature counter", err))?;
+        }
+        Ok(())
+    }
+
     /// Persist [`PersistentPinState`].  Called after every change to the PIN
     /// or to pinRetries, including the retry spent before a PIN is compared.
     /// A failed write is an error, so a PIN check fails closed instead of
