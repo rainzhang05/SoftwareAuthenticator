@@ -30,6 +30,10 @@ pub enum PresenceOperation {
     Register,
     /// authenticatorGetAssertion: sign in to the relying party.
     Authenticate,
+    /// U2F_REGISTER: the request carries only the application's hash.
+    U2fRegister,
+    /// U2F_AUTHENTICATE with enforced presence; the site is unknown.
+    U2fAuthenticate,
     /// authenticatorReset: erase every credential and the PIN.
     Reset,
     /// The platform asks the user to pick this authenticator among several:
@@ -242,9 +246,10 @@ pub(super) fn presence_status(
         PresenceOutcome::Approved => Ok(()),
         PresenceOutcome::Denied => Err(CTAP2_ERR_OPERATION_DENIED),
         PresenceOutcome::TimedOut => match operation {
-            PresenceOperation::Register | PresenceOperation::Authenticate => {
-                Err(CTAP2_ERR_OPERATION_DENIED)
-            }
+            PresenceOperation::Register
+            | PresenceOperation::Authenticate
+            | PresenceOperation::U2fRegister
+            | PresenceOperation::U2fAuthenticate => Err(CTAP2_ERR_OPERATION_DENIED),
             PresenceOperation::Reset
             | PresenceOperation::CredentialManagement
             | PresenceOperation::Select => Err(CTAP2_ERR_USER_ACTION_TIMEOUT),

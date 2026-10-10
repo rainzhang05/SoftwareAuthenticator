@@ -1364,6 +1364,7 @@ dependencies = [
  "p521",
  "pqkey-mldsa",
  "rand_core",
+ "rcgen",
  "rsa",
  "serde",
  "sha2",

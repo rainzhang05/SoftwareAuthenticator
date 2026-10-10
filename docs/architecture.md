@@ -254,6 +254,20 @@ are excluded by an excludeList, consume a slot, and are erased by reset.
 
 ## User presence
 
+The portable engine also answers U2F REGISTER, AUTHENTICATE and VERSION
+APDUs. U2F uses ES256 and the same sealed IDs, RP hashes and counters as
+CTAP2; it cannot create a discoverable credential or verify a user. Its
+registration always carries a certificate. Certificate mode uses the first
+provisioned certificate; self and none modes use a minimal X.509 v3
+certificate signed by the new credential itself. Its generic subject,
+fixed validity and fresh serial contain no installation identity. rcgen
+encodes it without a crypto backend, borrowing the credential key and
+signing through the engine's scrubbed ES256 path.
+
+Short APDUs and zero Lc followed by Le are accepted for compatibility. Le
+does not truncate HID responses. Signatures use DER's 8–72-byte range,
+which CTAP 2.3 §10.3 corrects in the older U2F raw formats.
+
 Each registration, sign-in that needs your presence, reset and authenticator
 selection asks for your approval in a desktop notification with Approve and
 Deny buttons, sent through `org.freedesktop.Notifications` on the session bus.

@@ -47,6 +47,8 @@ rand_core.workspace = true
 # `SysRng`, the operating system RNG that key generation uses.
 getrandom.workspace = true
 log.workspace = true
+# X.509 encoding only; credential signatures use the existing ES256 path.
+rcgen.workspace = true
 # Credential store: record encryption and constant-time comparison of secrets.
 # chacha20poly1305 0.11 shares the cipher 0.5 generation already in the tree;
 # its default features only add an RNG convenience the store does not use, and

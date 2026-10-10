@@ -33,7 +33,7 @@ getrandom.workspace = true
 sha2.workspace = true
 # Attestation certificate generation. rcgen is built without a crypto backend;
 # the certificate is signed with p256, which the CTAP engine already uses.
-rcgen = { version = "0.14", default-features = false }
+rcgen.workspace = true
 p256 = { workspace = true, features = ["ecdsa"] }
 zeroize.workspace = true
 # PINs are normalized to NFC before they are checked and sent (CTAP 2.3

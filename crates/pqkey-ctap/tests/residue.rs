@@ -485,10 +485,14 @@ const CLIENT_DATA_HASH: [u8; 32] = [0x22; 32];
 /// The secrets of `case`'s key and signature, checked to be the real ones
 /// and looked for in the stack the engine left: what [`run`] found.
 fn check_ecdsa(case: &EcdsaCase) -> Vec<String> {
+    check_ecdsa_message(case, &AUTH_DATA, &CLIENT_DATA_HASH)
+}
+
+fn check_ecdsa_message(case: &EcdsaCase, data: &[u8], challenge: &[u8]) -> Vec<String> {
     let alg = case.alg;
     let order = unhex(case.order);
     let (d, returned_bits) = private_scalar(case, &order);
-    let message = [&AUTH_DATA[..], &CLIENT_DATA_HASH[..]].concat();
+    let message = [data, challenge].concat();
     let (k, blocks) = rfc6979_k(case, &order, &d, &(case.digest)(&message));
     let public_key = (case.multiply)(&d);
     let r = reduce(&(case.multiply)(&k).0, &order);
@@ -506,7 +510,7 @@ fn check_ecdsa(case: &EcdsaCase) -> Vec<String> {
         .chain(blocks)
         .collect();
 
-    let (cose_key, signature, found) = run(alg, &case.key, needles);
+    let (cose_key, signature, found) = run_message(alg, &case.key, needles, data, challenge);
     assert_eq!(
         (cose_bytes(&cose_key, -2), cose_bytes(&cose_key, -3)),
         public_key,
@@ -580,6 +584,16 @@ fn run(
     key: &[u8],
     needles: Vec<(String, Vec<u8>)>,
 ) -> (Vec<u8>, Vec<u8>, Vec<String>) {
+    run_message(alg, key, needles, &AUTH_DATA, &CLIENT_DATA_HASH)
+}
+
+fn run_message(
+    alg: CoseAlg,
+    key: &[u8],
+    needles: Vec<(String, Vec<u8>)>,
+    data: &[u8],
+    challenge: &[u8],
+) -> (Vec<u8>, Vec<u8>, Vec<String>) {
     let control = Sha256::digest(b"never computed by the signer").to_vec();
     let needles: Vec<(String, Vec<u8>, Vec<u8>)> = needles
         .into_iter()
@@ -591,7 +605,7 @@ fn run(
     let (cose_key, signature) = {
         let key = try_credential_secret_from_bytes(alg, key).expect("key");
         let cose_key = try_cose_public_key(alg, &key).expect("public key");
-        let signature = try_sign_challenge(alg, &key, &AUTH_DATA, &CLIENT_DATA_HASH).expect("sign");
+        let signature = try_sign_challenge(alg, &key, data, challenge).expect("sign");
         (cose_key, signature)
     };
     let found: Vec<(&str, usize, usize)> = needles
@@ -661,7 +675,7 @@ fn check_rsa(alg: &CoseAlg) -> Vec<String> {
 }
 
 fn main() {
-    let failures: Vec<String> = ECDSA_CASES
+    let mut failures: Vec<String> = ECDSA_CASES
         .iter()
         .flat_map(check_ecdsa)
         .chain(EDDSA_CASES.iter().flat_map(check_eddsa))
@@ -678,6 +692,26 @@ fn main() {
             .flat_map(check_rsa),
         )
         .collect();
+    // U2F registration and authentication use the same ES256 signer with
+    // different signing bases. Independently check their nonces too.
+    let registration = [
+        vec![0],
+        vec![0x43; 32],
+        vec![0x42; 32],
+        vec![0x44; 107],
+        vec![4],
+        vec![0x45; 64],
+    ]
+    .concat();
+    failures.extend(check_ecdsa_message(&ECDSA_CASES[0], &registration, &[]));
+    for up in [0, 1] {
+        let authentication = [vec![0x43; 32], vec![up], vec![0, 0, 0, 1]].concat();
+        failures.extend(check_ecdsa_message(
+            &ECDSA_CASES[0],
+            &authentication,
+            &[0x42; 32],
+        ));
+    }
     assert!(
         failures.is_empty(),
         "secrets left in the stack after signing: {failures:?}"

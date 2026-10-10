@@ -386,6 +386,8 @@ fn summary(request: &PresenceRequest<'_>) -> &'static str {
         // its ID. Stored or sealed, `pqkey passkeys` will not list it.
         PresenceOperation::Register => "Register a security key",
         PresenceOperation::Authenticate => "Sign in with a passkey",
+        PresenceOperation::U2fRegister => "Register a U2F security key",
+        PresenceOperation::U2fAuthenticate => "Sign in with a U2F security key",
         PresenceOperation::Reset => "Reset the security key",
         PresenceOperation::CredentialManagement => "Manage passkeys",
         PresenceOperation::Select => "Select a security key",
@@ -420,6 +422,14 @@ pub fn prompt_text(request: &PresenceRequest<'_>) -> String {
     };
     let as_user = user.map(|user| format!(" as {user}")).unwrap_or_default();
     match (request.operation, rp) {
+        (PresenceOperation::U2fRegister, _) => {
+            "Register this security key for a U2F request? The site cannot be identified."
+                .to_owned()
+        }
+        (PresenceOperation::U2fAuthenticate, _) => {
+            "Sign in with this security key for a U2F request? The site cannot be identified."
+                .to_owned()
+        }
         (PresenceOperation::Register, Some(rp)) => {
             let rp_name = rp_name
                 .map(|name| format!(" (\u{201c}{name}\u{201d})"))
@@ -977,6 +987,23 @@ mod tests {
             user_name: name,
             ..PresenceRequest::new(operation, TIMEOUT)
         })
+    }
+
+    #[test]
+    fn u2f_prompts_name_the_protocol_and_never_claim_a_site() {
+        for operation in [
+            PresenceOperation::U2fRegister,
+            PresenceOperation::U2fAuthenticate,
+        ] {
+            let mut request = PresenceRequest::new(operation, TIMEOUT);
+            request.rp_id = Some("untrusted.example");
+            request.user_name = Some("untrusted user");
+            let body = prompt_text(&request);
+            assert!(body.contains("U2F"));
+            assert!(body.contains("The site cannot be identified."));
+            assert!(!body.contains("untrusted"));
+            assert!(summary(&request).contains("U2F"));
+        }
     }
 
     #[test]

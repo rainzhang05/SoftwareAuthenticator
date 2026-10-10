@@ -23,3 +23,4 @@ mod reset;
 mod response_size;
 mod storage;
 mod support;
+mod u2f;

@@ -23,6 +23,10 @@ retains freed blocks until they have been scanned, and live controls prove
 that the scan finds each secret pattern. CI and `scripts/check.sh` run it in
 debug and release, as they do the stack residue tests.
 The final cleanup scan also checks blocks released by the last controls.
+U2F residue cases cover registration certificates and signatures,
+authentication with and without presence, and the provisioned attestation
+key. Stack checks independently reconstruct the nonces of U2F signing
+bases; heap checks retain released blocks for all three attestation modes.
 Large-blob tests cover fragmented writes, interrupted staging and restart
 persistence; the fuzz sequence model checks committed-array visibility and
 the lifetime of pending writes, and that credential keys are stable and

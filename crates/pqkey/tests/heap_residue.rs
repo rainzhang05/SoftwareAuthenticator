@@ -449,6 +449,54 @@ fn exercise_large_blob_key_responses() {
     scan_freed("large-blob key responses", &needles);
 }
 
+fn exercise_u2f() {
+    let needles = [
+        PrivateValue {
+            name: "U2F scalar",
+            bytes: Zeroizing::new(vec![0x56; 32]),
+        },
+        PrivateValue {
+            name: "U2F attestation scalar",
+            bytes: Zeroizing::new(vec![0x57; 32]),
+        },
+    ];
+    {
+        for mode in [
+            AttestationMode::SelfAttestation,
+            AttestationMode::None,
+            AttestationMode::Certificate,
+        ] {
+            let mut store = MemoryStore::new();
+            store
+                .set_attestation(&AttestationRecord {
+                    private_key: [0x57; 32],
+                    certificate_chain: vec![vec![1]],
+                })
+                .unwrap();
+            let interrupt = InterruptFlag::new();
+            let mut app = CtapApp::new(store, CanaryRng, AutoApprove, &interrupt, [0; 16]);
+            app.set_attestation_mode(mode);
+            app.set_key_generator(|_| Ok(PrivateKeyMaterial::P256Scalar { scalar: [0x56; 32] }));
+            let request = [vec![0, 1, 0, 0, 0, 0, 64], vec![0x42; 64]].concat();
+            let registration = app.call_u2f(&request);
+            assert_eq!(&registration[registration.len() - 2..], &[0x90, 0]);
+            let handle = &registration[67..174];
+            for control in [3, 8] {
+                let request = [
+                    vec![0, 2, control, 0, 0, 0, 172],
+                    vec![0x42; 64],
+                    vec![107],
+                    handle.to_vec(),
+                ]
+                .concat();
+                let response = app.call_u2f(&request);
+                assert_eq!(&response[response.len() - 2..], &[0x90, 0]);
+            }
+        }
+    }
+    scan_freed("U2F registration and authentication", &needles);
+}
+
 fn main() {
     exercise(
         CoseAlg::RS256,
@@ -472,8 +520,9 @@ fn main() {
         exercise(alg, PrivateKeyMaterial::try_generate(alg).unwrap());
     }
     exercise_large_blob_key_responses();
+    exercise_u2f();
     // The last case's control buffers were dropped after its secret scan.
     // Inspect their retained blocks too, before the program exits.
     scan_freed("final cleanup", &[]);
-    println!("heap residue: 9 cases passed, including live controls");
+    println!("heap residue: 10 cases passed, including live controls");
 }

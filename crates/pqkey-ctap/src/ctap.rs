@@ -61,6 +61,7 @@ mod selection;
 mod storage;
 #[cfg(test)]
 mod tests;
+pub mod u2f;
 
 pub use self::pin::state::{MAX_PIN_RETRIES, PersistentPinState, PinAttempt, PinRetryState};
 pub use self::pin::token::Clock;
