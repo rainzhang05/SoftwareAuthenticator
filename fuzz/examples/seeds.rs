@@ -624,6 +624,13 @@ fn ctap_request(dir: &Path) {
     // getCredsMetadata with subCommandParams, which its pinUvAuthParam does
     // not cover.
     seeds.push(credential_management(1, Some(map(vec![]))));
+    for short in [false, true] {
+        for le in [false, true] {
+            seeds.push(pqkey_fuzz::requests::u2f_apdu(1, 0, &[0x42; 64], short, le));
+            seeds.push(pqkey_fuzz::requests::u2f_apdu(2, 7, &[0x42; 65], short, le));
+            seeds.push(pqkey_fuzz::requests::u2f_apdu(3, 0, &[], short, le));
+        }
+    }
     write_all(dir, &seeds);
 }
 
@@ -654,14 +661,14 @@ impl Encoder {
 
     fn action(&mut self, action: &Action) -> &mut Self {
         match action {
-            Action::Packet(packet) => self.variant(0, 10).raw(&packet[..]),
+            Action::Packet(packet) => self.variant(0, 12).raw(&packet[..]),
             Action::Init {
                 channel,
                 command,
                 length,
                 data,
             } => self
-                .variant(1, 10)
+                .variant(1, 12)
                 .channel(channel)
                 .raw(&[*command])
                 .raw(&length.to_le_bytes())
@@ -671,7 +678,7 @@ impl Encoder {
                 sequence,
                 data,
             } => self
-                .variant(2, 10)
+                .variant(2, 12)
                 .channel(channel)
                 .raw(&[*sequence])
                 .raw(&data[..]),
@@ -683,7 +690,7 @@ impl Encoder {
                 mangle,
                 gap_ms,
             } => {
-                self.variant(3, 10)
+                self.variant(3, 12)
                     .channel(channel)
                     .raw(&[*command])
                     .raw(&length.to_le_bytes())
@@ -696,14 +703,22 @@ impl Encoder {
                 };
                 self.raw(&gap_ms.to_le_bytes())
             }
-            Action::Advance(ms) => self.variant(4, 10).raw(&ms.to_le_bytes()),
-            Action::Timeout => self.variant(5, 10),
-            Action::Keepalive(waiting) => self.variant(6, 10).raw(&[u8::from(*waiting)]),
-            Action::TakeRequest => self.variant(7, 10),
+            Action::Advance(ms) => self.variant(4, 12).raw(&ms.to_le_bytes()),
+            Action::Timeout => self.variant(5, 12),
+            Action::Keepalive(waiting) => self.variant(6, 12).raw(&[u8::from(*waiting)]),
+            Action::TakeRequest => self.variant(7, 12),
             Action::Respond { length, fill } => {
-                self.variant(8, 10).raw(&length.to_le_bytes()).raw(&[*fill])
+                self.variant(8, 12).raw(&length.to_le_bytes()).raw(&[*fill])
             }
-            Action::TakeInterrupt => self.variant(9, 10),
+            Action::TakeInterrupt => self.variant(9, 12),
+            Action::Apdu { channel, payload } => {
+                self.variant(10, 12).channel(channel);
+                for byte in payload {
+                    self.raw(&[1, *byte]);
+                }
+                self.raw(&[0])
+            }
+            Action::U2fRespond { approved } => self.variant(11, 12).raw(&[u8::from(*approved)]),
         }
     }
 }
@@ -761,7 +776,7 @@ fn ctaphid_packets(dir: &Path) {
     let second = || Channel::Allocated(1);
     let init = || message(Channel::Broadcast, INIT, 8, 0xA0);
 
-    let seeds = vec![
+    let mut seeds = vec![
         // Allocate a channel, ping, and a CBOR request answered after
         // keepalives.
         exchange(&[
@@ -873,10 +888,74 @@ fn ctaphid_packets(dir: &Path) {
             Action::Packet(Box::new([0xFF; 64])),
         ]),
     ];
+    let request = u2f_registration();
+    for approved in [false, true] {
+        seeds.push(exchange(&[
+            init(),
+            Action::Apdu {
+                channel: first(),
+                payload: request.clone(),
+            },
+            Action::TakeRequest,
+            Action::Keepalive(true),
+            Action::Advance(100),
+            Action::Timeout,
+            Action::Apdu {
+                channel: first(),
+                payload: request.clone(),
+            },
+            Action::Apdu {
+                channel: second(),
+                payload: request.clone(),
+            },
+            Action::U2fRespond { approved },
+            Action::Apdu {
+                channel: first(),
+                payload: request.clone(),
+            },
+            Action::Advance(3_001),
+            Action::Timeout,
+        ]));
+    }
+    seeds.push(exchange(&[
+        init(),
+        Action::Apdu {
+            channel: first(),
+            payload: vec![0, 3, 0, 0, 0, 0, 0, 0, 0],
+        },
+        Action::TakeRequest,
+        Action::Respond { length: 8, fill: 0 },
+        Action::Apdu {
+            channel: first(),
+            payload: vec![0],
+        },
+        Action::TakeRequest,
+        Action::Respond {
+            length: 2,
+            fill: 0x67,
+        },
+    ]));
+    seeds.push(exchange(&[
+        init(),
+        Action::Apdu {
+            channel: first(),
+            payload: request.clone(),
+        },
+        Action::TakeRequest,
+        Action::Keepalive(true),
+        Action::Advance(100),
+        Action::Timeout,
+        Action::Advance(3_001),
+        Action::Timeout,
+        Action::TakeInterrupt,
+        Action::U2fRespond { approved: true },
+    ]));
     write_all(dir, &seeds);
 }
 
-const IMPLEMENTED: &[u8] = &[0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x0C, 0x0D];
+const IMPLEMENTED: &[u8] = &[
+    0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x0C, 0x0D, 0x81, 0x82, 0x83,
+];
 
 /// Keep inputs from a deterministic random search that reach a command and
 /// status pair no earlier input reached, at most `max` of them.
@@ -885,7 +964,7 @@ fn searched(
     candidates: usize,
     max_len: usize,
     max: usize,
-    run: fn(&[u8]) -> Vec<(u8, u8)>,
+    run: fn(&[u8]) -> Vec<(u8, u16)>,
 ) {
     let mut rng = SplitMix(0xC0FFEE);
     let mut seen = BTreeSet::new();
@@ -896,7 +975,7 @@ fn searched(
         rng.fill_bytes(&mut input);
         // Only the commands the engine implements: any other command byte
         // is a distinct but uninteresting pair.
-        let trace: Vec<(u8, u8)> = run(&input)
+        let trace: Vec<(u8, u16)> = run(&input)
             .into_iter()
             .filter(|(command, _)| IMPLEMENTED.contains(command))
             .collect();
@@ -996,4 +1075,8 @@ fn credential_key(dir: &Path) {
         seeds.push(layout(alg, alg, &invalid));
     }
     write_all(dir, &seeds);
+}
+
+fn u2f_registration() -> Vec<u8> {
+    pqkey_fuzz::requests::u2f_apdu(1, 0, &[0x42; 64], false, true)
 }

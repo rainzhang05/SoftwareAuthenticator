@@ -723,6 +723,64 @@ fn sha2_256(data: &[u8]) -> [u8; 32] {
     sha2::Sha256::digest(data).into()
 }
 
+/// An APDU in short or extended encoding, optionally followed by Le.
+pub fn u2f_apdu(ins: u8, control: u8, data: &[u8], short: bool, le: bool) -> Vec<u8> {
+    let mut request = vec![0, ins, control, 0];
+    if short {
+        if !data.is_empty() {
+            request.push(data.len() as u8);
+        }
+    } else {
+        request.push(0);
+        request.extend_from_slice(&(data.len() as u16).to_be_bytes());
+    }
+    request.extend_from_slice(data);
+    if le {
+        request.extend(vec![0; if short { 1 } else { 2 }]);
+    }
+    request
+}
+
+/// Structure-aware U2F APDUs, mixed with length and parameter mutations.
+pub fn any_u2f_request(u: &mut Unstructured<'_>, known: &[Vec<u8>]) -> Result<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let ins = *u.choose(&[1, 1, 2, 2, 3, 0xff])?;
+    let control = if ins == 2 {
+        *u.choose(&[3, 7, 8, 0])?
+    } else {
+        0
+    };
+    let mut data = Vec::new();
+    if matches!(ins, 1 | 2) {
+        let mut challenge = [0; 32];
+        u.fill_buffer(&mut challenge)?;
+        data.extend_from_slice(&challenge);
+        data.extend_from_slice(&Sha256::digest(u.choose(RP_IDS)?.as_bytes()));
+        if ins == 2 {
+            let handle = if !known.is_empty() && u.ratio(3, 4)? {
+                u.choose(known)?.clone()
+            } else {
+                credential_id(u)?
+            };
+            data.push(handle.len() as u8);
+            data.extend_from_slice(&handle);
+        }
+    }
+    let mut request = u2f_apdu(ins, control, &data, u.arbitrary()?, u.arbitrary()?);
+    match u.int_in_range(0u8..=9)? {
+        0 => request[0] = u.arbitrary()?,
+        1 => request[2] = u.arbitrary()?,
+        2 => request[3] = u.arbitrary()?,
+        3 => {
+            let length = u.int_in_range(0..=request.len())?;
+            request.truncate(length);
+        }
+        4 => request.push(u.arbitrary()?),
+        _ => {}
+    }
+    Ok(request)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

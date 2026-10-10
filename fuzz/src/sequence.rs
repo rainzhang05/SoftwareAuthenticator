@@ -30,7 +30,10 @@
 //!   trailing hash; partial and abandoned writes never become visible;
 //! * the minimum PIN length never falls without reset;
 //! * alwaysUv prevents makeCredential and getAssertion with up=true from
-//!   succeeding without pinUvAuthParam.
+//!   succeeding without pinUvAuthParam, and U2F from signing;
+//! * counters never decrease between resets, including the shared global
+//!   counter; U2F handles work only for their application, with ES256,
+//!   non-discoverable credentials and credProtect 1 or 2.
 
 use crate::cbor::{self, bytes, decode_map, get_int, get_text, int, text};
 use crate::engine::Engine;
@@ -181,9 +184,26 @@ enum Op {
         auth: Auth,
         next: bool,
     },
+    U2fRegister {
+        rp: u8,
+    },
+    U2fAuthenticate {
+        credential: u8,
+        rp: u8,
+        control: u8,
+        corrupt: bool,
+    },
+    U2fVersion,
+    U2fStructured,
+    U2fRaw,
 }
 
 struct Credential {
+    application: [u8; 32],
+    algorithm: i64,
+    protection: u8,
+    public_key: Vec<u8>,
+    counter: u32,
     cred_blob: Option<Vec<u8>>,
     large_blob_key: Option<LargeBlobKey>,
     discoverable: bool,
@@ -209,6 +229,7 @@ impl std::fmt::Debug for LargeBlobKey {
 type HmacInput = (Option<Value>, Option<(Session, usize)>);
 
 struct Platform {
+    global_counter: u32,
     engine: Engine,
     /// The PIN the authenticator has, as far as the platform knows.
     pin: Option<Vec<u8>>,
@@ -367,6 +388,7 @@ fn proposed_array(length: usize, fill: u8, valid_hash: bool) -> Vec<u8> {
 impl Platform {
     fn new(engine: Engine) -> Self {
         Self {
+            global_counter: 0,
             engine,
             pin: None,
             token: None,
@@ -400,6 +422,83 @@ impl Platform {
 
     fn known_ids(&self) -> Vec<Vec<u8>> {
         self.credentials.iter().map(|c| c.id.clone()).collect()
+    }
+
+    fn observe_counter(&mut self, id: &[u8], counter: u32) {
+        let credential = self
+            .credentials
+            .iter_mut()
+            .find(|credential| credential.id == id)
+            .expect("known counter");
+        assert!(counter >= credential.counter, "signature counter decreased");
+        credential.counter = counter;
+        if id.len() == 107 && id[0] == 2 {
+            assert!(counter >= self.global_counter, "global counter decreased");
+            self.global_counter = counter;
+        }
+    }
+
+    fn call_u2f(&mut self, request: &[u8]) -> Vec<u8> {
+        use pqkey_ctap::ctap::u2f::{SW_COMMAND_NOT_ALLOWED, SW_NO_ERROR};
+        self.pending = PendingArray::default();
+        self.assertion_rp = None;
+        self.assertion_large_blob_key = false;
+        let response = self.engine.call_u2f(request);
+        let end = response.len() - 2;
+        let status = u16::from_be_bytes(response[end..].try_into().unwrap());
+        let ins = request.get(1).copied().unwrap_or(0);
+        if self.always_uv && request.len() >= 4 && request[0] == 0 && matches!(ins, 1 | 2) {
+            assert_eq!(
+                status, SW_COMMAND_NOT_ALLOWED,
+                "U2F signed while alwaysUv was enabled"
+            );
+        }
+        if status != SW_NO_ERROR || ins == 3 {
+            return response;
+        }
+        let data = crate::engine::u2f_data(request).expect("successful APDU body");
+        let application: [u8; 32] = data[32..64].try_into().unwrap();
+        if ins == 1 {
+            let rp = requests::RP_IDS
+                .iter()
+                .find(|rp| Sha256::digest(rp.as_bytes()).as_slice() == application)
+                .copied()
+                .unwrap_or_default();
+            self.credentials.push(Credential {
+                application,
+                algorithm: -7,
+                protection: 1,
+                public_key: crate::engine::u2f_public_key(&response[1..66]),
+                counter: 0,
+                cred_blob: None,
+                large_blob_key: None,
+                discoverable: false,
+                id: response[67..174].to_vec(),
+                rp_id: rp.to_owned(),
+            });
+        } else {
+            let id = &data[65..];
+            let credential = self.known(id).expect("U2F signed an unknown handle");
+            assert_eq!(
+                credential.application, application,
+                "U2F used another application"
+            );
+            assert_eq!(credential.algorithm, -7);
+            assert!(!credential.discoverable);
+            assert!(credential.protection <= 2);
+            assert!(matches!(request[2], 3 | 8), "check-only signed");
+            assert_eq!(response[0], u8::from(request[2] == 3));
+            let base = [application.as_slice(), &response[..5], &data[..32]].concat();
+            pqkey_ctap::verify_signature(
+                CoseAlg::ES256,
+                &credential.public_key,
+                &base,
+                &response[5..end],
+            )
+            .unwrap();
+            self.observe_counter(id, u32::from_be_bytes(response[1..5].try_into().unwrap()));
+        }
+        response
     }
 
     /// Model the protocol's volatile counters separately from the engine.
@@ -637,7 +736,8 @@ impl Platform {
                 assert_eq!(length, expected_length, "credential ID length");
                 assert_eq!(auth_data[55], marker, "credential ID marker");
                 let mut remaining = &auth_data[55 + length..];
-                let _: Value = ciborium::de::from_reader(&mut remaining).expect("public key");
+                let public_key: Value =
+                    ciborium::de::from_reader(&mut remaining).expect("public key");
                 let outputs = decode_map(remaining).unwrap_or_default();
                 assert!(
                     get_text(&outputs, "largeBlobKey").is_none(),
@@ -675,6 +775,19 @@ impl Platform {
                     );
                 }
                 self.credentials.push(Credential {
+                    application: Sha256::digest(rp_id.as_bytes()).into(),
+                    algorithm: match get_int(public_key.as_map().unwrap(), 3).unwrap() {
+                        Value::Integer(alg) => i64::try_from(i128::from(*alg)).unwrap(),
+                        _ => panic!("public algorithm"),
+                    },
+                    protection: match get_int(&parameters, 6) {
+                        Some(Value::Map(extensions)) => {
+                            unsigned(get_text(extensions, "credProtect")).unwrap_or(1) as u8
+                        }
+                        _ => 1,
+                    },
+                    public_key: cbor::encode(&public_key),
+                    counter: 0,
                     large_blob_key: key,
                     discoverable,
                     cred_blob: match (get_int(&parameters, 6), auth_data.get(55 + length..)) {
@@ -765,6 +878,10 @@ impl Platform {
                         );
                     }
                 }
+                self.observe_counter(
+                    id,
+                    u32::from_be_bytes(auth_data[33..37].try_into().unwrap()),
+                );
                 if code == CTAP_CMD_GET_ASSERTION {
                     if get_int(&body, 5).is_some() {
                         self.assertion_rp = Some(rp_id);
@@ -812,6 +929,7 @@ impl Platform {
                 self.pin = None;
                 self.token = None;
                 self.credentials.clear();
+                self.global_counter = 0;
                 self.minimum = 4;
                 self.always_uv = false;
                 self.force_change = false;
@@ -877,6 +995,8 @@ impl Platform {
                 _ => panic!("unsupported config subcommand succeeded"),
             },
             CTAP_CMD_GET_INFO => {
+                let versions = get_int(&body, 1).unwrap().as_array().unwrap();
+                assert_eq!(versions.contains(&text("U2F_V2")), !self.always_uv);
                 assert_eq!(
                     get_int(&body, 0x0D),
                     Some(&int(i64::from(self.minimum))),
@@ -985,6 +1105,53 @@ impl Platform {
 
     fn step(&mut self, op: Op, u: &mut Unstructured<'_>) -> Result<()> {
         match op {
+            Op::U2fRegister { rp } => {
+                let data = [
+                    vec![0x42; 32],
+                    Sha256::digest(rp_id(rp).as_bytes()).to_vec(),
+                ]
+                .concat();
+                self.call_u2f(&requests::u2f_apdu(1, 0, &data, false, true));
+            }
+            Op::U2fAuthenticate {
+                credential,
+                rp,
+                control,
+                corrupt,
+            } => {
+                let mut handle = if self.credentials.is_empty() {
+                    vec![2; 107]
+                } else {
+                    self.credentials[usize::from(credential) % self.credentials.len()]
+                        .id
+                        .clone()
+                };
+                if corrupt && !handle.is_empty() {
+                    handle[0] ^= 1;
+                }
+                let mut data = vec![0x42; 32];
+                data.extend_from_slice(&Sha256::digest(rp_id(rp).as_bytes()));
+                data.push(handle.len() as u8);
+                data.extend_from_slice(&handle);
+                self.call_u2f(&requests::u2f_apdu(
+                    2,
+                    [3, 7, 8, 0][usize::from(control) % 4],
+                    &data,
+                    false,
+                    true,
+                ));
+            }
+            Op::U2fVersion => {
+                self.call_u2f(&[0, 3, 0, 0, 0]);
+            }
+            Op::U2fStructured => {
+                let request = requests::any_u2f_request(u, &self.known_ids())?;
+                self.call_u2f(&request);
+            }
+            Op::U2fRaw => {
+                let request: Vec<u8> = u.arbitrary()?;
+                self.call_u2f(&request);
+            }
             Op::SetPin {
                 v2,
                 pin,
@@ -1600,7 +1767,7 @@ pub fn run(data: &[u8]) {
 }
 
 /// Run one fuzz input and return the command and status of every request.
-pub fn run_traced(data: &[u8]) -> Vec<(u8, u8)> {
+pub fn run_traced(data: &[u8]) -> Vec<(u8, u16)> {
     let mut u = Unstructured::new(data);
     let Ok((seed, max_credentials)) = u.arbitrary::<(u64, u8)>() else {
         return Vec::new();
@@ -1816,6 +1983,108 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
             get(),
         ]);
     }
+    cases.push(vec![
+        Op::CreateCredential {
+            large_blob_key: None,
+            rk: false,
+            user: 1,
+        },
+        Op::U2fAuthenticate {
+            credential: 0,
+            rp: 0,
+            control: 0,
+            corrupt: false,
+        },
+        Op::U2fAuthenticate {
+            credential: 0,
+            rp: 0,
+            control: 1,
+            corrupt: false,
+        },
+        Op::U2fAuthenticate {
+            credential: 0,
+            rp: 0,
+            control: 2,
+            corrupt: false,
+        },
+        Op::U2fRegister { rp: 0 },
+        Op::U2fVersion,
+        Op::AssertCredentials {
+            large_blob_key: None,
+            discoverable: false,
+        },
+        Op::U2fAuthenticate {
+            credential: 1,
+            rp: 0,
+            control: 0,
+            corrupt: false,
+        },
+        Op::U2fAuthenticate {
+            credential: 1,
+            rp: 2,
+            control: 0,
+            corrupt: false,
+        },
+        Op::U2fAuthenticate {
+            credential: 1,
+            rp: 0,
+            control: 0,
+            corrupt: true,
+        },
+        Op::Reset,
+        Op::U2fAuthenticate {
+            credential: 1,
+            rp: 0,
+            control: 0,
+            corrupt: false,
+        },
+    ]);
+    cases.push(vec![
+        Op::U2fRegister { rp: 0 },
+        Op::AuthenticatorConfig {
+            auth: Auth::None,
+            subcommand: 0,
+            minimum: None,
+            rp_ids: None,
+            force_change: None,
+            complexity: None,
+        },
+        Op::U2fRegister { rp: 0 },
+        Op::U2fAuthenticate {
+            credential: 0,
+            rp: 0,
+            control: 0,
+            corrupt: false,
+        },
+        Op::U2fAuthenticate {
+            credential: 0,
+            rp: 0,
+            control: 1,
+            corrupt: false,
+        },
+        Op::U2fAuthenticate {
+            credential: 0,
+            rp: 0,
+            control: 2,
+            corrupt: false,
+        },
+        Op::GetInfo,
+        Op::U2fVersion,
+        Op::AuthenticatorConfig {
+            auth: Auth::None,
+            subcommand: 0,
+            minimum: None,
+            rp_ids: None,
+            force_change: None,
+            complexity: None,
+        },
+        Op::U2fAuthenticate {
+            credential: 0,
+            rp: 0,
+            control: 0,
+            corrupt: false,
+        },
+    ]);
     cases.iter().map(|ops| encode_fixture(ops)).collect()
 }
 
@@ -1861,15 +2130,15 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 permissions,
                 rp: None,
             } => {
-                variant(&mut output, 6, 23);
+                variant(&mut output, 6, 28);
                 output.extend_from_slice(&[u8::from(*v2), *permissions, 0]);
                 extra = if pin_set { 17 } else { 34 };
                 pin_set = true;
             }
-            Op::GetNextAssertion => variant(&mut output, 5, 23),
-            Op::GetInfo => variant(&mut output, 9, 23),
+            Op::GetNextAssertion => variant(&mut output, 5, 28),
+            Op::GetInfo => variant(&mut output, 9, 28),
             Op::Reset => {
-                variant(&mut output, 11, 23);
+                variant(&mut output, 11, 28);
                 pin_set = false;
             }
             Op::LargeBlobBegin {
@@ -1879,7 +2148,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 valid_hash,
                 fill,
             } => {
-                variant(&mut output, 15, 23);
+                variant(&mut output, 15, 28);
                 auth(&mut output, *value);
                 output.extend_from_slice(&length.to_le_bytes());
                 output.extend_from_slice(&fragment.to_le_bytes());
@@ -1891,7 +2160,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 length,
                 fragment,
             } => {
-                variant(&mut output, 16, 23);
+                variant(&mut output, 16, 28);
                 auth(&mut output, *value);
                 option_u16(&mut output, *offset);
                 option_u16(&mut output, *length);
@@ -1902,13 +2171,13 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 length,
                 extra,
             } => {
-                variant(&mut output, 17, 23);
+                variant(&mut output, 17, 28);
                 output.extend_from_slice(&offset.to_le_bytes());
                 output.extend_from_slice(&length.to_le_bytes());
                 output.push(*extra);
             }
             Op::Advance(millis) => {
-                variant(&mut output, 18, 23);
+                variant(&mut output, 18, 28);
                 output.extend_from_slice(&millis.to_le_bytes());
             }
             Op::LargeBlobWrite {
@@ -1917,7 +2186,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 fragment,
                 valid_hash,
             } => {
-                variant(&mut output, 19, 23);
+                variant(&mut output, 19, 28);
                 auth(&mut output, *value);
                 output.extend_from_slice(&length.to_le_bytes());
                 output.extend_from_slice(&fragment.to_le_bytes());
@@ -1929,7 +2198,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 rk,
                 user,
             } => {
-                variant(&mut output, 20, 23);
+                variant(&mut output, 20, 28);
                 option_bool(&mut output, *large_blob_key);
                 output.extend_from_slice(&[u8::from(*rk), *user]);
             }
@@ -1937,14 +2206,40 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 large_blob_key,
                 discoverable,
             } => {
-                variant(&mut output, 21, 23);
+                variant(&mut output, 21, 28);
                 option_bool(&mut output, *large_blob_key);
                 output.push(u8::from(*discoverable));
             }
             Op::EnumerateCredentials { auth: value, next } => {
-                variant(&mut output, 22, 23);
+                variant(&mut output, 22, 28);
                 auth(&mut output, *value);
                 output.push(u8::from(*next));
+            }
+            Op::U2fRegister { rp } => {
+                variant(&mut output, 23, 28);
+                output.push(*rp);
+            }
+            Op::U2fAuthenticate {
+                credential,
+                rp,
+                control,
+                corrupt,
+            } => {
+                variant(&mut output, 24, 28);
+                output.extend_from_slice(&[*credential, *rp, *control, u8::from(*corrupt)]);
+            }
+            Op::U2fVersion => variant(&mut output, 25, 28),
+            Op::AuthenticatorConfig {
+                auth: value,
+                subcommand,
+                minimum: None,
+                rp_ids: None,
+                force_change: None,
+                complexity: None,
+            } => {
+                variant(&mut output, 8, 28);
+                auth(&mut output, *value);
+                output.extend_from_slice(&[*subcommand, 0, 0, 0, 0]);
             }
             _ => panic!("operation has no fixture encoder"),
         }
@@ -1987,48 +2282,78 @@ mod tests {
     #[test]
     fn seeds_exercise_commits_abandoned_writes_and_stable_keys() {
         let seeds = seed_corpus();
-        assert_eq!(seeds.len(), 18);
+        assert_eq!(seeds.len(), 20);
         let traces: Vec<_> = seeds.iter().map(|seed| run_traced(seed)).collect();
-        let large_blob_ok = |trace: &Vec<(u8, u8)>| {
+        for pair in [
+            (0x81, 0x9000),
+            (0x82, 0x9000),
+            (0x82, 0x6985),
+            (0x82, 0x6a80),
+            (0x83, 0x9000),
+        ] {
+            assert!(
+                traces[18].contains(&pair),
+                "mixed protocol seed missed {pair:?}"
+            );
+        }
+        assert_eq!(
+            traces[19]
+                .iter()
+                .filter(|pair| **pair == (0x82, 0x6986))
+                .count(),
+            3
+        );
+        assert!(traces[19].contains(&(0x81, 0x6986)));
+        assert!(traces[19].contains(&(0x82, 0x9000)));
+        let large_blob_ok = |trace: &Vec<(u8, u16)>| {
             trace
                 .iter()
-                .filter(|pair| **pair == (CTAP_CMD_LARGE_BLOBS, CTAP2_OK))
+                .filter(|pair| **pair == (CTAP_CMD_LARGE_BLOBS, u16::from(CTAP2_OK)))
                 .count()
         };
         assert_eq!(large_blob_ok(&traces[0]), 2, "single fragment");
         assert_eq!(large_blob_ok(&traces[1]), 2, "exact fragment boundary");
         assert_eq!(large_blob_ok(&traces[2]), 3, "multiple fragments");
         assert_eq!(large_blob_ok(&traces[3]), 11, "capacity write");
-        assert!(traces[4].contains(&(CTAP_CMD_LARGE_BLOBS, CTAP2_ERR_INTEGRITY_FAILURE)));
+        assert!(
+            traces[4].contains(&(CTAP_CMD_LARGE_BLOBS, u16::from(CTAP2_ERR_INTEGRITY_FAILURE)))
+        );
         for trace in &traces[5..8] {
-            assert!(trace.contains(&(CTAP_CMD_LARGE_BLOBS, CTAP1_ERR_INVALID_SEQ)));
+            assert!(trace.contains(&(CTAP_CMD_LARGE_BLOBS, u16::from(CTAP1_ERR_INVALID_SEQ))));
         }
         for base in [8, 13] {
-            assert!(traces[base].contains(&(CTAP_CMD_LARGE_BLOBS, CTAP2_ERR_PIN_AUTH_INVALID)));
+            assert!(
+                traces[base]
+                    .contains(&(CTAP_CMD_LARGE_BLOBS, u16::from(CTAP2_ERR_PIN_AUTH_INVALID)))
+            );
             assert_eq!(large_blob_ok(&traces[base]), 3, "retry authenticates");
             for trace in &traces[base + 1..base + 3] {
-                assert!(trace.contains(&(CTAP_CMD_LARGE_BLOBS, CTAP1_ERR_INVALID_SEQ)));
+                assert!(trace.contains(&(CTAP_CMD_LARGE_BLOBS, u16::from(CTAP1_ERR_INVALID_SEQ))));
             }
             assert_eq!(large_blob_ok(&traces[base + 3]), 3, "lbw survives presence");
             let key_trace = &traces[base + 4];
             assert_eq!(
                 key_trace
                     .iter()
-                    .filter(|pair| **pair == (CTAP_CMD_MAKE_CREDENTIAL, CTAP2_OK))
+                    .filter(|pair| **pair == (CTAP_CMD_MAKE_CREDENTIAL, u16::from(CTAP2_OK)))
                     .count(),
                 4
             );
             assert_eq!(
                 key_trace
                     .iter()
-                    .filter(|pair| **pair == (CTAP_CMD_MAKE_CREDENTIAL, CTAP2_ERR_INVALID_OPTION))
+                    .filter(|pair| **pair
+                        == (
+                            CTAP_CMD_MAKE_CREDENTIAL,
+                            u16::from(CTAP2_ERR_INVALID_OPTION)
+                        ))
                     .count(),
                 2
             );
             assert_eq!(
                 key_trace
                     .iter()
-                    .filter(|pair| **pair == (CTAP_CMD_CREDENTIAL_MANAGEMENT, CTAP2_OK))
+                    .filter(|pair| **pair == (CTAP_CMD_CREDENTIAL_MANAGEMENT, u16::from(CTAP2_OK)))
                     .count(),
                 3
             );
@@ -2068,7 +2393,7 @@ mod tests {
         let trace = p.engine.into_trace();
         assert_eq!(
             trace.last(),
-            Some(&(CTAP_CMD_CREDENTIAL_MANAGEMENT, CTAP2_OK)),
+            Some(&(CTAP_CMD_CREDENTIAL_MANAGEMENT, u16::from(CTAP2_OK))),
             "{trace:02x?}"
         );
     }
@@ -2123,9 +2448,9 @@ mod tests {
                 assert_eq!(
                     p.engine.trace.last().unwrap().1,
                     if legacy {
-                        CTAP2_ERR_PIN_INVALID
+                        u16::from(CTAP2_ERR_PIN_INVALID)
                     } else {
-                        CTAP2_ERR_PIN_POLICY_VIOLATION
+                        u16::from(CTAP2_ERR_PIN_POLICY_VIOLATION)
                     }
                 );
             }

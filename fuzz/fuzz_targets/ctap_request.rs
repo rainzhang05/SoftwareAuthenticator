@@ -1,6 +1,5 @@
-//! One CTAPHID_CBOR message, the input exactly as a platform would send it
-//! (command byte, then CBOR parameters), to a fresh engine over an empty
-//! in-memory store whose user approves everything.
+//! Interpret raw bytes as both a CTAPHID_CBOR message and a CTAPHID_MSG
+//! APDU, against an engine whose user approves everything.
 //!
 //! Invariants (see `pqkey_fuzz::engine::check_response`): no panic;
 //! the response fits a 7,609-byte CTAPHID message, so the platform gets a CTAP
@@ -17,4 +16,5 @@ use pqkey_fuzz::engine::Engine;
 fuzz_target!(|data: &[u8]| {
     let mut engine = Engine::new(0);
     engine.call(data);
+    engine.call_u2f(data);
 });

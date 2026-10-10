@@ -128,7 +128,7 @@ pub struct Engine {
     presence: FuzzPresence,
     clock: FuzzClock,
     /// The command byte and response status of every request so far.
-    pub(crate) trace: Vec<(u8, u8)>,
+    pub(crate) trace: Vec<(u8, u16)>,
 }
 
 impl Engine {
@@ -177,7 +177,7 @@ impl Engine {
     }
 
     /// The command byte and response status of every request so far.
-    pub fn into_trace(self) -> Vec<(u8, u8)> {
+    pub fn into_trace(self) -> Vec<(u8, u16)> {
         self.trace
     }
 
@@ -201,9 +201,114 @@ impl Engine {
             "the response must fit {MESSAGE_SIZE} bytes"
         );
         check_response(request[0], &response);
-        self.trace.push((request[0], response[0]));
+        self.trace.push((request[0], u16::from(response[0])));
         response
     }
+
+    /// Send a U2F APDU and retain its full status word in the trace. The high
+    /// bit tags U2F instructions so they cannot collide with CTAP2 commands.
+    pub fn call_u2f(&mut self, request: &[u8]) -> Vec<u8> {
+        use pqkey_ctap::ctap::u2f::*;
+        let response = self.app.call_u2f(request);
+        assert!((2..=MESSAGE_SIZE).contains(&response.len()));
+        let end = response.len() - 2;
+        let status = u16::from_be_bytes(response[end..].try_into().unwrap());
+        assert!(
+            [
+                SW_NO_ERROR,
+                SW_CONDITIONS_NOT_SATISFIED,
+                SW_COMMAND_NOT_ALLOWED,
+                SW_WRONG_DATA,
+                SW_WRONG_LENGTH,
+                SW_CLA_NOT_SUPPORTED,
+                SW_INS_NOT_SUPPORTED,
+                SW_WRONG_PARAMETERS,
+                SW_INTERNAL_ERROR
+            ]
+            .contains(&status)
+        );
+        let ins = request.get(1).copied().unwrap_or(0);
+        if status != SW_NO_ERROR {
+            assert_eq!(end, 0, "error carries data");
+        } else {
+            match ins {
+                3 => assert_eq!(&response[..end], b"U2F_V2"),
+                1 => {
+                    assert_eq!(response[0], 5);
+                    assert_eq!(response[1], 4);
+                    assert_eq!(response[66], 107);
+                    assert_eq!(response[67], 2);
+                    let certificate = &response[174..end];
+                    assert_eq!(certificate[0], 0x30);
+                    let (prefix, length) = if certificate[1] < 128 {
+                        (2, usize::from(certificate[1]))
+                    } else {
+                        let bytes = usize::from(certificate[1] & 0x7f);
+                        assert!((1..=2).contains(&bytes));
+                        (
+                            2 + bytes,
+                            certificate[2..2 + bytes]
+                                .iter()
+                                .fold(0usize, |n, b| n * 256 + usize::from(*b)),
+                        )
+                    };
+                    let signature = &certificate[prefix + length..];
+                    assert!((8..=72).contains(&signature.len()));
+                    let data = u2f_data(request).unwrap();
+                    let base = [
+                        vec![0],
+                        data[32..64].to_vec(),
+                        data[..32].to_vec(),
+                        response[67..174].to_vec(),
+                        response[1..66].to_vec(),
+                    ]
+                    .concat();
+                    pqkey_ctap::verify_signature(
+                        pqkey_ctap::CoseAlg::ES256,
+                        &u2f_public_key(&response[1..66]),
+                        &base,
+                        signature,
+                    )
+                    .unwrap();
+                }
+                2 => {
+                    assert!(end >= 13);
+                    assert!(response[0] <= 1);
+                }
+                _ => panic!("successful unsupported U2F instruction"),
+            }
+        }
+        self.trace.push((ins | 0x80, status));
+        response
+    }
+}
+
+/// Data of a successful U2F registration or authentication request, decoded
+/// independently of the engine for the fuzz model.
+pub fn u2f_data(request: &[u8]) -> Option<&[u8]> {
+    let (start, length) = if *request.get(4)? == 0 {
+        (
+            7,
+            usize::from(u16::from_be_bytes([*request.get(5)?, *request.get(6)?])),
+        )
+    } else {
+        (5, usize::from(request[4]))
+    };
+    request.get(start..start + length)
+}
+
+/// COSE encoding of a U2F uncompressed P-256 public key.
+pub fn u2f_public_key(public: &[u8]) -> Vec<u8> {
+    use crate::cbor::{bytes, encode, int};
+    assert_eq!(public.len(), 65);
+    assert_eq!(public[0], 4);
+    encode(&Value::Map(vec![
+        (int(1), int(2)),
+        (int(3), int(-7)),
+        (int(-1), int(1)),
+        (int(-2), bytes(&public[1..33])),
+        (int(-3), bytes(&public[33..65])),
+    ]))
 }
 
 /// The checks every answer to a CTAPHID_CBOR request must pass.

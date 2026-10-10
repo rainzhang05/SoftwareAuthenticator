@@ -91,6 +91,15 @@ pub enum Action {
     },
     /// The transport reads the interrupt flag.
     TakeInterrupt,
+    /// A real U2F APDU rather than a patterned message payload.
+    Apdu {
+        channel: Channel,
+        payload: Vec<u8>,
+    },
+    /// A U2F result after presence, with the presence completion timestamp.
+    U2fRespond {
+        approved: bool,
+    },
 }
 
 struct Harness {
@@ -103,6 +112,7 @@ struct Harness {
     app_busy: bool,
     /// What the app answered in this step, if it did.
     app_answer: Option<Vec<u8>>,
+    cached_answer: Option<Vec<u8>>,
 }
 
 impl Harness {
@@ -213,13 +223,25 @@ impl Harness {
                 }
             }
             Command::Ping => assert_ne!(channel, BROADCAST),
-            Command::Cbor | Command::Msg => {
+            Command::Cbor => {
                 assert_ne!(channel, BROADCAST);
                 let answered = self.app_answer.take();
                 assert!(
                     answered.as_deref() == Some(payload) || payload == [CTAP2_ERR_KEEPALIVE_CANCEL],
                     "a CBOR response the app did not give"
                 );
+            }
+            Command::Msg => {
+                assert_ne!(channel, BROADCAST);
+                let answered = self.app_answer.take();
+                let cached = self.cached_answer.as_deref() == Some(payload);
+                assert!(
+                    answered.as_deref() == Some(payload) || cached || payload == [0x69, 0x85],
+                    "a MSG response the app did not give"
+                );
+                if cached {
+                    self.cached_answer = None;
+                }
             }
             Command::Cancel => panic!("CTAPHID_CANCEL is never sent"),
         }
@@ -228,7 +250,11 @@ impl Harness {
     fn check_timers(&self) {
         if let Some(deadline) = self.host.next_deadline() {
             assert!(
-                deadline <= self.now + CONTINUATION_TIMEOUT_MS.max(KEEPALIVE_INTERVAL_MS),
+                deadline
+                    <= self.now
+                        + CONTINUATION_TIMEOUT_MS
+                            .max(KEEPALIVE_INTERVAL_MS)
+                            .max(pqkey::transport::ctaphid_host::U2F_APPROVAL_MS + 1),
                 "a timer further away than any timeout"
             );
         }
@@ -237,6 +263,34 @@ impl Harness {
 
     fn act(&mut self, action: Action) {
         match action {
+            Action::Apdu { channel, payload } => {
+                let length = payload.len().min(MAX_MESSAGE_SIZE);
+                let channel = self.channel(&channel);
+                for packet in Self::message_packets(
+                    channel,
+                    Command::Msg as u8,
+                    &payload[..length],
+                    length as u16,
+                ) {
+                    self.packet(packet);
+                }
+            }
+            Action::U2fRespond { approved } => {
+                if self.app_busy {
+                    self.app_busy = false;
+                    let response = if approved {
+                        vec![5, 0x90, 0]
+                    } else {
+                        vec![0x69, 0x85]
+                    };
+                    self.app_answer = Some(response.clone());
+                    if approved {
+                        self.cached_answer = Some(response.clone());
+                    }
+                    self.host.app_response(response, self.now, Some(self.now));
+                    assert!(self.drain() <= 1);
+                }
+            }
             Action::Packet(packet) => self.packet(*packet),
             Action::Init {
                 channel,
@@ -301,6 +355,7 @@ impl Harness {
                 assert!(self.drain() <= 1);
             }
             Action::Keepalive(waiting) => {
+                self.host.app_presence(waiting);
                 let sent = self.host.send_keepalive(waiting, self.now);
                 assert_eq!(self.drain(), usize::from(sent));
             }
@@ -347,6 +402,7 @@ pub fn run(data: &[u8]) {
         senders: HashSet::new(),
         app_busy: false,
         app_answer: None,
+        cached_answer: None,
     };
     harness.host.set_capabilities(0x04);
     while let Ok(action) = u.arbitrary::<Action>() {

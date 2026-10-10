@@ -27,6 +27,12 @@ U2F residue cases cover registration certificates and signatures,
 authentication with and without presence, and the provisioned attestation
 key. Stack checks independently reconstruct the nonces of U2F signing
 bases; heap checks retain released blocks for all three attestation modes.
+The packet fuzz target includes U2F APDUs, repeats, approval, denial and
+abandonment. Structured and sequence targets mix both protocols; the
+sequence model verifies U2F signatures, credential eligibility, application
+binding, shared counter monotonicity and always-UV. Its traces retain full
+U2F status words. Regenerated seeds include protocol crossings and U2F
+disabled by always-UV.
 Large-blob tests cover fragmented writes, interrupted staging and restart
 persistence; the fuzz sequence model checks committed-array visibility and
 the lifetime of pending writes, and that credential keys are stable and

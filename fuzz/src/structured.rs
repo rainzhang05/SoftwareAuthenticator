@@ -17,7 +17,7 @@ pub fn run(data: &[u8]) {
 }
 
 /// Run one fuzz input and return the command and status of every request.
-pub fn run_traced(data: &[u8]) -> Vec<(u8, u8)> {
+pub fn run_traced(data: &[u8]) -> Vec<(u8, u16)> {
     let mut u = Unstructured::new(data);
     let Ok((seed, small_store)) = u.arbitrary::<(u64, bool)>() else {
         return Vec::new();
@@ -33,10 +33,17 @@ pub fn run_traced(data: &[u8]) -> Vec<(u8, u8)> {
             break;
         };
         engine.presence().select(presence);
-        let Ok(request) = requests::any_request(&mut u) else {
-            break;
-        };
-        engine.call(&request);
+        if u.arbitrary::<bool>().unwrap_or(false) {
+            let Ok(request) = requests::any_u2f_request(&mut u, &[]) else {
+                break;
+            };
+            engine.call_u2f(&request);
+        } else {
+            let Ok(request) = requests::any_request(&mut u) else {
+                break;
+            };
+            engine.call(&request);
+        }
         if u.is_empty() {
             break;
         }
