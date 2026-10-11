@@ -49,6 +49,24 @@ programs "busy". It also passes cancellation on to the engine. The engine
 runs on a worker thread, so the device keeps being served while a prompt is
 open.
 
+A transaction keeps its CID through reception, processing and transmission.
+The state machine retains queued reports until `HidDevice::write_frame`
+succeeds, and releases the CID only after the final response report succeeds.
+Selecting a report or queuing an answer does not release it. Busy errors for
+other clients remain in FIFO order and cannot interrupt response fragments or
+complete another transaction. During the pacing pauses, the transport keeps
+reading competing requests and rejects them as busy.
+
+Valid INIT on the owned CID aborts and resynchronizes it: received data,
+unsent response fragments and keepalives are discarded, including a report
+already selected by the transport. Output tokens are checked after incoming
+packets are processed and before writing. The INIT reply completes the new
+transaction when written; any answer from the cancelled worker is suppressed.
+Reports successfully written before INIT was processed cannot be recalled.
+Read, write and worker errors end the session without acknowledging failed
+writes. Shutdown is checked before writes; teardown cancels the worker,
+destroys the device and joins the worker.
+
 Two details carry ML-DSA's large messages across the kernel:
 
 - The transport paces its reports 1 ms apart, because a hidraw reader buffers
@@ -337,6 +355,10 @@ SW_CONDITIONS_NOT_SATISFIED while keeping the worker request alive. Exact
 repeats on its channel receive that status until the result is ready, then
 receive it once within ten seconds of approval. No eventual answer is
 sent without a repeat. Other requests are busy while the prompt is open.
+Each polling or cached response owns its CID until its last report is
+successfully written. Afterward, retained polling, approval or denial state
+continues to govern requests. An approval arriving while the short pending
+response is transmitting is retained for an exact repeat.
 Presence transitions are recorded even between transport polls; a finished
 prompt keeps its collection window while the worker prepares its answer.
 INIT cancels it; CANCEL applies only to CBOR. More than three seconds

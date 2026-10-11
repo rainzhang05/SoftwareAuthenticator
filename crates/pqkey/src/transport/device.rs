@@ -83,6 +83,9 @@ pub trait HidDevice {
     /// invalid ones are handled by the backend.
     fn try_read_frame(&self) -> io::Result<Option<CtapHidFrame>>;
     /// Send one complete input report to the host.
+    /// `Ok(())` is the transport's transmission-completion boundary. An
+    /// error must not be reported as a successful CTAPHID write; it ends the
+    /// device session. No additional acknowledgement from the client is used.
     fn write_frame(&self, frame: &CtapHidFrame) -> io::Result<()>;
     /// Wait for a queued report, the worker's `other` descriptor, or the
     /// timeout. `None` has no caller deadline. Signals or native event

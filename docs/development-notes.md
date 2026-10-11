@@ -55,6 +55,18 @@ their registration, assertion and enumeration response copies.
 
 ## Running your changes
 
+CTAPHID packet fuzzing models partial transmission explicitly: report selection,
+successful and failed writes, INIT aborts and session teardown. A separate
+request/worker oracle checks response bytes, ordering and ownership through
+the final successful write; its incremental parser rejects stale continuations
+and truncation without an explicit abort. Seeds cover single-report and
+maximum-length responses, final-report competition, selected-report INIT,
+keepalives, late workers, cancellation and U2F pending/cached answers.
+
+Raw HID transport E2E tests pace maximum-length PING requests, send a competing
+CID during the reply and resynchronize a transmitting channel. Run them on a
+Linux host with `/dev/uhid`; socket and callback tests cannot replace that check.
+
 `./install.sh` rebuilds pqkey and restarts the key with your changes. To
 watch the key's debug log, run it in the foreground. The log includes site and
 user names.

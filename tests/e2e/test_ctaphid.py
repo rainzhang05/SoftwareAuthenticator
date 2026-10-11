@@ -54,6 +54,59 @@ def test_ping_echoes_a_multi_packet_payload(hid):
     assert hid.expect(cid, ctaphid.PING).payload == payload
 
 
+def send_long_ping(hid, cid, payload):
+    """Keep the maximum-length request within uhid's small output queue."""
+    for packet in hid.init_packets(cid, ctaphid.PING, payload):
+        hid.write_packet(packet)
+        time.sleep(0.001)
+
+
+def test_other_channel_is_busy_while_a_maximum_ping_response_is_transmitted(hid):
+    first, second = hid.allocate_channel(), hid.allocate_channel()
+    payload = os.urandom(7609)
+    send_long_ping(hid, first, payload)
+    packet = hid.read_packet()
+    assert struct.unpack(">IBH", packet[:7]) == (first, 0x80 | ctaphid.PING, len(payload))
+    echoed = packet[7:]
+    hid.send(second, ctaphid.PING, b"competing")
+    for seq in range(128):
+        packet = hid.read_packet()
+        assert struct.unpack(">IB", packet[:5]) == (first, seq), "response fragments were interleaved"
+        echoed += packet[5:]
+    assert echoed == payload
+    assert hid.expect(second, ctaphid.ERROR).payload == bytes([0x06])
+    hid.send(second, ctaphid.PING, b"after completion")
+    assert hid.expect(second, ctaphid.PING).payload == b"after completion"
+
+
+def test_init_truncates_a_transmitting_response_without_stale_output(hid):
+    cid = hid.allocate_channel()
+    payload = os.urandom(7609)
+    send_long_ping(hid, cid, payload)
+    packet = hid.read_packet()
+    assert struct.unpack(">IBH", packet[:7]) == (cid, 0x80 | ctaphid.PING, len(payload))
+    nonce = os.urandom(8)
+    hid.send(cid, ctaphid.INIT, nonce)
+    prefix, seq = packet[7:], 0
+    while True:
+        packet = hid.read_packet()
+        next_cid, command = struct.unpack(">IB", packet[:5])
+        assert next_cid == cid
+        if command == 0x80 | ctaphid.INIT:
+            assert struct.unpack(">H", packet[5:7]) == (17,)
+            assert packet[7:15] == nonce
+            assert struct.unpack(">I", packet[15:19]) == (cid,)
+            break
+        assert command == seq, "unexpected output before resynchronization"
+        prefix += packet[5:]
+        seq += 1
+    # Reports successfully written before INIT was read cannot be recalled.
+    assert seq < 128, "INIT waited for the entire old response"
+    assert prefix == payload[:len(prefix)]
+    hid.send(cid, ctaphid.PING, b"resynchronized")
+    assert hid.expect(cid, ctaphid.PING).payload == b"resynchronized"
+
+
 def test_cancel_while_idle_gets_no_response(hid):
     cid = hid.allocate_channel()
     hid.send(cid, ctaphid.CANCEL)
@@ -93,9 +146,8 @@ def test_request_from_another_channel_does_not_corrupt_a_request_in_progress(hid
         assert message.cid in (first, second), f"response on unknown channel: {message}"
         responses[message.cid] = message
 
-    # Busy, or served after the first request: both are allowed.
     other = responses[second]
-    assert (other.cmd, other.payload) in ((ctaphid.ERROR, bytes([0x06])), (ctaphid.PING, b"interleaved")), str(other)
+    assert (other.cmd, other.payload) == (ctaphid.ERROR, bytes([0x06])), str(other)
 
     response = responses[first]
     assert response.cmd == ctaphid.CBOR, str(response)
