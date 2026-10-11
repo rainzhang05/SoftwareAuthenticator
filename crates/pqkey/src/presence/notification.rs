@@ -1220,8 +1220,7 @@ mod tests {
     /// its own timeout says.
     ///
     /// The prompt waits a second, many nudge intervals, because a loaded
-    /// machine can oversleep each wait several times over (GitHub's macOS
-    /// runners take about 100 ms for a 20 ms sleep).
+    /// machine can oversleep each wait several times over.
     #[test]
     fn an_unanswered_prompt_is_nudged_on_gnome() {
         let server = FakeServer::named("gnome-shell");

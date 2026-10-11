@@ -1,36 +1,27 @@
-//! The operating-system boundary. Only the selected backend is compiled.
+//! The Linux operating-system boundary.
 //!
 //! Devices and client links exchange reports; services and system preparation
 //! expose semantic operations and diagnostics. Presence policy uses a
 //! normalized notification server. Runtime helpers select state paths,
 //! process protections, executable identity and the suspend-aware clock.
 
-#[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "linux")]
-use linux as native;
-#[cfg(target_os = "macos")]
-use macos as native;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-compile_error!("pqkey supports Linux and macOS builds");
 
 use crate::transport::HidDeviceDescriptor;
 use std::io;
 
 #[cfg(test)]
-pub(crate) use native::test_support;
-pub(crate) use native::{
+pub(crate) use linux::test_support;
+pub(crate) use linux::{
     BootTimeClock, PRESENCE_NOTIFY_HELP, RUN_HELP, START_HELP, current_executable_identity,
     disable_core_dumps, notification_connect_error, notification_failure, warn_device_access,
 };
-pub use native::{
-    ClientLink, Device, Notifications, System, UserService, default_state_dir, ensure_supported,
-    notifications, open_client,
+pub use linux::{
+    ClientLink, Device, Notifications, System, UserService, default_state_dir, notifications,
+    open_client,
 };
 
-/// Create the selected platform's virtual device. Drop removes it.
+/// Create the Linux virtual device. Drop removes it.
 pub fn create_device(descriptor: HidDeviceDescriptor) -> io::Result<Device> {
     Device::new(descriptor)
 }

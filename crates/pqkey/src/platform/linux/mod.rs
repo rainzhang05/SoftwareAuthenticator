@@ -29,10 +29,6 @@ pub(crate) use self::{
 };
 use std::io;
 
-/// Linux implements the running key.
-pub fn ensure_supported() -> io::Result<()> {
-    Ok(())
-}
 /// Prepare the desktop notification backend; connection is per request.
 pub fn notifications() -> io::Result<Notifications> {
     Ok(Notifications::new())

@@ -438,7 +438,6 @@ fn exit_status(result: &io::Result<()>) -> u8 {
 
 pub fn run_cli() -> io::Result<()> {
     let cli = Cli::parse();
-    crate::platform::ensure_supported()?;
     let state_dir = cli.state_dir;
     match cli.command.unwrap_or(Command::Status) {
         Command::Run(args) => daemon::run(state_dir, &args),
@@ -754,7 +753,6 @@ mod tests {
 
     /// A second key on the same state exits with a status of its own, which
     /// the systemd unit does not restart on.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_second_key_on_the_same_state_exits_with_status_3() {
         let dir = crate::test_support::TempDir::new("cli-already-running");
@@ -793,62 +791,5 @@ mod tests {
         assert_eq!(read.to_args(), start.to_args());
         assert!(daemon_args_from(b"/usr/bin/pqkey\0attach\0--foreground\0").is_none());
         assert!(daemon_args_from(b"/usr/bin/pqkey\0status\0").is_none());
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod macos_state_tests {
-    use super::*;
-    use std::process::Command;
-
-    #[test]
-    fn state_paths_use_application_support_and_allow_overrides() {
-        const EXPECTED: &str = "PQKEY_EXPECTED_STATE";
-        if let Some(expected) = std::env::var_os(EXPECTED) {
-            let cli = Cli::parse_from(["pqkey"]);
-            assert_eq!(cli.state_dir, PathBuf::from(expected));
-            let cli = Cli::parse_from(["pqkey", "--state-dir", "/explicit/state"]);
-            assert_eq!(cli.state_dir, PathBuf::from("/explicit/state"));
-            return;
-        }
-        for (home, state, expected) in [
-            (
-                Some("/Users/a user"),
-                None,
-                "/Users/a user/Library/Application Support/pqkey",
-            ),
-            (None, None, "./pqkey"),
-            (
-                Some("/Users/a user"),
-                Some("/environment/state"),
-                "/environment/state",
-            ),
-        ] {
-            let test =
-                "cli::macos_state_tests::state_paths_use_application_support_and_allow_overrides";
-            let mut command = Command::new(std::env::current_exe().unwrap());
-            command
-                .args(["--exact", test])
-                .env(EXPECTED, expected)
-                .env("XDG_DATA_HOME", "/ignored/xdg");
-            match home {
-                Some(home) => {
-                    command.env("HOME", home);
-                }
-                None => {
-                    command.env_remove("HOME");
-                }
-            }
-            match state {
-                Some(state) => {
-                    command.env("PQKEY_STATE_DIR", state);
-                }
-                None => {
-                    command.env_remove("PQKEY_STATE_DIR");
-                }
-            }
-            let output = command.output().unwrap();
-            assert!(output.status.success(), "{output:?}");
-        }
     }
 }

@@ -256,7 +256,6 @@ pub fn run(
     shutdown: ShutdownSignal,
     on_ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
-    platform::ensure_supported()?;
     platform::disable_core_dumps()?;
     let RunnerConfig {
         descriptor,

@@ -77,7 +77,6 @@ fn starting_or_stopping() -> io::Error {
 /// holding the state directory's lock throughout.  The pid file is published
 /// once the virtual device exists and removed on the way out.
 pub fn run(state_dir: PathBuf, args: &DaemonArgs) -> io::Result<()> {
-    platform::ensure_supported()?;
     state::ensure_state_dir(&state_dir)?;
     let config = args
         .to_runner_config(state_dir.clone())

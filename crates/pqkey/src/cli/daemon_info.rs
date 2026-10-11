@@ -187,7 +187,6 @@ mod tests {
         assert!(!info.runs_binary(&binary).unwrap());
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_non_dumpable_daemon_can_be_inspected() {
         use std::{
