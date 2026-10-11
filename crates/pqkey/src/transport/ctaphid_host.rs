@@ -276,13 +276,36 @@ enum State {
         last_packet_at: u64,
     },
     Processing(Processing),
+    Transmitting {
+        channel: u32,
+        final_frame: u64,
+    },
+}
+
+/// A selected report, still owned by the host until its successful write.
+///
+/// Selection does not remove it. After processing incoming packets, check
+/// [`CtaphidHost::is_outgoing_current`] before writing: INIT can invalidate
+/// this token. Only a successful device write may be reported through
+/// [`CtaphidHost::outgoing_frame_written`].
+#[derive(Clone, Copy, Debug)]
+pub struct OutgoingFrame {
+    frame: CtapHidFrame,
+    token: u64,
+}
+
+impl OutgoingFrame {
+    pub fn frame(&self) -> &CtapHidFrame {
+        &self.frame
+    }
 }
 
 pub struct CtaphidHost<R = OsRng> {
     state: State,
     /// The message being received.
     message: Vec<u8>,
-    pending: VecDeque<CtapHidFrame>,
+    pending: VecDeque<OutgoingFrame>,
+    next_token: u64,
     channels: Channels,
     rng: R,
     capabilities: u8,
@@ -315,6 +338,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
             state: State::Idle,
             message: Vec::with_capacity(MAX_MESSAGE_SIZE),
             pending: VecDeque::new(),
+            next_token: 0,
             channels: Channels::default(),
             rng,
             capabilities: 0,
@@ -394,8 +418,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
             && now >= last_packet_at + CONTINUATION_TIMEOUT_MS
         {
             debug!("message timeout cid={channel:08x}");
-            self.state = State::Idle;
-            self.enqueue_error(channel, ErrorCode::Timeout);
+            self.finish_error(channel, ErrorCode::Timeout);
         }
     }
 
@@ -463,7 +486,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
         frame[5..7].copy_from_slice(&1u16.to_be_bytes());
         frame[7] = status as u8;
         debug!("TX keepalive cid={channel:08x} status={status:?}");
-        self.pending.push_back(CtapHidFrame::new(frame));
+        self.queue_frame(CtapHidFrame::new(frame));
         true
     }
 
@@ -472,7 +495,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
     /// if anything.
     pub fn next_deadline(&self) -> Option<u64> {
         let transaction = match &self.state {
-            State::Idle => None,
+            State::Idle | State::Transmitting { .. } => None,
             State::Receiving { last_packet_at, .. } => {
                 Some(last_packet_at + CONTINUATION_TIMEOUT_MS)
             }
@@ -596,8 +619,34 @@ impl<R: CryptoRng> CtaphidHost<R> {
         self.enqueue_message(channel, command, &response);
     }
 
-    pub fn next_outgoing_frame(&mut self) -> Option<CtapHidFrame> {
-        self.pending.pop_front()
+    /// Select the next report without retiring it or releasing its CID.
+    pub fn next_outgoing_frame(&self) -> Option<OutgoingFrame> {
+        self.pending.front().copied()
+    }
+
+    /// Whether a selected report remains the queue head after incoming I/O.
+    pub fn is_outgoing_current(&self, frame: &OutgoingFrame) -> bool {
+        self.pending
+            .front()
+            .is_some_and(|head| head.token == frame.token)
+    }
+
+    /// Retire a report after `HidDevice::write_frame` returned `Ok(())`.
+    ///
+    /// Returns false for an invalidated or already retired token, changing
+    /// nothing. Only the successful write of the owned response's final
+    /// report completes its transaction. Auxiliary errors and keepalives
+    /// cannot complete another transaction.
+    pub fn outgoing_frame_written(&mut self, frame: &OutgoingFrame) -> bool {
+        if !self.is_outgoing_current(frame) {
+            return false;
+        }
+        self.pending.pop_front();
+        if matches!(self.state, State::Transmitting { final_frame, .. } if final_frame == frame.token)
+        {
+            self.state = State::Idle;
+        }
+        true
     }
 
     /// The channel of the transaction under way, if any.
@@ -610,6 +659,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
                 .map(|poll| poll.channel),
             State::Receiving { channel, .. } => Some(*channel),
             State::Processing(processing) => Some(processing.channel),
+            State::Transmitting { channel, .. } => Some(*channel),
         }
     }
 
@@ -652,9 +702,40 @@ impl<R: CryptoRng> CtaphidHost<R> {
             _ => {}
         }
         if length != 8 {
-            self.enqueue_error(channel, ErrorCode::InvalidLength);
+            if self.busy_channel().is_some() {
+                self.enqueue_error(channel, ErrorCode::InvalidLength);
+            } else {
+                self.finish_error(channel, ErrorCode::InvalidLength);
+            }
             return;
         }
+        let aborted = !matches!(self.state, State::Idle);
+        let assigned = if channel == BROADCAST_CID {
+            match self.allocate_channel() {
+                Some(assigned) => assigned,
+                None => {
+                    self.finish_error(channel, ErrorCode::ChannelBusy);
+                    return;
+                }
+            }
+        } else if channel != 0 && (aborted || self.channels.contains(channel)) {
+            // An active channel remains valid even after LRU eviction.
+            channel
+        } else {
+            if aborted {
+                self.enqueue_error(channel, ErrorCode::InvalidChannel);
+            } else {
+                self.finish_error(channel, ErrorCode::InvalidChannel);
+            }
+            return;
+        };
+
+        // Validation succeeded. Invalidate even a selected report by keeping
+        // it in this queue until its write is acknowledged. Other channels'
+        // auxiliary replies retain their FIFO order and never own this CID.
+        self.pending
+            .retain(|frame| frame.frame.0[..4] != channel.to_be_bytes());
+        self.message.clear();
         if self
             .u2f
             .as_ref()
@@ -675,28 +756,10 @@ impl<R: CryptoRng> CtaphidHost<R> {
         {
             self.interrupt_app = true;
         }
-        let aborted = !matches!(self.state, State::Idle);
         if aborted {
             debug!("INIT aborts the transaction on cid={channel:08x}");
             self.state = State::Idle;
         }
-
-        let assigned = if channel == BROADCAST_CID {
-            match self.allocate_channel() {
-                Some(assigned) => assigned,
-                None => {
-                    self.enqueue_error(channel, ErrorCode::ChannelBusy);
-                    return;
-                }
-            }
-        } else if aborted || self.channels.contains(channel) {
-            // A channel that had a transaction is in use, even if it has
-            // dropped out of the table.
-            channel
-        } else {
-            self.enqueue_error(channel, ErrorCode::InvalidChannel);
-            return;
-        };
 
         let mut response = [0u8; 17];
         response[..8].copy_from_slice(&data[..8]);
@@ -725,7 +788,10 @@ impl<R: CryptoRng> CtaphidHost<R> {
             // that request will immediately fail with a busy-error message
             // sent to the requesting channel."
             if busy != channel
-                || matches!(self.state, State::Processing(_))
+                || matches!(
+                    self.state,
+                    State::Processing(_) | State::Transmitting { .. }
+                )
                 || (matches!(self.state, State::Idle) && command != Some(Command::Msg))
             {
                 self.enqueue_error(channel, ErrorCode::ChannelBusy);
@@ -735,21 +801,20 @@ impl<R: CryptoRng> CtaphidHost<R> {
             // last one: §11.2.9.1.6 "ERR_INVALID_SEQ: The sequence does not
             // match expected value". The half-received message is dropped.
             if matches!(self.state, State::Receiving { .. }) {
-                self.state = State::Idle;
-                self.enqueue_error(channel, ErrorCode::InvalidSeq);
+                self.finish_error(channel, ErrorCode::InvalidSeq);
                 return;
             }
         }
 
         // Any other channel is served, allocated or not (see MAX_CHANNELS).
         if channel == 0 || channel == BROADCAST_CID {
-            self.enqueue_error(channel, ErrorCode::InvalidChannel);
+            self.finish_error(channel, ErrorCode::InvalidChannel);
             return;
         }
         let command = match command {
             Some(command @ (Command::Ping | Command::Cbor | Command::Msg)) => command,
             _ => {
-                self.enqueue_error(channel, ErrorCode::InvalidCommand);
+                self.finish_error(channel, ErrorCode::InvalidCommand);
                 return;
             }
         };
@@ -758,7 +823,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
         if length > MAX_MESSAGE_SIZE
             || (matches!(command, Command::Cbor | Command::Msg) && length == 0)
         {
-            self.enqueue_error(channel, ErrorCode::InvalidLength);
+            self.finish_error(channel, ErrorCode::InvalidLength);
             return;
         }
 
@@ -798,8 +863,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
         }
         if sequence != *next_sequence {
             debug!("RX cont cid={channel:08x} seq={sequence}, expected {next_sequence}");
-            self.state = State::Idle;
-            self.enqueue_error(channel, ErrorCode::InvalidSeq);
+            self.finish_error(channel, ErrorCode::InvalidSeq);
             return;
         }
         *next_sequence += 1;
@@ -835,8 +899,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
                         return;
                     }
                 } else if poll.answer.is_none() {
-                    self.state = State::Idle;
-                    self.enqueue_error(channel, ErrorCode::ChannelBusy);
+                    self.finish_error(channel, ErrorCode::ChannelBusy);
                     return;
                 }
             }
@@ -854,8 +917,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
             self.denied_polls
                 .retain(|poll| now.saturating_sub(poll.last_poll) <= U2F_POLL_TIMEOUT_MS);
             if requests_presence(&self.message) && self.denied_polls.len() >= MAX_CHANNELS {
-                self.state = State::Idle;
-                self.enqueue_error(channel, ErrorCode::ChannelBusy);
+                self.finish_error(channel, ErrorCode::ChannelBusy);
                 return;
             }
         }
@@ -893,6 +955,26 @@ impl<R: CryptoRng> CtaphidHost<R> {
     /// (CTAP 2.3 §11.2.4)  A longer payload, which only the app can
     /// produce, is not sent: the channel gets ERR_OTHER instead.
     fn enqueue_message(&mut self, channel: u32, command: Command, payload: &[u8]) {
+        let final_frame = self.queue_message(channel, command, payload);
+        self.state = State::Transmitting {
+            channel,
+            final_frame,
+        };
+    }
+
+    fn queue_frame(&mut self, frame: CtapHidFrame) -> u64 {
+        let token = self.next_token;
+        // Never reuse a token, including after INIT. Exhaustion requires
+        // more reports than a device could write in its lifetime.
+        self.next_token = token
+            .checked_add(1)
+            .expect("CTAPHID report token exhausted");
+        self.pending.push_back(OutgoingFrame { frame, token });
+        token
+    }
+
+    /// Append a whole message without changing transaction ownership.
+    fn queue_message(&mut self, channel: u32, command: Command, payload: &[u8]) -> u64 {
         debug!(
             "TX cid={channel:08x} cmd=0x{:02x} len={} preview={:02x?}",
             command.into_u8(),
@@ -907,8 +989,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
                 "a {}-byte response to cid={channel:08x} exceeds the {MAX_MESSAGE_SIZE} bytes a message can hold",
                 payload.len()
             );
-            self.enqueue_error(channel, ErrorCode::Other);
-            return;
+            return self.queue_message(channel, Command::Error, &[ErrorCode::Other as u8]);
         };
         let mut frame = [0u8; PACKET_SIZE];
         frame[..4].copy_from_slice(&channel.to_be_bytes());
@@ -916,18 +997,24 @@ impl<R: CryptoRng> CtaphidHost<R> {
         frame[5..7].copy_from_slice(&length.to_be_bytes());
         let (head, rest) = payload.split_at(payload.len().min(INIT_DATA));
         frame[7..7 + head.len()].copy_from_slice(head);
-        self.pending.push_back(CtapHidFrame::new(frame));
+        let mut final_frame = self.queue_frame(CtapHidFrame::new(frame));
 
         for (sequence, chunk) in (0..=0x7f_u8).zip(rest.chunks(CONT_DATA)) {
             let mut frame = [0u8; PACKET_SIZE];
             frame[..4].copy_from_slice(&channel.to_be_bytes());
             frame[4] = sequence;
             frame[5..5 + chunk.len()].copy_from_slice(chunk);
-            self.pending.push_back(CtapHidFrame::new(frame));
+            final_frame = self.queue_frame(CtapHidFrame::new(frame));
         }
+        final_frame
     }
 
+    /// An auxiliary rejection, never the owned transaction's response.
     fn enqueue_error(&mut self, channel: u32, code: ErrorCode) {
+        self.queue_message(channel, Command::Error, &[code as u8]);
+    }
+
+    fn finish_error(&mut self, channel: u32, code: ErrorCode) {
         self.enqueue_message(channel, Command::Error, &[code as u8]);
     }
 
@@ -951,6 +1038,260 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_response_frame_keeps_ownership_until_its_successful_write() {
+        for command in [Command::Ping, Command::Cbor, Command::Msg] {
+            for length in [
+                0,
+                1,
+                INIT_DATA,
+                INIT_DATA + 1,
+                INIT_DATA + CONT_DATA + 1,
+                MAX_MESSAGE_SIZE,
+            ] {
+                let mut host = host();
+                let payload: Vec<u8> = (0..length).map(|n| n as u8).collect();
+                if command == Command::Ping {
+                    send(&mut host, FIRST, command, &payload, 0);
+                } else {
+                    send(&mut host, FIRST, command, &[4], 0);
+                    assert_eq!(host.take_app_request().unwrap().command, command);
+                    host.app_response(payload.clone(), 1, None);
+                }
+                let packets = message_packets(FIRST, command as u8, &payload);
+                for (index, expected) in packets.iter().enumerate() {
+                    let selected = host.next_outgoing_frame().unwrap();
+                    assert_eq!(selected.frame(), expected);
+                    assert_eq!(host.busy_channel(), Some(FIRST));
+                    // In particular, selection of the last frame is not completion.
+                    send(&mut host, SECOND, Command::Cbor, &[4], 2);
+                    send(&mut host, FIRST, Command::Ping, &[1], 2);
+                    send(&mut host, BROADCAST_CID, Command::Init, &[0; 8], 2);
+                    assert!(host.take_app_request().is_none());
+                    assert!(host.is_outgoing_current(&selected));
+                    assert!(host.outgoing_frame_written(&selected));
+                    assert!(
+                        !host.outgoing_frame_written(&selected),
+                        "duplicate completion"
+                    );
+                    assert_eq!(
+                        host.busy_channel(),
+                        if index + 1 == packets.len() {
+                            None
+                        } else {
+                            Some(FIRST)
+                        }
+                    );
+                }
+                // Already queued busy replies cannot release this new request.
+                start_cbor(&mut host, SECOND, &[4], 3);
+                while let Some(frame) = host.next_outgoing_frame() {
+                    assert_eq!(frame.frame().0[4], Command::Error as u8 | 0x80);
+                    assert_eq!(frame.frame().0[7], ErrorCode::ChannelBusy as u8);
+                    assert!(host.outgoing_frame_written(&frame));
+                    assert_eq!(host.busy_channel(), Some(SECOND));
+                }
+                host.app_response(vec![0], 4, None);
+                assert_eq!(sent(&mut host), [message(SECOND, Command::Cbor, &[0])]);
+                assert_eq!(host.busy_channel(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn init_invalidates_every_selected_response_boundary() {
+        for length in [1, INIT_DATA + 1, MAX_MESSAGE_SIZE] {
+            let packets = message_packets(FIRST, Command::Ping as u8, &vec![0x42; length]);
+            for boundary in 0..packets.len() {
+                let mut host = host();
+                send(&mut host, FIRST, Command::Ping, &vec![0x42; length], 0);
+                for expected in &packets[..boundary] {
+                    let selected = host.next_outgoing_frame().unwrap();
+                    assert_eq!(selected.frame(), expected);
+                    assert!(host.outgoing_frame_written(&selected));
+                }
+                let stale = host.next_outgoing_frame().unwrap();
+                send(&mut host, SECOND, Command::Ping, &[1], 1);
+                send(&mut host, FIRST, Command::Init, &[9; 8], 2);
+                assert!(host.message.is_empty());
+                assert!(!host.is_outgoing_current(&stale));
+                assert!(!host.outgoing_frame_written(&stale));
+                assert_eq!(host.busy_channel(), Some(FIRST));
+                let replies = sent(&mut host);
+                assert_eq!(replies.len(), 2);
+                assert_eq!(replies[0], error(SECOND, ErrorCode::ChannelBusy));
+                assert_eq!(replies[1].command, Command::Init as u8);
+                assert_eq!(&replies[1].payload[..8], &[9; 8]);
+                start_cbor(&mut host, FIRST, &[4], 3);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_init_and_cancel_do_not_truncate_a_transmitting_response() {
+        let mut host = host();
+        let payload = vec![0x42; 200];
+        send(&mut host, FIRST, Command::Ping, &payload, 0);
+        let selected = host.next_outgoing_frame().unwrap();
+        send(&mut host, FIRST, Command::Init, &[0; 7], 1);
+        send(&mut host, FIRST, Command::Cancel, &[], 1);
+        send(&mut host, SECOND, Command::Cancel, &[], 1);
+        assert!(!host.take_interrupt());
+        assert!(host.is_outgoing_current(&selected));
+        assert_eq!(
+            sent(&mut host),
+            [
+                message(FIRST, Command::Ping, &payload),
+                error(FIRST, ErrorCode::InvalidLength)
+            ]
+        );
+    }
+
+    #[test]
+    fn repeated_init_invalidates_its_own_unwritten_reply() {
+        let mut host = host();
+        start_cbor(&mut host, FIRST, &[4], 0);
+        assert!(host.send_keepalive(true, 50));
+        let keepalive = host.next_outgoing_frame().unwrap();
+        send(&mut host, FIRST, Command::Init, &[1; 8], 51);
+        assert!(host.take_interrupt());
+        let old_init = host.next_outgoing_frame().unwrap();
+        send(&mut host, FIRST, Command::Init, &[2; 8], 52);
+        assert!(!host.outgoing_frame_written(&keepalive));
+        assert!(!host.outgoing_frame_written(&old_init));
+        host.app_response(vec![0x42; 200], 53, None);
+        let replies = sent(&mut host);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(&replies[0].payload[..8], &[2; 8]);
+        start_cbor(&mut host, SECOND, &[4], 54);
+    }
+
+    #[test]
+    fn terminal_transport_errors_and_held_cancellation_are_owned() {
+        let mut host = host();
+        host.handle_frame(&message_packets(FIRST, 0x08, &[])[0], 0);
+        assert_eq!(host.busy_channel(), Some(FIRST));
+        send(&mut host, SECOND, Command::Ping, &[], 1);
+        assert_eq!(
+            sent(&mut host),
+            [
+                error(FIRST, ErrorCode::InvalidCommand),
+                error(SECOND, ErrorCode::ChannelBusy)
+            ]
+        );
+        start_cbor(&mut host, FIRST, &[4], 2);
+        send(&mut host, FIRST, Command::Init, &[0; 8], 3);
+        sent(&mut host);
+        send(&mut host, SECOND, Command::Cbor, &[4], 4);
+        send(&mut host, SECOND, Command::Cancel, &[], 5);
+        let selected = host.next_outgoing_frame().unwrap();
+        assert_eq!(host.busy_channel(), Some(SECOND));
+        host.app_response(vec![0x42; 100], 6, None);
+        assert!(
+            host.is_outgoing_current(&selected),
+            "late old worker response is ignored"
+        );
+        assert_eq!(
+            sent(&mut host),
+            [message(
+                SECOND,
+                Command::Cbor,
+                &[CTAP2_ERR_KEEPALIVE_CANCEL]
+            )]
+        );
+        start_cbor(&mut host, SECOND, &[4], 7);
+    }
+
+    #[test]
+    fn u2f_pending_and_cached_replies_are_owned_separately_from_the_worker() {
+        for approved in [true, false] {
+            let mut host = host();
+            let request = start_u2f(&mut host, 0);
+            host.app_presence(true);
+            host.handle_timeout(100);
+            let pending = host.next_outgoing_frame().unwrap();
+            let answer = if approved {
+                vec![0x42; 200].into_iter().chain([0x90, 0]).collect()
+            } else {
+                vec![0x69, 0x85]
+            };
+            host.app_response(answer.clone(), 101, Some(101));
+            assert!(host.is_outgoing_current(&pending));
+            send(&mut host, SECOND, Command::Ping, &[], 102);
+            send(&mut host, FIRST, Command::Msg, &request, 102);
+            assert_eq!(
+                sent(&mut host),
+                [
+                    message(FIRST, Command::Msg, &[0x69, 0x85]),
+                    error(SECOND, ErrorCode::ChannelBusy),
+                    error(FIRST, ErrorCode::ChannelBusy)
+                ]
+            );
+            send(&mut host, FIRST, Command::Msg, &request, 103);
+            let cached = host.next_outgoing_frame().unwrap();
+            assert_eq!(host.busy_channel(), Some(FIRST));
+            send(&mut host, SECOND, Command::Cbor, &[4], 104);
+            assert!(host.take_app_request().is_none());
+            assert!(host.is_outgoing_current(&cached));
+            assert_eq!(
+                sent(&mut host),
+                [
+                    message(FIRST, Command::Msg, &answer),
+                    error(SECOND, ErrorCode::ChannelBusy)
+                ]
+            );
+            send(&mut host, FIRST, Command::Msg, &request, 105);
+            if approved {
+                assert!(host.take_app_request().is_some(), "approval consumed once");
+            } else {
+                assert!(host.take_app_request().is_none(), "denial is suppressed");
+                assert_eq!(
+                    sent(&mut host),
+                    [message(FIRST, Command::Msg, &[0x69, 0x85])]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn queued_replies_keep_other_channels_busy() {
+        for length in [1, INIT_DATA, INIT_DATA + 1, MAX_MESSAGE_SIZE] {
+            let mut host = host();
+            start_cbor(&mut host, FIRST, &[4], 0);
+            let response = vec![0x42; length];
+            host.app_response(response.clone(), 1, None);
+            send(&mut host, SECOND, Command::Cbor, &[4], 2);
+            assert!(
+                host.take_app_request().is_none(),
+                "queued {length}-byte response still owns the CID"
+            );
+            assert_eq!(
+                sent(&mut host),
+                [
+                    message(FIRST, Command::Cbor, &response),
+                    error(SECOND, ErrorCode::ChannelBusy)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn init_discards_queued_keepalives_and_response_fragments() {
+        let mut host = host();
+        start_cbor(&mut host, FIRST, &[4], 0);
+        assert!(host.send_keepalive(true, 50));
+        host.app_response(vec![0x42; 200], 51, None);
+        send(&mut host, FIRST, Command::Init, &[9; 8], 52);
+        let replies = sent(&mut host);
+        assert_eq!(
+            replies.len(),
+            1,
+            "only the resynchronization reply survives"
+        );
+        assert_eq!(replies[0].command, Command::Init as u8);
+        assert_eq!(&replies[0].payload[..8], &[9; 8]);
+    }
+
     #[test]
     fn reset_discards_suppression_so_invalidated_handles_reach_the_engine() {
         let mut host = host();
@@ -1344,20 +1685,22 @@ mod tests {
     fn sent<R: CryptoRng>(host: &mut CtaphidHost<R>) -> Vec<Message> {
         let mut messages = Vec::new();
         while let Some(frame) = host.next_outgoing_frame() {
-            let packet = frame.as_bytes();
+            let packet = frame.frame().as_bytes();
             assert_ne!(packet[4] & 0x80, 0, "continuation packet out of place");
             let channel = u32::from_be_bytes(packet[..4].try_into().unwrap());
             let length = u16::from_be_bytes([packet[5], packet[6]]) as usize;
             let mut payload = packet[7..7 + length.min(INIT_DATA)].to_vec();
+            assert!(host.outgoing_frame_written(&frame));
             let mut sequence = 0;
             while payload.len() < length {
                 let frame = host.next_outgoing_frame().expect("a continuation packet");
-                let packet = frame.as_bytes();
+                let packet = frame.frame().as_bytes();
                 assert_eq!(packet[..4], channel.to_be_bytes());
                 assert_eq!(packet[4], sequence);
                 let missing = length - payload.len();
                 payload.extend_from_slice(&packet[5..5 + missing.min(CONT_DATA)]);
                 sequence += 1;
+                assert!(host.outgoing_frame_written(&frame));
             }
             messages.push(Message {
                 channel,
@@ -1564,22 +1907,20 @@ mod tests {
     fn reserved_channels_and_oversized_messages_are_rejected() {
         let mut host = host();
         send(&mut host, 0, Command::Ping, &[1], 0);
+        assert_eq!(sent(&mut host), [error(0, ErrorCode::InvalidChannel)]);
         send(&mut host, BROADCAST_CID, Command::Cbor, &[4], 0);
+        assert_eq!(
+            sent(&mut host),
+            [error(BROADCAST_CID, ErrorCode::InvalidChannel)]
+        );
         send(&mut host, 0, Command::Init, &[0; 8], 0);
+        assert_eq!(sent(&mut host), [error(0, ErrorCode::InvalidChannel)]);
         send(&mut host, FIRST, Command::Init, &[0; 7], 0);
+        assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidLength)]);
         let mut oversized = message_packets(FIRST, Command::Ping.into_u8(), &[])[0];
         oversized.0[5..7].copy_from_slice(&(MAX_MESSAGE_SIZE as u16 + 1).to_be_bytes());
         host.handle_frame(&oversized, 0);
-        assert_eq!(
-            sent(&mut host),
-            [
-                error(0, ErrorCode::InvalidChannel),
-                error(BROADCAST_CID, ErrorCode::InvalidChannel),
-                error(0, ErrorCode::InvalidChannel),
-                error(FIRST, ErrorCode::InvalidLength),
-                error(FIRST, ErrorCode::InvalidLength),
-            ]
-        );
+        assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidLength)]);
     }
 
     /// CTAP 2.3 §11.2.5.1: a request from another channel while a request is
@@ -1663,6 +2004,7 @@ mod tests {
         let mut host = host();
         start_cbor(&mut host, FIRST, &[0x02], 0);
         send(&mut host, FIRST, Command::Init, &[0; 8], 1);
+        sent(&mut host);
         send(&mut host, FIRST, Command::Cbor, &[0x04], 2);
         assert!(host.take_app_request().is_none(), "the app is busy");
         sent(&mut host);

@@ -258,6 +258,7 @@ impl<D: HidDevice> Transport<'_, D> {
     fn read_frames(&mut self) -> io::Result<bool> {
         let mut read = false;
         while let Some(frame) = self.device.try_read_frame()? {
+            self.shutdown.check()?;
             self.collect_responses()?;
             let now = self.now();
             self.observe_presence();
@@ -305,9 +306,17 @@ impl<D: HidDevice> Transport<'_, D> {
             if wrote {
                 let resume = Instant::now() + INPUT_REPORT_INTERVAL;
                 self.read_frames()?;
+                if self.host.take_interrupt() {
+                    self.app.interrupt();
+                }
                 thread::sleep(resume.saturating_duration_since(Instant::now()));
             }
-            self.device.write_frame(&frame)?;
+            self.shutdown.check()?;
+            if !self.host.is_outgoing_current(&frame) {
+                continue;
+            }
+            self.device.write_frame(frame.frame())?;
+            assert!(self.host.outgoing_frame_written(&frame));
             wrote = true;
         }
         Ok(wrote)
@@ -319,6 +328,8 @@ impl<D: HidDevice> Transport<'_, D> {
     ///
     /// Fails with [`crate::shutdown::shutdown_error`] once shutdown has been
     /// requested, which is how [`serve`] gets out of its loop.
+    /// Any error ends this session: callers must stop and drop the transport.
+    /// Failed writes are not acknowledged and do not complete transactions.
     pub fn poll(&mut self) -> io::Result<bool> {
         self.shutdown.check()?;
         let mut did_work = self.read_frames()?;
@@ -599,7 +610,7 @@ mod tests {
     /// While a long answer is paced out, one input report a millisecond,
     /// the transport keeps reading what the host writes, so the kernel's
     /// small output queue does not fill up behind it: a request that arrives
-    /// during the answer is read, and answered, before the answer ends.
+    /// during the answer is read and rejected as busy without truncating it.
     #[test]
     fn packets_arriving_while_an_answer_is_paced_out_are_read() {
         let (device, mut kernel) = socket_device();
@@ -671,14 +682,205 @@ mod tests {
             None,
             "the ping was left unread"
         );
-        // The echo of the first ping, then the answer to the second.
+        // The echo stays intact; the request read during it is busy.
         assert!(
             reports[..echo]
                 .iter()
                 .all(|report| report[..4] == 0x0102_0304u32.to_be_bytes())
         );
         assert_eq!(reports[echo][..4], 0x0A0B_0C0Du32.to_be_bytes());
-        assert_eq!(&reports[echo][7..13], b"second");
+        assert_eq!(reports[echo][4], Command::Error.into_u8() | 0x80);
+        assert_eq!(reports[echo][7], ctaphid_host::ErrorCode::ChannelBusy as u8);
+        assert!(transport.host.next_outgoing_frame().is_none());
+        transport.host.handle_frame(
+            &CtapHidFrame::new(message_frames(0x0A0B_0C0D, Command::Ping, b"second")[0]),
+            transport.now(),
+        );
+        assert_eq!(
+            &transport.host.next_outgoing_frame().unwrap().frame().0[7..13],
+            b"second"
+        );
+    }
+}
+
+#[cfg(test)]
+mod transmission_tests {
+    use super::*;
+    use ctaphid_host::ErrorCode;
+    use std::{cell::RefCell, collections::VecDeque, os::fd::BorrowedFd};
+
+    struct Device {
+        written: RefCell<Vec<CtapHidFrame>>,
+        incoming: RefCell<VecDeque<CtapHidFrame>>,
+        after: usize,
+        fail_write: Option<usize>,
+        fail_read: bool,
+        stop: Option<ShutdownSignal>,
+        _responses: mpsc::Sender<AppResponse>,
+    }
+
+    impl HidDevice for Device {
+        fn try_read_frame(&self) -> io::Result<Option<CtapHidFrame>> {
+            if self.written.borrow().len() < self.after {
+                return Ok(None);
+            }
+            if let Some(stop) = &self.stop {
+                stop.request();
+            }
+            if self.fail_read {
+                return Err(io::Error::other("scripted read failure"));
+            }
+            Ok(self.incoming.borrow_mut().pop_front())
+        }
+
+        fn write_frame(&self, frame: &CtapHidFrame) -> io::Result<()> {
+            let mut written = self.written.borrow_mut();
+            if self.fail_write == Some(written.len()) {
+                return Err(io::Error::other("scripted write failure"));
+            }
+            written.push(*frame);
+            Ok(())
+        }
+
+        fn wait_with(&self, _: BorrowedFd<'_>, _: Option<Duration>) -> io::Result<bool> {
+            unreachable!()
+        }
+    }
+
+    fn packet(channel: u32, command: Command, payload: &[u8]) -> CtapHidFrame {
+        let mut bytes = [0; CTAPHID_FRAME_LEN];
+        bytes[..4].copy_from_slice(&channel.to_be_bytes());
+        bytes[4] = command as u8 | 0x80;
+        bytes[5..7].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        bytes[7..7 + payload.len()].copy_from_slice(payload);
+        CtapHidFrame::new(bytes)
+    }
+
+    fn transport(interrupt: &InterruptFlag, length: usize) -> Transport<'_, Device> {
+        let (requests, _) = mpsc::channel();
+        let (responses, receiver) = mpsc::channel();
+        let (wake, _peer) = UnixStream::pair().unwrap();
+        wake.set_nonblocking(true).unwrap();
+        let mut host = CtaphidHost::new();
+        host.handle_frame(&packet(1, Command::Cbor, &[4]), 0);
+        host.take_app_request().unwrap();
+        host.app_response(vec![0x42; length], 1, None);
+        Transport {
+            device: Device {
+                written: RefCell::new(Vec::new()),
+                incoming: RefCell::new(VecDeque::new()),
+                after: 1,
+                fail_write: None,
+                fail_read: false,
+                stop: None,
+                _responses: responses,
+            },
+            host,
+            app: AppWorker {
+                requests: Some(requests),
+                responses: receiver,
+                wake,
+                interrupt,
+                presence_before: None,
+            },
+            waiting: WaitingForUser::new(),
+            epoch: Instant::now(),
+            shutdown: ShutdownSignal::new(),
+        }
+    }
+
+    #[test]
+    fn init_read_between_selection_and_write_invalidates_the_local_frame() {
+        for length in [58, MAX_MESSAGE_SIZE] {
+            let interrupt = InterruptFlag::new();
+            let mut transport = transport(&interrupt, length);
+            transport
+                .device
+                .incoming
+                .borrow_mut()
+                .push_back(packet(1, Command::Init, &[9; 8]));
+            assert!(transport.flush_pending().unwrap());
+            let written = transport.device.written.borrow();
+            assert_eq!(written.len(), 2, "no locally held continuation escaped");
+            assert_eq!(written[0].0[4], Command::Cbor as u8 | 0x80);
+            assert_eq!(written[1].0[4], Command::Init as u8 | 0x80);
+            assert_eq!(&written[1].0[7..15], &[9; 8]);
+            assert!(transport.device.incoming.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_competitor_before_the_selected_last_frame_is_busy() {
+        let interrupt = InterruptFlag::new();
+        let mut transport = transport(&interrupt, 58);
+        transport
+            .device
+            .incoming
+            .borrow_mut()
+            .push_back(packet(2, Command::Cbor, &[4]));
+        assert!(transport.flush_pending().unwrap());
+        assert!(transport.host.take_app_request().is_none());
+        let written = transport.device.written.borrow();
+        assert_eq!(written.len(), 3);
+        assert_eq!(written[1].0[4], 0, "last continuation preserved");
+        assert_eq!(
+            written[2],
+            packet(2, Command::Error, &[ErrorCode::ChannelBusy as u8])
+        );
+    }
+
+    #[test]
+    fn failed_writes_never_retire_the_selected_frame() {
+        for (length, failure) in [(1, 0), (58, 0), (58, 1), (MAX_MESSAGE_SIZE, 128)] {
+            let interrupt = InterruptFlag::new();
+            let mut transport = transport(&interrupt, length);
+            transport.device.fail_write = Some(failure);
+            assert!(
+                transport
+                    .flush_pending()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("write failure")
+            );
+            assert_eq!(transport.device.written.borrow().len(), failure);
+            let selected = transport.host.next_outgoing_frame().unwrap();
+            assert!(transport.host.is_outgoing_current(&selected));
+            transport
+                .host
+                .handle_frame(&packet(2, Command::Cbor, &[4]), 2);
+            assert!(
+                transport.host.take_app_request().is_none(),
+                "failed final write still owns the CID"
+            );
+            assert!(transport.host.is_outgoing_current(&selected));
+        }
+    }
+
+    #[test]
+    fn shutdown_or_read_error_during_pacing_does_not_write_the_selected_frame() {
+        for shutdown in [false, true] {
+            let interrupt = InterruptFlag::new();
+            let mut transport = transport(&interrupt, 58);
+            if shutdown {
+                transport.device.stop = Some(transport.shutdown.clone());
+            } else {
+                transport.device.fail_read = true;
+            }
+            let error = transport.flush_pending().unwrap_err();
+            assert_eq!(crate::shutdown::is_shutdown(&error), shutdown);
+            assert_eq!(transport.device.written.borrow().len(), 1);
+            assert_eq!(
+                transport.host.next_outgoing_frame().unwrap().frame().0[4],
+                0
+            );
+        }
+        let interrupt = InterruptFlag::new();
+        let mut transport = transport(&interrupt, 1);
+        transport.shutdown.request();
+        assert!(crate::shutdown::is_shutdown(
+            &transport.flush_pending().unwrap_err()
+        ));
+        assert!(transport.device.written.borrow().is_empty());
     }
 }
 

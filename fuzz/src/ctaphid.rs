@@ -160,7 +160,8 @@ impl Harness {
     fn drain(&mut self) -> usize {
         let mut messages = 0;
         while let Some(frame) = self.host.next_outgoing_frame() {
-            let packet = *frame.as_bytes();
+            let packet = *frame.frame().as_bytes();
+            assert!(self.host.outgoing_frame_written(&frame));
             assert_ne!(packet[4] & 0x80, 0, "a continuation packet out of place");
             let channel = u32::from_be_bytes(packet[..4].try_into().unwrap());
             let command = packet[4] & 0x7f;
@@ -175,13 +176,14 @@ impl Harness {
                     .host
                     .next_outgoing_frame()
                     .expect("the rest of the message is queued with it");
-                let packet = frame.as_bytes();
+                let packet = frame.frame().as_bytes();
                 assert_eq!(packet[..4], channel.to_be_bytes(), "interleaved channel");
                 assert_eq!(packet[4], sequence, "continuation sequence");
                 let chunk = (length - payload.len()).min(CONT_DATA);
                 payload.extend_from_slice(&packet[5..5 + chunk]);
                 assert!(packet[5 + chunk..].iter().all(|&b| b == 0), "padding");
                 sequence += 1;
+                assert!(self.host.outgoing_frame_written(&frame));
             }
             self.check_message(channel, command, &payload);
             messages += 1;
