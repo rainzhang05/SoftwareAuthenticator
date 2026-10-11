@@ -66,6 +66,11 @@ keepalives, late workers, cancellation and U2F pending/cached answers.
 Raw HID transport E2E tests pace maximum-length PING requests, send a competing
 CID during the reply and resynchronize a transmitting channel. Run them on a
 Linux host with `/dev/uhid`; socket and callback tests cannot replace that check.
+Management-client recording links verify zero rejected-command reports at
+the advertised and HID limits, including authenticated CBOR and getInfo
+refreshes. CLI tests preserve PIN policy and the RP list after oversized
+configuration; `test_cli.py` repeats this through real HID with and without
+a PIN, then successfully authorizes eight shorter RP IDs.
 
 `./install.sh` rebuilds pqkey and restarts the key with your changes. To
 watch the key's debug log, run it in the foreground. The log includes site and

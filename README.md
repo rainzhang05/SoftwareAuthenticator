@@ -115,7 +115,11 @@ separate limit of 63 UTF-8 bytes. Raising it asks for confirmation, unless
 `--yes` is given: only `pqkey reset`, which erases every passkey and large
 blob, can lower it again. Repeated `--rp` options replace the RP IDs allowed
 to receive the `minPinLength` extension; omitting them keeps the list. A key
-can remember 8 RP IDs, each up to 253 bytes. If a PIN change becomes required,
+can remember 8 RP IDs, each up to 253 bytes. The complete configuration request
+must also fit the key's advertised 1,768-byte message limit, including CBOR
+and PIN authentication. If it is too large, pqkey reports its encoded size
+and limit before sending the command; use fewer or shorter RP IDs. The list
+is applied in one operation. If a PIN change becomes required,
 run `pqkey pin` and choose a different PIN meeting the current minimum.
 
 `pqkey passkeys` lists only passkeys, which are discoverable credentials. A

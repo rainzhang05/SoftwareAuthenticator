@@ -178,6 +178,14 @@ suite requires `/dev/uhid`.
   - Up to 8 RP IDs, each at most 253 bytes, may read the minimum through the
     `minPinLength` extension. An empty list leaves the stored one in place
     (§6.11.4).
+    The management client discovers `maxMsgSize` before dependent commands
+    and refreshes its cached limit with getInfo. Absent limits default to
+    1,024 bytes; malformed limits fail discovery. Every complete encoded
+    request, including its command byte and authentication, must fit the
+    smaller of that limit and CTAPHID's 7,609-byte capacity (§§6.4, 8,
+    11.2.4). The HID sender independently checks capacity before its first
+    report. Oversized RP lists are rejected locally as one operation;
+    shorten the list to fit pqkey's advertised 1,768 bytes.
   - There is no PIN complexity policy: `pinComplexityPolicy` true is refused
     with CTAP1_ERR_INVALID_PARAMETER, and false changes nothing.
 - Up to 1,000 stored credentials. Credential management lists and counts
