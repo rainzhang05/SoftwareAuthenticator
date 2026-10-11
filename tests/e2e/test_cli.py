@@ -460,7 +460,6 @@ def test_large_blobs_and_keys_survive_restart_and_reset_erases_them(pqkey: Pqkey
         assert replacement.large_blob_key != credential.large_blob_key
 
 
-
 def test_replacement_old_id_rejection_survives_restart_and_deletion(pqkey: Pqkey):
     """A dedicated real HID daemon keeps committed membership across restart."""
     pqkey.start()
@@ -491,6 +490,10 @@ def test_replacement_old_id_rejection_survives_restart_and_deletion(pqkey: Pqkey
             if not deleted:
                 client.authenticate(session, new)
         listing = pqkey.passkeys()
-        assert [row[1] for row in listing] == (["kept (Kept)"] if deleted else ["replacement (Replacement)", "kept (Kept)"])
+        expected_users = ["kept (Kept)"] if deleted else [
+            "kept (Kept)", "replacement (Replacement)"
+        ]
+        assert [row[1] for row in listing] == expected_users
         if not deleted:
-            assert pqkey.ok("passkeys", "delete", listing[0][3], "--yes", stdin=f"{PIN}\n") == "Passkey deleted.\n"
+            replacement = next(row for row in listing if row[1] == "replacement (Replacement)")
+            assert pqkey.ok("passkeys", "delete", replacement[3], "--yes", stdin=f"{PIN}\n") == "Passkey deleted.\n"
