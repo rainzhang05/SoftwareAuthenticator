@@ -4,7 +4,7 @@
 #   ./install.sh          asks once, then does everything
 #   ./install.sh --yes    does not ask to go ahead (a PIN it still asks for)
 #
-# 1. Installs what building needs and is missing: a C linker and curl, with
+# 1. Installs what building needs and is missing: a C linker, curl and ACL tools, with
 #    the system's package manager (sudo), and Rust, with rustup.
 # 2. Builds pqkey from this clone and installs it in /usr/local/bin (sudo),
 #    where every shell finds it, this one included.
@@ -18,6 +18,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+[ "$#" -le 1 ] || { echo "usage: $0 [--yes]" >&2; exit 2; }
 yes=false
 case "${1:-}" in
   "") ;;
@@ -44,8 +45,6 @@ fi
 
 # What the commands print goes here, and is shown only when one fails.
 log=${XDG_CACHE_HOME:-$HOME/.cache}/pqkey/install.log
-mkdir -p "$(dirname "$log")"
-: >"$log"
 
 duration() { # duration SECONDS: 1m 05s, or 12s
   if [ "$1" -ge 60 ]; then
@@ -122,12 +121,22 @@ step() {
   fi
 }
 
+original_path=$PATH
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 pqkey=/usr/local/bin/pqkey
 have_rust() { command -v cargo >/dev/null || [ -x "$cargo_home/bin/cargo" ]; }
+recovery=$pqkey.previous
+staged=$pqkey.install-$$
+recovery_hint() {
+  if [ -f "$recovery" ]; then
+    printf 'Previous executable: %s. To restore it: sudo mv -f %s %s && pqkey setup
+' "$recovery" "$recovery" "$pqkey" >&2
+  fi
+}
 
 missing=()
 command -v cc >/dev/null || missing+=(linker)
+command -v setfacl >/dev/null || missing+=(acl)
 have_rust || command -v curl >/dev/null || missing+=(curl)
 
 # Disk space in MB, as measured on Ubuntu: the build tools, Rust with rustup,
@@ -149,6 +158,7 @@ size() { # size MB: MB, readably
   fail "pqkey needs about $(size "$mb_needed") of disk space, but only $(size "$mb_free") is free"
 
 tools=("${missing[@]/linker/a C linker}")
+tools=("${tools[@]/acl/device ACL tools}")
 have_rust || tools+=("Rust")
 printf '\n%spqkey%s, a FIDO2 security key in software\n\n' "$bold" "$reset"
 echo "This sets it up for $(id -un), using about $(size "$mb_needed") of disk ($(size "$mb_free") free):"
@@ -161,17 +171,31 @@ echo
 echo "It needs your password once, for sudo."
 if ! $yes; then
   [ -t 0 ] || fail "no terminal to ask on; run it with --yes"
-  read -r -p "Continue? [Y/n] " answer
+  read -r -p "Continue? [Y/n] " answer || { echo "Installation cancelled; nothing was installed."; exit 0; }
   case $answer in [Nn]*) exit 0 ;; esac
 fi
+
+mkdir -p "$(dirname "$log")" || fail "cannot create the installation log directory"
+: >"$log" || fail "cannot write $log"
 
 # The sudo password once, now, kept fresh until the script ends: the steps
 # below that need root then never stop to ask, not even after a long build.
 command -v sudo >/dev/null || fail "installing pqkey needs sudo"
 sudo -v -p "Password for sudo (%p): " || fail "installing pqkey needs sudo"
-while sleep 60; do sudo -n -v 2>/dev/null || exit; done &
+while sleep 60; do sudo -n -v 2>/dev/null || exit; done </dev/null >/dev/null 2>&1 &
 sudo_keeper=$!
-trap 'kill "$sudo_keeper" ${drawer:+"$drawer"} 2>/dev/null || true' EXIT
+cleanup() {
+  local status=$?
+  kill "$sudo_keeper" ${drawer:+"$drawer"} 2>/dev/null || true
+  [ ! -e "$staged" ] || sudo -n rm -f "$staged" || true
+  if [ "$status" != 0 ]; then
+    printf 'Installation did not finish. Fix the reported problem and rerun ./install.sh. Log: %s\n' "$log" >&2
+    recovery_hint
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # What each step weighs in the progress bar.
 [ ${#missing[@]} = 0 ] || total_weight=$((total_weight + 15))
@@ -185,25 +209,26 @@ if [ ${#missing[@]} != 0 ]; then
       case $item in
         linker) echo "$1" ;;
         curl) echo curl ;;
+        acl) echo acl ;;
       esac
     done
   }
   install_packages() {
     if command -v apt-get >/dev/null; then
-      sudo apt-get update
+      sudo -n apt-get update || return $?
       # shellcheck disable=SC2046
-      sudo apt-get install -y $(packages build-essential)
+      sudo -n apt-get install -y $(packages build-essential)
     elif command -v dnf >/dev/null; then
       # shellcheck disable=SC2046
-      sudo dnf install -y $(packages gcc)
+      sudo -n dnf install -y $(packages gcc)
     elif command -v pacman >/dev/null; then
       # shellcheck disable=SC2046
-      sudo pacman -S --needed --noconfirm $(packages gcc)
+      sudo -n pacman -S --needed --noconfirm $(packages gcc)
     elif command -v zypper >/dev/null; then
       # shellcheck disable=SC2046
-      sudo zypper --non-interactive install $(packages gcc)
+      sudo -n zypper --non-interactive install $(packages gcc)
     else
-      echo "no apt-get, dnf, pacman or zypper: install a C compiler and linker (cc) and curl yourself"
+      echo "no apt-get, dnf, pacman or zypper: install the missing C compiler/linker (cc), curl and acl tools yourself"
       return 1
     fi
   }
@@ -216,15 +241,20 @@ if ! have_rust; then
   }
   step 20 60 "Installing Rust" "Rust installed" install_rust
 fi
+# Discover rustup/Cargo directly even when CARGO_HOME has no env script.
+if [ -d "$cargo_home/bin" ]; then
+  export PATH="$cargo_home/bin:$PATH"
+fi
 if [ -f "$cargo_home/env" ]; then
   # shellcheck source=/dev/null
   . "$cargo_home/env"
 fi
-command -v cargo >/dev/null || fail "cargo is not on the PATH; open a new terminal and run $0 again"
+command -v cargo >/dev/null || fail "cargo is unavailable; check CARGO_HOME or install Rust from https://rustup.rs, then rerun $0"
 
 # Without rustup, the system's Rust has to be new enough itself.
 if ! command -v rustup >/dev/null; then
   required=$(sed -nE 's/^rust-version *= *"([^"]+)".*/\1/p' Cargo.toml)
+  command -v rustc >/dev/null || fail "Cargo is available but rustc is missing; install Rust with rustup and rerun $0"
   have=$(rustc --version | cut -d' ' -f2)
   if [ "$(printf '%s\n%s\n' "$required" "$have" | sort -V | head -1)" != "$required" ]; then
     fail "Rust $have is older than the $required pqkey needs; install Rust with rustup (https://rustup.rs) and run $0 again"
@@ -239,22 +269,39 @@ if command -v rustup >/dev/null; then
 fi
 build() {
   if command -v rustup >/dev/null && ! rustup toolchain list | grep -q '^stable'; then
-    rustup toolchain install stable --profile minimal
+    rustup toolchain install stable --profile minimal || return $?
   fi
   # Its progress line goes to the log too, for the progress bar to read.
   CARGO_TERM_PROGRESS_WHEN=always CARGO_TERM_PROGRESS_WIDTH=100 \
     "${cargo[@]}" build --release --locked -p pqkey --target-dir target
 }
 step 60 cargo "Building pqkey" "pqkey built" build
-step 5 3 "Installing $pqkey" "pqkey installed in $(dirname "$pqkey")" \
-  sudo install -D -m 755 target/release/pqkey "$pqkey"
-# An earlier install.sh installed pqkey with `cargo install`, in a directory
-# that comes first on the PATH. A link in its place keeps a shell that
-# remembers that path working.
+install_binary() {
+  # Never truncate a running executable. Keep the first recovery copy across
+  # failed reruns until a complete setup establishes the new version is usable.
+  sudo -n install -D -m 755 target/release/pqkey "$staged" || return $?
+  if [ -f "$pqkey" ] && [ ! -e "$recovery" ]; then
+    sudo -n cp -p "$pqkey" "$recovery" || return $?
+  fi
+  sudo -n mv -f "$staged" "$pqkey"
+}
+step 5 3 "Installing $pqkey" "pqkey installed in $(dirname "$pqkey")" install_binary
+# Keep the known legacy path usable, including shells that cached it.
 old=${CARGO_INSTALL_ROOT:-$cargo_home}/bin/pqkey
-if [ -f "$old" ] && [ ! -L "$old" ]; then
-  "${cargo[@]}" uninstall -q pqkey 2>/dev/null || rm -f "$old"
-  ln -sf "$pqkey" "$old"
+if [ -f "$old" ] && [ ! -L "$old" ] && ! [ "$old" -ef "$pqkey" ]; then
+  ln -sf "$pqkey" "$old" || fail "cannot repair the old pqkey at $old"
 fi
 
-"$pqkey" setup --yes
+# Check the caller's PATH, not the PATH rustup added inside this child shell.
+resolved=$(PATH="$original_path" command -v pqkey || true)
+if [ -z "$resolved" ]; then
+  fail 'pqkey is not on this terminal’s PATH; run export PATH="/usr/local/bin:$PATH", then ./install.sh again'
+elif ! [ "$resolved" -ef "$pqkey" ]; then
+  fail "pqkey resolves to $resolved; remove that older installation or run export PATH=\"/usr/local/bin:\$PATH\", then ./install.sh again"
+fi
+
+# The left side retains terminal stdin for hidden PIN input. pipefail also
+# reports logging failures, and tee captures output, never terminal input.
+printf '\n==> Setting up pqkey\n' >>"$log"
+"$pqkey" setup --yes 2>&1 | tee -a "$log"
+sudo -n rm -f "$recovery"

@@ -47,16 +47,33 @@ The installer says how much disk space it will use (about 1.2 GB with the
 build tools and Rust), asks once to continue and once for your sudo password,
 and shows its progress as it:
 
-1. installs a C linker and Rust, if they are missing;
+1. installs a C linker, Rust and ACL tools, if they are missing;
 2. builds pqkey and installs it as `/usr/local/bin/pqkey`;
 3. gives the key access to `/dev/uhid` with
    [udev rules](contrib/udev/70-pqkey.rules), and loads the `uhid` module at
    every boot;
 4. starts the key as a systemd user service and asks you to choose its PIN.
 
-When it finishes, the key is running and `pqkey` works in the same terminal,
-with no reboot or new login. To update, run `git pull` and then
-`./install.sh` again.
+A successful installation means the installed service is running, its HID
+client can exchange messages, the configured presence provider is usable,
+and its PIN requirements are complete. `pqkey` works in the same terminal,
+with no reboot or new login. Missing requirements produce a nonzero exit
+status and instructions; the installer log is `~/.cache/pqkey/install.log`
+(or `$XDG_CACHE_HOME/pqkey/install.log`).
+
+`./install.sh --yes` approves installation; you still choose and confirm the
+PIN. Without terminal input, a fresh key remains installed but setup fails
+until you run `pqkey pin`, then `pqkey setup`, in a terminal. A configured key
+can be updated without PIN input unless its policy requires a PIN change.
+If your terminal's PATH excludes `/usr/local/bin`, run
+`export PATH="/usr/local/bin:$PATH"` in that terminal and rerun the installer.
+
+To update, run `git pull` and then `./install.sh` again. Reruns repair partial
+setup and preserve credentials, valid PINs and authenticator policy. Updates
+replace the executable atomically. If setup fails after replacement, the
+previous executable remains at `/usr/local/bin/pqkey.previous`; the installer
+prints retry and restore commands. Restore the executable only; keep the key's
+state directory. The recovery copy is removed after successful setup.
 
 > [!NOTE]
 > Anyone who can open `/dev/uhid` can create any HID device, keyboards
