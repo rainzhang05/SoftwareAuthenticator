@@ -99,7 +99,9 @@ pub(crate) fn ask(question: &str, default_yes: bool) -> io::Result<bool> {
     // Standard input's own buffer, which PIN lines read before were taken
     // from: a reader of its own could swallow lines meant for later.
     let mut answer = String::new();
-    io::stdin().lock().read_line(&mut answer)?;
+    if io::stdin().lock().read_line(&mut answer)? == 0 {
+        return Ok(false);
+    }
     Ok(is_yes(&answer, default_yes))
 }
 
@@ -218,20 +220,18 @@ pub fn running_problems(
     wait: Duration,
 ) -> io::Result<Vec<Problem>> {
     let mut problems = system.device_problems(running.pid(), wait)?;
-    if asks_with_notifications(state_dir, running) {
-        problems.extend(system.notification_problem(&notification_server())?);
+    let args = super::daemon_args_of(state_dir, running.pid())?;
+    match args.presence {
+        super::PresenceArg::Notify => {
+            problems.extend(system.notification_problem(&notification_server())?);
+        }
+        super::PresenceArg::Unanswered => problems.push(Problem::new(
+            "the configured presence provider never answers requests",
+            "configure the service to use --presence notify, then run `pqkey setup`",
+        )),
+        super::PresenceArg::AutoApprove => {}
     }
     Ok(problems)
-}
-
-/// Whether the key `running` asks for presence with notifications, as the
-/// user service and `pqkey start` without test options have it do.
-fn asks_with_notifications(state_dir: &Path, running: Running) -> bool {
-    match running {
-        Running::Service(_) => true,
-        Running::Daemon(pid) => super::daemon_args_of(state_dir, pid)
-            .is_ok_and(|args| args.presence == super::PresenceArg::Notify),
-    }
 }
 
 /// What the desktop's notification server says about itself.
@@ -266,44 +266,59 @@ const PIN_ATTEMPTS: usize = 3;
 /// The last step of `pqkey setup`: a PIN on the key `running`, which
 /// browsers ask for before they use passkeys. Asked for on a terminal, and
 /// again if it was mistyped. Returns whether the key has a PIN now.
-pub fn ensure_pin(running: Running, interactive: bool) -> io::Result<bool> {
-    let Ok((_, mut key)) = connect_to(running, DEVICE_WAIT) else {
-        output::problem(
-            "the key could not be reached to set its PIN",
-            "run `pqkey pin`",
-        )?;
-        return Ok(false);
-    };
+pub fn ensure_pin(running: Running, interactive: bool) -> io::Result<()> {
+    let (_, mut key) = connect_to(running, DEVICE_WAIT).map_err(|err| {
+        io::Error::new(err.kind(), format!(
+            "cannot communicate with the key: {err}; check `pqkey status` and rerun `pqkey setup`"
+        ))
+    })?;
+    ensure_pin_on(&mut key, interactive, &mut PinReader::from_stdin()).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("{err}; run `pqkey pin`, then `pqkey setup`"),
+        )
+    })
+}
+
+/// Uses the same CTAP client in setup and socket-backed regression tests.
+fn ensure_pin_on<L: ReportLink>(
+    key: &mut Authenticator<L>,
+    interactive: bool,
+    pins: &mut dyn PinSource,
+) -> io::Result<()> {
     let info = key.info().map_err(client_error)?;
     match info.pin_set {
-        Some(true) => {
-            if info.force_pin_change == Some(true) {
-                output::problem("the key requires a new PIN", "run `pqkey pin`")?;
-                return Ok(false);
-            }
-            output::done("PIN is set")?;
-            return Ok(true);
+        Some(true) if info.force_pin_change != Some(true) => {
+            check_pin_usable(key)?;
+            return output::done("PIN is set");
         }
-        Some(false) => {}
-        // A key without PINs, which pqkey is not.
-        None => return Ok(true),
+        Some(_) if !interactive => {
+            return Err(io::Error::other(
+                "PIN setup is incomplete; run `pqkey pin` in a terminal, then `pqkey setup`",
+            ));
+        }
+        Some(true) => {
+            outln!("The key requires a different PIN meeting its current policy.")?;
+            set_or_change_pin(key, pins)?;
+        }
+        Some(false) => {
+            outln!()?;
+            let minimum = minimum_pin_length(&info);
+            outln!("Choose a PIN for the key, at least {minimum} characters.")?;
+            set_first_pin(key, pins)?;
+        }
+        None => {
+            return Err(io::Error::other(
+                "the key does not support the required PIN",
+            ));
+        }
     }
-    if !interactive {
-        output::problem(
-            "the key has no PIN, which browsers ask for before they use passkeys",
-            "run `pqkey pin`",
-        )?;
-        return Ok(false);
+    let info = key.info().map_err(client_error)?;
+    if info.pin_set != Some(true) || info.force_pin_change == Some(true) {
+        return Err(io::Error::other("PIN setup is incomplete; run `pqkey pin`"));
     }
-    outln!()?;
-    let minimum = minimum_pin_length(&info);
-    outln!(
-        "Choose a PIN for the key, at least {minimum} characters. Browsers ask for it \
-         before they use passkeys."
-    )?;
-    set_first_pin(&mut key, &mut PinReader::from_stdin())?;
-    output::done("PIN set")?;
-    Ok(true)
+    check_pin_usable(key)?;
+    output::done("PIN setup complete")
 }
 
 /// Set a PIN on `key`, which has none, asking `pins` again for one that was
@@ -987,6 +1002,51 @@ mod tests {
         let err = set_first_pin(&mut key, &mut Script::of(&["1", "2", "3", "4567"])).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
         assert_eq!(key.info().unwrap().pin_set, Some(false));
+    }
+
+    #[test]
+    fn setup_pin_readiness_roundtrips_without_replacing_a_valid_pin() {
+        let dir = TempDir::new("setup-pin-ready");
+        let (_daemon, mut key) = start(&dir);
+        assert!(ensure_pin_on(&mut key, false, &mut Script::of(&[])).is_err());
+        assert_eq!(key.info().unwrap().pin_set, Some(false));
+        ensure_pin_on(&mut key, true, &mut Script::of(&["1234"])).unwrap();
+        let token = key.config_token(b"1234").unwrap();
+        key.toggle_always_uv(Some(&token)).unwrap();
+        ensure_pin_on(&mut key, false, &mut Script::of(&[])).unwrap();
+        assert!(key.management_token(b"1234").is_ok());
+        assert_eq!(key.info().unwrap().always_uv, Some(true));
+    }
+
+    #[test]
+    fn setup_does_not_report_a_blocked_pin_as_ready() {
+        let dir = TempDir::new("setup-blocked-pin");
+        let (_daemon, mut key) = start(&dir);
+        key.set_pin(b"1234").unwrap();
+        for _ in 0..3 {
+            assert!(key.management_token(b"0000").is_err());
+        }
+        let err = ensure_pin_on(&mut key, false, &mut Script::of(&[])).unwrap_err();
+        assert!(
+            err.to_string().contains("pqkey stop && pqkey start"),
+            "{err}"
+        );
+        assert_eq!(key.info().unwrap().pin_set, Some(true));
+    }
+
+    #[test]
+    fn setup_completes_a_required_pin_change_only_with_user_input() {
+        let dir = TempDir::new("setup-forced-pin");
+        let (_daemon, mut key) = start(&dir);
+        key.set_pin(b"1234").unwrap();
+        let token = key.config_token(b"1234").unwrap();
+        key.set_min_pin_length(Some(&token), None, None, Some(true))
+            .unwrap();
+        assert!(ensure_pin_on(&mut key, false, &mut Script::of(&[])).is_err());
+        assert_eq!(key.info().unwrap().force_pin_change, Some(true));
+        ensure_pin_on(&mut key, true, &mut Script::of(&["1234", "5678"])).unwrap();
+        assert_eq!(key.info().unwrap().force_pin_change, Some(false));
+        assert!(key.management_token(b"5678").is_ok());
     }
 
     #[test]

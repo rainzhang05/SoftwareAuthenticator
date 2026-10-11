@@ -41,6 +41,5 @@ pub struct SetupSteps {
     pub summary: Vec<String>,
     pub heading: &'static str,
     pub question: &'static str,
-    pub instructions: Vec<String>,
-    pub artifact: std::path::PathBuf,
+    pub script: String,
 }

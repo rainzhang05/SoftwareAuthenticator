@@ -97,14 +97,16 @@ The Linux backend exposes these interfaces:
   `ReportLink::send` and `receive(timeout)` exchange complete reports; the
   client owns CTAPHID and CTAP. The label need not be a device-node path.
 - `UserService::installed`, `main_pid`, `install(binary)`, `remove` and
-  `action(ServiceAction)`. Actions are start, restart, stop, enable and
+  `action(ServiceAction)`, plus `prepare_session` to synchronize the notification
+  bus. Actions are start, restart, stop, enable and
   reset-failed. Installation returns whether its file changed; removal
   returns the removed path, if any. Backend descriptions, help and log
   hints keep native names out of command logic.
 - `System::real`, `check_setup_caller`, `setup_steps`, `apply_setup_steps`,
   `refresh`, `login_problem`, `start_problems`, `device_problems`,
   `notification_problem` and `uninstall_instructions`. Setup steps carry
-  their description, confirmation, deferred instructions and artifact.
+  their description, confirmation and script; the script is written only after
+  approval, and retained with rerun instructions if a root step fails.
   Diagnostics return `Problem` values. Commands own confirmation, sequencing,
   PIN setup, readiness waits and output. Linux refreshes its
   membership snapshot after privileged setup.
@@ -294,7 +296,8 @@ to "Register a security key" for a non-discoverable credential.
   - It installs the udev rules and loads uhid at boot, with sudo after it
     lists what it changes.
   - It installs and starts the systemd user service.
-  - It asks for a PIN.
+  - It verifies client communication and presence, completes required PIN setup,
+    and returns success only when every readiness check passes.
 - `status` checks everything the key needs and names the fix for anything
   missing.
 

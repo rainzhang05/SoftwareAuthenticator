@@ -7,13 +7,14 @@ use nix::unistd::Pid;
 use super::{DaemonArgs, daemon_args_from};
 use crate::state_lock::{self, DaemonState, StateLock};
 
-const VERSION: &str = "pqkey-daemon-v1";
+const VERSION: &str = "pqkey-daemon-v2";
 
 pub(crate) struct DaemonInfo {
     pid: Pid,
     device: u64,
     inode: u64,
     cmdline: Vec<u8>,
+    session_bus: Option<Vec<u8>>,
 }
 
 impl DaemonInfo {
@@ -33,12 +34,28 @@ impl DaemonInfo {
             device,
             inode,
             cmdline,
+            session_bus: std::env::var_os("DBUS_SESSION_BUS_ADDRESS")
+                .map(|address| address.as_encoded_bytes().to_vec()),
         }
     }
 
     pub fn publish(&self, state_dir: &Path, lock: &StateLock) -> io::Result<()> {
-        let mut bytes =
-            format!("{VERSION} {} {} {}\n", self.pid, self.device, self.inode).into_bytes();
+        let bus = self.session_bus.as_ref().map_or_else(
+            || "-".into(),
+            |bytes| {
+                let mut encoded = String::from("x");
+                for byte in bytes {
+                    use std::fmt::Write;
+                    write!(encoded, "{byte:02x}").unwrap();
+                }
+                encoded
+            },
+        );
+        let mut bytes = format!(
+            "{VERSION} {} {} {} {bus}\n",
+            self.pid, self.device, self.inode
+        )
+        .into_bytes();
         bytes.extend_from_slice(&self.cmdline);
         state_lock::write_info_file(state_dir, lock, &bytes)
     }
@@ -54,16 +71,33 @@ impl DaemonInfo {
             .ok_or_else(invalid_info)?;
         let header = std::str::from_utf8(&bytes[..end]).map_err(|_| invalid_info())?;
         let mut fields = header.split_ascii_whitespace();
-        let (Some(version), Some(recorded), Some(device), Some(inode), None) = (
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-        ) else {
+        let (Some(version), Some(recorded), Some(device), Some(inode)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
             return Err(invalid_info());
         };
-        if version != VERSION || recorded.parse::<i32>().ok() != Some(pid.as_raw()) {
+        let session_bus = if version == VERSION {
+            let encoded = fields.next().ok_or_else(invalid_info)?;
+            if encoded == "-" {
+                None
+            } else {
+                let hex = encoded.strip_prefix('x').ok_or_else(invalid_info)?;
+                if hex.len() % 2 != 0 || !hex.is_ascii() {
+                    return Err(invalid_info());
+                }
+                Some(
+                    (0..hex.len())
+                        .step_by(2)
+                        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| invalid_info()))
+                        .collect::<io::Result<Vec<_>>>()?,
+                )
+            }
+        } else if version == "pqkey-daemon-v1" {
+            None
+        } else {
+            return Err(invalid_info());
+        };
+        if fields.next().is_some() || recorded.parse::<i32>().ok() != Some(pid.as_raw()) {
             return Err(invalid_info());
         }
         let cmdline = bytes[end + 1..].to_vec();
@@ -75,11 +109,19 @@ impl DaemonInfo {
             device: device.parse().map_err(|_| invalid_info())?,
             inode: inode.parse().map_err(|_| invalid_info())?,
             cmdline,
+            session_bus,
         })
     }
 
     pub fn args(&self) -> io::Result<DaemonArgs> {
         daemon_args_from(&self.cmdline).ok_or_else(invalid_info)
+    }
+
+    /// The provider checked by setup must be the one the daemon can reach.
+    pub fn session_bus_matches(&self) -> bool {
+        self.session_bus
+            == std::env::var_os("DBUS_SESSION_BUS_ADDRESS")
+                .map(|address| address.as_encoded_bytes().to_vec())
     }
 
     pub fn runs_binary(&self, binary: &Path) -> io::Result<bool> {
@@ -108,6 +150,37 @@ mod tests {
             .unwrap();
         state_lock::write_pid_file(dir.path(), &lock).unwrap();
         lock
+    }
+
+    #[test]
+    fn setup_checks_the_daemons_notification_bus_and_reads_old_runtime_info() {
+        let dir = TempDir::new("daemon-info-bus");
+        let lock = StateLock::try_acquire(dir.path()).unwrap().unwrap();
+        let mut info = crate::test_support::daemon_info(&DaemonArgs::default());
+        assert!(info.session_bus_matches());
+        let mut other = info.session_bus.clone().unwrap_or_default();
+        other.extend_from_slice(b"-another-session");
+        info.session_bus = Some(other);
+        info.publish(dir.path(), &lock).unwrap();
+        state_lock::write_pid_file(dir.path(), &lock).unwrap();
+        assert!(
+            !DaemonInfo::read(dir.path(), Pid::this())
+                .unwrap()
+                .session_bus_matches()
+        );
+        let mut old = format!(
+            "pqkey-daemon-v1 {} {} {}\n",
+            info.pid, info.device, info.inode
+        )
+        .into_bytes();
+        old.extend_from_slice(&info.cmdline);
+        fs::write(dir.path().join(state_lock::INFO_FILE), old).unwrap();
+        assert!(
+            DaemonInfo::read(dir.path(), Pid::this())
+                .unwrap()
+                .args()
+                .is_ok()
+        );
     }
 
     #[test]

@@ -85,7 +85,13 @@ pub(crate) fn root_script(system: &System, membership: &Membership) -> Option<Ro
         ));
         steps.push(step);
     }
-    if steps.is_empty() {
+    // Database membership does not update this session or its user manager.
+    // Also repair a partial installation whose node is still inaccessible.
+    let needs_acl = (!membership.in_session && !steps.is_empty()) || system.open_uhid().is_err();
+    if needs_acl {
+        summary.push("access to /dev/uhid in this session".into());
+    }
+    if steps.is_empty() && !needs_acl {
         return None;
     }
     steps.push(
@@ -95,12 +101,13 @@ pub(crate) fn root_script(system: &System, membership: &Membership) -> Option<Ro
          udevadm settle"
             .into(),
     );
-    if !membership.member {
+    if needs_acl {
         // The group applies from the next login on; until then an ACL lets
         // this user, and so the user service, open /dev/uhid right away.
         steps.push(format!(
             "# Until the group applies, at the next login, let the user open /dev/uhid.\n\
-             if command -v setfacl >/dev/null; then setfacl -m u:{user}:rw /dev/uhid; fi",
+             command -v setfacl >/dev/null || {{ echo 'install the acl package, then rerun pqkey setup' >&2; exit 1; }}\n\
+             setfacl -m u:{user}:rw /dev/uhid",
             user = shell_quote(&membership.user)
         ));
     }
@@ -238,14 +245,23 @@ mod tests {
             .lines()
             .filter(|l| l.starts_with("ExecStart="))
             .collect();
-        assert_eq!(exec, ["ExecStart=/home/a/.cargo/bin/pqkey run"]);
+        assert_eq!(
+            exec,
+            [format!(
+                "ExecStart=/home/a/.cargo/bin/pqkey --state-dir \"{}\" run",
+                default_state_dir().display()
+            )]
+        );
         assert_eq!(unit.lines().count(), UNIT_TEMPLATE.lines().count());
         assert!(unit.contains("RestartPreventExitStatus=3"));
         assert!(unit.contains("LimitCORE=0"));
 
         let unit = unit_file(Path::new("/home/a b/100%/pqkey")).unwrap();
         assert!(
-            unit.contains("\nExecStart=\"/home/a b/100%%/pqkey\" run\n"),
+            unit.contains(&format!(
+                "\nExecStart=\"/home/a b/100%%/pqkey\" --state-dir \"{}\" run\n",
+                default_state_dir().display()
+            )),
             "{unit}"
         );
         assert!(unit_file(Path::new("/home/a\nExecStartPre=/bin/x/pqkey")).is_err());
@@ -268,7 +284,7 @@ mod tests {
             "groupadd --system plugdev\n",
             "usermod -aG plugdev 'o'\\''brien'\n",
             "udevadm trigger --action=change --subsystem-match=hidraw\n",
-            "then setfacl -m u:'o'\\''brien':rw /dev/uhid; fi\n",
+            "setfacl -m u:'o'\\''brien':rw /dev/uhid\n",
         ] {
             assert!(script.contains(step), "{step}\n{script}");
         }
@@ -289,13 +305,17 @@ mod tests {
                 "udev rules for /dev/uhid and the key's device",
                 "uhid module, loaded now and at every boot",
                 "'plugdev' group for o'brien, which may open /dev/uhid",
+                "access to /dev/uhid in this session",
             ]
         );
         fs::create_dir_all(system.path("/sys/class/misc/uhid")).unwrap();
         let root = root_script(&system, &membership(true, true)).unwrap();
         assert_eq!(
             root.summary[1..],
-            ["uhid module, loaded at every boot".to_owned()]
+            [
+                "uhid module, loaded at every boot".to_owned(),
+                "access to /dev/uhid in this session".to_owned()
+            ]
         );
     }
 
@@ -331,7 +351,7 @@ mod tests {
         )
         .unwrap()
         .script;
-        assert!(!script.contains("setfacl"), "{script}");
+        assert!(script.contains("setfacl"), "{script}");
     }
 
     #[test]
@@ -350,6 +370,38 @@ mod tests {
         let root = root_script(&system, &membership(true, true)).unwrap();
         assert!(root.script.contains("\nmodprobe uhid\n"), "{root:?}");
         assert_eq!(root.summary, ["uhid module, loaded now"]);
+    }
+
+    #[test]
+    fn a_rerun_repairs_access_for_a_session_with_stale_groups() {
+        let dir = TempDir::new("setup-stale-group");
+        let system = System::under(dir.path().to_owned());
+        for (path, text) in [
+            (UDEV_RULES_PATH, UDEV_RULES),
+            (MODULES_LOAD_PATH, "uhid\n"),
+            ("/sys/class/misc/uhid/dev", "10:239\n"),
+            ("/dev/uhid", ""),
+        ] {
+            let path = system.path(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        let member = Membership {
+            in_session: false,
+            ..membership(true, true)
+        };
+        // An ACL from the first run already works, despite stale groups.
+        assert_eq!(root_script(&system, &member), None);
+        if unistd::geteuid().is_root() {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(system.path("/dev/uhid"), fs::Permissions::from_mode(0o000)).unwrap();
+        let root = root_script(&system, &member).unwrap();
+        assert_eq!(root.summary, ["access to /dev/uhid in this session"]);
+        assert!(!root.script.contains("usermod"));
+        assert!(root.script.contains("setfacl -m u:"));
+        assert!(root.script.contains("exit 1"));
     }
 
     #[test]

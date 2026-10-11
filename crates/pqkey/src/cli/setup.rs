@@ -16,61 +16,113 @@ use std::{
     time::Duration,
 };
 
-/// `pqkey setup`; `yes` runs the steps that need root without asking.
+/// `pqkey setup`; `yes` approves installation, never supplies a PIN.
 pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
+    setup_result(setup_inner(state_dir, yes), "pqkey setup")
+}
+
+fn setup_result(result: io::Result<()>, command: &str) -> io::Result<()> {
+    result.map_err(|err| {
+        // A closed pipe is a successful read-only command, but must never
+        // turn an interrupted installation into success.
+        if output::is_closed_output(&err) {
+            io::Error::other(format!("setup did not finish: {err}; rerun `{command}`"))
+        } else {
+            err
+        }
+    })
+}
+
+fn setup_inner(state_dir: &Path, yes: bool) -> io::Result<()> {
     System::check_setup_caller(state_dir)?;
     let binary = env::current_exe()?.canonicalize()?;
     if binary.components().any(|part| part.as_os_str() == "target") {
-        output::problem(
-            format!(
-                "{} is in a build directory, which `cargo clean` empties",
-                binary.display()
-            ),
-            "install pqkey with ./install.sh, which runs setup itself",
-        )?;
+        return Err(io::Error::other(format!(
+            "{} is in a build directory; install with ./install.sh, which runs setup itself",
+            binary.display()
+        )));
     }
-    let mut system = System::real()?;
+    let path = env::var_os("PATH");
+    run_setup(
+        &mut System::real()?,
+        SetupRequest {
+            state: state_dir,
+            binary: &binary,
+            yes,
+            interactive: io::stdin().is_terminal(),
+            path: path.as_deref(),
+        },
+        &mut || key::ask("Set these up with sudo?", true),
+    )
+}
 
-    let interactive = io::stdin().is_terminal();
-    if let Some(root) = system.setup_steps()? {
-        if !yes {
-            outln!("{}", root.heading)?;
-            for step in &root.summary {
-                outln!("  - {step}")?;
-            }
-            if !interactive || !key::ask(root.question, true)? {
-                for line in &root.instructions {
-                    outln!("{line}")?;
-                }
-                return Ok(());
-            }
-        }
-        system.apply_setup_steps(&root)?;
-        for step in &root.summary {
-            output::done(step)?;
-        }
-    }
-    // The script may have added this user to the device's access group.
-    system.refresh()?;
-    if let Some(problem) = system.login_problem()? {
-        UserService::install(&binary)?;
-        UserService::action(ServiceAction::Enable)?;
-        return output::problem(problem.what, problem.fix);
-    }
-    let problems = system.start_problems()?;
-    if !problems.is_empty() {
-        output::problems(&problems)?;
-        outln!()?;
-        outln!("The key cannot start yet: fix the above, then run `pqkey setup` again.")?;
-        return Ok(());
-    }
+/// The effects of setup, kept narrow so regression tests run the actual
+/// orchestration without changing the host's service, groups or devices.
+trait SetupHost {
+    fn steps(&self) -> io::Result<Option<crate::platform::SetupSteps>>;
+    fn apply(&mut self, steps: &crate::platform::SetupSteps) -> io::Result<()>;
+    fn blockers(&mut self) -> io::Result<Vec<checks::Problem>>;
+    fn start(&mut self, state: &Path, binary: &Path) -> io::Result<Running>;
+    fn problems(&self, state: &Path, running: Running) -> io::Result<Vec<checks::Problem>>;
+    fn pin(&mut self, running: Running, interactive: bool) -> io::Result<()>;
+    fn verify(&self, state: &Path, binary: &Path, running: Running) -> io::Result<()>;
+}
 
-    let changed = UserService::install(&binary)?;
+impl SetupHost for System {
+    fn steps(&self) -> io::Result<Option<crate::platform::SetupSteps>> {
+        self.setup_steps()
+    }
+    fn apply(&mut self, steps: &crate::platform::SetupSteps) -> io::Result<()> {
+        self.apply_setup_steps(steps)
+    }
+    fn blockers(&mut self) -> io::Result<Vec<checks::Problem>> {
+        self.refresh()?;
+        self.start_problems()
+    }
+    fn start(&mut self, state: &Path, binary: &Path) -> io::Result<Running> {
+        start_service(state, binary)
+    }
+    fn problems(&self, state: &Path, running: Running) -> io::Result<Vec<checks::Problem>> {
+        key::running_problems(state, self, running, Duration::from_secs(5))
+    }
+    fn pin(&mut self, running: Running, interactive: bool) -> io::Result<()> {
+        key::ensure_pin(running, interactive)
+    }
+    fn verify(&self, state: &Path, binary: &Path, running: Running) -> io::Result<()> {
+        if daemon::running(state)? != Some(running) || !matches!(running, Running::Service(_)) {
+            return Err(io::Error::other(
+                "the installed service is not running; check `journalctl --user -u pqkey`",
+            ));
+        }
+        if runs_another_binary(state, running.pid(), binary) {
+            return Err(io::Error::other(
+                "the service runs another executable; fix its ExecStart or drop-ins, then rerun `pqkey setup`",
+            ));
+        }
+        let info = super::daemon_info::DaemonInfo::read(state, running.pid())?;
+        if info.args()?.presence == super::PresenceArg::Notify && !info.session_bus_matches() {
+            return Err(io::Error::other(
+                "the service uses another notification session; remove its DBUS_SESSION_BUS_ADDRESS override and rerun `pqkey setup`",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn start_service(state_dir: &Path, binary: &Path) -> io::Result<Running> {
+    let before = daemon::running(state_dir)?;
+    if let Some(Running::Daemon(pid)) = before
+        && !super::daemon_args_of(state_dir, pid)?.are_defaults()
+    {
+        return Err(io::Error::other(
+            "the running key has custom options; configure them in the user service before running setup (see `systemctl --user edit pqkey`)",
+        ));
+    }
+    let changed = UserService::install(binary)?;
     UserService::action(ServiceAction::Enable)?;
-    // A unit that failed to start too often refuses to start until this.
-    let _ = UserService::action(ServiceAction::ResetFailed);
+    UserService::action(ServiceAction::ResetFailed)?;
+    let session_changed = UserService::prepare_session()?;
     let running = match daemon::running(state_dir)? {
-        // The service runs it from now on.
         Some(Running::Daemon(_)) => {
             daemon::unplug(state_dir)?;
             None
@@ -78,8 +130,9 @@ pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
         running => running,
     };
     let (running, how) = match running {
-        // A new unit, or a new binary in place of the one the service runs.
-        Some(Running::Service(pid)) if changed || runs_another_binary(state_dir, pid, &binary) => {
+        Some(Running::Service(pid))
+            if changed || session_changed || runs_another_binary(state_dir, pid, binary) =>
+        {
             (daemon::replug(state_dir)?, "restarted")
         }
         Some(running) => (running, "running"),
@@ -89,32 +142,78 @@ pub fn setup(state_dir: &Path, yes: bool) -> io::Result<()> {
         ),
     };
     output::done(format_args!("Key {how}; it starts with your session"))?;
-
-    let mut problems = key::running_problems(state_dir, &system, running, Duration::from_secs(5))?;
-    problems.extend(path_problem(&binary, env::var_os("PATH").as_deref()));
-    output::problems(&problems)?;
-    let has_pin = match key::ensure_pin(running, interactive) {
-        Ok(has_pin) => has_pin,
-        Err(err) => {
-            output::problem(format!("the PIN is not set: {err}"), "run `pqkey pin`")?;
-            false
-        }
-    };
-    finish(problems.is_empty() && has_pin)
+    Ok(running)
 }
 
-/// The last words of setup: whether the key is ready, and the commands to
-/// use it with.
-fn finish(ready: bool) -> io::Result<()> {
-    outln!()?;
-    if ready {
-        outln!(
-            "pqkey is ready. Use it on any site that supports passkeys or security keys, and \
-             approve the desktop notification that appears."
-        )?;
-    } else {
-        outln!("pqkey is almost ready: fix what is marked with ! above.")?;
+struct SetupRequest<'a> {
+    state: &'a Path,
+    binary: &'a Path,
+    yes: bool,
+    interactive: bool,
+    path: Option<&'a OsStr>,
+}
+
+fn run_setup(
+    host: &mut impl SetupHost,
+    request: SetupRequest<'_>,
+    confirm: &mut impl FnMut() -> io::Result<bool>,
+) -> io::Result<()> {
+    let SetupRequest {
+        state,
+        binary,
+        yes,
+        interactive,
+        path,
+    } = request;
+    if let Some(steps) = host.steps()? {
+        if !yes {
+            outln!("{}", steps.heading)?;
+            for step in &steps.summary {
+                outln!("  - {step}")?;
+            }
+            if !interactive {
+                return Err(io::Error::other(
+                    "setup needs approval; run `pqkey setup --yes` or ./install.sh in a terminal",
+                ));
+            }
+            if !confirm()? {
+                return outln!("Setup cancelled; nothing was installed.");
+            }
+        }
+        host.apply(&steps)?;
+        for step in &steps.summary {
+            output::done(step)?;
+        }
     }
+    let blockers = host.blockers()?;
+    if !blockers.is_empty() {
+        output::problems(&blockers)?;
+        return Err(io::Error::other(
+            "the key cannot start; fix the above, then rerun `pqkey setup`",
+        ));
+    }
+    let running = host.start(state, binary)?;
+    host.verify(state, binary, running)?;
+    let mut problems = host.problems(state, running)?;
+    problems.extend(path_problem(binary, path));
+    output::problems(&problems)?;
+    // Keep the final PIN interaction even when a separate repair is needed.
+    host.pin(running, interactive)?;
+    if !problems.is_empty() {
+        return Err(io::Error::other(
+            "setup is incomplete; fix the above, then rerun `pqkey setup`",
+        ));
+    }
+    host.verify(state, binary, running)?;
+    finish()
+}
+
+/// Only reached after every readiness check has passed.
+fn finish() -> io::Result<()> {
+    outln!()?;
+    outln!(
+        "pqkey is ready. Use it on sites supporting passkeys or security keys; approve requests with the configured presence provider."
+    )?;
     outln!()?;
     for (command, what) in [
         ("pqkey", "the key's status"),
@@ -160,7 +259,10 @@ fn path_problem(binary: &Path, path: Option<&OsStr>) -> Option<checks::Problem> 
         }),
         None => Some(checks::Problem {
             what: format!("{} is not on your PATH", dir.display()),
-            fix: "add it in your shell's profile, or log in again if your profile adds it".into(),
+            fix: format!(
+                "in this terminal, run `export PATH=\"{}:$PATH\"`, then rerun `pqkey setup`",
+                dir.display()
+            ),
         }),
     }
 }
@@ -172,6 +274,10 @@ fn is_executable(path: &Path) -> bool {
 
 /// `pqkey setup --uninstall`.
 pub fn uninstall(state_dir: &Path) -> io::Result<()> {
+    setup_result(uninstall_inner(state_dir), "pqkey setup --uninstall")
+}
+
+fn uninstall_inner(state_dir: &Path) -> io::Result<()> {
     System::check_setup_caller(state_dir)?;
     if daemon::unplug(state_dir)?.is_some() {
         output::done("Key stopped")?;
@@ -191,6 +297,195 @@ mod tests {
     use super::*;
     use crate::test_support::TempDir;
     use std::path::PathBuf;
+    struct Fixture {
+        scenario: String,
+        trace: std::cell::RefCell<Vec<&'static str>>,
+    }
+    impl Fixture {
+        fn effect(&self, name: &'static str) -> io::Result<()> {
+            self.trace.borrow_mut().push(name);
+            if self.scenario == name {
+                Err(io::Error::other(format!("{name} failed; retry setup")))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    impl SetupHost for Fixture {
+        fn steps(&self) -> io::Result<Option<crate::platform::SetupSteps>> {
+            self.effect("prepare")?;
+            Ok(
+                (self.scenario != "configured").then(|| crate::platform::SetupSteps {
+                    summary: vec!["fixture permissions".into()],
+                    heading: "Setup needs root:",
+                    question: "Continue?",
+                    script: "exit 0".into(),
+                }),
+            )
+        }
+        fn apply(&mut self, _: &crate::platform::SetupSteps) -> io::Result<()> {
+            self.effect("root")
+        }
+        fn blockers(&mut self) -> io::Result<Vec<checks::Problem>> {
+            self.effect("refresh")?;
+            Ok(if self.scenario == "blockers" {
+                vec![checks::Problem::new(
+                    "cannot open /dev/uhid",
+                    "install acl and rerun setup",
+                )]
+            } else {
+                Vec::new()
+            })
+        }
+        fn start(&mut self, _: &Path, _: &Path) -> io::Result<Running> {
+            self.effect("service")?;
+            Ok(Running::Service(unistd::Pid::this()))
+        }
+        fn problems(&self, _: &Path, _: Running) -> io::Result<Vec<checks::Problem>> {
+            self.effect("client")?;
+            Ok(
+                if ["device", "notifications"].contains(&self.scenario.as_str()) {
+                    vec![checks::Problem::new(
+                        format!("{} unavailable", self.scenario),
+                        "repair and rerun setup",
+                    )]
+                } else {
+                    Vec::new()
+                },
+            )
+        }
+        fn pin(&mut self, _: Running, interactive: bool) -> io::Result<()> {
+            self.effect("pin")?;
+            if self.scenario == "missing-pin" && !interactive {
+                return Err(io::Error::other("PIN setup incomplete; run pqkey pin"));
+            }
+            Ok(())
+        }
+        fn verify(&self, _: &Path, _: &Path, _: Running) -> io::Result<()> {
+            self.effect("verify")
+        }
+    }
+
+    // Each scenario is a process: observe the real orchestration's output and
+    // the CLI's exit-status mapping, including explicit cancellation.
+    #[test]
+    fn setup_scenario_child() {
+        let Ok(scenario) = env::var("PQKEY_SETUP_SCENARIO") else {
+            return;
+        };
+        if scenario == "closed-output" {
+            let (reader, writer) = io::pipe().unwrap();
+            drop(reader);
+            unistd::dup2_stdout(writer).unwrap();
+        }
+        let dir = TempDir::new("setup-scenario");
+        let binary = dir.path().join("pqkey");
+        fs::write(&binary, "fixture").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut host = Fixture {
+            scenario: scenario.clone(),
+            trace: Default::default(),
+        };
+        let result = run_setup(
+            &mut host,
+            SetupRequest {
+                state: dir.path(),
+                binary: &binary,
+                yes: !["cancel", "approval"].contains(&scenario.as_str()),
+                interactive: !["approval", "missing-pin", "configured"]
+                    .contains(&scenario.as_str()),
+                path: (scenario != "path").then_some(dir.path().as_os_str()),
+            },
+            &mut || Ok(false),
+        );
+        let result = setup_result(result, "pqkey setup");
+        if let Err(err) = &result {
+            eprintln!("pqkey: {err}");
+        }
+        let _ = output::line(format_args!("TRACE:{}", host.trace.borrow().join(",")));
+        let status = crate::cli::exit_status(&result);
+        drop(dir);
+        std::process::exit(i32::from(status));
+    }
+
+    #[test]
+    fn interrupted_setup_output_is_failure_while_status_pipes_remain_successful() {
+        let result = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::setup::tests::setup_scenario_child",
+                "--nocapture",
+            ])
+            .env("PQKEY_SETUP_SCENARIO", "closed-output")
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert!(String::from_utf8_lossy(&result.stderr).contains("setup did not finish"));
+    }
+
+    #[test]
+    fn setup_completion_cancellation_and_failure_statuses() {
+        for scenario in [
+            "fresh",
+            "configured",
+            "cancel",
+            "approval",
+            "prepare",
+            "root",
+            "refresh",
+            "blockers",
+            "service",
+            "client",
+            "device",
+            "notifications",
+            "pin",
+            "missing-pin",
+            "path",
+            "verify",
+        ] {
+            let result = std::process::Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::setup::tests::setup_scenario_child",
+                    "--nocapture",
+                ])
+                .env("PQKEY_SETUP_SCENARIO", scenario)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            let ready = ["fresh", "configured"].contains(&scenario);
+            let success = ready || scenario == "cancel";
+            assert_eq!(
+                result.status.code(),
+                Some(if success { 0 } else { 1 }),
+                "{scenario}: {stdout} {stderr}"
+            );
+            assert_eq!(
+                stdout.contains("pqkey is ready."),
+                ready,
+                "{scenario}: {stdout}"
+            );
+            assert!(!stdout.contains("almost ready"));
+            if ["cancel", "approval", "prepare"].contains(&scenario) {
+                assert!(
+                    !stdout.contains("TRACE:prepare,root"),
+                    "{scenario}: {stdout}"
+                );
+            }
+            if scenario == "blockers" {
+                assert!(!stdout.contains(",service"));
+            }
+            if scenario == "configured" {
+                assert!(!stdout.contains(",root"));
+            }
+            if !success {
+                assert!(!stderr.trim().is_empty(), "{scenario}");
+            }
+        }
+    }
+
     #[test]
     fn an_older_pqkey_earlier_on_the_path_is_found() {
         use std::os::unix::fs::PermissionsExt;

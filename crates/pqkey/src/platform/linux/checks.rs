@@ -257,7 +257,7 @@ pub fn start_problems(system: &System, membership: &Membership) -> Vec<Problem> 
                         "this session started before you joined '{UHID_GROUP}', so it cannot open \
                          /dev/uhid"
                     ),
-                    "log out and in again",
+                    "run `pqkey setup` to grant access in this session",
                 )
             } else if membership.member {
                 Problem::new(
@@ -372,25 +372,21 @@ impl System {
         let Some(root) = super::setup::root_script(self, &member) else {
             return Ok(None);
         };
-        let artifact =
-            super::setup::hand_over(&super::setup::runtime_dir(), &root.script, "pqkey-setup.sh")?;
-        let instructions = vec![
-            String::new(),
-            "Run this script, then `pqkey setup` again:".into(),
-            String::new(),
-            format!("    sudo sh {}", artifact.display()),
-        ];
         Ok(Some(crate::platform::SetupSteps {
             summary: root.summary,
             heading: "Setup needs root (sudo) once, for:",
             question: "Set these up with sudo?",
-            instructions,
-            artifact,
+            script: root.script,
         }))
     }
     pub fn apply_setup_steps(&self, steps: &crate::platform::SetupSteps) -> io::Result<()> {
-        super::setup::run_as_root("sudo", &steps.artifact)?;
-        let _ = fs::remove_file(&steps.artifact);
+        let artifact = super::setup::hand_over(
+            &super::setup::runtime_dir(),
+            &steps.script,
+            "pqkey-setup.sh",
+        )?;
+        super::setup::run_as_root("sudo", &artifact)?;
+        let _ = fs::remove_file(&artifact);
         Ok(())
     }
     pub fn login_problem(&self) -> io::Result<Option<Problem>> {
@@ -398,7 +394,7 @@ impl System {
         Ok(needs_login(self, &member).then(|| {
             Problem::new(
                 format!("this session started before you joined '{UHID_GROUP}'"),
-                "log out and in again: the key then starts by itself, and `pqkey pin` sets its PIN",
+                "run `pqkey setup` to repair access in this session",
             )
         }))
     }
@@ -581,7 +577,10 @@ mod tests {
             ..member()
         });
         assert_eq!(relogin.len(), 1, "{relogin:?}");
-        assert_eq!(relogin[0].fix, "log out and in again");
+        assert_eq!(
+            relogin[0].fix,
+            "run `pqkey setup` to grant access in this session"
+        );
         let outsider = fix_for(Membership {
             member: false,
             in_session: false,
