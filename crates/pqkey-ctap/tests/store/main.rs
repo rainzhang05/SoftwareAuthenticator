@@ -15,3 +15,14 @@ mod file_store;
 mod verify;
 
 use pqkey_ctap::CoseAlg;
+
+#[test]
+fn memory_pin_writes_and_reset_are_intentionally_volatile() {
+    use pqkey_ctap::store::{CommitDurability, CredentialStore, MemoryStore, PinStateRecord};
+    let mut store = MemoryStore::new();
+    assert_eq!(
+        store.set_pin_state(&PinStateRecord::default()).unwrap(),
+        CommitDurability::Volatile
+    );
+    assert_eq!(store.clear().unwrap(), CommitDurability::Volatile);
+}

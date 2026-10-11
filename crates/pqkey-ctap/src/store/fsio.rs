@@ -444,6 +444,68 @@ mod tests {
     }
 
     #[test]
+    fn pin_publication_outcomes_cover_every_checkpoint_and_unsupported_flush() {
+        let scratch = scratch_dir();
+        for failing in [
+            "write",
+            "written",
+            "file-flush",
+            "file-flushed",
+            "rename",
+            "renamed",
+            "directory-flush",
+            "directory-flushed",
+        ] {
+            replace_pin_state(scratch.path(), "pin-state", b"previous").unwrap();
+            let outcome = with_hook(
+                Box::new(move |event, path| {
+                    if event == failing {
+                        Err(io_error(path, io::Error::other("injected")))
+                    } else {
+                        Ok(())
+                    }
+                }),
+                || replace_pin_state(scratch.path(), "pin-state", b"candidate"),
+            );
+            let published = ["renamed", "directory-flush", "directory-flushed"].contains(&failing);
+            if published {
+                assert_eq!(outcome.unwrap(), CommitDurability::Unconfirmed);
+            } else {
+                assert!(outcome.is_err());
+            }
+            assert_eq!(
+                fs::read(scratch.path().join("pin-state")).unwrap(),
+                if published {
+                    b"candidate".as_slice()
+                } else {
+                    b"previous".as_slice()
+                }
+            );
+            assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 1);
+        }
+        for kind in [ErrorKind::Unsupported, ErrorKind::InvalidInput] {
+            assert_eq!(
+                with_hook(
+                    Box::new(move |event, path| {
+                        if event == "directory-flush" {
+                            Err(io_error(path, io::Error::from(kind)))
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    || replace_pin_state(scratch.path(), "pin-state", b"visible")
+                )
+                .unwrap(),
+                CommitDurability::Unconfirmed
+            );
+        }
+        assert_eq!(
+            replace_pin_state(scratch.path(), "pin-state", b"flushed").unwrap(),
+            CommitDurability::Flushed
+        );
+    }
+
+    #[test]
     fn hex_is_lowercase_and_complete() {
         assert_eq!(hex(&[]), "");
         assert_eq!(hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");

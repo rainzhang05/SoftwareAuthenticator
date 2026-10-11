@@ -681,3 +681,6 @@ fn successful_reset_restores_defaults_in_the_running_engine_and_preserves_attest
         assert_eq!(fs::read(path.join(ATTESTATION_FILE)).unwrap(), attestation);
     }
 }
+
+#[path = "pin_publication_tests.rs"]
+mod pin_publication_tests;

@@ -505,6 +505,7 @@ fn unreadable_pin_state_is_treated_as_set_and_blocked_until_reset() {
     let (mut app, _) = app_with_store(store.clone(), [0x6B; 16], [], &NEVER_INTERRUPTED);
 
     assert!(app.pin_state.is_set(), "never acts as if no PIN is set");
+    assert_eq!(app.save_persistent_pin_state(), Err(CTAP2_ERR_PROCESSING));
     assert_eq!(get_pin_retries(&mut app), (0, None));
     for pin in [PIN, b"0000".as_slice()] {
         assert_eq!(

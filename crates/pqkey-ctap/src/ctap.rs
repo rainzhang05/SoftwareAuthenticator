@@ -56,6 +56,8 @@ mod hmac_secret;
 mod large_blobs;
 mod make_credential;
 mod pin;
+#[cfg(test)]
+pub(crate) use pin::observation as pin_observation;
 pub mod presence;
 mod request;
 mod reset;
