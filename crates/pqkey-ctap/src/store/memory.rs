@@ -7,9 +7,10 @@ use zeroize::Zeroizing;
 use super::envelope;
 use super::keys::{CredentialKeys, RootKey};
 use super::{
-    AttestationRecord, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS,
-    INITIAL_LARGE_BLOB_ARRAY, PinStateRecord, StoreError, next_created_at, sort_newest_first,
-    validate_attestation, validate_credential, validate_large_blob_array, validate_pin_state,
+    AttestationRecord, CommitDurability, CredentialCommit, CredentialRecord, CredentialStore,
+    DEFAULT_MAX_CREDENTIALS, INITIAL_LARGE_BLOB_ARRAY, PinStateRecord, StoreError, next_created_at,
+    sort_newest_first, validate_attestation, validate_credential, validate_large_blob_array,
+    validate_pin_state,
 };
 
 /// A [`CredentialStore`] that keeps everything in memory.
@@ -90,6 +91,43 @@ impl CredentialStore for MemoryStore {
 
     fn delete(&mut self, credential_id: &[u8]) -> Result<bool, StoreError> {
         Ok(self.credentials.remove(credential_id).is_some())
+    }
+
+    fn insert_or_replace_discoverable(
+        &mut self,
+        record: &CredentialRecord,
+    ) -> Result<CredentialCommit, StoreError> {
+        validate_credential(record)?;
+        if !crate::credential_id::is_discoverable(&record.credential_id) {
+            return Err(StoreError::InvalidRecord(
+                "replacement requires a discoverable credential",
+            ));
+        }
+        if self.credentials.contains_key(&record.credential_id) {
+            return Err(StoreError::InvalidRecord("credential ID is occupied"));
+        }
+        let matching = |existing: &CredentialRecord| {
+            crate::credential_id::is_discoverable(&existing.credential_id)
+                && existing.rp_id == record.rp_id
+                && existing.user_id == record.user_id
+        };
+        if !self.credentials.values().any(matching)
+            && self.credentials.len() >= self.max_credentials
+        {
+            return Err(StoreError::Full {
+                max: self.max_credentials,
+            });
+        }
+        let mut stored = record.clone();
+        stored.created_at = next_created_at(self.credentials.values());
+        let mut candidate = self.credentials.clone();
+        candidate.retain(|_, existing| !matching(existing));
+        candidate.insert(stored.credential_id.clone(), stored);
+        self.credentials = candidate;
+        Ok(CredentialCommit {
+            durability: CommitDurability::Volatile,
+            cleanup_pending: false,
+        })
     }
 
     fn list(&self) -> Result<Vec<CredentialRecord>, StoreError> {

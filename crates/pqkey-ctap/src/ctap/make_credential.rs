@@ -11,7 +11,7 @@ use super::storage::store_status;
 use super::{AttestationMode, CtapApp};
 use crate::CoseAlg;
 use crate::cbor::{SecretValue, encoded_len_bound};
-use crate::store::{AttestationRecord, CredentialRecord, MAX_CRED_BLOB_LENGTH, StoreError};
+use crate::store::{AttestationRecord, CredentialRecord, MAX_CRED_BLOB_LENGTH};
 use crate::try_sign_challenge;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -565,69 +565,35 @@ impl CtapApp<'_> {
             // Stored only once the response is complete, so a request that
             // fails leaves no credential behind that the platform never
             // learned about.
+            let mut out = Zeroizing::new(Vec::with_capacity(1 + encoded.len()));
+            out.push(CTAP2_OK);
+            out.extend_from_slice(&encoded);
             if stored {
                 self.store_new_credential(&record)?;
             }
-            let mut out = Vec::with_capacity(1 + encoded.len());
-            out.push(CTAP2_OK);
-            out.extend_from_slice(&encoded);
-            return Ok(out);
+            return Ok(core::mem::take(&mut *out));
         }
         log::error!("the makeCredential response does not fit even without attestation");
         Err(CTAP2_ERR_PROCESSING)
     }
 
-    /// Persist a newly created stored credential.
-    ///
-    /// CTAP 2.3 §6.1.2 step 17.2: when a discoverable credential is created
-    /// ("rk" true) and "a credential for the same rp.id and account ID already
-    /// exists on the authenticator", the authenticator must "Overwrite that
-    /// credential".  Only discoverable credentials are replaced: a
-    /// non-discoverable credential for the same account is the relying
-    /// party's to keep or drop.  The replaced credentials are deleted, which
-    /// also stops their IDs from working (§6.1.3).
-    ///
-    /// The new credential is written first and the old ones deleted after, so
-    /// a failure can leave a duplicate but never loses the account.  Only when
-    /// the store is full is the replaced credential deleted first, because the
-    /// overwrite needs no extra space (step 17.4 is checked after step 17.2).
+    /// Commit replacement through the store's authoritative membership.
+    /// CTAP 2.3 §6.1.2 step 17.2 and §6.1.3 require both overwrite and
+    /// rejection of every retired ID, even when ciphertext cleanup fails.
     fn store_new_credential(&mut self, record: &CredentialRecord) -> Result<(), u8> {
-        let replaced: Vec<Vec<u8>> = self
-            .stored_credentials()?
-            .iter()
-            .filter(|existing| {
-                is_discoverable(&record.credential_id)
-                    && existing.rp_id == record.rp_id
-                    && existing.user_id == record.user_id
-                    && is_discoverable(&existing.credential_id)
-            })
-            .map(|existing| existing.credential_id.clone())
-            .collect();
-        // `put` replaces a credential with the same ID; a random 32-byte ID
-        // only collides if the random number generator is broken.
+        if is_discoverable(&record.credential_id) {
+            let _committed = self
+                .store
+                .insert_or_replace_discoverable(record)
+                .map_err(|err| store_status("commit a discoverable credential", err))?;
+            return Ok(());
+        }
         if self.stored_credential(&record.credential_id)?.is_some() {
             log::error!("refusing to overwrite a credential with a duplicate random ID");
             return Err(CTAP2_ERR_PROCESSING);
         }
-        match self.store.put(record) {
-            Ok(()) => {}
-            Err(StoreError::Full { .. }) if !replaced.is_empty() => {
-                self.store
-                    .delete(&replaced[0])
-                    .map_err(|err| store_status("delete a replaced credential", err))?;
-                self.store
-                    .put(record)
-                    .map_err(|err| store_status("store a credential", err))?;
-            }
-            Err(err) => return Err(store_status("store a credential", err)),
-        }
-        for credential_id in &replaced {
-            if let Err(err) = self.store.delete(credential_id) {
-                // The new credential is stored and about to be registered by
-                // the relying party; failing now would orphan it.
-                log::warn!("could not delete a credential replaced by a new registration: {err}");
-            }
-        }
-        Ok(())
+        self.store
+            .put(record)
+            .map_err(|err| store_status("store a credential", err))
     }
 }

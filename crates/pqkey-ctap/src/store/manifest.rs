@@ -46,7 +46,7 @@ pub(super) fn encode(manifest: &Manifest) -> Result<Zeroizing<Vec<u8>>, StoreErr
             Location::Legacy => 0,
             Location::Managed => 1,
         });
-        for pair in name.as_bytes().chunks_exact(2) {
+        for pair in name.as_bytes().as_chunks::<2>().0 {
             let digit = |byte: u8| {
                 if byte <= b'9' {
                     byte - b'0'
@@ -71,7 +71,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Manifest, Corruption> {
     }
     let mut manifest = Manifest::new();
     let mut previous: Option<String> = None;
-    for entry in bytes[8..].chunks_exact(33) {
+    for entry in bytes[8..].as_chunks::<33>().0 {
         let location = match entry[0] {
             0 => Location::Legacy,
             1 => Location::Managed,

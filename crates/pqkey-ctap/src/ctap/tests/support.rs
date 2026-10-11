@@ -245,6 +245,12 @@ impl TryCryptoRng for TestRng {}
 pub(super) struct Faults {
     pub(super) get: bool,
     pub(super) put: bool,
+    /// Reproduces a write that fails only after the old full-store path has
+    /// freed a slot. Atomic replacement injects it before commitment.
+    pub(super) replacement_write: bool,
+    pub(super) delete: bool,
+    pub(super) replace: bool,
+    pub(super) replacement_cleanup: bool,
     pub(super) list: bool,
     /// `pin_state` reports the record as corrupt.
     pub(super) pin_state: bool,
@@ -339,10 +345,29 @@ impl CredentialStore for TestStore {
 
     fn put(&mut self, record: &CredentialRecord) -> Result<(), StoreError> {
         self.fail_if(|faults| faults.put)?;
+        let state = self.lock();
+        let fail =
+            state.faults.replacement_write && state.store.count()? < state.store.max_credentials();
+        drop(state);
+        self.fail_if(|_| fail)?;
         self.lock().store.put(record)
     }
 
+    fn insert_or_replace_discoverable(
+        &mut self,
+        record: &CredentialRecord,
+    ) -> Result<crate::store::CredentialCommit, StoreError> {
+        self.fail_if(|faults| {
+            faults.put || faults.replace || faults.replacement_write || faults.list || faults.get
+        })?;
+        let mut state = self.lock();
+        let mut committed = state.store.insert_or_replace_discoverable(record)?;
+        committed.cleanup_pending = state.faults.replacement_cleanup || state.faults.delete;
+        Ok(committed)
+    }
+
     fn delete(&mut self, credential_id: &[u8]) -> Result<bool, StoreError> {
+        self.fail_if(|faults| faults.delete)?;
         self.lock().store.delete(credential_id)
     }
 

@@ -13,7 +13,8 @@
 //! 1 MiB per record, and a post-quantum credential takes a few hundred bytes
 //! because ML-DSA keys are stored as their 32-byte seed), and no limit on the
 //! number of credentials other than the configurable
-//! [`CredentialStore::max_credentials`].
+//! [`CredentialStore::max_credentials`] and the file store's bounded
+//! membership metadata (1 MiB, comfortably above the default 1,000 slots).
 //!
 //! # Threat model
 //!
@@ -65,6 +66,10 @@
 //! [`CredentialStore::count`] skip it with a logged warning, so one bad file
 //! cannot hide the others.  It stays on disk until it is overwritten, deleted
 //! with [`CredentialStore::delete`], or removed by [`CredentialStore::clear`].
+//! Authoritative membership metadata is different: missing or corrupt
+//! metadata returns [`StoreError::CredentialSetUnavailable`], and cannot be
+//! skipped or rebuilt from records. Atomic replacement refuses unreadable
+//! active records rather than risk leaving a matching credential usable.
 //!
 //! # Concurrency
 //!
@@ -87,6 +92,7 @@ mod file;
 mod fsio;
 mod keys;
 mod large_blobs;
+mod manifest;
 mod memory;
 mod record;
 pub(crate) use record::MAX_CRED_BLOB_LENGTH;
@@ -104,6 +110,27 @@ pub use record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKey
 
 /// The credential limit a store uses unless configured otherwise.
 pub const DEFAULT_MAX_CREDENTIALS: usize = 1000;
+
+/// Durability of an already committed credential-set change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitDurability {
+    /// An in-memory store; nothing survives process exit.
+    Volatile,
+    /// Files and publication directory have been flushed successfully.
+    Flushed,
+    /// Publication is visible, but its directory flush failed. Power loss
+    /// can roll it back; a process restart observes the published set.
+    Unconfirmed,
+}
+
+/// A successful credential-set transaction. Every value means committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialCommit {
+    /// Whether publication was flushed to backing storage.
+    pub durability: CommitDurability,
+    /// Retired ciphertext remains to be removed. It is never active.
+    pub cleanup_pending: bool,
+}
 
 /// Storage for credentials, PIN state, the attestation key, the serialized
 /// large-blob array and the key that seals credential IDs.
@@ -131,11 +158,34 @@ pub trait CredentialStore {
     /// if `record` is inconsistent: an empty credential ID, an `alg` that does
     /// not match the key material, an invalid P-256 scalar, or a `cred_protect`
     /// outside 1–3, or a large-blob key on a non-discoverable credential.
+    /// In a managed file store, membership inserts commit at manifest rename;
+    /// later flush/cleanup errors are logged and return success. An occupied
+    /// orphan ID is rejected instead of reactivated. Active same-ID updates
+    /// retain the preceding per-record persistence semantics.
     fn put(&mut self, record: &CredentialRecord) -> Result<(), StoreError>;
+
+    /// Insert a fresh discoverable credential, atomically retiring every
+    /// discoverable credential with exactly its RP ID and user handle.
+    ///
+    /// Validate the record and reject an occupied ID before commitment. The
+    /// supplied creation order is ignored; the new record receives an order
+    /// newer than the preceding set. Replacement needs no additional logical
+    /// slot, while a new account obeys [`Self::max_credentials`].
+    ///
+    /// An error preserves the preceding usable credentials. Success always
+    /// means committed: only the new credential is active for this account,
+    /// including lookup by ID. Post-publication flush and cleanup problems
+    /// are represented in the outcome, never reported as a failed insert.
+    fn insert_or_replace_discoverable(
+        &mut self,
+        record: &CredentialRecord,
+    ) -> Result<CredentialCommit, StoreError>;
 
     /// Delete the credential with this ID, returning whether one was stored.
     ///
     /// A credential that is stored but corrupt is deleted too.
+    /// In a managed file store, deletion commits by removing membership;
+    /// subsequent flush/cleanup problems are logged and still return `true`.
     fn delete(&mut self, credential_id: &[u8]) -> Result<bool, StoreError>;
 
     /// Every readable credential, most recently created first.
@@ -263,6 +313,15 @@ impl fmt::Display for Corruption {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum StoreError {
+    /// Authoritative credential-set metadata is missing, corrupt or
+    /// inconsistent. Unlike an unreadable individual credential, this must
+    /// never be skipped or mistaken for an empty store.
+    CredentialSetUnavailable {
+        /// The metadata object's logical name.
+        object: String,
+        /// Why authority could not be established.
+        detail: String,
+    },
     /// Reading or writing the backing storage failed.
     Io {
         /// The file or directory being accessed.
@@ -304,6 +363,9 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            StoreError::CredentialSetUnavailable { object, detail } => {
+                write!(f, "credential-set authority {object} unavailable: {detail}")
+            }
             StoreError::Io { path, source } => write!(f, "{}: {source}", path.display()),
             StoreError::Corrupt { object, reason } => write!(f, "{object} is corrupt: {reason}"),
             StoreError::KeyUnavailable { domain, detail } => {

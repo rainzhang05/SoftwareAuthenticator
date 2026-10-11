@@ -169,6 +169,87 @@ fn overwrite_succeeds_in_a_full_store_and_new_accounts_do_not() {
     assert_eq!(ids(&app), [new]);
 }
 
+fn assertion_with_id(id: &[u8]) -> Vec<u8> {
+    let mut request: Value = from_reader(get_assertion_payload().as_slice()).unwrap();
+    request.as_map_mut().unwrap().push((
+        Value::Integer(Integer::from(3)),
+        Value::Array(vec![canonical_map(vec![
+            (Value::Text("type".into()), Value::Text("public-key".into())),
+            (Value::Text("id".into()), Value::Bytes(id.to_vec())),
+        ])]),
+    ));
+    let mut bytes = Vec::new();
+    into_writer(&request, &mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn failed_full_replacement_preserves_the_original_and_unrelated_accounts() {
+    let store = TestStore::with_max_credentials(2);
+    let (mut app, _) = app_with_store(store.clone(), [0x81; 16], [], &NEVER_INTERRUPTED);
+    let original = register(&mut app, RP_ID, &[1], Some(true));
+    let unrelated = register(&mut app, RP_ID, &[2], Some(true));
+    let before = store.credentials();
+    store.faults(|faults| faults.replacement_write = true);
+    assert_eq!(
+        app.handle_make_credential(&make_credential_payload(RP_ID, &[1], Some(true))),
+        Err(CTAP2_ERR_PROCESSING)
+    );
+    assert_eq!(store.credentials(), before);
+    store.faults(|faults| faults.replacement_write = false);
+    for id in [&original, &unrelated] {
+        assert_eq!(
+            app.handle_get_assertion(&assertion_with_id(id)).unwrap()[0],
+            CTAP2_OK
+        );
+    }
+    let replacement = register(&mut app, RP_ID, &[1], Some(true));
+    assert_ne!(replacement, original);
+    assert_eq!(
+        app.handle_get_assertion(&assertion_with_id(&original)),
+        Err(CTAP2_ERR_NO_CREDENTIALS)
+    );
+    assert_eq!(store.credentials().len(), 2);
+}
+
+#[test]
+fn successful_replacement_rejects_old_ids_despite_cleanup_failure() {
+    let store = TestStore::with_max_credentials(3);
+    let (mut app, _) = app_with_store(store.clone(), [0x82; 16], [], &NEVER_INTERRUPTED);
+    let original = register(&mut app, RP_ID, &[1], Some(true));
+    let unrelated = register(&mut app, RP_ID, &[2], Some(true));
+    store.faults(|faults| faults.delete = true);
+    let replacement = register(&mut app, RP_ID, &[1], Some(true));
+    assert_ne!(replacement, original);
+    assert_eq!(store.credentials().len(), 2);
+    assert_eq!(
+        app.handle_get_assertion(&assertion_with_id(&original)),
+        Err(CTAP2_ERR_NO_CREDENTIALS)
+    );
+    assert_eq!(
+        app.handle_get_assertion(&assertion_with_id(&replacement))
+            .unwrap()[0],
+        CTAP2_OK
+    );
+    let (mut restarted, _) = app_with_store(store.clone(), [0x82; 16], [], &NEVER_INTERRUPTED);
+    assert_eq!(
+        restarted.handle_get_assertion(&assertion_with_id(&original)),
+        Err(CTAP2_ERR_NO_CREDENTIALS)
+    );
+    store.faults(|faults| faults.delete = false);
+    restarted.store.delete(&replacement).unwrap();
+    assert_eq!(
+        restarted.handle_get_assertion(&assertion_with_id(&original)),
+        Err(CTAP2_ERR_NO_CREDENTIALS)
+    );
+    assert_eq!(
+        restarted
+            .handle_get_assertion(&assertion_with_id(&unrelated))
+            .unwrap()[0],
+        CTAP2_OK
+    );
+}
+
 #[test]
 fn a_failed_registration_stores_nothing() {
     let store = TestStore::new();

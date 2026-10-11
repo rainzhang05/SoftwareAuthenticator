@@ -883,7 +883,183 @@ fn clear_ends_sealed_credential_ids<B: Backend>() {
     assert_eq!(opened.as_deref().map(Vec::as_slice), Some(&b"secret"[..]));
 }
 
+fn discoverable_replacement_retires_duplicates_at_capacity<B: Backend>() {
+    let mut fixture = B::create(5);
+    let store = &mut fixture.store;
+    let old = new_record(CoseAlg::ES256);
+    let mut duplicate = new_record(CoseAlg::MLDSA44);
+    duplicate.rp_id = old.rp_id.clone();
+    duplicate.user_id = old.user_id.clone();
+    let mut other_user = old.clone();
+    other_user.credential_id = random_bytes::<32>().to_vec();
+    other_user.user_id.push(0);
+    let mut other_rp = old.clone();
+    other_rp.credential_id = random_bytes::<32>().to_vec();
+    other_rp.rp_id = "EXAMPLE.com".into();
+    let mut non_discoverable = old.clone();
+    non_discoverable.credential_id = [vec![0], random_bytes::<32>().to_vec()].concat();
+    for record in [&old, &duplicate, &other_user, &other_rp, &non_discoverable] {
+        insert(store, record);
+    }
+    let preceding_order = store.list().unwrap()[0].created_at;
+    let mut replacement = new_record(CoseAlg::MLDSA65);
+    replacement.rp_id = old.rp_id.clone();
+    replacement.user_id = old.user_id.clone();
+    replacement.cred_protect = 3;
+    replacement.cred_blob = Some(vec![0x72; 32]);
+    replacement.large_blob_key = Some(random_bytes());
+    replacement.created_at = u64::MAX;
+    let committed = store.insert_or_replace_discoverable(&replacement).unwrap();
+    assert!(!committed.cleanup_pending);
+    let loaded = store.get(&replacement.credential_id).unwrap().unwrap();
+    assert_eq!(loaded, with_created_at(&replacement, preceding_order + 1));
+    assert_signature_verifies(&loaded);
+    assert_eq!(store.count().unwrap(), 4);
+    assert_eq!(
+        ids(&store.list().unwrap()),
+        [
+            replacement.credential_id.clone(),
+            non_discoverable.credential_id.clone(),
+            other_rp.credential_id.clone(),
+            other_user.credential_id.clone()
+        ]
+    );
+    for record in [&old, &duplicate] {
+        assert!(store.get(&record.credential_id).unwrap().is_none());
+    }
+    let mut second = replacement.clone();
+    second.credential_id = random_bytes::<32>().to_vec();
+    store.insert_or_replace_discoverable(&second).unwrap();
+    assert!(store.get(&replacement.credential_id).unwrap().is_none());
+    assert!(store.delete(&second.credential_id).unwrap());
+    for record in [&old, &duplicate, &replacement, &second] {
+        assert!(store.get(&record.credential_id).unwrap().is_none());
+    }
+    assert_eq!(store.count().unwrap(), 3);
+    for record in [&other_user, &other_rp, &non_discoverable] {
+        assert!(store.get(&record.credential_id).unwrap().is_some());
+    }
+}
+
+fn discoverable_replacement_validates_before_commit<B: Backend>() {
+    let mut fixture = B::create(1);
+    let store = &mut fixture.store;
+    let old = new_record(CoseAlg::ES256);
+    insert(store, &old);
+    let before = store.list().unwrap();
+    let mut replacement = old.clone();
+    replacement.credential_id = random_bytes::<32>().to_vec();
+    for invalid in 0..7 {
+        let mut candidate = replacement.clone();
+        match invalid {
+            0 => candidate.credential_id.clear(),
+            1 => candidate.alg = CoseAlg::MLDSA44,
+            2 => candidate.cred_protect = 0,
+            3 => candidate.cred_protect = 4,
+            4 => candidate.private_key = PrivateKeyMaterial::P256Scalar { scalar: [0; 32] },
+            5 => candidate.cred_blob = Some(vec![0; 33]),
+            6 => candidate.credential_id = [vec![0], random_bytes::<32>().to_vec()].concat(),
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            store.insert_or_replace_discoverable(&candidate),
+            Err(StoreError::InvalidRecord(_))
+        ));
+        assert_eq!(store.list().unwrap(), before);
+    }
+    let mut collision = replacement.clone();
+    collision.credential_id = old.credential_id.clone();
+    assert!(matches!(
+        store.insert_or_replace_discoverable(&collision),
+        Err(StoreError::InvalidRecord(_))
+    ));
+    assert_eq!(store.list().unwrap(), before);
+    store.insert_or_replace_discoverable(&replacement).unwrap();
+}
+
+fn atomic_new_accounts_respect_capacity<B: Backend>() {
+    let mut fixture = B::create(1);
+    let mut old = new_record(CoseAlg::ES256);
+    old.credential_id = [vec![0], random_bytes::<32>().to_vec()].concat();
+    insert(&mut fixture.store, &old);
+    let before = fixture.store.list().unwrap();
+    let new = new_record(CoseAlg::ES256);
+    assert!(matches!(
+        fixture.store.insert_or_replace_discoverable(&new),
+        Err(StoreError::Full { max: 1 })
+    ));
+    assert_eq!(fixture.store.list().unwrap(), before);
+    assert!(fixture.store.delete(&old.credential_id).unwrap());
+    fixture.store.insert_or_replace_discoverable(&new).unwrap();
+    let mut fresh = new.clone();
+    fresh.credential_id = random_bytes::<32>().to_vec();
+    fresh.user_id.push(0);
+    assert!(matches!(
+        fixture.store.insert_or_replace_discoverable(&fresh),
+        Err(StoreError::Full { max: 1 })
+    ));
+    let mut empty = B::create(0);
+    assert!(matches!(
+        empty.store.insert_or_replace_discoverable(&new),
+        Err(StoreError::Full { max: 0 })
+    ));
+}
+
+fn replacement_preserves_policy_sealing_and_updates<B: Backend>() {
+    let mut fixture = B::create(1);
+    let store = &mut fixture.store;
+    let pin = PinStateRecord {
+        pin_hash: Some(random_bytes()),
+        min_pin_length: 8,
+        pin_code_point_length: 8,
+        always_uv: true,
+        min_pin_length_rp_ids: Vec::new(),
+        ..PinStateRecord::default()
+    };
+    let attestation = attestation_record(&[256]);
+    store.set_pin_state(&pin).unwrap();
+    store.set_attestation(&attestation).unwrap();
+    store.set_signature_counter(42).unwrap();
+    let array = serialized_large_blob_array(b"\x80");
+    store.set_large_blob_array(&array).unwrap();
+    let sealed = store
+        .seal_credential_id(b"unchanged key domain", b"rp hash")
+        .unwrap();
+    let old = new_record(CoseAlg::MLDSA44);
+    insert(store, &old);
+    let mut new = old.clone();
+    new.credential_id = random_bytes::<32>().to_vec();
+    store.insert_or_replace_discoverable(&new).unwrap();
+    let mut updated = store.get(&new.credential_id).unwrap().unwrap();
+    let order = updated.created_at;
+    updated.sign_count = 9;
+    updated.user_name = Some("updated".into());
+    store.put(&updated).unwrap();
+    assert_eq!(store.get(&updated.credential_id).unwrap().unwrap(), updated);
+    assert_eq!(updated.created_at, order);
+    assert_eq!(store.pin_state().unwrap(), Some(pin));
+    assert_eq!(store.attestation().unwrap(), Some(attestation));
+    assert_eq!(store.signature_counter().unwrap(), 42);
+    assert_eq!(store.large_blob_array().unwrap(), array);
+    assert_eq!(
+        store
+            .open_credential_id(&sealed, b"rp hash")
+            .unwrap()
+            .unwrap()
+            .as_slice(),
+        b"unchanged key domain"
+    );
+    store.clear().unwrap();
+    assert_eq!(store.count().unwrap(), 0);
+    store.insert_or_replace_discoverable(&old).unwrap();
+    assert_eq!(store.count().unwrap(), 1);
+}
+
 conformance_suite!(
+    discoverable_replacement_retires_duplicates_at_capacity,
+    discoverable_replacement_validates_before_commit,
+    atomic_new_accounts_respect_capacity,
+    replacement_preserves_policy_sealing_and_updates,
     empty_store_holds_nothing,
     large_blob_array_round_trips_without_interpreting_contents,
     invalid_large_blob_arrays_preserve_the_committed_array,
