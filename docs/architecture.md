@@ -7,7 +7,7 @@ has the details (`cargo doc --workspace --no-deps --document-private-items
 ## Crates
 
 ```text
-crates/pqkey        the daemon and the pqkey command
+crates/pqkey        the Linux daemon and the pqkey command
 crates/pqkey-ctap   the CTAP engine and the credential store (no unsafe code)
 crates/pqkey-mldsa  ML-DSA-44/65/87 over RustCrypto's ml-dsa (no unsafe code)
 fuzz/               libFuzzer targets
@@ -36,8 +36,8 @@ system allocator. Reallocation allocates a replacement, copies the retained
 prefix, and wipes the old block, including any discarded tail.
 
 Before opening the store or creating the device, the daemon disables core
-files with a zero core size limit. On Linux it makes itself non-dumpable too,
-blocking core dumps, ptrace attachment and `/proc` memory reads by other
+files with a zero core size limit and makes itself non-dumpable, blocking
+core dumps, ptrace attachment and `/proc` memory reads by other
 unprivileged processes. Failures are warned about and startup continues.
 The user service also sets `LimitCORE=0`. Memory in use, swap and root remain
 outside these protections; the daemon does not lock its memory.
@@ -69,12 +69,15 @@ the kernel drops what does not fit, and the request fails or times out.
 
 ## Platform boundary
 
-`crates/pqkey/src/platform/mod.rs` selects `linux` or `macos` with
-`cfg(target_os)`. Portable modules import this facade. CTAPHID framing and
-the loop, the service runner, presence policy, state locking and daemon
-information, attestation, the allocator, PIN input, client protocols and
-command logic stay outside it. Both builds share Unix locks, signals,
-background-process coordination and terminal I/O.
+`pqkey` requires Linux; other targets fail at compile time. The protocol
+engine in `pqkey-ctap` and the cryptography in `pqkey-mldsa` remain portable
+and can be built and tested independently of the daemon.
+
+`crates/pqkey/src/platform/mod.rs` exposes the Linux backend through a
+facade. CTAPHID framing and the loop, the service runner, presence policy,
+state locking and daemon information, attestation, the allocator, PIN input,
+client protocols and command logic stay outside it. The daemon uses Unix
+locks, signals, background-process coordination and terminal I/O.
 
 Linux's backend owns uhid, hidraw, device permissions, udev, groups, kernel
 checks and modules, snap tags, XDG paths, systemd, D-Bus, the boot clock,
@@ -82,7 +85,7 @@ process protections and `/proc/self/exe` identity. These implementations live
 under `crates/pqkey/src/platform/linux/`; shipped units and rules stay in
 `contrib/`.
 
-The interfaces a backend implements are:
+The Linux backend exposes these interfaces:
 
 - `Device::new(HidDeviceDescriptor)`, reached through `create_device`, and
   `HidDevice::try_read_frame`, `write_frame` and `wait_with`. Reads return
@@ -102,8 +105,8 @@ The interfaces a backend implements are:
   `refresh`, `login_problem`, `start_problems`, `device_problems`,
   `notification_problem` and `uninstall_instructions`. Setup steps carry
   their description, confirmation, deferred instructions and artifact.
-  Diagnostics return portable `Problem` values. Commands own confirmation,
-  sequencing, PIN setup, readiness waits and output. Linux refreshes its
+  Diagnostics return `Problem` values. Commands own confirmation, sequencing,
+  PIN setup, readiness waits and output. Linux refreshes its
   membership snapshot after privileged setup.
 - `notifications()`, returning `Notifications`, which implements
   `NotificationServer::connect`, `notify`, `next_event`, `close`, `nudge`
@@ -111,43 +114,26 @@ The interfaces a backend implements are:
   server identity. An optional refresh interval requests queue nudging;
   Linux supplies GNOME's existing two-second interval. Backend helpers
   format native failures. Prompt text, sanitization, deadlines,
-  cancellation and stale-prompt policy stay portable. Linux records the
-  same bus, owner and notification ID as before.
-- `ensure_supported`, `default_state_dir`, `disable_core_dumps`,
+  cancellation and stale-prompt policy stay in presence policy. Linux
+  records the bus, owner and notification ID.
+- `default_state_dir`, `disable_core_dumps`,
   `current_executable_identity` and `BootTimeClock::new`. Identity is the
   executable's device and inode; `DaemonInfo` owns its format and validation.
   The clock implements the engine's `Clock` and counts through suspend.
-  Linux still attempts both memory protections independently, warns on
+  Linux attempts both memory protections independently, warns on
   failure and continues.
 
-Services, system preparation and runtime helpers are concrete implementations
-selected by cfg. Traits are used where tests need substitutes: the device,
+Services, system preparation and runtime helpers are concrete Linux
+implementations. Traits are used where tests need substitutes: the device,
 client report link, notification server and the engine's existing clock.
 There is no trait for an entire platform.
 
-A callback device can queue host output reports and signal a private pipe
-that `wait_with` polls alongside the worker socket. It need not expose a
-file descriptor or implement `AsFd`. Pending reports must prevent sleep,
-and enqueueing must wake a concurrent wait even when earlier wake bytes
-have been drained. Drop must stop callbacks and remove the virtual device
-before the transport joins the cancelled worker. The loop keeps its 10 ms
-idle bound, CTAPHID deadlines and 1 ms input-report pacing.
-
-Tests inject devices, report links, clocks and executable identity. Linux's
-socket peer retains uhid encoding and destruction assertions; macOS uses a
-callback queue and readiness socket. Portable presence tests script a
-notification server. Linux-specific CLI and kernel tests run on Linux.
-
-macOS currently implements only the default state path,
-`~/Library/Application Support/pqkey`, with `./pqkey` without `HOME`.
-Explicit state-directory overrides still apply. All operational backend
-entry points fail with `the key does not run on macOS yet`. The CLI checks
-support after parsing and before side effects; help and version work.
-A future macOS backend can use IOHIDUserDevice or, on macOS 15 and later,
-CoreHID's HIDVirtualDevice, with Apple's required entitlement; IOHIDManager
-for the client; a LaunchAgent for the service; and a native prompt provider.
-Implementing these interfaces requires no changes to portable command or
-protocol logic.
+Tests inject devices, report links, clocks and executable identity. The
+Linux socket peer checks uhid encoding and destruction. A queued test
+device checks that the transport handles pending reports, worker wakeups,
+timeouts and shutdown through its device interface. Presence tests script
+a notification server. CLI and kernel tests run on Linux; the real HID E2E
+suite requires `/dev/uhid`.
 
 ## What the key supports
 

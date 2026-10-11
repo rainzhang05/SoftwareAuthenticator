@@ -1,8 +1,17 @@
 # Development notes
 
 pqkey builds with Rust stable, 1.89 or later; `rust-toolchain.toml` picks the
-toolchain. The key runs on Linux. Portable code builds and tests on macOS;
-operational commands there report that the key does not run on macOS yet.
+toolchain. The daemon and CLI require Linux, with a compile-time diagnostic
+on other systems. `pqkey-ctap` and `pqkey-mldsa` are portable and can be
+tested independently, including on macOS:
+
+```bash
+cargo test --locked -p pqkey-ctap -p pqkey-mldsa --all-targets
+cargo test --locked -p pqkey-ctap -p pqkey-mldsa --doc
+```
+
+`./install.sh` is the Linux installation entry point. It rejects other
+systems before creating logs, installing tools or changing system setup.
 
 ## Scripts
 
@@ -56,9 +65,9 @@ Ctrl-C stops it, and `pqkey start` brings the service back.
 
 GitHub Actions runs these workflows:
 
-- **CI** runs the checks of `scripts/check.sh` on x86_64 and arm64, and the
-  lints and tests on macOS too.
-- **E2E** runs `scripts/e2e.sh`'s tests.
+- **CI** runs the checks of `scripts/check.sh` on Linux, with workspace
+  tests on both x86_64 and arm64.
+- **E2E** runs `scripts/e2e.sh`'s real HID tests on Linux.
 - **Security** runs `cargo audit` and `cargo deny`.
 - **Fuzz** runs each target for 30 seconds on changes and for 30 minutes
   every week.
@@ -67,42 +76,19 @@ Dependabot proposes updates every week. Cargo updates that are
 semver-compatible and pass every workflow are merged automatically. Commit
 changes to `Cargo.lock` and `fuzz/Cargo.lock` together.
 
-## Adding a platform
+## Linux platform boundary
 
-The boundary is documented in the [architecture notes](architecture.md).
-The current runner shares Unix facilities between Linux and macOS.
+The [architecture notes](architecture.md) describe the boundary between
+command and protocol logic and the Linux backend. Keep kernel, udev,
+systemd, D-Bus and process operations under
+`crates/pqkey/src/platform/linux/`. Tests inject devices, clocks and
+notification servers while retaining Linux uhid assertions. Run the full
+workspace and fuzz checks on Linux and the unchanged E2E suite on a Linux
+host with `/dev/uhid`.
 
-1. Add a backend under `crates/pqkey/src/platform/` and select it with
-   `cfg(target_os)` in the facade. Keep native APIs, dependencies, messages
-   and configuration there; do not add platform branches to command or
-   protocol logic.
-2. Implement the concrete virtual device and client link, using the shared
-   report descriptor and identifiers. A callback device queues reports and
-   signals a private pipe or socket, which it waits on with the worker's
-   wake descriptor. Pending reports must not lose their wakeup. Drop stops
-   callbacks and removes the device before the app worker is joined.
-3. Implement user-service inspection, installation, removal and actions,
-   and system preparation and diagnostics. Preserve portable confirmation,
-   readiness, restart and PIN logic. Return no privileged setup steps on a
-   system that needs none; do not invent device groups or kernel modules.
-4. Implement the notification server's normalized capabilities, events,
-   identity and optional refresh interval. Keep fail-closed decisions,
-   prompt text, deadlines and cancellation in presence policy. Give a
-   server identity only when stale prompts can be withdrawn safely.
-5. Implement state paths, executable identity, startup protections and the
-   suspend-aware clock. Keep the daemon information format and state lock
-   portable. Enable `ensure_supported` only when the running key works;
-   until then, operations return one clear error before side effects.
-6. Run the portable tests with injected devices, clocks and notifications,
-   and add native integration tests. Cover callback and worker wakeups,
-   queued reports, timeouts, cancellation, shutdown, state overrides and
-   command exit statuses. Keep every existing Linux assertion.
-
-For macOS, obtaining the virtual-HID entitlement is part of implementing the
-backend; the current stubs do not create a device or a LaunchAgent. Run all
-project checks on both builds and the unchanged end-to-end suite on Linux
-with `/dev/uhid`. Declare native-only dependencies for that target, and keep
-both lockfiles synchronized after changing a manifest.
+On macOS, test the portable crates natively and use a Linux environment,
+such as Docker, for daemon and fuzz checks. Container unit tests can use
+socket-backed devices; real HID E2E tests require access to `/dev/uhid`.
 
 ## Adding a signature algorithm
 
