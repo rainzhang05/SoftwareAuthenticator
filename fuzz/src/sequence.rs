@@ -31,7 +31,7 @@
 //! * the minimum PIN length never falls without reset;
 //! * alwaysUv prevents makeCredential and getAssertion with up=true from
 //!   succeeding without pinUvAuthParam, and U2F from signing;
-//! * counters never decrease between resets, including the shared global
+//! * counters never decrease between successful resets, including the shared global
 //!   counter; U2F handles work only for their application, with ES256,
 //!   non-discoverable credentials and credProtect 1 or 2.
 
@@ -965,8 +965,14 @@ impl Platform {
             CTAP_CMD_RESET => {
                 self.pin = None;
                 self.token = None;
-                self.credentials.clear();
-                self.retired.clear();
+                // Keep reset-invalidated IDs available to the existing
+                // individual retired-ID probes. Failed resets never reach
+                // this branch and retain the observed counter floors.
+                self.retired.extend(
+                    self.credentials
+                        .drain(..)
+                        .map(|credential| (credential.id, credential.rp_id)),
+                );
                 self.global_counter = 0;
                 self.minimum = 4;
                 self.always_uv = false;
@@ -2340,6 +2346,66 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_resets_preserve_shared_counter_and_success_retires_all_ids() {
+        let mut platform = Platform::new(Engine::new(19));
+        let mut input = Unstructured::new(&[]);
+        platform
+            .step(Op::U2fRegister { rp: 0 }, &mut input)
+            .unwrap();
+        for expected in 1..=4 {
+            platform.step(Op::Presence(0), &mut input).unwrap();
+            platform
+                .step(
+                    Op::U2fAuthenticate {
+                        credential: 0,
+                        rp: 0,
+                        control: 0,
+                        corrupt: false,
+                    },
+                    &mut input,
+                )
+                .unwrap();
+            assert_eq!(platform.global_counter, expected);
+            for selector in [0xFD, 0xFE, 0xFF] {
+                platform.step(Op::Presence(selector), &mut input).unwrap();
+                platform.step(Op::Reset, &mut input).unwrap();
+                assert_eq!(platform.global_counter, expected);
+                assert_eq!(platform.credentials[0].counter, expected);
+                assert!(platform.retired.is_empty());
+            }
+        }
+        platform.step(Op::Presence(0), &mut input).unwrap();
+        platform.step(Op::Reset, &mut input).unwrap();
+        assert_eq!(platform.global_counter, 0);
+        assert!(platform.credentials.is_empty());
+        assert_eq!(platform.retired.len(), 1);
+        platform
+            .step(
+                Op::AssertCredentials {
+                    large_blob_key: None,
+                    discoverable: false,
+                },
+                &mut input,
+            )
+            .unwrap();
+        platform
+            .step(Op::U2fRegister { rp: 0 }, &mut input)
+            .unwrap();
+        platform
+            .step(
+                Op::U2fAuthenticate {
+                    credential: 0,
+                    rp: 0,
+                    control: 0,
+                    corrupt: false,
+                },
+                &mut input,
+            )
+            .unwrap();
+        assert_eq!(platform.global_counter, 1);
+    }
 
     #[test]
     fn models_replacement_at_capacity_and_targets_retired_ids() {

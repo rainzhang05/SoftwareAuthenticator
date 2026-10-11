@@ -253,9 +253,43 @@ Missing, corrupt or inconsistent authoritative metadata fails closed; it is
 never rebuilt by scanning leftover records. Individual corrupt records retain
 the existing lookup-error/list-skip behavior, but replacement must read every
 active record successfully to avoid leaving an unknown matching record usable.
-Explicit reset purges managed records, rotates the credential key, establishes
-empty membership and resets policy. The existing reset failure semantics are
-otherwise unchanged. Upgrade is forward-only: back up the complete store and
+Explicit reset uses the following order in both store layouts:
+
+1. Determine the layout without authenticating damaged metadata, then rotate
+   the credential key. The new key file is flushed before atomic publication,
+   its directory is flushed, and only then is the old key overwritten as a
+   best effort and stale key temporary files removed.
+2. After rotation succeeds, purge credential records and managed membership,
+   remove the shared signature counter and large-blob array, and flush their
+   directories. Missing counter/blob records supply zero/the initial array.
+3. For a managed store, write the authenticated format marker and publish a
+   valid empty manifest under the new key.
+4. Write default PIN/configuration state last. Only after the store succeeds
+   does the running engine reset its PIN/UV policy, retries, tokens and keys.
+
+A rotation error does not establish which key is active. Before publication,
+credentials, counters, membership and PIN/UV policy remain intact; surviving
+sealed credentials continue the same saturating shared CTAP2/U2F counter, even
+across restart and repeated failures. An error after publication leaves those
+records untouched too: they fail authentication under the new key, while an
+unflushed rename rolled back by power loss can still use the old key with its
+original counter and policy. Key wiping is deferred until successful flushing.
+No reset cleanup or counter removal runs on a rotation error.
+
+After durable rotation, old stored and sealed credentials are invalid even if
+purging, counter removal, empty-manifest publication or PIN-state writing fails.
+Missing/corrupt managed authority fails closed. Until the default PIN write,
+old PIN state fails authentication; a restarted engine treats it as set and
+blocked and requires always-UV. A failed command keeps the running engine's
+preceding PIN/UV state. A failure after default PIN publication may leave
+persisted defaults despite the error, but old credentials are already invalid.
+An explicit reset retry rotates again and recovers partial or damaged stores
+without needing the old key or readable metadata. The device/attestation key
+and attestation record survive every step. Checkpoint tests cover errors and
+process exits at each persistence boundary; they model rename rollback but do
+not simulate physical power loss or override filesystem durability guarantees.
+
+Upgrade is forward-only: back up the complete store and
 do not use an older binary on upgraded state.
 
 Other record writes retain their atomic file replacement behavior. Most report

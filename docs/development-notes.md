@@ -41,7 +41,11 @@ The packet fuzz target includes U2F APDUs, repeats, approval, denial and
 abandonment. Structured and sequence targets mix both protocols; the
 sequence model verifies U2F signatures, credential eligibility, application
 binding, shared counter monotonicity and always-UV. Its traces retain full
-U2F status words. Regenerated seeds include protocol crossings and U2F
+U2F status words. Failed resets retain counter floors; successful resets keep
+invalidated IDs for the existing individual retired-ID probes. File-store
+reset tests inject failures and process exits at every persistence checkpoint
+in both layouts, including key publication, counter deletion, manifest and
+PIN writes, and verify explicit retry recovery. Regenerated seeds include protocol crossings and U2F
 disabled by always-UV.
 Large-blob tests cover fragmented writes, interrupted staging and restart
 persistence; the fuzz sequence model checks committed-array visibility and

@@ -32,8 +32,10 @@ impl CtapApp<'_> {
     /// writes the default PIN state and, for the file store, replaces their
     /// root key before discarding counters or PIN/UV policy. Rotation errors
     /// can precede or follow key publication. If reset fails, the in-memory
-    /// PIN state is kept; a restart also preserves the preceding policy or
-    /// treats unreadable PIN state as set and blocked, requiring always-UV.
+    /// PIN state is kept. Surviving credentials retain their PIN/UV policy
+    /// across restart; unreadable PIN state is set and blocked with always-UV.
+    /// After key publication, a later error may leave persisted defaults,
+    /// but every preceding credential is already invalid.
     pub(super) fn handle_reset(&mut self) -> Result<Vec<u8>, u8> {
         // The clock the engine's timers share starts at power-up.
         if let Some(window) = self.reset_window
