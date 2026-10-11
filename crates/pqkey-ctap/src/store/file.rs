@@ -757,14 +757,15 @@ impl<K: KeySource> FileStore<K> {
         &self,
         keys: &CredentialKeys,
         state: &PinStateRecord,
-    ) -> Result<(), StoreError> {
+    ) -> Result<CommitDurability, StoreError> {
         let plaintext = codec::encode_pin_state(state)?;
-        self.write_object(
+        let sealed = envelope::seal(
             &keys.record,
             RecordType::PinState,
             PIN_STATE_FILE,
             &plaintext,
-        )
+        )?;
+        fsio::replace_pin_state(&self.root, PIN_STATE_FILE, &sealed)
     }
 }
 
@@ -958,7 +959,7 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
         self.max_credentials
     }
 
-    fn clear(&mut self) -> Result<(), StoreError> {
+    fn clear(&mut self) -> Result<CommitDurability, StoreError> {
         // Rotate before discarding any state protected by the credential key.
         // A failure before publication leaves credentials, their counters and
         // PIN/UV policy intact. Rotation can also fail AFTER publishing the
@@ -999,6 +1000,7 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
         if counter_removed || array_removed {
             fsio::sync_dir(&self.root)?;
         }
+        let mut durability = CommitDurability::Flushed;
         if managed {
             let sealed = envelope::seal(
                 &keys.record,
@@ -1007,9 +1009,15 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
                 FORMAT,
             )?;
             fsio::replace_file(&self.root, FORMAT_FILE, &sealed)?;
-            let _committed = self.publish_manifest(&keys, &Manifest::new())?;
+            durability = self.publish_manifest(&keys, &Manifest::new())?.durability;
         }
-        self.write_pin_state(&keys, &PinStateRecord::default())
+        let defaults = self.write_pin_state(&keys, &PinStateRecord::default())?;
+        if durability == CommitDurability::Unconfirmed || defaults == CommitDurability::Unconfirmed
+        {
+            Ok(CommitDurability::Unconfirmed)
+        } else {
+            Ok(defaults)
+        }
     }
 
     fn pin_state(&self) -> Result<Option<PinStateRecord>, StoreError> {
@@ -1024,7 +1032,7 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
         )
     }
 
-    fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<(), StoreError> {
+    fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<CommitDurability, StoreError> {
         let keys = CredentialKeys::derive(&self.root_key_for_write(KeyDomain::Credential)?)?;
         self.write_pin_state(&keys, state)
     }
@@ -1119,8 +1127,14 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
         // them.  A PIN state, the default one if there is none yet, marks that
         // something depends on the credential key, so a lost key is reported
         // rather than replaced as if nothing did.
-        if !exists(&self.root.join(PIN_STATE_FILE))? {
-            self.write_pin_state(&keys, &PinStateRecord::default())?;
+        if !exists(&self.root.join(PIN_STATE_FILE))?
+            && self.write_pin_state(&keys, &PinStateRecord::default())?
+                == CommitDurability::Unconfirmed
+        {
+            return Err(fsio::io_error(
+                &self.root.join(PIN_STATE_FILE),
+                std::io::Error::other("credential-key dependency marker durability is unconfirmed"),
+            ));
         }
         envelope::seal_credential_id(&keys.id, plaintext, associated_data)
     }

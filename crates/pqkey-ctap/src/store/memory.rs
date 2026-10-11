@@ -144,23 +144,23 @@ impl CredentialStore for MemoryStore {
         self.max_credentials
     }
 
-    fn clear(&mut self) -> Result<(), StoreError> {
+    fn clear(&mut self) -> Result<CommitDurability, StoreError> {
         self.credentials.clear();
         self.pin_state = Some(PinStateRecord::default());
         self.signature_counter = 0;
         self.large_blob_array = INITIAL_LARGE_BLOB_ARRAY.to_vec();
         self.credential_key = None;
-        Ok(())
+        Ok(CommitDurability::Volatile)
     }
 
     fn pin_state(&self) -> Result<Option<PinStateRecord>, StoreError> {
         Ok(self.pin_state.clone())
     }
 
-    fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<(), StoreError> {
+    fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<CommitDurability, StoreError> {
         validate_pin_state(state)?;
         self.pin_state = Some(state.clone());
-        Ok(())
+        Ok(CommitDurability::Volatile)
     }
 
     fn signature_counter(&self) -> Result<u32, StoreError> {

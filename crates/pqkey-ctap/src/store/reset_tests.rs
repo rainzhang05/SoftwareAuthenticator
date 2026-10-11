@@ -171,6 +171,47 @@ fn failure(path: &Path) -> StoreError {
 }
 
 #[test]
+fn published_configuration_is_immediately_used_despite_post_rename_failure() {
+    for failing in ["renamed", "directory-flush", "directory-flushed"] {
+        let scratch = TempDir::new();
+        let path = scratch.path().join("state");
+        let mut engine = app(&path);
+        let mut published = false;
+        let response = fsio::with_hook(
+            Box::new(move |event, path| {
+                if event == "renamed" && path.ends_with(PIN_STATE_FILE) {
+                    published = true;
+                }
+                if published && event == failing {
+                    Err(failure(path))
+                } else {
+                    Ok(())
+                }
+            }),
+            || {
+                call(
+                    &mut engine,
+                    CTAP_CMD_AUTHENTICATOR_CONFIG,
+                    vec![(int(1), int(2))],
+                )
+            },
+        );
+        assert!(
+            FileStore::open(&path)
+                .unwrap()
+                .pin_state()
+                .unwrap()
+                .unwrap()
+                .always_uv
+        );
+        let live = field(&engine.call(&[CTAP_CMD_GET_INFO]), 4);
+        let restarted = field(&app(&path).call(&[CTAP_CMD_GET_INFO]), 4);
+        assert_eq!(live, restarted, "live policy diverged after {failing}");
+        assert_eq!(response, [CTAP2_OK]);
+    }
+}
+
+#[test]
 fn failed_rotation_preserves_shared_counter_across_restarts_and_protocols() {
     for (managed, restart) in [(false, false), (false, true), (true, false), (true, true)] {
         let scratch = TempDir::new();

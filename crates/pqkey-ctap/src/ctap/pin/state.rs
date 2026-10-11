@@ -91,6 +91,7 @@ impl fmt::Debug for PersistentPinState {
 /// count behind CTAP2_ERR_PIN_AUTH_BLOCKED is volatile on purpose: it exists so
 /// "malware running on the platform should not be able to block the device
 /// without user interaction", and a power cycle is that interaction.
+#[derive(Clone)]
 pub struct PinRetryState {
     persistent: PersistentPinState,
     consecutive_mismatches: u8,
@@ -191,6 +192,8 @@ impl PinRetryState {
         candidate: Option<&[u8]>,
     ) -> Result<(), u8> {
         let PinAttempt(()) = attempt;
+        #[cfg(test)]
+        super::observation::record(super::observation::Phase::Comparison);
         let matches = match (self.persistent.pin_hash.as_ref(), candidate) {
             (Some(stored), Some(candidate)) => bool::from(stored.as_slice().ct_eq(candidate)),
             _ => false,
@@ -292,10 +295,20 @@ impl PinState {
         self.pin.check_attempt_allowed()
     }
 
+    /// Stage restoration without refunding retries before publication.
+    pub(crate) fn retry_state(&self) -> PinRetryState {
+        self.pin.clone()
+    }
+
+    pub(crate) fn adopt_retry_state(&mut self, state: PinRetryState) {
+        self.pin = state;
+    }
+
     pub(crate) fn begin_pin_attempt(&mut self) -> Result<PinAttempt, u8> {
         self.pin.begin_attempt()
     }
 
+    #[cfg(test)]
     pub(crate) fn finish_pin_attempt(
         &mut self,
         attempt: PinAttempt,
@@ -315,6 +328,8 @@ impl PinState {
         permissions: u8,
         rp_id: Option<String>,
     ) {
+        #[cfg(test)]
+        super::observation::record(super::observation::Phase::Token);
         let now = self.clock.now();
         self.token
             .begin_using(now, protocol, token, false, permissions, rp_id);
@@ -412,6 +427,8 @@ impl PinState {
         token: [u8; 32],
         permissions: u8,
     ) {
+        #[cfg(test)]
+        super::observation::record(super::observation::Phase::Token);
         let now = self.clock.now();
         self.token
             .begin_using(now, protocol, token, true, permissions, None);

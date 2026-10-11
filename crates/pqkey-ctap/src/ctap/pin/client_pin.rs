@@ -6,6 +6,7 @@ use super::state::MAX_PIN_RETRIES;
 use crate::PinUvSessionKeys;
 use crate::ctap::CtapApp;
 use crate::ctap::cbor::{self, canonical_map, required_bytes, required_map};
+use crate::store::CommitDurability;
 
 use ciborium::{
     ser::into_writer,
@@ -104,6 +105,16 @@ fn hash_pin(pin: &[u8]) -> Zeroizing<[u8; 16]> {
     hash
 }
 
+/// Publication alone cannot confirm a spent or restored verification retry.
+fn require_confirmed_retry(durability: CommitDurability) -> Result<(), u8> {
+    if durability == CommitDurability::Unconfirmed {
+        log::error!("PIN verification refused: required retry write has unconfirmed durability");
+        Err(CTAP2_ERR_PROCESSING)
+    } else {
+        Ok(())
+    }
+}
+
 impl CtapApp<'_> {
     /// Decrypt newPinEnc and turn it into the PIN hash to store:
     /// "calls decrypt(shared secret, newPinEnc) to produce paddedNewPin. If an
@@ -141,18 +152,26 @@ impl CtapApp<'_> {
         pin_hash_enc: &[u8],
     ) -> Result<(), u8> {
         let attempt = self.pin_state.begin_pin_attempt()?;
-        self.save_persistent_pin_state()?;
+        require_confirmed_retry(self.save_persistent_pin_state()?)?;
+        #[cfg(test)]
+        super::observation::record(super::observation::Phase::Decryption);
         let candidate = decrypt(protocol, keys, pin_hash_enc);
-        let result = self
-            .pin_state
-            .finish_pin_attempt(attempt, candidate.as_ref().map(|hash| hash.as_slice()));
+        let mut completed = self.pin_state.retry_state();
+        let result =
+            completed.finish_attempt(attempt, candidate.as_ref().map(|hash| hash.as_slice()));
         if result.is_err() {
             // "If an error results, or a mismatch is detected, the
             // authenticator performs the following operations: Calls
             // regenerate for the selected pinUvAuthProtocol."
+            // Observed mismatches are never refunded by a later write error.
+            self.pin_state.adopt_retry_state(completed);
             self.pin_state.key_agreement.regenerate(protocol);
+            require_confirmed_retry(self.save_persistent_pin_state()?)?;
+        } else {
+            let durability = self.save_pin_state(completed.persistent())?;
+            self.pin_state.adopt_retry_state(completed);
+            require_confirmed_retry(durability)?;
         }
-        self.save_persistent_pin_state()?;
         result
     }
 

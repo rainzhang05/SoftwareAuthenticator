@@ -257,6 +257,10 @@ pub(super) struct Faults {
     pub(super) set_pin_state: bool,
     /// Let this many more PIN state writes succeed, then fail every one.
     pub(super) set_pin_state_after: Option<usize>,
+    /// Publish but report unconfirmed durability after this many writes.
+    pub(super) pin_state_unconfirmed_after: Option<usize>,
+    pub(super) pin_state_durability: Option<crate::store::CommitDurability>,
+    pub(super) clear_unconfirmed: bool,
     pub(super) attestation: bool,
     pub(super) clear: bool,
     /// `signature_counter` reports the record as corrupt.
@@ -385,9 +389,15 @@ impl CredentialStore for TestStore {
         self.lock().store.max_credentials()
     }
 
-    fn clear(&mut self) -> Result<(), StoreError> {
+    fn clear(&mut self) -> Result<crate::store::CommitDurability, StoreError> {
         self.fail_if(|faults| faults.clear)?;
-        self.lock().store.clear()
+        let mut state = self.lock();
+        let outcome = state.store.clear()?;
+        Ok(if state.faults.clear_unconfirmed {
+            crate::store::CommitDurability::Unconfirmed
+        } else {
+            outcome
+        })
     }
 
     fn pin_state(&self) -> Result<Option<PinStateRecord>, StoreError> {
@@ -400,14 +410,28 @@ impl CredentialStore for TestStore {
         self.lock().store.pin_state()
     }
 
-    fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<(), StoreError> {
+    fn set_pin_state(
+        &mut self,
+        state: &PinStateRecord,
+    ) -> Result<crate::store::CommitDurability, StoreError> {
         self.fail_if(|faults| faults.set_pin_state || faults.set_pin_state_after == Some(0))?;
         let mut locked = self.lock();
         if let Some(remaining) = locked.faults.set_pin_state_after.as_mut() {
             *remaining -= 1;
         }
         locked.pin_state_writes.push(state.clone());
-        locked.store.set_pin_state(state)
+        let mut outcome = locked.store.set_pin_state(state)?;
+        if let Some(durability) = locked.faults.pin_state_durability {
+            outcome = durability;
+        }
+        if let Some(remaining) = locked.faults.pin_state_unconfirmed_after.as_mut() {
+            if *remaining == 0 {
+                outcome = crate::store::CommitDurability::Unconfirmed;
+            } else {
+                *remaining -= 1;
+            }
+        }
+        Ok(outcome)
     }
 
     fn signature_counter(&self) -> Result<u32, StoreError> {

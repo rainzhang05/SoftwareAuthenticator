@@ -46,9 +46,13 @@ impl CtapApp<'_> {
         let timeout = self.presence_timeout;
         self.confirm_user_presence(PresenceRequest::new(PresenceOperation::Reset, timeout))?;
         self.cred_mgmt_state = CredentialManagementState::new();
-        self.store
+        let durability = self
+            .store
             .clear()
             .map_err(|err| store_status("reset the credential store", err))?;
+        if durability == crate::store::CommitDurability::Unconfirmed {
+            log::warn!("reset completed with published defaults and unconfirmed durability");
+        }
         // PIN and UV policy, pinRetries, the token and each protocol's key
         // agreement key go back to their initial values, as at power-up
         // (CTAP 2.3 §6.5.5.1).  The store already holds the default PIN state.

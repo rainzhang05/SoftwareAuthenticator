@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use getrandom::SysRng;
 use rand_core::TryRng;
 
-use super::StoreError;
+use super::{CommitDurability, StoreError};
 
 /// Mode of every directory the store creates.
 pub(crate) const DIR_MODE: u32 = 0o700;
@@ -129,6 +129,30 @@ pub(crate) fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> Result<()
         |from, to| fs::rename(from, to),
         sync_dir,
     )
+}
+
+/// Replace PIN state with an explicit publication outcome. No error after
+/// successful rename can be mistaken for failure to publish the candidate.
+pub(crate) fn replace_pin_state(
+    dir: &Path,
+    name: &str,
+    contents: &[u8],
+) -> Result<CommitDurability, StoreError> {
+    let target = dir.join(name);
+    let temp = write_temp_file(dir, contents)?;
+    if let Err(err) = checkpoint("rename", &target)
+        .and_then(|()| fs::rename(&temp, &target).map_err(|err| io_error(&target, err)))
+    {
+        let _ = fs::remove_file(temp);
+        return Err(err);
+    }
+    match checkpoint("renamed", &target).and_then(|()| sync_dir_strict(dir)) {
+        Ok(()) => Ok(CommitDurability::Flushed),
+        Err(err) => {
+            log::warn!("PIN state published with unconfirmed durability: {err}");
+            Ok(CommitDurability::Unconfirmed)
+        }
+    }
 }
 
 /// Atomically replace an array, treating rename as commitment. A directory

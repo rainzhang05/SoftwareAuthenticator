@@ -10,7 +10,8 @@
 use super::CtapApp;
 use super::pin::state::{PersistentPinState, PinState};
 use crate::store::{
-    AttestationRecord, CredentialRecord, CredentialStore, PinStateRecord, StoreError,
+    AttestationRecord, CommitDurability, CredentialRecord, CredentialStore, PinStateRecord,
+    StoreError,
 };
 
 use rand_core::Rng;
@@ -119,16 +120,19 @@ impl CtapApp<'_> {
     ///
     /// While the stored PIN state is unreadable nothing is written, so the
     /// fail-closed placeholder never replaces it.
-    pub(super) fn save_persistent_pin_state(&mut self) -> Result<(), u8> {
+    pub(super) fn save_persistent_pin_state(&mut self) -> Result<CommitDurability, u8> {
         let persistent = self.pin_state.persistent().clone();
         self.save_pin_state(&persistent)
     }
 
     /// Persist `persistent`, which may be a PIN state the engine only adopts
     /// once it is stored.  Otherwise as [`Self::save_persistent_pin_state`].
-    pub(super) fn save_pin_state(&mut self, persistent: &PersistentPinState) -> Result<(), u8> {
+    pub(super) fn save_pin_state(
+        &mut self,
+        persistent: &PersistentPinState,
+    ) -> Result<CommitDurability, u8> {
         if !self.pin_state_writable {
-            return Ok(());
+            return Err(CTAP2_ERR_PROCESSING);
         }
         let record = PinStateRecord {
             pin_hash: persistent.pin_hash,

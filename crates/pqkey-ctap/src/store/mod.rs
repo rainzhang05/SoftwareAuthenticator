@@ -113,7 +113,7 @@ pub use record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKey
 /// The credential limit a store uses unless configured otherwise.
 pub const DEFAULT_MAX_CREDENTIALS: usize = 1000;
 
-/// Durability of an already committed credential-set change.
+/// Durability of an already published storage change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitDurability {
     /// An in-memory store; nothing survives process exit.
@@ -121,7 +121,7 @@ pub enum CommitDurability {
     /// Files and publication directory have been flushed successfully.
     Flushed,
     /// Publication is visible, but its directory flush failed. Power loss
-    /// can roll it back; a process restart observes the published set.
+    /// can roll it back; a process restart observes the published state.
     Unconfirmed,
 }
 
@@ -216,13 +216,20 @@ pub trait CredentialStore {
     /// every credential that remains usable. A rotation error can mean the
     /// new key is already published; unreadable state must fail closed, and
     /// an explicit reset retry must remain able to recover it.
-    fn clear(&mut self) -> Result<(), StoreError>;
+    /// Success means all invalidation, purge and metadata work completed and
+    /// defaults were published. The outcome includes any unconfirmed metadata
+    /// or default-state publication. Errors may follow key publication or
+    /// partial cleanup; they do not promise an unchanged store.
+    fn clear(&mut self) -> Result<CommitDurability, StoreError>;
 
     /// The persistent PIN state, or `None` if it has never been written.
     fn pin_state(&self) -> Result<Option<PinStateRecord>, StoreError>;
 
-    /// Atomically replace the persistent PIN state.
-    fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<(), StoreError>;
+    /// Atomically replace the persistent PIN state, treating publication as
+    /// commitment. Every successful outcome means the candidate is visible;
+    /// an error means it was not published. Unconfirmed publication can roll
+    /// back after power loss and must not authorize a PIN comparison or token.
+    fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<CommitDurability, StoreError>;
 
     /// The global signature counter: the signature count of the credentials
     /// that keep none of their own, the non-discoverable ones sealed into
