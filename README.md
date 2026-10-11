@@ -68,12 +68,19 @@ can be updated without PIN input unless its policy requires a PIN change.
 If your terminal's PATH excludes `/usr/local/bin`, run
 `export PATH="/usr/local/bin:$PATH"` in that terminal and rerun the installer.
 
-To update, run `git pull` and then `./install.sh` again. Reruns repair partial
-setup and preserve credentials, valid PINs and authenticator policy. Updates
-replace the executable atomically. If setup fails after replacement, the
-previous executable remains at `/usr/local/bin/pqkey.previous`; the installer
-prints retry and restore commands. Restore the executable only; keep the key's
-state directory. The recovery copy is removed after successful setup.
+Before upgrading, stop the key and back up its complete state directory,
+including the keys. Then run `git pull` and `./install.sh` again. Reruns repair
+partial setup and preserve credentials, valid PINs and authenticator policy.
+Updates replace the executable atomically. If setup fails after replacement,
+the previous executable remains at `/usr/local/bin/pqkey.previous`; the
+installer prints retry and restore commands. The recovery copy is removed
+after successful setup.
+
+Registering or replacing a discoverable credential upgrades older stores to
+the [authenticated membership format](docs/architecture.md). Restore only the
+executable when the previous version understands that format. A version
+predating this format requires its matching complete state backup as well;
+credentials created after that backup will be absent.
 
 > [!NOTE]
 > Anyone who can open `/dev/uhid` can create any HID device, keyboards

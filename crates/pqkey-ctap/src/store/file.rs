@@ -793,14 +793,16 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
     }
 
     fn put(&mut self, record: &CredentialRecord) -> Result<(), StoreError> {
-        // Crash safety: the only file this changes is `credentials/<name>`
+        // The managed path uses authoritative membership; same-ID updates
+        // keep their per-record semantics. The legacy path below changes
+        // only `credentials/<name>`
         // (plus, on first use, the credential key, which is created atomically
         // before anything is encrypted under it).  `replace_file` writes the
         // envelope to a flushed temporary file, renames it into place, and
         // flushes the directory, so a crash leaves either the previous file
         // (or none) or the complete new one, never a torn record.  A leftover
         // temporary file does not have a credential name, so it is ignored
-        // until `clear` removes it.  There is no index or counter to fall out
+        // until `clear` removes it. In legacy mode there is no index to fall out
         // of step: the limit and the creation order are recomputed from the
         // records on every insert.
         validate_credential(record)?;

@@ -129,8 +129,8 @@ recovery=$pqkey.previous
 staged=$pqkey.install-$$
 recovery_hint() {
   if [ -f "$recovery" ]; then
-    printf 'Previous executable: %s. To restore it: sudo mv -f %s %s && pqkey setup
-' "$recovery" "$recovery" "$pqkey" >&2
+    printf 'Previous executable: %s. If it supports the current credential format, restore it with: sudo mv -f %s %s && pqkey setup\n' "$recovery" "$recovery" "$pqkey" >&2
+    printf 'Older binaries require a matching complete state backup; see the README recovery notes.\n' >&2
   fi
 }
 
