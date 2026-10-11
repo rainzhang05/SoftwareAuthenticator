@@ -172,7 +172,7 @@ fn failure(path: &Path) -> StoreError {
 
 #[test]
 fn failed_rotation_preserves_shared_counter_across_restarts_and_protocols() {
-    for managed in [false, true] {
+    for (managed, restart) in [(false, false), (false, true), (true, false), (true, true)] {
         let scratch = TempDir::new();
         let path = scratch.path().join("state");
         let (id, public, record) = setup(&path, managed);
@@ -192,7 +192,7 @@ fn failed_rotation_preserves_shared_counter_across_restarts_and_protocols() {
                 || engine.call(&[CTAP_CMD_RESET]),
             );
             assert_eq!(response, [CTAP2_ERR_PROCESSING]);
-            if expected % 2 == 0 {
+            if restart || expected % 2 == 0 {
                 engine = app(&path);
             }
             let count = if expected % 2 == 0 {
