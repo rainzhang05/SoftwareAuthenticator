@@ -662,6 +662,13 @@ fn config_error<L: ReportLink>(
     info: &Info,
 ) -> io::Error {
     let message = match err {
+        ClientError::RequestTooLarge {
+            encoded_bytes,
+            limit,
+        } => format!(
+            "the encoded CTAP2 request is {encoded_bytes} bytes; the limit is {limit} bytes; \
+             shorten the RP list (use fewer or shorter RP IDs)"
+        ),
         ClientError::Status(CTAP2_ERR_PIN_POLICY_VIOLATION) => format!(
             "the minimum PIN length cannot be lowered below {}; only `pqkey reset` lowers \
              it, and erases every passkey and large blob",
@@ -1300,6 +1307,78 @@ mod tests {
         assert_eq!(err.to_string(), "PIN must be at least 7 characters long");
         set_first_pin(&mut key, &mut Script::of(&["123456", "1234567"])).unwrap();
         assert!(key.config_token(b"1234567").is_ok());
+    }
+
+    #[test]
+    fn oversized_configuration_preserves_policy_and_a_shorter_eight_rp_list_succeeds() {
+        for pin_set in [false, true] {
+            let dir = TempDir::new("cli-config-size");
+            let (_daemon, mut key) = start(&dir);
+            if pin_set {
+                key.set_pin(b"123456").unwrap();
+            }
+            let stored = || {
+                FileStore::open(dir.path())
+                    .unwrap()
+                    .pin_state()
+                    .unwrap()
+                    .unwrap()
+            };
+            let original = ConfigAction::MinPinLength {
+                minimum: 4,
+                rp_ids: vec!["original.example".into()],
+                yes: true,
+            };
+            let pins = if pin_set { &["123456"][..] } else { &[] };
+            configure(
+                &mut key,
+                &mut Script::of(pins),
+                Some(&original),
+                &mut |_| Ok(true),
+            )
+            .unwrap();
+            let unchanged = stored();
+            let oversized = ConfigAction::MinPinLength {
+                minimum: 6,
+                rp_ids: (0..8)
+                    .map(|index| format!("{index}{}", "x".repeat(252)))
+                    .collect(),
+                yes: true,
+            };
+            let error = configure(
+                &mut key,
+                &mut Script::of(pins),
+                Some(&oversized),
+                &mut |_| Ok(true),
+            )
+            .unwrap_err();
+            let bytes = if pin_set { 2087 } else { 2050 };
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "the encoded CTAP2 request is {bytes} bytes; the limit is 1768 bytes; \
+                 shorten the RP list (use fewer or shorter RP IDs)"
+                )
+            );
+            assert_eq!(stored(), unchanged);
+            assert_eq!(key.info().unwrap().max_msg_size, 1768);
+            let rps: Vec<_> = (0..8)
+                .map(|index| format!("{index}.short.example"))
+                .collect();
+            let smaller = ConfigAction::MinPinLength {
+                minimum: 6,
+                rp_ids: rps.clone(),
+                yes: true,
+            };
+            configure(&mut key, &mut Script::of(pins), Some(&smaller), &mut |_| {
+                Ok(true)
+            })
+            .unwrap();
+            assert_eq!(stored().min_pin_length, 6);
+            assert_eq!(stored().min_pin_length_rp_ids, rps);
+            assert!(!stored().force_pin_change);
+        }
     }
 
     #[test]

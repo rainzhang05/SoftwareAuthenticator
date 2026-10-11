@@ -371,6 +371,56 @@ def test_config_reports_irreversible_minimum_and_rp_capacity_errors(pqkey: Pqkey
     assert pqkey.config()["Minimum PIN length"] == "6"
 
 
+@pytest.mark.parametrize("pin_set", [False, True])
+def test_oversized_config_preserves_policy_and_shorter_eight_rps_succeed(pqkey: Pqkey, pin_set: bool):
+    """The CLI rejects the whole command locally and leaves the real HID key usable."""
+    pqkey.start()
+    pin = "730915"
+    stdin = f"{pin}\n" if pin_set else ""
+
+    def register_minimum(ctap: Ctap2, rp_id: str):
+        auth = client.pin_uv_auth(
+            ctap, ClientPin(ctap).protocol, pin, ClientPin.PERMISSION.MAKE_CREDENTIAL, rp_id,
+        ) if pin_set else {}
+        return client.register(
+            ctap, rp_id, client.ES256, uv=pin_set, extensions={"minPinLength": True}, **auth,
+        )
+
+    if pin_set:
+        pqkey.ok("pin", stdin=stdin)
+    pqkey.ok("config", "min-pin-length", "4", "--rp", "original.config.example", "--yes", stdin=stdin)
+    unchanged = pqkey.config()
+    args = ["config", "min-pin-length", "6", "--yes"]
+    for number in range(8):
+        args += ["--rp", f"{number}" + "x" * 252]
+    encoded_bytes = 2087 if pin_set else 2050
+    assert pqkey.error(*args, stdin=stdin) == (
+        f"the encoded CTAP2 request is {encoded_bytes} bytes; the limit is 1768 bytes; "
+        "shorten the RP list (use fewer or shorter RP IDs)"
+    )
+    assert pqkey.config() == unchanged
+    with client.open_device(pqkey.status()["Device"]) as device:
+        ctap = Ctap2(device)
+        assert ctap.info.max_msg_size == 1768
+        # The rejected list must not replace the previously authorized RP.
+        credential = register_minimum(ctap, "original.config.example")
+        assert credential.auth_data.extensions == {"minPinLength": 4}
+
+    rps = [f"{number}.short.config.example" for number in range(8)]
+    smaller = ["config", "min-pin-length", "6", "--yes"]
+    for rp_id in rps:
+        smaller += ["--rp", rp_id]
+    assert pqkey.ok(*smaller, stdin=stdin) == "Minimum PIN length: 6.\n"
+    assert pqkey.config()["PIN change required"] == "no"
+    with client.open_device(pqkey.status()["Device"]) as device:
+        ctap = Ctap2(device)
+        for rp_id in rps:
+            credential = register_minimum(ctap, rp_id)
+            assert credential.auth_data.extensions == {"minPinLength": 6}
+        credential = register_minimum(ctap, "original.config.example")
+        assert not credential.auth_data.extensions
+
+
 def test_config_survives_restart_and_reset_restores_defaults(pqkey: Pqkey):
     pqkey.start()
     pqkey.ok("pin", stdin=f"{PIN}\n")
