@@ -251,8 +251,10 @@ const ATTESTATION_FILE: &str = "attestation";
 /// [`put`](CredentialStore::put) and [`clear`](CredentialStore::clear) in
 /// the source for the crash analysis. A large-blob array write commits when
 /// renamed: a later directory-flush failure is logged and returns success,
-/// although a power failure may then restore the preceding file. Other
-/// writers report that failure even though the replacement is visible.
+/// although a power failure may then restore the preceding file. PIN state
+/// returns an explicit publication outcome: every post-rename checkpoint or
+/// strict directory-flush error gives `Unconfirmed`, never a failed write.
+/// Other per-record writers retain their preceding failure semantics.
 /// Credential-set membership follows the explicit commit rules above.
 /// `Flushed` relies on the filesystem and hardware honoring flushes; it is
 /// not protection against snapshot rollback. Unsupported directory flushing

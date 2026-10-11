@@ -115,8 +115,9 @@ impl CtapApp<'_> {
 
     /// Persist [`PersistentPinState`].  Called after every change to the PIN
     /// or to pinRetries, including the retry spent before a PIN is compared.
-    /// A failed write is an error, so a PIN check fails closed instead of
-    /// comparing a PIN whose spent retry was not saved.
+    /// Publication and durability are returned separately: settings may adopt
+    /// any published state, but verification requires Flushed or intentional
+    /// Volatile persistence before comparison and authorization.
     ///
     /// While the stored PIN state is unreadable nothing is written, so the
     /// fail-closed placeholder never replaces it.

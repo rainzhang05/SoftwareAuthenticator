@@ -290,8 +290,12 @@ Explicit reset uses the following order in both store layouts:
    directories. Missing counter/blob records supply zero/the initial array.
 3. For a managed store, write the authenticated format marker and publish a
    valid empty manifest under the new key.
-4. Write default PIN/configuration state last. Only after the store succeeds
-   does the running engine reset its PIN/UV policy, retries, tokens and keys.
+4. Publish default PIN/configuration state last. The store returns an explicit
+   durability outcome only after the preceding work completes and defaults
+   are published. The running engine then resets PIN/UV policy, retries,
+   tokens and protocol keys before returning success, even if publication
+   durability is unconfirmed. Unconfirmed empty-manifest publication is also
+   included in the reset outcome.
 
 A rotation error does not establish which key is active. Before publication,
 credentials, counters, membership and PIN/UV policy remain intact; surviving
@@ -307,8 +311,9 @@ purging, counter removal, empty-manifest publication or PIN-state writing fails.
 Missing/corrupt managed authority fails closed. Until the default PIN write,
 old PIN state fails authentication; a restarted engine treats it as set and
 blocked and requires always-UV. A failed command keeps the running engine's
-preceding PIN/UV state. A failure after default PIN publication may leave
-persisted defaults despite the error, but old credentials are already invalid.
+preceding PIN/UV state. Final default-state publication completes the command;
+errors at subsequent checkpoints become unconfirmed durability warnings and
+success, with live and restarted engines observing the same defaults.
 An explicit reset retry rotates again and recovers partial or damaged stores
 without needing the old key or readable metadata. The device/attestation key
 and attestation record survive every step. Checkpoint tests cover errors and
@@ -317,6 +322,38 @@ not simulate physical power loss or override filesystem durability guarantees.
 
 Upgrade is forward-only: back up the complete store and
 do not use an older binary on upgraded state.
+
+PIN/configuration writes distinguish publication from durability through
+`Result<CommitDurability, StoreError>`. An error means the candidate PIN record
+was not published. `Flushed` confirms the file and publication directory were
+flushed; `Volatile` describes an intentional memory store. `Unconfirmed` means
+rename published the record but a post-rename checkpoint or strict directory
+flush did not complete successfully. A process restart sees this published
+record, but power loss can restore its predecessor. Flushes are not protection
+against filesystem snapshots or hardware that fails to honor them.
+
+setPIN, changePIN and authenticatorConfig treat publication as commitment:
+they return CTAP2_OK, adopt the settings and perform required token
+invalidations even when durability is unconfirmed. getInfo and subsequent
+commands immediately use the published PIN, alwaysUv, minimum length,
+authorized RP IDs and forcePINChange. An unconfirmed warning describes the
+power-loss limitation, rather than claiming the settings failed to change.
+Pre-publication errors keep the preceding PIN and policy; changePIN may still
+have legitimately consumed or restored retries while checking the old PIN.
+
+PIN verification has a stronger persistence requirement. The engine debits a
+retry before decrypting or comparing pinHashEnc. Only `Flushed` or intentional
+`Volatile` writes allow comparison. Failed and unconfirmed debits return
+CTAP2_ERR_PROCESSING without a PIN verdict or token and may conservatively
+reduce the live budget. Successful comparison stages restoration of retries
+until publication. Failed restoration retains the spent budget and preceding
+mismatch history; unconfirmed restoration adopts the published retry state but
+still returns CTAP2_ERR_PROCESSING without authorizing a token or PIN change.
+An observed mismatch remains spent and counts toward the three-mismatch
+power-cycle block even if a following write fails. Restart clears this volatile
+block, while the published retry budget persists; zero retries requires reset.
+Unreadable PIN state remains set, blocked and alwaysUv, and its placeholder is
+never written over the stored record.
 
 Other record writes retain their atomic file replacement behavior. Most report
 a directory-flush error even though the renamed file remains visible;

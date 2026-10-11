@@ -214,8 +214,9 @@ impl CtapApp<'_> {
 
     /// "stores LEFT(SHA-256(newPin), 16) internally as CurrentStoredPIN, sets
     /// the pinRetries counter to maximum count" (CTAP 2.3 §6.5.5.5,
-    /// §6.5.5.6).  The new PIN is written first and only then used, so a
-    /// failed write leaves the old PIN in force, in memory as on disk.
+    /// §6.5.5.6). Publication commits the new PIN, including unconfirmed
+    /// durability, and invalidates old tokens. A pre-publication failure keeps
+    /// the previous PIN and the legitimate effects of preceding verification.
     fn store_new_pin(&mut self, hash: &[u8; 16], length: u8) -> Result<(), u8> {
         let mut persistent = self.pin_state.persistent().clone();
         persistent.pin_hash = Some(*hash);

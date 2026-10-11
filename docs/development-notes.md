@@ -45,13 +45,44 @@ U2F status words. Failed resets retain counter floors; successful resets keep
 invalidated IDs for the existing individual retired-ID probes. File-store
 reset tests inject failures and process exits at every persistence checkpoint
 in both layouts, including key publication, counter deletion, manifest and
-PIN writes, and verify explicit retry recovery. Regenerated seeds include protocol crossings and U2F
-disabled by always-UV.
+PIN writes, and verify explicit retry recovery. PIN/configuration regressions
+cover every preparation and post-rename checkpoint, both PIN protocols,
+legacy and managed stores, live/restarted policy and old-token invalidation.
+Private test observations prove unconfirmed retry debits reach no decryption,
+comparison or token issuance. The sequence harness schedules pre-publication
+failures and committed-but-unconfirmed outcomes, tracks live and published
+retry budgets, and reconstructs engines over the same published store. Seeds
+cover these outcomes, retry recovery, protocol crossings and U2F disabled by
+always-UV. Fault controls exist only in unit tests and the fuzz harness.
 Large-blob tests cover fragmented writes, interrupted staging and restart
 persistence; the fuzz sequence model checks committed-array visibility and
 the lifetime of pending writes, and that credential keys are stable and
 returned only when requested. Heap residue tests include those keys and
 their registration, assertion and enumeration response copies.
+
+## PIN storage recovery
+
+A successful PIN/configuration command publishes its settings immediately.
+A warning about unconfirmed durability means a process restart observes the
+new settings, while power loss may roll back the rename. Read getInfo to
+observe PIN presence, minimum length, forced change and alwaysUv; RP disclosure
+is tested through the minPinLength extension. Avoid treating a durability
+warning as evidence that the old PIN or policy is still active.
+
+A retry-write processing error gives no verdict on the supplied PIN and issues
+no token. Inspect getPINRetries before further attempts: a failed write can
+conservatively reduce the running budget, and an unconfirmed published debit
+is visible after restart. Restoring storage permits another attempt if retries
+remain. Restart clears the three-mismatch power-cycle block; it does not clear
+persisted retry exhaustion. An unreadable record remains untouched and fails
+closed until an explicit reset.
+
+Reset preserves attestation and rotates the credential key before removing
+counters or policy. Earlier errors may leave partial cleanup, but cannot
+revive invalidated credentials or lower surviving credentials' protections.
+Retrying explicit reset recovers without needing readable old records. Once
+all preceding work completes and default PIN state is published, reset returns
+success and adopts defaults even if the final publication is unconfirmed.
 
 ## Running your changes
 

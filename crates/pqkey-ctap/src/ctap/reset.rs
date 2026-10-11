@@ -34,8 +34,9 @@ impl CtapApp<'_> {
     /// can precede or follow key publication. If reset fails, the in-memory
     /// PIN state is kept. Surviving credentials retain their PIN/UV policy
     /// across restart; unreadable PIN state is set and blocked with always-UV.
-    /// After key publication, a later error may leave persisted defaults,
-    /// but every preceding credential is already invalid.
+    /// After durable key rotation, later errors cannot revive old credentials.
+    /// Published defaults complete reset even with unconfirmed durability;
+    /// the running engine adopts them before returning success.
     pub(super) fn handle_reset(&mut self) -> Result<Vec<u8>, u8> {
         // The clock the engine's timers share starts at power-up.
         if let Some(window) = self.reset_window
