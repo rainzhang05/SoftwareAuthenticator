@@ -145,3 +145,22 @@ def test_pin_is_required_for_discoverable_credentials_only(ctap: Ctap2):
     assert excinfo.value.code == CtapError.ERR.PUAT_REQUIRED
 
     client.authenticate(ctap, client.register(ctap, RP_ID, client.ES256))
+
+
+@pytest.mark.parametrize("protocol", _protocols())
+def test_three_mismatches_block_even_the_correct_pin_until_reset(ctap: Ctap2, protocol):
+    pin = _client_pin(ctap, protocol)
+    pin.set_pin(PIN)
+    for expected in (CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_BLOCKED):
+        with pytest.raises(CtapError) as excinfo:
+            pin.get_pin_token(WRONG_PIN)
+        assert excinfo.value.code == expected
+    assert pin.get_pin_retries() == (MAX_RETRIES - 3, True)
+    with pytest.raises(CtapError) as excinfo:
+        pin.get_pin_token(PIN)
+    assert excinfo.value.code == CtapError.ERR.PIN_AUTH_BLOCKED
+    assert pin.get_pin_retries() == (MAX_RETRIES - 3, True)
+    ctap.reset()
+    pin.set_pin(NEW_PIN)
+    assert pin.get_pin_token(NEW_PIN)
+    assert pin.get_pin_retries()[0] == MAX_RETRIES

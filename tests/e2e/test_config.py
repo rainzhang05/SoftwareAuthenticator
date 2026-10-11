@@ -368,3 +368,24 @@ def test_reset_restores_every_configuration_default(ctap: Ctap2, protocol):
     assert credential.auth_data.extensions is None
     ClientPin(ctap, protocol).set_pin(PIN)
     assert ClientPin(ctap, protocol).get_pin_token(PIN, ClientPin.PERMISSION.AUTHENTICATOR_CFG)
+
+
+def test_pin_change_invalidates_configuration_token_and_preserves_policy(ctap: Ctap2, protocol):
+    pin = ClientPin(ctap, protocol)
+    pin.set_pin(NEW_PIN)
+    old_config = _config(ctap, protocol, NEW_PIN)
+    old_config.set_min_pin_length(6, [RP_ID])
+    replacement = "9123456"
+    pin.change_pin(NEW_PIN, replacement)
+    with pytest.raises(CtapError) as excinfo:
+        old_config.toggle_always_uv()
+    assert excinfo.value.code == ERR.PIN_AUTH_INVALID
+    with pytest.raises(CtapError) as excinfo:
+        pin.get_pin_token(NEW_PIN, ClientPin.PERMISSION.AUTHENTICATOR_CFG)
+    assert excinfo.value.code == ERR.PIN_INVALID
+    assert pin.get_pin_token(replacement, ClientPin.PERMISSION.AUTHENTICATOR_CFG)
+    assert pin.get_pin_retries()[0] == MAX_RETRIES
+    assert _info(ctap)[0x0D] == 6
+    for rp_id, expected in ((RP_ID, {"minPinLength": 6}), (OTHER_RP_ID, None)):
+        credential = client.register(ctap, rp_id, client.ES256, extensions={"minPinLength": True})
+        assert credential.auth_data.extensions == expected

@@ -377,3 +377,51 @@ fn configuration_uses_its_permission_and_survives_a_restart() {
     assert_eq!(info.force_pin_change, Some(false));
     assert_eq!(info.pin_set, Some(false));
 }
+
+#[test]
+fn pin_publication_invalidates_client_tokens_and_forced_change_survives_restart() {
+    let dir = TempDir::new("client-pin-publication");
+    {
+        let (_daemon, mut key) = start(&dir);
+        key.set_pin(b"1234").unwrap();
+        let old = key.config_token(b"1234").unwrap();
+        key.change_pin(b"1234", b"567890").unwrap();
+        assert!(matches!(
+            key.toggle_always_uv(Some(&old)),
+            Err(ClientError::Status(0x33))
+        ));
+        assert!(matches!(
+            key.config_token(b"1234"),
+            Err(ClientError::Status(0x31))
+        ));
+        let current = key.config_token(b"567890").unwrap();
+        key.set_min_pin_length(
+            Some(&current),
+            Some(6),
+            Some(&["example.com".into()]),
+            Some(true),
+        )
+        .unwrap();
+        assert!(matches!(
+            key.toggle_always_uv(Some(&current)),
+            Err(ClientError::Status(0x33))
+        ));
+        assert_eq!(key.info().unwrap().force_pin_change, Some(true));
+    }
+    let store = FileStore::open(dir.path()).unwrap();
+    assert_eq!(
+        store.pin_state().unwrap().unwrap().min_pin_length_rp_ids,
+        ["example.com"]
+    );
+    drop(store);
+    let (_daemon, mut key) = start(&dir);
+    assert_eq!(key.info().unwrap().force_pin_change, Some(true));
+    assert!(matches!(
+        key.config_token(b"567890"),
+        Err(ClientError::Status(0x37))
+    ));
+    key.change_pin(b"567890", b"678901").unwrap();
+    assert_eq!(key.info().unwrap().force_pin_change, Some(false));
+    assert_eq!(key.pin_retries().unwrap().retries, 8);
+    assert!(key.config_token(b"678901").is_ok());
+}
