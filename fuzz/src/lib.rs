@@ -12,3 +12,5 @@ pub mod requests;
 pub mod rng;
 pub mod sequence;
 pub mod structured;
+
+mod storage;

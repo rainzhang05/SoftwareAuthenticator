@@ -7,11 +7,12 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use crate::storage::{HarnessStore, Write};
 use ciborium::value::Value;
 use pqkey_ctap::ctap::constants::*;
 use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest, UserPresence};
 use pqkey_ctap::ctap::{Clock, CtapApp, InterruptFlag};
-use pqkey_ctap::store::MemoryStore;
+use pqkey_ctap::store::{CredentialStore, MemoryStore, PinStateRecord};
 
 use crate::rng::SplitMix;
 
@@ -125,6 +126,8 @@ impl UserPresence for FuzzPresence {
 /// A fresh engine over an empty in-memory store, with a seeded RNG.
 pub struct Engine {
     app: CtapApp<'static>,
+    store: HarnessStore,
+    seed: u64,
     presence: FuzzPresence,
     clock: FuzzClock,
     /// The command byte and response status of every request so far.
@@ -138,9 +141,13 @@ impl Engine {
 
     /// An engine over `store`, for example one with a small credential limit.
     pub fn with_store(seed: u64, store: MemoryStore) -> Self {
+        Self::with_harness(seed, HarnessStore::new(store))
+    }
+
+    fn with_harness(seed: u64, store: HarnessStore) -> Self {
         let presence = FuzzPresence::default();
         let mut app = CtapApp::new(
-            store,
+            store.clone(),
             SplitMix(seed),
             presence.clone(),
             &NEVER_INTERRUPTED,
@@ -162,10 +169,32 @@ impl Engine {
         });
         Self {
             app,
+            store,
+            seed,
             presence,
             clock,
             trace: Vec::new(),
         }
+    }
+
+    pub(crate) fn schedule_pin_write(&self, mode: u8, after: u8) {
+        self.store.schedule(mode, after);
+    }
+
+    pub(crate) fn take_pin_writes(&self) -> Vec<Write> {
+        self.store.take_writes()
+    }
+
+    pub(crate) fn pin_record(&self) -> Option<PinStateRecord> {
+        self.store.pin_state().unwrap()
+    }
+
+    /// Reconstruct only the engine, keeping the harness's published storage.
+    pub(crate) fn restart(&mut self) {
+        let trace = std::mem::take(&mut self.trace);
+        let mut fresh = Self::with_harness(self.seed.wrapping_add(1), self.store.clone());
+        fresh.trace = trace;
+        *self = fresh;
     }
 
     pub fn presence(&self) -> &FuzzPresence {

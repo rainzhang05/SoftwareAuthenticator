@@ -37,6 +37,14 @@ use sha2::{Digest, Sha256};
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("seeds");
+    if let Some(argument) = std::env::args().nth(1) {
+        assert_eq!(
+            argument, "--sequence-only",
+            "unknown seed generation option"
+        );
+        sequence_seeds(&root);
+        return;
+    }
     ctap_request(&root.join("ctap_request"));
     ctaphid_packets(&root.join("ctaphid_packets"));
     searched(
@@ -46,6 +54,11 @@ fn main() {
         16,
         structured::run_traced,
     );
+    sequence_seeds(&root);
+    credential_key(&root.join("credential_key"));
+}
+
+fn sequence_seeds(root: &Path) {
     searched(
         &root.join("ctap_sequence"),
         3_000,
@@ -61,7 +74,6 @@ fn main() {
         sequence_dir.display(),
         explicit.len()
     );
-    credential_key(&root.join("credential_key"));
 }
 
 /// Replace the seeds in `dir` with `seeds`, named by content like libFuzzer

@@ -45,7 +45,9 @@ use p256::elliptic_curve::{subtle::ConstantTimeEq, zeroize::Zeroizing};
 use pqkey_ctap::ctap::Clock;
 use pqkey_ctap::ctap::CtapApp;
 use pqkey_ctap::ctap::constants::*;
-use pqkey_ctap::store::{INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY, MemoryStore};
+use pqkey_ctap::store::{
+    CommitDurability, INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY, MemoryStore,
+};
 use pqkey_ctap::{ClassicPinProtocol, CoseAlg};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -196,6 +198,12 @@ enum Op {
     U2fVersion,
     U2fStructured,
     U2fRaw,
+    /// One scheduled PIN/default-state write: volatile, flushed, rejected or unconfirmed.
+    PinWriteFault {
+        mode: u8,
+        after: u8,
+    },
+    Restart,
 }
 
 struct Credential {
@@ -231,6 +239,10 @@ type HmacInput = (Option<Value>, Option<(Session, usize)>);
 
 struct Platform {
     global_counter: u32,
+    retries: u8,
+    mismatches: u8,
+    saved_retries: u8,
+    expected_pin_match: Option<bool>,
     engine: Engine,
     /// The PIN the authenticator has, as far as the platform knows.
     pin: Option<Vec<u8>>,
@@ -392,6 +404,10 @@ impl Platform {
     fn new(engine: Engine) -> Self {
         Self {
             global_counter: 0,
+            retries: 8,
+            mismatches: 0,
+            saved_retries: 8,
+            expected_pin_match: None,
             engine,
             pin: None,
             token: None,
@@ -414,8 +430,96 @@ impl Platform {
 
     fn call(&mut self, request: &[u8]) -> Vec<u8> {
         let response = self.engine.call(request);
+        self.audit_pin_writes(request, &response);
         self.observe(request, &response);
         response
+    }
+
+    fn audit_pin_writes(&mut self, request: &[u8], response: &[u8]) {
+        let writes = self.engine.take_pin_writes();
+        let correct = self.expected_pin_match.take();
+        let parameters = request.get(1..).and_then(decode_map).unwrap_or_default();
+        let verifying = request.first() == Some(&CTAP_CMD_CLIENT_PIN)
+            && matches!(
+                get_int(&parameters, 2)
+                    .and_then(Value::as_integer)
+                    .map(i128::from),
+                Some(4 | 5 | 9)
+            );
+        for (index, write) in writes.iter().enumerate() {
+            let confirmed = matches!(
+                write.outcome,
+                Some(CommitDurability::Flushed | CommitDurability::Volatile)
+            );
+            if verifying && index == 0 {
+                assert!(self.retries > 0);
+                self.retries -= 1;
+                assert_eq!(
+                    write.state.pin_retries, self.retries,
+                    "incorrect retry debit"
+                );
+            } else if verifying && index == 1 {
+                let matched = correct.unwrap_or(write.state.pin_retries == 8);
+                assert_eq!(
+                    write.state.pin_retries,
+                    if matched { 8 } else { self.retries },
+                    "incorrect retry restoration"
+                );
+                if matched && write.outcome.is_some() {
+                    self.retries = 8;
+                    self.mismatches = 0;
+                } else if !matched {
+                    self.mismatches = self.mismatches.saturating_add(1);
+                }
+            } else if write.outcome.is_some() {
+                let expected = if request.first() == Some(&CTAP_CMD_AUTHENTICATOR_CONFIG) {
+                    self.retries
+                } else {
+                    8
+                };
+                assert_eq!(
+                    write.state.pin_retries, expected,
+                    "incorrect settings retry budget"
+                );
+                self.retries = write.state.pin_retries;
+                if request.first() != Some(&CTAP_CMD_AUTHENTICATOR_CONFIG) {
+                    self.mismatches = 0;
+                }
+            }
+            if write.outcome.is_some() {
+                self.saved_retries = write.state.pin_retries;
+            }
+            if verifying && index < 2 && !confirmed {
+                assert_eq!(response, [CTAP2_ERR_PROCESSING]);
+                assert_eq!(
+                    writes.len(),
+                    index + 1,
+                    "verification continued after uncertain retry persistence"
+                );
+            }
+        }
+        if request.first() == Some(&CTAP_CMD_CLIENT_PIN)
+            && get_int(&parameters, 2) == Some(&int(1))
+            && status(response) == CTAP2_OK
+        {
+            let body = decode_map(&response[1..]).unwrap();
+            assert_eq!(get_int(&body, 3), Some(&int(self.retries.into())));
+            assert_eq!(
+                get_int(&body, 4),
+                (self.mismatches >= 3).then_some(&Value::Bool(true))
+            );
+        }
+    }
+
+    fn check_published_state(&self) {
+        if let Some(record) = self.engine.pin_record() {
+            assert_eq!(record.pin_retries, self.saved_retries);
+            assert_eq!(record.pin_hash, self.pin.as_deref().map(pin_hash));
+            assert_eq!(record.min_pin_length, self.minimum);
+            assert_eq!(record.always_uv, self.always_uv);
+            assert_eq!(record.force_pin_change, self.force_change);
+            assert_eq!(record.min_pin_length_rp_ids, self.min_pin_length_rp_ids);
+        }
     }
 
     fn known(&self, id: &[u8]) -> Option<&Credential> {
@@ -1281,6 +1385,7 @@ impl Platform {
                         (int(6), bytes(&pin_hash_enc)),
                     ]),
                 );
+                self.expected_pin_match = Some(right_pin && self.pin.is_some());
                 let response = self.call(&request);
                 let knows_pin = right_pin && self.pin.is_some();
                 if knows_pin {
@@ -1335,6 +1440,7 @@ impl Platform {
                         entries.push((int(10), text(rp_id(rp))));
                     }
                 }
+                self.expected_pin_match = Some(right_pin && self.pin.is_some());
                 let response = self.call(&command(CTAP_CMD_CLIENT_PIN, &Value::Map(entries)));
                 let knows_pin = right_pin && self.pin.is_some();
                 if knows_pin && legacy && self.force_change {
@@ -1604,6 +1710,16 @@ impl Platform {
             Op::Reset => {
                 self.call(&[CTAP_CMD_RESET]);
             }
+            Op::PinWriteFault { mode, after } => self.engine.schedule_pin_write(mode, after),
+            Op::Restart => {
+                self.engine.restart();
+                self.retries = self.saved_retries;
+                self.mismatches = 0;
+                self.token = None;
+                self.pending = PendingArray::default();
+                self.assertion_rp = None;
+                self.assertion_large_blob_key = false;
+            }
             Op::Presence(selector) => self.engine.presence().select(selector),
             Op::Structured => {
                 let request = requests::any_request(u)?;
@@ -1846,7 +1962,11 @@ pub fn run_traced(data: &[u8]) -> Vec<(u8, u16)> {
         let Ok(op) = u.arbitrary::<Op>() else {
             break;
         };
-        if platform.step(op, &mut u).is_err() || u.is_empty() {
+        if platform.step(op, &mut u).is_err() {
+            break;
+        }
+        platform.check_published_state();
+        if u.is_empty() {
             break;
         }
     }
@@ -2153,6 +2273,98 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
             corrupt: false,
         },
     ]);
+    for v2 in [false, true] {
+        let set = || Op::SetPin {
+            v2,
+            pin: 0,
+            bad_auth: false,
+            pad_to: 2,
+        };
+        let token = || Op::GetToken {
+            v2,
+            right_pin: true,
+            legacy: false,
+            permissions: 6,
+            rp: None,
+        };
+        for mode in [2, 3] {
+            cases.push(vec![
+                Op::PinWriteFault { mode, after: 0 },
+                set(),
+                Op::GetInfo,
+                Op::Restart,
+                Op::GetPinRetries,
+            ]);
+            for after in [0, 1] {
+                cases.push(vec![
+                    set(),
+                    Op::PinWriteFault { mode, after },
+                    token(),
+                    Op::GetPinRetries,
+                    Op::Restart,
+                    token(),
+                    Op::GetInfo,
+                ]);
+            }
+            cases.push(vec![
+                set(),
+                token(),
+                Op::PinWriteFault { mode, after: 2 },
+                Op::ChangePin {
+                    v2,
+                    right_pin: true,
+                    new_pin: 2,
+                },
+                Op::GetInfo,
+                Op::Restart,
+                token(),
+            ]);
+            cases.push(vec![
+                set(),
+                token(),
+                Op::PinWriteFault { mode, after: 0 },
+                Op::AuthenticatorConfig {
+                    auth: Auth::Token,
+                    subcommand: 0,
+                    minimum: None,
+                    rp_ids: None,
+                    force_change: None,
+                    complexity: None,
+                },
+                Op::GetInfo,
+                Op::Restart,
+                Op::GetInfo,
+            ]);
+            cases.push(vec![
+                set(),
+                Op::PinWriteFault { mode, after: 0 },
+                Op::Reset,
+                Op::GetInfo,
+                Op::Restart,
+                Op::GetPinRetries,
+            ]);
+        }
+    }
+    for v2 in [false, true] {
+        cases.push(vec![
+            Op::SetPin {
+                v2,
+                pin: 0,
+                bad_auth: false,
+                pad_to: 2,
+            },
+            Op::PinWriteFault { mode: 1, after: 0 },
+            Op::GetToken {
+                v2,
+                right_pin: true,
+                legacy: false,
+                permissions: 6,
+                rp: None,
+            },
+            Op::GetPinRetries,
+            Op::Restart,
+        ]);
+    }
     cases.iter().map(|ops| encode_fixture(ops)).collect()
 }
 
@@ -2198,15 +2410,15 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 permissions,
                 rp: None,
             } => {
-                variant(&mut output, 6, 28);
+                variant(&mut output, 6, 30);
                 output.extend_from_slice(&[u8::from(*v2), *permissions, 0]);
                 extra = if pin_set { 17 } else { 34 };
                 pin_set = true;
             }
-            Op::GetNextAssertion => variant(&mut output, 5, 28),
-            Op::GetInfo => variant(&mut output, 9, 28),
+            Op::GetNextAssertion => variant(&mut output, 5, 30),
+            Op::GetInfo => variant(&mut output, 9, 30),
             Op::Reset => {
-                variant(&mut output, 11, 28);
+                variant(&mut output, 11, 30);
                 pin_set = false;
             }
             Op::LargeBlobBegin {
@@ -2216,7 +2428,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 valid_hash,
                 fill,
             } => {
-                variant(&mut output, 15, 28);
+                variant(&mut output, 15, 30);
                 auth(&mut output, *value);
                 output.extend_from_slice(&length.to_le_bytes());
                 output.extend_from_slice(&fragment.to_le_bytes());
@@ -2228,7 +2440,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 length,
                 fragment,
             } => {
-                variant(&mut output, 16, 28);
+                variant(&mut output, 16, 30);
                 auth(&mut output, *value);
                 option_u16(&mut output, *offset);
                 option_u16(&mut output, *length);
@@ -2239,13 +2451,13 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 length,
                 extra,
             } => {
-                variant(&mut output, 17, 28);
+                variant(&mut output, 17, 30);
                 output.extend_from_slice(&offset.to_le_bytes());
                 output.extend_from_slice(&length.to_le_bytes());
                 output.push(*extra);
             }
             Op::Advance(millis) => {
-                variant(&mut output, 18, 28);
+                variant(&mut output, 18, 30);
                 output.extend_from_slice(&millis.to_le_bytes());
             }
             Op::LargeBlobWrite {
@@ -2254,7 +2466,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 fragment,
                 valid_hash,
             } => {
-                variant(&mut output, 19, 28);
+                variant(&mut output, 19, 30);
                 auth(&mut output, *value);
                 output.extend_from_slice(&length.to_le_bytes());
                 output.extend_from_slice(&fragment.to_le_bytes());
@@ -2266,7 +2478,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 rk,
                 user,
             } => {
-                variant(&mut output, 20, 28);
+                variant(&mut output, 20, 30);
                 option_bool(&mut output, *large_blob_key);
                 output.extend_from_slice(&[u8::from(*rk), *user]);
             }
@@ -2274,17 +2486,17 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 large_blob_key,
                 discoverable,
             } => {
-                variant(&mut output, 21, 28);
+                variant(&mut output, 21, 30);
                 option_bool(&mut output, *large_blob_key);
                 output.push(u8::from(*discoverable));
             }
             Op::EnumerateCredentials { auth: value, next } => {
-                variant(&mut output, 22, 28);
+                variant(&mut output, 22, 30);
                 auth(&mut output, *value);
                 output.push(u8::from(*next));
             }
             Op::U2fRegister { rp } => {
-                variant(&mut output, 23, 28);
+                variant(&mut output, 23, 30);
                 output.push(*rp);
             }
             Op::U2fAuthenticate {
@@ -2293,10 +2505,10 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 control,
                 corrupt,
             } => {
-                variant(&mut output, 24, 28);
+                variant(&mut output, 24, 30);
                 output.extend_from_slice(&[*credential, *rp, *control, u8::from(*corrupt)]);
             }
-            Op::U2fVersion => variant(&mut output, 25, 28),
+            Op::U2fVersion => variant(&mut output, 25, 30),
             Op::AuthenticatorConfig {
                 auth: value,
                 subcommand,
@@ -2305,9 +2517,52 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 force_change: None,
                 complexity: None,
             } => {
-                variant(&mut output, 8, 28);
+                variant(&mut output, 8, 30);
                 auth(&mut output, *value);
                 output.extend_from_slice(&[*subcommand, 0, 0, 0, 0]);
+            }
+            Op::PinWriteFault { mode, after } => {
+                variant(&mut output, 28, 30);
+                output.extend_from_slice(&[*mode, *after]);
+            }
+            Op::Restart => variant(&mut output, 29, 30),
+            Op::GetPinRetries => variant(&mut output, 10, 30),
+            Op::SetPin {
+                v2,
+                pin,
+                bad_auth,
+                pad_to,
+            } => {
+                variant(&mut output, 0, 30);
+                output.extend_from_slice(&[u8::from(*v2), *pin, u8::from(*bad_auth), *pad_to]);
+                extra = 17;
+                pin_set = true;
+            }
+            Op::ChangePin {
+                v2,
+                right_pin,
+                new_pin,
+            } => {
+                variant(&mut output, 1, 30);
+                output.extend_from_slice(&[u8::from(*v2), u8::from(*right_pin), *new_pin]);
+                extra = 33;
+            }
+            Op::GetToken {
+                v2,
+                right_pin,
+                legacy,
+                permissions,
+                rp: None,
+            } => {
+                variant(&mut output, 2, 30);
+                output.extend_from_slice(&[
+                    u8::from(*v2),
+                    u8::from(*right_pin),
+                    u8::from(*legacy),
+                    *permissions,
+                    0,
+                ]);
+                extra = 17;
             }
             _ => panic!("operation has no fixture encoder"),
         }
@@ -2465,7 +2720,7 @@ mod tests {
     #[test]
     fn seeds_exercise_commits_abandoned_writes_and_stable_keys() {
         let seeds = seed_corpus();
-        assert_eq!(seeds.len(), 20);
+        assert_eq!(seeds.len(), 46);
         let traces: Vec<_> = seeds.iter().map(|seed| run_traced(seed)).collect();
         for pair in [
             (0x81, 0x9000),
