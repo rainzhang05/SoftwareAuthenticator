@@ -135,8 +135,8 @@ fn install_unit(binary: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
-/// Only units matching the shipped template (apart from ExecStart) are
-/// rewritten. User drop-ins remain under systemd's control.
+/// Only units matching the shipped template, with the default state path,
+/// are rewritten. User drop-ins remain under systemd's control.
 fn managed_unit(unit: &str) -> bool {
     let without_exec = |text: &str| {
         text.lines()
@@ -158,8 +158,20 @@ fn managed_unit(unit: &str) -> bool {
         .lines()
         .find_map(|line| line.strip_prefix("ExecStart="))
         .and_then(|line| line.strip_suffix(" run"));
+    let default_state = crate::state::default_state_dir();
+    let default_state = default_state.to_str().map(|path| path.replace('%', "%%"));
     let ordinary_exec = exec.is_some_and(|exec| match exec.split_once(" --state-dir ") {
-        Some((binary, state)) => one_word(binary) && one_word(state),
+        Some((binary, state)) => {
+            one_word(binary)
+                && one_word(state)
+                && default_state.as_deref().is_some_and(|default| {
+                    state == default
+                        || state
+                            .strip_prefix('"')
+                            .and_then(|state| state.strip_suffix('"'))
+                            == Some(default)
+                })
+        }
         None => one_word(exec),
     });
     ordinary_exec && without_exec(unit) == without_exec(UNIT_TEMPLATE)
@@ -374,6 +386,15 @@ exit 0
             "--user set-environment DBUS_SESSION_BUS_ADDRESS=unix:path=/fixture/bus:unset"
         ));
         assert!(commands.contains("--user enable pqkey.service:unset"));
+        let managed = fs::read_to_string(&unit).unwrap();
+        let custom_state = UNIT_TEMPLATE.replace(
+            "ExecStart=/usr/local/bin/pqkey run",
+            "ExecStart=/usr/local/bin/pqkey --state-dir \"/retained/custom state\" run",
+        );
+        fs::write(&unit, &custom_state).unwrap();
+        assert!(child("").status.success());
+        assert_eq!(fs::read_to_string(&unit).unwrap(), custom_state);
+        fs::write(&unit, managed).unwrap();
         let custom = fs::read_to_string(&unit)
             .unwrap()
             .replace(" run\n", " run --presence unanswered\n");
