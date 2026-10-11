@@ -18,6 +18,12 @@
 //!   growth), requests for the app are never empty, never handed out while it
 //!   is busy and never exceed 7,609 bytes, and timers are never further away
 //!   than the longest timeout.
+//! * an independent request/worker model predicts response bytes and order;
+//!   CID ownership lasts through the final successful write, including when
+//!   that report has already been selected;
+//! * selection and failed writes do not consume reports; valid INIT may
+//!   explicitly truncate its CID's output, and session teardown may discard
+//!   pending output. Every other truncation or stale continuation fails.
 
 use std::collections::HashSet;
 
@@ -25,9 +31,11 @@ use crate::rng::NarrowRng;
 use arbitrary::{Arbitrary, Unstructured};
 use pqkey::transport::ctaphid_host::{
     CONTINUATION_TIMEOUT_MS, CTAP2_ERR_KEEPALIVE_CANCEL, Command, CtaphidHost,
-    KEEPALIVE_INTERVAL_MS, MAX_MESSAGE_SIZE,
+    KEEPALIVE_INTERVAL_MS, MAX_MESSAGE_SIZE, OutgoingFrame,
 };
 use pqkey::transport::{CTAPHID_FRAME_LEN, CtapHidFrame};
+
+mod model;
 
 pub const INIT_DATA: usize = CTAPHID_FRAME_LEN - 7;
 pub const CONT_DATA: usize = CTAPHID_FRAME_LEN - 5;
@@ -100,6 +108,18 @@ pub enum Action {
     U2fRespond {
         approved: bool,
     },
+    /// Select without writing, including the last response report.
+    SelectOutput,
+    /// Write a selected report successfully, unless INIT invalidated it.
+    WriteOutput,
+    /// A failed device write: retain the selected report without completion.
+    FailOutput,
+    /// Successfully transmit at most this many reports.
+    Transmit(u8),
+    /// Explicit same-channel abort and resynchronization.
+    Abort(Channel),
+    /// End the session, allowing pending output to be discarded on teardown.
+    Shutdown,
 }
 
 struct Harness {
@@ -110,9 +130,18 @@ struct Harness {
     /// Channels that sent an initialization packet.
     senders: HashSet<u32>,
     app_busy: bool,
-    /// What the app answered in this step, if it did.
-    app_answer: Option<Vec<u8>>,
-    cached_answer: Option<Vec<u8>>,
+    model: model::Model,
+    selected: Option<OutgoingFrame>,
+    assembly: Option<Assembly>,
+    stopped: bool,
+}
+
+struct Assembly {
+    channel: u32,
+    command: u8,
+    length: usize,
+    payload: Vec<u8>,
+    sequence: u8,
 }
 
 impl Harness {
@@ -133,8 +162,15 @@ impl Harness {
             self.senders
                 .insert(u32::from_be_bytes(packet[..4].try_into().unwrap()));
         }
+        let abort = self.model.packet(&packet, self.now);
         self.host.handle_frame(&CtapHidFrame::new(packet), self.now);
-        assert!(self.drain() <= 1, "more than one message for one packet");
+        if abort.is_some_and(|cid| {
+            self.assembly
+                .as_ref()
+                .is_some_and(|message| message.channel == cid)
+        }) {
+            self.assembly = None;
+        }
     }
 
     fn message_packets(channel: u32, command: u8, payload: &[u8], length: u16) -> Vec<[u8; 64]> {
@@ -155,40 +191,82 @@ impl Harness {
         packets
     }
 
-    /// Take every queued packet, check it and return how many messages
-    /// there were.
-    fn drain(&mut self) -> usize {
-        let mut messages = 0;
-        while let Some(frame) = self.host.next_outgoing_frame() {
-            let packet = *frame.frame().as_bytes();
-            assert!(self.host.outgoing_frame_written(&frame));
-            assert_ne!(packet[4] & 0x80, 0, "a continuation packet out of place");
-            let channel = u32::from_be_bytes(packet[..4].try_into().unwrap());
-            let command = packet[4] & 0x7f;
-            let length = usize::from(u16::from_be_bytes([packet[5], packet[6]]));
-            assert!(length <= MAX_MESSAGE_SIZE, "a {length}-byte message");
-            let head = length.min(INIT_DATA);
-            let mut payload = packet[7..7 + head].to_vec();
-            assert!(packet[7 + head..].iter().all(|&b| b == 0), "padding");
-            let mut sequence = 0u8;
-            while payload.len() < length {
-                let frame = self
-                    .host
-                    .next_outgoing_frame()
-                    .expect("the rest of the message is queued with it");
-                let packet = frame.frame().as_bytes();
-                assert_eq!(packet[..4], channel.to_be_bytes(), "interleaved channel");
-                assert_eq!(packet[4], sequence, "continuation sequence");
-                let chunk = (length - payload.len()).min(CONT_DATA);
-                payload.extend_from_slice(&packet[5..5 + chunk]);
-                assert!(packet[5 + chunk..].iter().all(|&b| b == 0), "padding");
-                sequence += 1;
-                assert!(self.host.outgoing_frame_written(&frame));
-            }
-            self.check_message(channel, command, &payload);
-            messages += 1;
+    fn write_selected(&mut self) {
+        let Some(selected) = self.selected.take() else {
+            return;
+        };
+        if !self.host.is_outgoing_current(&selected) {
+            assert!(
+                !self.host.outgoing_frame_written(&selected),
+                "stale completion accepted"
+            );
+            return;
         }
-        messages
+        let packet = selected.frame().as_bytes();
+        let channel = u32::from_be_bytes(packet[..4].try_into().unwrap());
+        if packet[4] & 0x80 != 0 {
+            assert!(
+                self.assembly.is_none(),
+                "unexplained truncation or interleaved message"
+            );
+            let length = usize::from(u16::from_be_bytes([packet[5], packet[6]]));
+            assert!(length <= MAX_MESSAGE_SIZE);
+            let head = length.min(INIT_DATA);
+            assert!(packet[7 + head..].iter().all(|&byte| byte == 0), "padding");
+            self.assembly = Some(Assembly {
+                channel,
+                command: packet[4] & 0x7f,
+                length,
+                payload: packet[7..7 + head].to_vec(),
+                sequence: 0,
+            });
+        } else {
+            let message = self
+                .assembly
+                .as_mut()
+                .expect("stale continuation without an initialization report");
+            assert_eq!(channel, message.channel, "interleaved channel");
+            assert_eq!(packet[4], message.sequence, "continuation sequence");
+            message.sequence += 1;
+            let count = (message.length - message.payload.len()).min(CONT_DATA);
+            message.payload.extend_from_slice(&packet[5..5 + count]);
+            assert!(packet[5 + count..].iter().all(|&byte| byte == 0), "padding");
+        }
+        // No input can intervene between this simulated successful write and
+        // its completion callback, just as in the real transport thread.
+        assert!(self.host.outgoing_frame_written(&selected));
+        assert!(
+            !self.host.outgoing_frame_written(&selected),
+            "duplicate completion"
+        );
+        if self
+            .assembly
+            .as_ref()
+            .is_some_and(|message| message.payload.len() == message.length)
+        {
+            let message = self.assembly.take().unwrap();
+            self.model
+                .output(message.channel, message.command, &message.payload);
+            self.check_message(message.channel, message.command, &message.payload);
+        }
+    }
+
+    fn transmit(&mut self, count: usize) {
+        for _ in 0..count {
+            self.selected = self.host.next_outgoing_frame();
+            if self.selected.is_none() {
+                break;
+            }
+            self.write_selected();
+        }
+    }
+
+    fn drain(&mut self) {
+        while self.host.next_outgoing_frame().is_some() {
+            self.transmit(1);
+        }
+        assert!(self.assembly.is_none(), "unexplained response truncation");
+        self.model.drained();
     }
 
     fn check_message(&mut self, channel: u32, command: u8, payload: &[u8]) {
@@ -225,26 +303,7 @@ impl Harness {
                 }
             }
             Command::Ping => assert_ne!(channel, BROADCAST),
-            Command::Cbor => {
-                assert_ne!(channel, BROADCAST);
-                let answered = self.app_answer.take();
-                assert!(
-                    answered.as_deref() == Some(payload) || payload == [CTAP2_ERR_KEEPALIVE_CANCEL],
-                    "a CBOR response the app did not give"
-                );
-            }
-            Command::Msg => {
-                assert_ne!(channel, BROADCAST);
-                let answered = self.app_answer.take();
-                let cached = self.cached_answer.as_deref() == Some(payload);
-                assert!(
-                    answered.as_deref() == Some(payload) || cached || payload == [0x69, 0x85],
-                    "a MSG response the app did not give"
-                );
-                if cached {
-                    self.cached_answer = None;
-                }
-            }
+            Command::Cbor | Command::Msg => assert_ne!(channel, BROADCAST),
             Command::Cancel => panic!("CTAPHID_CANCEL is never sent"),
         }
     }
@@ -285,12 +344,9 @@ impl Harness {
                     } else {
                         vec![0x69, 0x85]
                     };
-                    self.app_answer = Some(response.clone());
-                    if approved {
-                        self.cached_answer = Some(response.clone());
-                    }
+                    self.model
+                        .respond(response.clone(), self.now, Some(self.now));
                     self.host.app_response(response, self.now, Some(self.now));
-                    assert!(self.drain() <= 1);
                 }
             }
             Action::Packet(packet) => self.packet(*packet),
@@ -353,16 +409,23 @@ impl Harness {
             }
             Action::Advance(ms) => self.now += u64::from(ms),
             Action::Timeout => {
+                self.model.timeout(self.now);
                 self.host.handle_timeout(self.now);
-                assert!(self.drain() <= 1);
             }
             Action::Keepalive(waiting) => {
                 self.host.app_presence(waiting);
                 let sent = self.host.send_keepalive(waiting, self.now);
-                assert_eq!(self.drain(), usize::from(sent));
+                assert_eq!(sent, self.model.keepalive(waiting, self.now));
             }
             Action::TakeRequest => {
-                if let Some(request) = self.host.take_app_request() {
+                let request = self.host.take_app_request();
+                assert_eq!(
+                    request.is_some(),
+                    self.model.wants_request(),
+                    "worker admission"
+                );
+                if let Some(request) = request {
+                    self.model.take_request(&request);
                     assert!(!self.app_busy, "a request for a busy app");
                     assert!(!request.payload.is_empty(), "an empty CBOR request");
                     assert!(request.payload.len() <= MAX_MESSAGE_SIZE);
@@ -378,15 +441,32 @@ impl Harness {
                 // goes out as ERR_OTHER.
                 let length = usize::from(length) % (MAX_MESSAGE_SIZE + 64);
                 let response: Vec<u8> = (0..length).map(|i| fill.wrapping_add(i as u8)).collect();
-                self.app_answer = Some(response.clone());
+                self.model.respond(response.clone(), self.now, None);
                 self.host.app_response(response, self.now, None);
-                assert!(self.drain() <= 1);
             }
             Action::TakeInterrupt => {
                 self.host.take_interrupt();
             }
+            Action::SelectOutput => self.selected = self.host.next_outgoing_frame(),
+            Action::WriteOutput => self.write_selected(),
+            Action::FailOutput => {
+                if self.selected.is_none() {
+                    self.selected = self.host.next_outgoing_frame();
+                }
+                // No successful write, hence no completion callback.
+                if let Some(selected) = &self.selected
+                    && self.host.is_outgoing_current(selected)
+                {
+                    assert!(self.host.next_outgoing_frame().is_some());
+                }
+            }
+            Action::Transmit(count) => self.transmit(usize::from(count)),
+            Action::Abort(channel) => {
+                let channel = self.channel(&channel);
+                self.packet(Self::message_packets(channel, Command::Init as u8, &[0xA5; 8], 8)[0]);
+            }
+            Action::Shutdown => self.stopped = true,
         }
-        self.app_answer = None;
         self.check_timers();
     }
 }
@@ -403,14 +483,35 @@ pub fn run(data: &[u8]) {
         allocated: Vec::new(),
         senders: HashSet::new(),
         app_busy: false,
-        app_answer: None,
-        cached_answer: None,
+        model: model::Model::new(seed, u32::from(range) + 1),
+        selected: None,
+        assembly: None,
+        stopped: false,
     };
     harness.host.set_capabilities(0x04);
     while let Ok(action) = u.arbitrary::<Action>() {
         harness.act(action);
-        if u.is_empty() {
+        if u.is_empty() || harness.stopped {
             break;
         }
+    }
+    if !harness.stopped {
+        harness.drain();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn committed_transmission_boundary_seeds_replay() {
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("seeds/ctaphid_packets");
+        let mut count = 0;
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            super::run(&std::fs::read(&path).unwrap());
+            count += 1;
+        }
+        assert!(count > 0, "transmission boundary seeds are missing");
     }
 }

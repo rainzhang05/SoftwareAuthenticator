@@ -25,6 +25,7 @@ use std::path::Path;
 use arbitrary::{Arbitrary, Unstructured};
 use ciborium::value::Value;
 use p256::elliptic_curve::sec1::ToSec1Point;
+use pqkey::transport::ctaphid_host::MAX_MESSAGE_SIZE;
 use pqkey_ctap::CoseAlg;
 use pqkey_fuzz::cbor::{bytes, int, text};
 use pqkey_fuzz::ctaphid::{Action, CONT_DATA, Channel, INIT_DATA, Mangle};
@@ -661,14 +662,14 @@ impl Encoder {
 
     fn action(&mut self, action: &Action) -> &mut Self {
         match action {
-            Action::Packet(packet) => self.variant(0, 12).raw(&packet[..]),
+            Action::Packet(packet) => self.variant(0, 18).raw(&packet[..]),
             Action::Init {
                 channel,
                 command,
                 length,
                 data,
             } => self
-                .variant(1, 12)
+                .variant(1, 18)
                 .channel(channel)
                 .raw(&[*command])
                 .raw(&length.to_le_bytes())
@@ -678,7 +679,7 @@ impl Encoder {
                 sequence,
                 data,
             } => self
-                .variant(2, 12)
+                .variant(2, 18)
                 .channel(channel)
                 .raw(&[*sequence])
                 .raw(&data[..]),
@@ -690,7 +691,7 @@ impl Encoder {
                 mangle,
                 gap_ms,
             } => {
-                self.variant(3, 12)
+                self.variant(3, 18)
                     .channel(channel)
                     .raw(&[*command])
                     .raw(&length.to_le_bytes())
@@ -703,22 +704,28 @@ impl Encoder {
                 };
                 self.raw(&gap_ms.to_le_bytes())
             }
-            Action::Advance(ms) => self.variant(4, 12).raw(&ms.to_le_bytes()),
-            Action::Timeout => self.variant(5, 12),
-            Action::Keepalive(waiting) => self.variant(6, 12).raw(&[u8::from(*waiting)]),
-            Action::TakeRequest => self.variant(7, 12),
+            Action::Advance(ms) => self.variant(4, 18).raw(&ms.to_le_bytes()),
+            Action::Timeout => self.variant(5, 18),
+            Action::Keepalive(waiting) => self.variant(6, 18).raw(&[u8::from(*waiting)]),
+            Action::TakeRequest => self.variant(7, 18),
             Action::Respond { length, fill } => {
-                self.variant(8, 12).raw(&length.to_le_bytes()).raw(&[*fill])
+                self.variant(8, 18).raw(&length.to_le_bytes()).raw(&[*fill])
             }
-            Action::TakeInterrupt => self.variant(9, 12),
+            Action::TakeInterrupt => self.variant(9, 18),
             Action::Apdu { channel, payload } => {
-                self.variant(10, 12).channel(channel);
+                self.variant(10, 18).channel(channel);
                 for byte in payload {
                     self.raw(&[1, *byte]);
                 }
                 self.raw(&[0])
             }
-            Action::U2fRespond { approved } => self.variant(11, 12).raw(&[u8::from(*approved)]),
+            Action::U2fRespond { approved } => self.variant(11, 18).raw(&[u8::from(*approved)]),
+            Action::SelectOutput => self.variant(12, 18),
+            Action::WriteOutput => self.variant(13, 18),
+            Action::FailOutput => self.variant(14, 18),
+            Action::Transmit(count) => self.variant(15, 18).raw(&[*count]),
+            Action::Abort(channel) => self.variant(16, 18).channel(channel),
+            Action::Shutdown => self.variant(17, 18),
         }
     }
 }
@@ -741,11 +748,30 @@ fn respond(length: u16, fill: u8) -> Action {
 /// An exchange: `(seed, channel range)` and its actions, encoded and checked
 /// to decode back to the same actions.
 fn exchange(actions: &[Action]) -> Vec<u8> {
+    encode_exchange(actions, true)
+}
+
+fn partial_exchange(actions: &[Action]) -> Vec<u8> {
+    encode_exchange(actions, false)
+}
+
+fn encode_exchange(actions: &[Action], auto_transmit: bool) -> Vec<u8> {
+    let transmit = Action::Transmit(u8::MAX);
+    let actions: Vec<&Action> = actions
+        .iter()
+        .flat_map(|action| {
+            if auto_transmit {
+                vec![action, &transmit]
+            } else {
+                vec![action]
+            }
+        })
+        .collect();
     let mut encoder = Encoder::default();
     encoder
         .raw(&0x5EED_u64.to_le_bytes())
         .raw(&u16::MAX.to_le_bytes());
-    for action in actions {
+    for action in &actions {
         encoder.action(action);
     }
     let encoded = encoder.0;
@@ -950,6 +976,128 @@ fn ctaphid_packets(dir: &Path) {
         Action::TakeInterrupt,
         Action::U2fRespond { approved: true },
     ]));
+    for command in [0x01, 0x03, 0x10] {
+        for length in [1, 58, MAX_MESSAGE_SIZE as u16] {
+            let packets = 1 + usize::from(length)
+                .saturating_sub(INIT_DATA)
+                .div_ceil(CONT_DATA);
+            for sent in [0, packets - 1] {
+                for abort in [false, true] {
+                    let mut actions = vec![
+                        message(Channel::Broadcast, 0x06, 8, 0),
+                        Action::Transmit(255),
+                        message(
+                            Channel::Allocated(0),
+                            command,
+                            if command == 1 { length } else { 1 },
+                            4,
+                        ),
+                    ];
+                    if command != 1 {
+                        actions.extend([Action::TakeRequest, respond(length, 0x42)]);
+                    }
+                    actions.extend([
+                        Action::Transmit(sent as u8),
+                        Action::SelectOutput,
+                        Action::FailOutput,
+                    ]);
+                    if abort {
+                        actions.push(Action::Abort(Channel::Allocated(0)));
+                    } else {
+                        actions.push(message(Channel::Raw(0x1234_5678), 0x10, 1, 4));
+                    }
+                    actions.extend([
+                        Action::TakeRequest,
+                        Action::WriteOutput,
+                        Action::Transmit(255),
+                        message(Channel::Raw(0x1234_5678), 1, 1, 5),
+                    ]);
+                    seeds.push(partial_exchange(&actions));
+                }
+            }
+        }
+    }
+    seeds.push(partial_exchange(&[
+        message(Channel::Broadcast, 6, 8, 0),
+        Action::Transmit(255),
+        message(Channel::Allocated(0), 0x10, 1, 4),
+        Action::TakeRequest,
+        Action::Keepalive(true),
+        Action::SelectOutput,
+        Action::Abort(Channel::Allocated(0)),
+        Action::TakeInterrupt,
+        Action::WriteOutput,
+        Action::Transmit(255),
+        message(Channel::Allocated(0), 0x10, 1, 5),
+        Action::TakeRequest,
+        respond(200, 0x42),
+        Action::TakeRequest,
+        respond(58, 0),
+        Action::SelectOutput,
+        message(Channel::Allocated(0), 0x11, 0, 0),
+        Action::WriteOutput,
+        Action::Transmit(255),
+    ]));
+    seeds.push(partial_exchange(&[
+        message(Channel::Broadcast, 6, 8, 0),
+        Action::Transmit(255),
+        message(Channel::Allocated(0), 0x10, 1, 4),
+        Action::TakeRequest,
+        Action::Abort(Channel::Allocated(0)),
+        Action::Transmit(255),
+        message(Channel::Allocated(0), 0x10, 1, 5),
+        message(Channel::Allocated(0), 0x11, 0, 0),
+        Action::SelectOutput,
+        respond(200, 0x42),
+        Action::FailOutput,
+        Action::WriteOutput,
+    ]));
+    for approved in [false, true] {
+        seeds.push(partial_exchange(&[
+            message(Channel::Broadcast, 6, 8, 0),
+            Action::Transmit(255),
+            Action::Apdu {
+                channel: Channel::Allocated(0),
+                payload: [vec![0, 1, 0, 0, 0, 0, 64], vec![0x42; 64]].concat(),
+            },
+            Action::TakeRequest,
+            Action::Keepalive(true),
+            Action::Transmit(1),
+            Action::Advance(100),
+            Action::Timeout,
+            Action::SelectOutput,
+            Action::U2fRespond { approved },
+            message(Channel::Raw(0x1234_5678), 1, 1, 0),
+            Action::WriteOutput,
+            Action::Transmit(255),
+            Action::Apdu {
+                channel: Channel::Allocated(0),
+                payload: [vec![0, 1, 0, 0, 0, 0, 64], vec![0x42; 64]].concat(),
+            },
+            Action::SelectOutput,
+            Action::FailOutput,
+            Action::WriteOutput,
+        ]));
+    }
+    seeds.push(partial_exchange(&[
+        message(Channel::Raw(1), 1, MAX_MESSAGE_SIZE as u16, 4),
+        Action::Transmit(1),
+        Action::SelectOutput,
+        Action::Shutdown,
+    ]));
+    let mut narrow = partial_exchange(&[
+        message(Channel::Broadcast, 6, 8, 0),
+        Action::SelectOutput,
+        message(Channel::Broadcast, 6, 8, 1),
+        Action::WriteOutput,
+        message(Channel::Raw(0x1234_5678), 0x10, 1, 4),
+        Action::TakeRequest,
+        Action::Transmit(255),
+        respond(58, 0x42),
+    ]);
+    narrow[8..10].copy_from_slice(&0u16.to_le_bytes());
+    pqkey_fuzz::ctaphid::run(&narrow);
+    seeds.push(narrow);
     write_all(dir, &seeds);
 }
 
