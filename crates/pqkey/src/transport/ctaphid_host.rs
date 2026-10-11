@@ -9,7 +9,7 @@
 //! # Transactions
 //!
 //! One transaction is served at a time (§11.2.5.1). It starts with the
-//! initialization packet of a request and is in one of two states:
+//! initialization packet of a request and is in one of three states:
 //!
 //! * **Receiving**: continuation packets are still expected. Each one must
 //!   arrive within [`CONTINUATION_TIMEOUT_MS`] of the previous packet.
@@ -17,6 +17,11 @@
 //!   (or will as soon as it is free). While a CTAPHID_CBOR request is
 //!   processed, keepalives go out every [`KEEPALIVE_INTERVAL_MS`] and
 //!   whenever their status changes.
+//! * **Transmitting**: the response is queued or being written. The CID
+//!   remains owned until the transport reports the final successful device
+//!   write through [`CtaphidHost::outgoing_frame_written`]. Selecting that
+//!   report does not complete the transaction. Auxiliary errors and
+//!   keepalives do not release ownership.
 //!
 //! The app answers CTAPHID_CBOR and CTAPHID_MSG. INIT and PING are
 //! answered as soon as they are complete, and every other command with
@@ -32,7 +37,13 @@
 //!   response. CANCEL is never answered itself;
 //! * any other request on the transaction's channel fails with
 //!   ERR_INVALID_SEQ while receiving (and ends the transaction) and with
-//!   ERR_CHANNEL_BUSY while processing (and does not).
+//!   ERR_CHANNEL_BUSY while processing or transmitting (and does not).
+//!
+//! A valid same-CID INIT discards received data and all unsent output on
+//! that CID. It invalidates selected reports too: the transport rechecks
+//! their tokens after processing input and before writing them. Already
+//! successful writes cannot be recalled. INIT's reply owns the replacement
+//! transaction until it is written.
 //!
 //! # The app outlives aborted transactions
 //!
@@ -714,7 +725,11 @@ impl<R: CryptoRng> CtaphidHost<R> {
             match self.allocate_channel() {
                 Some(assigned) => assigned,
                 None => {
-                    self.finish_error(channel, ErrorCode::ChannelBusy);
+                    if aborted {
+                        self.enqueue_error(channel, ErrorCode::ChannelBusy);
+                    } else {
+                        self.finish_error(channel, ErrorCode::ChannelBusy);
+                    }
                     return;
                 }
             }
@@ -1038,6 +1053,23 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_init_allocation_does_not_replace_an_unwritten_reply() {
+        let mut host = host_with_channels(&[0; 128]);
+        send(&mut host, BROADCAST_CID, Command::Init, &[0; 8], 0);
+        let selected = host.next_outgoing_frame().unwrap();
+        send(&mut host, BROADCAST_CID, Command::Init, &[1; 8], 1);
+        assert!(host.is_outgoing_current(&selected));
+        assert!(host.outgoing_frame_written(&selected));
+        assert_eq!(host.busy_channel(), None);
+        start_cbor(&mut host, FIRST, &[4], 2);
+        assert_eq!(
+            sent(&mut host),
+            [error(BROADCAST_CID, ErrorCode::ChannelBusy)]
+        );
+        assert_eq!(host.busy_channel(), Some(FIRST));
+    }
+
     #[test]
     fn every_response_frame_keeps_ownership_until_its_successful_write() {
         for command in [Command::Ping, Command::Cbor, Command::Msg] {

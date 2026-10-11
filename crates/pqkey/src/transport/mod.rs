@@ -717,6 +717,13 @@ mod transmission_tests {
         fail_read: bool,
         stop: Option<ShutdownSignal>,
         _responses: mpsc::Sender<AppResponse>,
+        destroyed: Arc<AtomicBool>,
+    }
+
+    impl Drop for Device {
+        fn drop(&mut self) {
+            self.destroyed.store(true, Ordering::SeqCst);
+        }
     }
 
     impl HidDevice for Device {
@@ -774,6 +781,7 @@ mod transmission_tests {
                 fail_read: false,
                 stop: None,
                 _responses: responses,
+                destroyed: Arc::new(AtomicBool::new(false)),
             },
             host,
             app: AppWorker {
@@ -827,6 +835,81 @@ mod transmission_tests {
             written[2],
             packet(2, Command::Error, &[ErrorCode::ChannelBusy as u8])
         );
+    }
+
+    #[test]
+    fn init_cancels_the_worker_and_discards_selected_keepalives() {
+        let interrupt = InterruptFlag::new();
+        let mut transport = transport(&interrupt, 1);
+        transport.host = CtaphidHost::new();
+        transport
+            .host
+            .handle_frame(&packet(1, Command::Cbor, &[4]), 0);
+        transport.host.take_app_request().unwrap();
+        interrupt.set_working();
+        assert!(transport.host.send_keepalive(false, 50));
+        assert!(transport.host.send_keepalive(true, 51));
+        transport
+            .device
+            .incoming
+            .borrow_mut()
+            .push_back(packet(1, Command::Init, &[9; 8]));
+        transport.flush_pending().unwrap();
+        assert!(
+            interrupt.is_interrupted(),
+            "INIT is serviced during output pacing"
+        );
+        let written = transport.device.written.borrow();
+        assert_eq!(written.len(), 2);
+        assert_eq!(written[0].0[4], Command::KeepAlive as u8 | 0x80);
+        assert_eq!(written[1].0[4], Command::Init as u8 | 0x80);
+        drop(written);
+        transport.host.app_response(vec![0x42; 200], 52, None);
+        assert!(
+            transport.host.next_outgoing_frame().is_none(),
+            "late worker reply suppressed"
+        );
+        transport
+            .host
+            .handle_frame(&packet(2, Command::Cbor, &[5]), 53);
+        assert_eq!(transport.host.take_app_request().unwrap().payload, [5]);
+    }
+
+    #[test]
+    fn a_device_write_error_ends_exec_and_destroys_the_device() {
+        struct NoCalls<'a>(&'a InterruptFlag);
+        impl<'a> App<'a> for NoCalls<'a> {
+            fn interrupt(&self) -> &'a InterruptFlag {
+                self.0
+            }
+            fn call(&mut self, _: &[u8]) -> Vec<u8> {
+                panic!("PING must not reach the worker")
+            }
+            fn call_u2f(&mut self, _: &[u8]) -> Vec<u8> {
+                panic!("no MSG request")
+            }
+        }
+        let interrupt = InterruptFlag::new();
+        let mut transport = transport(&interrupt, 1);
+        transport.device.after = 0;
+        transport.device.fail_write = Some(0);
+        transport
+            .device
+            .incoming
+            .borrow_mut()
+            .push_back(packet(1, Command::Ping, &[4]));
+        let destroyed = Arc::clone(&transport.device.destroyed);
+        let error = exec(
+            transport.device,
+            &mut NoCalls(&interrupt),
+            &WaitingForUser::new(),
+            ShutdownSignal::new(),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "scripted write failure");
+        assert!(!crate::shutdown::is_shutdown(&error));
+        assert!(destroyed.load(Ordering::SeqCst));
     }
 
     #[test]
