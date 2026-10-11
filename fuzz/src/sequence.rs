@@ -199,6 +199,7 @@ enum Op {
 }
 
 struct Credential {
+    user_id: Vec<u8>,
     application: [u8; 32],
     algorithm: i64,
     protection: u8,
@@ -235,6 +236,8 @@ struct Platform {
     pin: Option<Vec<u8>>,
     token: Option<(ClassicPinProtocol, [u8; 32])>,
     credentials: Vec<Credential>,
+    /// IDs implicitly overwritten or explicitly deleted, with their RP IDs.
+    retired: Vec<(Vec<u8>, String)>,
     /// The RP ID of the getAssertion whose further credentials
     /// getNextAssertion may return.
     assertion_rp: Option<String>,
@@ -393,6 +396,7 @@ impl Platform {
             pin: None,
             token: None,
             credentials: Vec::new(),
+            retired: Vec::new(),
             assertion_rp: None,
             assertion_large_blob_key: false,
             minimum: 4,
@@ -421,7 +425,11 @@ impl Platform {
     }
 
     fn known_ids(&self) -> Vec<Vec<u8>> {
-        self.credentials.iter().map(|c| c.id.clone()).collect()
+        self.credentials
+            .iter()
+            .map(|c| c.id.clone())
+            .chain(self.retired.iter().map(|(id, _)| id.clone()))
+            .collect()
     }
 
     fn observe_counter(&mut self, id: &[u8], counter: u32) {
@@ -465,6 +473,7 @@ impl Platform {
                 .copied()
                 .unwrap_or_default();
             self.credentials.push(Credential {
+                user_id: Vec::new(),
                 application,
                 algorithm: -7,
                 protection: 1,
@@ -774,7 +783,27 @@ impl Platform {
                         "minimum disclosed without an authorized request"
                     );
                 }
+                let user_id = match get_int(&parameters, 3) {
+                    Some(Value::Map(user)) => match get_text(user, "id") {
+                        Some(Value::Bytes(id)) => id.clone(),
+                        _ => panic!("successful registration without user handle"),
+                    },
+                    _ => panic!("successful registration without user"),
+                };
+                if discoverable {
+                    self.credentials.retain(|credential| {
+                        let replaced = credential.discoverable
+                            && credential.rp_id == *rp_id
+                            && credential.user_id == user_id;
+                        if replaced {
+                            self.retired
+                                .push((credential.id.clone(), credential.rp_id.clone()));
+                        }
+                        !replaced
+                    });
+                }
                 self.credentials.push(Credential {
+                    user_id,
                     application: Sha256::digest(rp_id.as_bytes()).into(),
                     algorithm: match get_int(public_key.as_map().unwrap(), 3).unwrap() {
                         Value::Integer(alg) => i64::try_from(i128::from(*alg)).unwrap(),
@@ -921,7 +950,15 @@ impl Platform {
                     let Some(Value::Bytes(id)) = id else {
                         panic!("deleted a credential without an id");
                     };
-                    self.credentials.retain(|credential| credential.id != id);
+                    self.credentials.retain(|credential| {
+                        if credential.id == id {
+                            self.retired
+                                .push((credential.id.clone(), credential.rp_id.clone()));
+                            false
+                        } else {
+                            true
+                        }
+                    });
                 }
                 _ => {}
             },
@@ -929,6 +966,7 @@ impl Platform {
                 self.pin = None;
                 self.token = None;
                 self.credentials.clear();
+                self.retired.clear();
                 self.global_counter = 0;
                 self.minimum = 4;
                 self.always_uv = false;
@@ -1707,6 +1745,30 @@ impl Platform {
                     ));
                 }
                 self.call(&command(CTAP_CMD_GET_ASSERTION, &Value::Map(entries)));
+                // Target retired IDs individually: a mixed allowList could
+                // otherwise hide their continued usability behind a live ID.
+                for (id, rp) in self.retired.clone() {
+                    let request = command(
+                        CTAP_CMD_GET_ASSERTION,
+                        &Value::Map(vec![
+                            (int(1), text(&rp)),
+                            (int(2), bytes(&[0x55; 32])),
+                            (
+                                int(3),
+                                Value::Array(vec![Value::Map(vec![
+                                    (text("id"), bytes(&id)),
+                                    (text("type"), text("public-key")),
+                                ])]),
+                            ),
+                            (int(5), Value::Map(vec![(text("up"), Value::Bool(false))])),
+                        ]),
+                    );
+                    assert_ne!(
+                        status(&self.call(&request)),
+                        CTAP2_OK,
+                        "retired ID authenticated"
+                    );
+                }
             }
             Op::EnumerateCredentials { auth, next } => {
                 let subcommand = if next { 5 } else { 4 };
@@ -2278,6 +2340,61 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn models_replacement_at_capacity_and_targets_retired_ids() {
+        let mut platform = Platform::new(Engine::with_store(
+            11,
+            MemoryStore::new().with_max_credentials(2),
+        ));
+        let mut input = Unstructured::new(&[]);
+        for (rk, user) in [(false, 1), (true, 1), (true, 2), (true, 1), (true, 1)] {
+            platform
+                .step(
+                    Op::CreateCredential {
+                        large_blob_key: rk.then_some(true),
+                        rk,
+                        user,
+                    },
+                    &mut input,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            platform.credentials.len(),
+            3,
+            "two accounts and a sealed credential"
+        );
+        assert_eq!(platform.retired.len(), 2);
+        for discoverable in [false, true] {
+            platform
+                .step(
+                    Op::AssertCredentials {
+                        large_blob_key: Some(true),
+                        discoverable,
+                    },
+                    &mut input,
+                )
+                .unwrap();
+        }
+        let trace = platform.engine.into_trace();
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|pair| **pair == (CTAP_CMD_MAKE_CREDENTIAL, u16::from(CTAP2_OK)))
+                .count(),
+            5
+        );
+        assert_eq!(
+            trace
+                .iter()
+                .filter(
+                    |pair| **pair == (CTAP_CMD_GET_ASSERTION, u16::from(CTAP2_ERR_NO_CREDENTIALS))
+                )
+                .count(),
+            4
+        );
+    }
 
     #[test]
     fn seeds_exercise_commits_abandoned_writes_and_stable_keys() {

@@ -884,12 +884,14 @@ fn clear_ends_sealed_credential_ids<B: Backend>() {
 }
 
 fn discoverable_replacement_retires_duplicates_at_capacity<B: Backend>() {
-    let mut fixture = B::create(5);
+    let mut fixture = B::create(6);
     let store = &mut fixture.store;
     let old = new_record(CoseAlg::ES256);
     let mut duplicate = new_record(CoseAlg::MLDSA44);
     duplicate.rp_id = old.rp_id.clone();
     duplicate.user_id = old.user_id.clone();
+    let mut another_duplicate = duplicate.clone();
+    another_duplicate.credential_id = random_bytes::<32>().to_vec();
     let mut other_user = old.clone();
     other_user.credential_id = random_bytes::<32>().to_vec();
     other_user.user_id.push(0);
@@ -898,7 +900,14 @@ fn discoverable_replacement_retires_duplicates_at_capacity<B: Backend>() {
     other_rp.rp_id = "EXAMPLE.com".into();
     let mut non_discoverable = old.clone();
     non_discoverable.credential_id = [vec![0], random_bytes::<32>().to_vec()].concat();
-    for record in [&old, &duplicate, &other_user, &other_rp, &non_discoverable] {
+    for record in [
+        &old,
+        &duplicate,
+        &another_duplicate,
+        &other_user,
+        &other_rp,
+        &non_discoverable,
+    ] {
         insert(store, record);
     }
     let preceding_order = store.list().unwrap()[0].created_at;
@@ -924,7 +933,7 @@ fn discoverable_replacement_retires_duplicates_at_capacity<B: Backend>() {
             other_user.credential_id.clone()
         ]
     );
-    for record in [&old, &duplicate] {
+    for record in [&old, &duplicate, &another_duplicate] {
         assert!(store.get(&record.credential_id).unwrap().is_none());
     }
     let mut second = replacement.clone();
@@ -932,7 +941,7 @@ fn discoverable_replacement_retires_duplicates_at_capacity<B: Backend>() {
     store.insert_or_replace_discoverable(&second).unwrap();
     assert!(store.get(&replacement.credential_id).unwrap().is_none());
     assert!(store.delete(&second.credential_id).unwrap());
-    for record in [&old, &duplicate, &replacement, &second] {
+    for record in [&old, &duplicate, &another_duplicate, &replacement, &second] {
         assert!(store.get(&record.credential_id).unwrap().is_none());
     }
     assert_eq!(store.count().unwrap(), 3);

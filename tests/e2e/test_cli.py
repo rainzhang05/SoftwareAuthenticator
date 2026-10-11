@@ -458,3 +458,39 @@ def test_large_blobs_and_keys_survive_restart_and_reset_erases_them(pqkey: Pqkey
             extensions={"largeBlobKey": True},
         )
         assert replacement.large_blob_key != credential.large_blob_key
+
+
+
+def test_replacement_old_id_rejection_survives_restart_and_deletion(pqkey: Pqkey):
+    """A dedicated real HID daemon keeps committed membership across restart."""
+    pqkey.start()
+    user = client.user_entity("replacement")
+    rp = "replacement.e2e.example"
+    with client.open_device(pqkey.status()["Device"]) as device:
+        session = Ctap2(device)
+        old = client.register(session, rp, client.ES256, user=user, options={"rk": True})
+        kept = client.register(session, rp, client.ES256, user=client.user_entity("kept"), options={"rk": True})
+        new = client.register(session, rp, client.ES256, user=user, options={"rk": True})
+        assert old.credential_id != new.credential_id
+        assert old.public_key != new.public_key
+        client.authenticate(session, new)
+        with pytest.raises(CtapError) as excinfo:
+            client.authenticate(session, old)
+        assert excinfo.value.code == CtapError.ERR.NO_CREDENTIALS
+    pqkey.ok("pin", stdin=f"{PIN}\n")
+    for deleted in (False, True):
+        pqkey.ok("stop")
+        pqkey.start()
+        with client.open_device(pqkey.status()["Device"]) as device:
+            session = Ctap2(device)
+            client.authenticate(session, kept)
+            for retired in ([old, new] if deleted else [old]):
+                with pytest.raises(CtapError) as excinfo:
+                    client.authenticate(session, retired)
+                assert excinfo.value.code == CtapError.ERR.NO_CREDENTIALS
+            if not deleted:
+                client.authenticate(session, new)
+        listing = pqkey.passkeys()
+        assert [row[1] for row in listing] == (["kept (Kept)"] if deleted else ["replacement (Replacement)", "kept (Kept)"])
+        if not deleted:
+            assert pqkey.ok("passkeys", "delete", listing[0][3], "--yes", stdin=f"{PIN}\n") == "Passkey deleted.\n"

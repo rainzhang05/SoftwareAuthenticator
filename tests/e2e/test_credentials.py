@@ -89,3 +89,43 @@ def test_reset_removes_credentials(ctap: Ctap2):
 
     # The store is usable again after the reset.
     client.authenticate(ctap, client.register(ctap, RP_ID, client.ES256))
+
+
+@pytest.mark.parametrize("policy", [1, 2, 3])
+def test_replacement_retires_old_id_and_refreshes_extensions(ctap: Ctap2, policy):
+    from fido2.ctap2 import ClientPin
+    from fido2.ctap2.pin import PinProtocolV2
+    from test_hmac_secret import _hmac_secret
+
+    user = client.user_entity("replacement")
+    old = client.register(ctap, RP_ID, client.ES256, user=user, options={"rk": True},
+                          extensions={"credBlob": b"old", "hmac-secret": True, "largeBlobKey": True})
+    unrelated = client.register(ctap, RP_ID, client.ES256,
+                                user=client.user_entity("unrelated"), options={"rk": True})
+    non_discoverable = client.register(ctap, RP_ID, client.ES256, user=user)
+    protocol = PinProtocolV2()
+    salts = os.urandom(32)
+    old_hmac = _hmac_secret(ctap, old, protocol, salts)
+    ClientPin(ctap, protocol).set_pin("4821")
+    auth = client.pin_uv_auth(ctap, protocol, "4821", ClientPin.PERMISSION.MAKE_CREDENTIAL, RP_ID)
+    replacement = client.register(ctap, RP_ID, client.ES256, user=user, options={"rk": True}, uv=True,
+                                  extensions={"credProtect": policy, "credBlob": b"new",
+                                              "hmac-secret": True, "largeBlobKey": True}, **auth)
+    assert replacement.credential_id != old.credential_id
+    assert replacement.public_key != old.public_key
+    assert replacement.large_blob_key != old.large_blob_key
+    assert replacement.auth_data.extensions == {"credProtect": policy, "credBlob": True, "hmac-secret": True}
+    with pytest.raises(CtapError) as excinfo:
+        client.authenticate(ctap, old)
+    assert excinfo.value.code == CtapError.ERR.NO_CREDENTIALS
+    auth = client.pin_uv_auth(ctap, protocol, "4821", ClientPin.PERMISSION.GET_ASSERTION, RP_ID)
+    response, data = client.authenticate(ctap, replacement, extensions={"credBlob": True, "largeBlobKey": True}, uv=True, **auth)
+    assert data.extensions == {"credBlob": b"new"}
+    assert response[7] == replacement.large_blob_key
+    # Without UV, hmac-secret uses the same branch as the old credential.
+    # Policy 3 requires UV, so compare its UV output instead.
+    auth = client.pin_uv_auth(ctap, protocol, "4821", ClientPin.PERMISSION.GET_ASSERTION, RP_ID) if policy == 3 else {}
+    new_hmac = _hmac_secret(ctap, replacement, protocol, salts, uv=policy == 3, **auth)
+    assert new_hmac != old_hmac
+    client.authenticate(ctap, unrelated)
+    client.authenticate(ctap, non_discoverable)

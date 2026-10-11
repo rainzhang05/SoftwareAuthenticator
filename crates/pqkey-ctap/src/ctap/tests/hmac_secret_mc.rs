@@ -241,6 +241,115 @@ fn creation_and_assertion_prfs_match_for_each_uv_state_and_protocol() {
 }
 
 #[test]
+fn replacement_refreshes_prfs_blob_protection_and_large_blob_key() {
+    for protocol in PROTOCOLS {
+        for uv in [false, true] {
+            let mut app = test_app([0x85; 16]);
+            let salts = [0x53; 64];
+            let mut preceding: Option<(CredentialRecord, Vec<u8>)> = None;
+            for generation in 0..2 {
+                let auth = uv.then_some(protocol);
+                if uv {
+                    install_pin_uv_auth_token(
+                        &mut app,
+                        protocol,
+                        TOKEN,
+                        PIN_PERMISSION_MC,
+                        Some(RP),
+                    );
+                }
+                let session = PlatformPinSession::establish(&mut app, protocol, 0x21 + generation);
+                let extensions = canonical_map(vec![
+                    (text("hmac-secret"), Value::Bool(true)),
+                    (
+                        text("hmac-secret-mc"),
+                        hmac_input(&session, &salts, protocol),
+                    ),
+                    (text("credBlob"), Value::Bytes(vec![generation; 32])),
+                    (text("credProtect"), int(if uv { 3 } else { 2 })),
+                    (text("largeBlobKey"), Value::Bool(true)),
+                ]);
+                let response = app
+                    .handle_make_credential(&creation_request(
+                        CoseAlg::ES256,
+                        true,
+                        extensions,
+                        auth,
+                        1,
+                    ))
+                    .unwrap();
+                let credential = created_credential(&app, &response, RP);
+                verify_response(&response, &credential, true);
+                assert_eq!(stored(&app).len(), 1);
+                assert_eq!(credential.cred_protect, if uv { 3 } else { 2 });
+                assert_eq!(credential.cred_blob, Some(vec![generation; 32]));
+                let outputs = extension_outputs(&response, Some(&credential));
+                let Value::Bytes(encrypted) = map_get(&outputs, text("hmac-secret-mc")).unwrap()
+                else {
+                    panic!("creation PRF");
+                };
+                let created = session.decrypt(encrypted);
+                if let Some((old, old_prf)) = &preceding {
+                    assert_ne!(credential.credential_id, old.credential_id);
+                    assert_ne!(
+                        credential.cose_public_key().unwrap(),
+                        old.cose_public_key().unwrap()
+                    );
+                    assert_ne!(credential.cred_random_with_uv, old.cred_random_with_uv);
+                    assert_ne!(
+                        credential.cred_random_without_uv,
+                        old.cred_random_without_uv
+                    );
+                    assert_ne!(credential.large_blob_key, old.large_blob_key);
+                    assert_ne!(created, *old_prf);
+                    assert!(app.store.get(&old.credential_id).unwrap().is_none());
+                }
+                if uv {
+                    install_pin_uv_auth_token(
+                        &mut app,
+                        protocol,
+                        TOKEN,
+                        PIN_PERMISSION_GA,
+                        Some(RP),
+                    );
+                }
+                let session = PlatformPinSession::establish(&mut app, protocol, 0x31 + generation);
+                let request = get_assertion_request(
+                    &HASH,
+                    RP,
+                    auth.map(|p| (p, token_pin_auth(p, &TOKEN, &HASH))),
+                    Some(canonical_map(vec![(
+                        text("hmac-secret"),
+                        hmac_input(&session, &salts, protocol),
+                    )])),
+                );
+                let Value::Map(mut entries) = from_reader(request.as_slice()).unwrap() else {
+                    panic!("assertion map");
+                };
+                entries.push((
+                    int(3),
+                    Value::Array(vec![canonical_map(vec![
+                        (text("id"), Value::Bytes(credential.credential_id.clone())),
+                        (text("type"), text("public-key")),
+                    ])]),
+                ));
+                let response = app
+                    .handle_get_assertion(&encode(&canonical_map(entries)))
+                    .unwrap();
+                verify_response(&response, &credential, false);
+                let outputs = extension_outputs(&response, None);
+                let Value::Bytes(encrypted) = map_get(&outputs, text("hmac-secret")).unwrap()
+                else {
+                    panic!("assertion PRF");
+                };
+                assert_eq!(session.decrypt(encrypted), created);
+                preceding = Some((credential, created));
+            }
+        }
+    }
+}
+
+#[test]
 fn creation_requires_true_hmac_secret_and_reports_typed_input_errors() {
     let key = canonical_map(vec![]);
     for (input, expected) in [

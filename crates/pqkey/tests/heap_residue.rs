@@ -237,6 +237,16 @@ fn exercise(alg: CoseAlg, material: PrivateKeyMaterial) {
         assert_eq!(loaded_public, public);
         let signature = try_sign_challenge(alg, &loaded_key, &[0x11; 37], &[0x22; 32]).unwrap();
         verify_signature(alg, &loaded_public, &rsa_fixture::MESSAGE, &signature).unwrap();
+        let mut replacement = record.clone();
+        replacement.credential_id[32] = 2;
+        let mut store = FileStore::open(&dir.0).unwrap();
+        store.insert_or_replace_discoverable(&replacement).unwrap();
+        assert!(store.get(&record.credential_id).unwrap().is_none());
+        store.delete(&replacement.credential_id).unwrap();
+        let mut memory = MemoryStore::new();
+        memory.put(&record).unwrap();
+        memory.insert_or_replace_discoverable(&replacement).unwrap();
+        assert!(memory.get(&record.credential_id).unwrap().is_none());
     }
     scan_freed(alg.name(), &needles);
 }
