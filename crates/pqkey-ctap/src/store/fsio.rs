@@ -78,16 +78,26 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), StoreError> {
 /// Flush a directory, making the creation, renaming, and removal of entries in
 /// it durable.
 pub(crate) fn sync_dir(dir: &Path) -> Result<(), StoreError> {
-    let handle = File::open(dir).map_err(|err| io_error(dir, err))?;
-    match handle.sync_all() {
-        Ok(()) => Ok(()),
-        // Some filesystems cannot flush a directory handle.  Nothing more can
-        // be done there, and the file contents themselves were already flushed.
-        Err(err) if matches!(err.kind(), ErrorKind::InvalidInput | ErrorKind::Unsupported) => {
+    match sync_dir_strict(dir) {
+        Err(StoreError::Io { source, .. })
+            if matches!(
+                source.kind(),
+                ErrorKind::InvalidInput | ErrorKind::Unsupported
+            ) =>
+        {
             Ok(())
         }
-        Err(err) => Err(io_error(dir, err)),
+        result => result,
     }
+}
+
+/// Transaction preparation cannot assume unsupported directory flushing
+/// made a candidate's name durable.
+pub(crate) fn sync_dir_strict(dir: &Path) -> Result<(), StoreError> {
+    checkpoint("directory-flush", dir)?;
+    let handle = File::open(dir).map_err(|err| io_error(dir, err))?;
+    handle.sync_all().map_err(|err| io_error(dir, err))?;
+    checkpoint("directory-flushed", dir)
 }
 
 /// Read at most `limit` bytes of a file, or `None` if it does not exist.
@@ -149,10 +159,15 @@ fn replace_file_with(
 ) -> Result<(), StoreError> {
     let target = dir.join(name);
     let temp = write_temp_file(dir, contents)?;
+    if let Err(err) = checkpoint("rename", &target) {
+        let _ = fs::remove_file(&temp);
+        return Err(err);
+    }
     if let Err(err) = rename(&temp, &target) {
         let _ = fs::remove_file(&temp);
         return Err(io_error(&target, err));
     }
+    checkpoint("renamed", &target)?;
     match flush(dir) {
         Err(err) if rename_commits => {
             log::warn!(
@@ -194,8 +209,12 @@ pub(crate) fn create_file_exclusive(
 /// Remove a file if it exists, returning whether it did.  The caller is
 /// responsible for flushing the directory.
 pub(crate) fn remove_file_if_present(path: &Path) -> Result<bool, StoreError> {
+    checkpoint("remove", path)?;
     match fs::remove_file(path) {
-        Ok(()) => Ok(true),
+        Ok(()) => {
+            checkpoint("removed", path)?;
+            Ok(true)
+        }
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
         Err(err) => Err(io_error(path, err)),
     }
@@ -258,7 +277,7 @@ pub(crate) fn overwrite_with_zeros(file: &File) -> io::Result<()> {
 
 /// Write `contents` to a new, uniquely named `0600` file in `dir`, flush it,
 /// and return its path.
-fn write_temp_file(dir: &Path, contents: &[u8]) -> Result<PathBuf, StoreError> {
+pub(crate) fn write_temp_file(dir: &Path, contents: &[u8]) -> Result<PathBuf, StoreError> {
     for _ in 0..TEMP_NAME_ATTEMPTS {
         let path = dir.join(temp_name()?);
         let mut file = match OpenOptions::new()
@@ -271,12 +290,21 @@ fn write_temp_file(dir: &Path, contents: &[u8]) -> Result<PathBuf, StoreError> {
             Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(io_error(&path, err)),
         };
-        return match file.write_all(contents).and_then(|()| file.sync_all()) {
+        let write = (|| {
+            checkpoint("write", &path)?;
+            file.write_all(contents)
+                .map_err(|err| io_error(&path, err))?;
+            checkpoint("written", &path)?;
+            checkpoint("file-flush", &path)?;
+            file.sync_all().map_err(|err| io_error(&path, err))?;
+            checkpoint("file-flushed", &path)
+        })();
+        return match write {
             Ok(()) => Ok(path),
             Err(err) => {
                 drop(file);
                 let _ = fs::remove_file(&path);
-                Err(io_error(&path, err))
+                Err(err)
             }
         };
     }
@@ -287,6 +315,44 @@ fn write_temp_file(dir: &Path, contents: &[u8]) -> Result<PathBuf, StoreError> {
             "could not find an unused temporary file name",
         ),
     ))
+}
+
+/// Persistence checkpoints are inert in production. Tests inject failures
+/// or terminate a child process here without a shipped fault-injection API.
+#[cfg(not(test))]
+#[inline]
+pub(crate) fn checkpoint(_event: &str, _path: &Path) -> Result<(), StoreError> {
+    Ok(())
+}
+
+#[cfg(test)]
+type Hook = Box<dyn FnMut(&str, &Path) -> Result<(), StoreError>>;
+
+#[cfg(test)]
+thread_local! { static HOOK: std::cell::RefCell<Option<Hook>> = const { std::cell::RefCell::new(None) }; }
+
+#[cfg(test)]
+pub(crate) fn checkpoint(event: &str, path: &Path) -> Result<(), StoreError> {
+    HOOK.with_borrow_mut(|hook| match hook {
+        Some(hook) => hook(event, path),
+        None => Ok(()),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn with_hook<T>(hook: Hook, operation: impl FnOnce() -> T) -> T {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOOK.with_borrow_mut(|hook| *hook = None);
+        }
+    }
+    HOOK.with_borrow_mut(|slot| {
+        assert!(slot.is_none());
+        *slot = Some(hook);
+    });
+    let _guard = Guard;
+    operation()
 }
 
 fn temp_name() -> Result<String, StoreError> {
@@ -327,6 +393,30 @@ mod tests {
 
     fn scratch_dir() -> TempDir {
         TempDir::new()
+    }
+
+    #[test]
+    fn injected_preparation_failures_preserve_the_target() {
+        let scratch = scratch_dir();
+        replace_file(scratch.path(), "object", b"preceding").unwrap();
+        for failing in ["write", "file-flush", "rename"] {
+            let result = with_hook(
+                Box::new(move |event, path| {
+                    if event == failing {
+                        Err(io_error(path, io::Error::other("injected")))
+                    } else {
+                        Ok(())
+                    }
+                }),
+                || replace_file(scratch.path(), "object", b"candidate"),
+            );
+            assert!(result.is_err());
+            assert_eq!(
+                fs::read(scratch.path().join("object")).unwrap(),
+                b"preceding"
+            );
+        }
+        replace_file(scratch.path(), "object", b"following").unwrap();
     }
 
     #[test]
