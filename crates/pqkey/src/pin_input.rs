@@ -182,11 +182,12 @@ fn read_hidden_line(
     prompt_output: &mut impl Write,
     prompt: &str,
 ) -> io::Result<Pin> {
-    prompt_output.write_all(prompt.as_bytes())?;
-    prompt_output.flush()?;
-
     let catcher = SignalCatcher::install()?;
-    let result = EchoDisabled::new(tty).and_then(|_echo_disabled| read_tty_line(tty));
+    let result = EchoDisabled::new(tty).and_then(|_echo_disabled| {
+        prompt_output.write_all(prompt.as_bytes())?;
+        prompt_output.flush()?;
+        read_tty_line(tty)
+    });
     // `_echo_disabled` has been dropped, so the terminal is back to normal.
     if let Some(signal) = catcher.restore() {
         let _ = prompt_output.write_all(b"\n");
@@ -559,6 +560,37 @@ mod tests {
             .unwrap()
             .local_flags
             .contains(LocalFlags::ECHO)
+    }
+
+    #[test]
+    fn echo_is_disabled_before_a_pin_prompt_and_restored_on_output_failure() {
+        let _serialized = crate::test_support::lock_signal_handlers();
+        let pty = nix::pty::openpty(None, None).expect("openpty");
+        let tty = File::from(pty.slave);
+        struct FailingPrompt<'a> {
+            tty: &'a File,
+            echo_at_prompt: Option<bool>,
+        }
+        impl Write for FailingPrompt<'_> {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                self.echo_at_prompt = Some(echo_enabled(self.tty));
+                Err(io::Error::other("prompt output failed"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut prompt = FailingPrompt {
+            tty: &tty,
+            echo_at_prompt: None,
+        };
+        let err = read_hidden_line(tty.as_fd(), &mut prompt, "PIN: ").unwrap_err();
+        assert_eq!(err.to_string(), "prompt output failed");
+        assert_eq!(prompt.echo_at_prompt, Some(false));
+        assert!(
+            echo_enabled(&tty),
+            "echo was not restored after prompt failure"
+        );
     }
 
     #[test]
