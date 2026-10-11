@@ -30,6 +30,8 @@ pub trait ReportLink {
 const INIT_DATA: usize = CTAPHID_FRAME_LEN - 7;
 /// The payload of a continuation packet: 64 − 5 bytes.
 const CONT_DATA: usize = CTAPHID_FRAME_LEN - 5;
+/// Maximum payload with continuation sequences 0x00..=0x7f (CTAP 2.3 §11.2.4).
+pub const MAX_PAYLOAD: usize = INIT_DATA + 128 * CONT_DATA;
 /// ERR_CHANNEL_BUSY, CTAPHID_ERROR's code while another channel's
 /// transaction runs (§11.2.9.1.7).
 const ERR_CHANNEL_BUSY: u8 = 0x06;
@@ -48,6 +50,8 @@ const BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 /// What went wrong talking CTAPHID.
 #[derive(Debug)]
 pub enum HidError {
+    /// Rejected locally, before sending any report.
+    RequestTooLarge { encoded_bytes: usize, limit: usize },
     /// The link failed.
     Io(io::Error),
     /// The key answered CTAPHID_ERROR with this code.
@@ -69,6 +73,13 @@ impl From<io::Error> for HidError {
 impl std::fmt::Display for HidError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            HidError::RequestTooLarge {
+                encoded_bytes,
+                limit,
+            } => write!(
+                f,
+                "the encoded HID request is {encoded_bytes} bytes; the limit is {limit} bytes"
+            ),
             HidError::Io(err) => write!(f, "cannot talk to the key: {err}"),
             HidError::Ctaphid(code) => write!(f, "the key answered CTAPHID error {code:#04x}"),
             HidError::Silent => f.write_str("the key stopped answering"),
@@ -175,8 +186,13 @@ fn send_message<L: ReportLink>(
     command: Command,
     payload: &[u8],
 ) -> Result<(), HidError> {
-    let length =
-        u16::try_from(payload.len()).map_err(|_| HidError::Malformed("a request too long"))?;
+    if payload.len() > MAX_PAYLOAD {
+        return Err(HidError::RequestTooLarge {
+            encoded_bytes: payload.len(),
+            limit: MAX_PAYLOAD,
+        });
+    }
+    let length = u16::try_from(payload.len()).expect("HID capacity fits the length field");
     let (first, rest) = payload.split_at(payload.len().min(INIT_DATA));
     let mut report = [0u8; CTAPHID_FRAME_LEN];
     report[..4].copy_from_slice(&channel.to_be_bytes());
@@ -287,5 +303,57 @@ mod tests {
                 .to_string()
                 .contains("finish or cancel that first")
         );
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingLink(Vec<Report>);
+
+    impl ReportLink for RecordingLink {
+        fn send(&mut self, report: &Report) -> io::Result<()> {
+            self.0.push(*report);
+            Ok(())
+        }
+
+        fn receive(&mut self, _: Duration) -> io::Result<Option<Report>> {
+            panic!("a rejected payload must not wait for a response");
+        }
+    }
+
+    #[test]
+    fn hid_capacity_is_checked_before_the_first_report() {
+        assert_eq!(MAX_PAYLOAD, 7609);
+        let mut link = RecordingLink::default();
+        let payload = vec![0x5A; MAX_PAYLOAD];
+        send_message(&mut link, 1, Command::Cbor, &payload).unwrap();
+        assert_eq!(link.0.len(), 129);
+        assert_eq!(link.0[0][5..7], (7609u16).to_be_bytes());
+        let mut reconstructed = link.0[0][7..].to_vec();
+        for (sequence, report) in link.0[1..].iter().enumerate() {
+            assert_eq!(usize::from(report[4]), sequence);
+            assert_eq!(report[4] & 0x80, 0);
+            reconstructed.extend_from_slice(&report[5..]);
+        }
+        assert_eq!(reconstructed, payload);
+        for length in [7610, 15162, 65535, 65536, 100000] {
+            let mut hid = CtapHid {
+                link: RecordingLink::default(),
+                channel: 1,
+                cancel: Arc::default(),
+            };
+            let error = hid.cbor(&vec![0; length], &mut |_| {}).unwrap_err();
+            assert!(matches!(error, HidError::RequestTooLarge {
+                encoded_bytes, limit: 7609
+            } if encoded_bytes == length));
+            assert!(hid.link.0.is_empty(), "{length} bytes sent reports");
+            assert_eq!(
+                error.to_string(),
+                format!("the encoded HID request is {length} bytes; the limit is 7609 bytes")
+            );
+        }
     }
 }

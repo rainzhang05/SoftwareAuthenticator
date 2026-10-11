@@ -307,6 +307,7 @@ fn configuration_uses_its_permission_and_survives_a_restart() {
         let (_daemon, mut key) = start(&dir);
         let info = key.info().unwrap();
         assert_eq!(info.authenticator_config, Some(true));
+        assert_eq!(info.max_msg_size, 1768);
         assert_eq!(info.always_uv, Some(false));
         assert_eq!(info.set_min_pin_length, Some(true));
         assert_eq!(info.force_pin_change, Some(false));

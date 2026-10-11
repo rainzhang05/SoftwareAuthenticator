@@ -11,7 +11,10 @@ use pqkey_ctap::CryptoError;
 use pqkey_ctap::platform::{PlatformKeyAgreement, authenticate, padded_pin, pin_hash};
 use zeroize::Zeroizing;
 
-use super::ctaphid::{CtapHid, HidError, ReportLink};
+use super::ctaphid::{CtapHid, HidError, MAX_PAYLOAD, ReportLink};
+
+/// Message limit when getInfo omits maxMsgSize (CTAP 2.3 §8).
+const DEFAULT_MAX_MSG_SIZE: u64 = 1024;
 
 const GET_INFO: u8 = 0x04;
 const CLIENT_PIN: u8 = 0x06;
@@ -33,6 +36,8 @@ pub const NO_CREDENTIALS: u8 = 0x2E;
 /// What went wrong.
 #[derive(Debug)]
 pub enum ClientError {
+    /// Rejected locally, before sending any part of this command.
+    RequestTooLarge { encoded_bytes: usize, limit: usize },
     /// The CTAPHID transport.
     Hid(HidError),
     /// The key answered with this CTAP status.
@@ -58,6 +63,13 @@ impl From<CryptoError> for ClientError {
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ClientError::RequestTooLarge {
+                encoded_bytes,
+                limit,
+            } => write!(
+                f,
+                "the encoded CTAP2 request is {encoded_bytes} bytes; the limit is {limit} bytes"
+            ),
             ClientError::Hid(err) => err.fmt(f),
             ClientError::Status(status) => write!(f, "the key answered CTAP status {status:#04x}"),
             ClientError::Malformed(what) => write!(f, "the key's answer is malformed: {what}"),
@@ -67,9 +79,11 @@ impl std::fmt::Display for ClientError {
 }
 
 /// What authenticatorGetInfo reports that `pqkey status` shows.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Info {
     pub versions: Vec<String>,
+    /// Advertised maxMsgSize, or the 1,024-byte default when absent.
+    pub max_msg_size: u64,
     /// The clientPin option: whether a PIN is set.
     pub pin_set: Option<bool>,
     /// The authnrCfg option: configuration is supported.
@@ -88,6 +102,24 @@ pub struct Info {
     pub config_commands: Vec<u8>,
     /// remainingDiscoverableCredentials.
     pub remaining_discoverable: Option<u64>,
+}
+
+impl Default for Info {
+    fn default() -> Self {
+        Self {
+            versions: Vec::new(),
+            max_msg_size: DEFAULT_MAX_MSG_SIZE,
+            pin_set: None,
+            authenticator_config: None,
+            always_uv: None,
+            set_min_pin_length: None,
+            force_pin_change: None,
+            min_pin_length: None,
+            max_rp_ids_for_min_pin_length: None,
+            config_commands: Vec::new(),
+            remaining_discoverable: None,
+        }
+    }
 }
 
 /// getPinRetries.
@@ -122,6 +154,8 @@ impl std::fmt::Debug for Token {
 /// The running key, through CTAPHID.
 pub struct Authenticator<L> {
     hid: CtapHid<L>,
+    /// Only a successfully parsed getInfo permits dependent requests.
+    max_msg_size: Option<u64>,
 }
 
 fn int(value: i64) -> Value {
@@ -166,6 +200,7 @@ impl<L: ReportLink> Authenticator<L> {
     pub fn open(link: L) -> Result<Self, ClientError> {
         Ok(Self {
             hid: CtapHid::open(link)?,
+            max_msg_size: None,
         })
     }
 
@@ -174,6 +209,7 @@ impl<L: ReportLink> Authenticator<L> {
     pub fn open_within(link: L, patience: std::time::Duration) -> Result<Self, ClientError> {
         Ok(Self {
             hid: CtapHid::open_within(link, patience)?,
+            max_msg_size: None,
         })
     }
 
@@ -205,6 +241,22 @@ impl<L: ReportLink> Authenticator<L> {
         request: &[u8],
         keepalive: &mut dyn FnMut(u8),
     ) -> Result<Value, ClientError> {
+        if request != [GET_INFO] && self.max_msg_size.is_none() {
+            self.info()?;
+        }
+        // Clamp before converting to usize, including on 32-bit platforms.
+        let limit = usize::try_from(
+            self.max_msg_size
+                .unwrap_or(DEFAULT_MAX_MSG_SIZE)
+                .min(MAX_PAYLOAD as u64),
+        )
+        .expect("HID capacity fits usize");
+        if request.len() > limit {
+            return Err(ClientError::RequestTooLarge {
+                encoded_bytes: request.len(),
+                limit,
+            });
+        }
         let response = self.hid.cbor(request, keepalive)?;
         match response.split_first() {
             Some((0, [])) => Ok(Value::Null),
@@ -217,7 +269,27 @@ impl<L: ReportLink> Authenticator<L> {
     }
 
     pub fn info(&mut self) -> Result<Info, ClientError> {
+        // A failed refresh must not leave a stale, more permissive limit.
+        self.max_msg_size = None;
         let info = self.call(GET_INFO, None, &mut |_| {})?;
+        let Value::Map(entries) = &info else {
+            return Err(ClientError::Malformed("getInfo is not a map"));
+        };
+        let mut limits = entries.iter().filter(|(key, _)| *key == int(0x05));
+        let max_msg_size = match limits.next() {
+            None => DEFAULT_MAX_MSG_SIZE,
+            Some((_, value)) => value
+                .as_integer()
+                .and_then(|value| u64::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or(ClientError::Malformed(
+                    "maxMsgSize is not a positive unsigned integer",
+                ))?,
+        };
+        if limits.next().is_some() {
+            return Err(ClientError::Malformed("duplicate maxMsgSize"));
+        }
+        self.max_msg_size = Some(max_msg_size);
         let versions = match member(&info, 1) {
             Some(Value::Array(versions)) => versions
                 .iter()
@@ -252,6 +324,7 @@ impl<L: ReportLink> Authenticator<L> {
         };
         Ok(Info {
             versions,
+            max_msg_size,
             pin_set: option("clientPin"),
             authenticator_config: option("authnrCfg"),
             always_uv: option("alwaysUv"),
@@ -460,24 +533,24 @@ impl<L: ReportLink> Authenticator<L> {
         subcommand: u8,
         parameters: Option<Value>,
     ) -> Result<Value, ClientError> {
+        let parameters = parameters.as_ref().map(encode);
         let mut message = vec![subcommand];
         if let Some(parameters) = &parameters {
-            message.extend(encode(parameters));
+            message.extend_from_slice(parameters);
         }
-        let mut entries = vec![(int(1), int(subcommand.into()))];
+        let fields = 3 + u8::from(parameters.is_some());
+        let mut request = vec![CREDENTIAL_MANAGEMENT, 0xA0 + fields, 0x01, subcommand];
         if let Some(parameters) = parameters {
-            entries.push((int(2), parameters));
+            request.push(0x02);
+            request.extend(parameters);
         }
-        entries.push((int(3), int(PROTOCOL.identifier().into())));
-        entries.push((
-            int(4),
-            Value::Bytes(authenticate(PROTOCOL, &token.0, &message)),
-        ));
-        self.call(
-            CREDENTIAL_MANAGEMENT,
-            Some(Value::Map(entries)),
-            &mut |_| {},
-        )
+        request.push(0x03);
+        request.extend(encode(&int(PROTOCOL.identifier().into())));
+        request.push(0x04);
+        request.extend(encode(&Value::Bytes(authenticate(
+            PROTOCOL, &token.0, &message,
+        ))));
+        self.call_encoded(&request, &mut |_| {})
     }
 
     /// A continuation subcommand, which carries nothing but itself.
@@ -569,5 +642,306 @@ impl<L: ReportLink> Authenticator<L> {
     /// `keepalive` sees the key wait for them.
     pub fn reset(&mut self, keepalive: &mut dyn FnMut(u8)) -> Result<(), ClientError> {
         self.call(RESET, None, keepalive).map(drop)
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use std::{cell::RefCell, collections::VecDeque, io, rc::Rc, time::Duration};
+
+    use super::*;
+    use crate::client::ctaphid::Report;
+
+    #[derive(Default)]
+    struct Traffic {
+        reports: Vec<Report>,
+        requests: Vec<Vec<u8>>,
+    }
+
+    /// A scripted key that records every report, including incomplete commands.
+    struct RecordingLink {
+        traffic: Rc<RefCell<Traffic>>,
+        infos: VecDeque<Value>,
+        answers: VecDeque<Report>,
+        pending: Vec<u8>,
+        length: usize,
+    }
+
+    impl RecordingLink {
+        fn answer(&mut self, report: &Report, payload: &[u8]) {
+            for (sequence, chunk) in payload.chunks(57).enumerate() {
+                assert_eq!(sequence, 0, "these scripted replies fit in one report");
+                let mut answer = [0; 64];
+                answer[..5].copy_from_slice(&report[..5]);
+                answer[5..7].copy_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
+                answer[7..7 + chunk.len()].copy_from_slice(chunk);
+                self.answers.push_back(answer);
+            }
+        }
+    }
+
+    impl ReportLink for RecordingLink {
+        fn send(&mut self, report: &Report) -> io::Result<()> {
+            self.traffic.borrow_mut().reports.push(*report);
+            if report[4] == 0x86 {
+                let mut init = report[7..15].to_vec();
+                init.extend([0, 0, 0, 1, 2, 0, 0, 0, 4]);
+                self.answer(report, &init);
+            } else {
+                let start = if report[4] & 0x80 != 0 {
+                    assert_eq!(report[4], 0x90);
+                    self.pending.clear();
+                    self.length = usize::from(u16::from_be_bytes([report[5], report[6]]));
+                    7
+                } else {
+                    5
+                };
+                let count = (self.length - self.pending.len()).min(64 - start);
+                self.pending
+                    .extend_from_slice(&report[start..start + count]);
+                if self.pending.len() == self.length {
+                    self.traffic
+                        .borrow_mut()
+                        .requests
+                        .push(self.pending.clone());
+                    let mut response = vec![0];
+                    if self.pending == [GET_INFO] {
+                        response.extend(encode(&self.infos.pop_front().expect("scripted getInfo")));
+                    }
+                    let mut header = *report;
+                    header[4] = 0x90;
+                    self.answer(&header, &response);
+                }
+            }
+            Ok(())
+        }
+
+        fn receive(&mut self, _: Duration) -> io::Result<Option<Report>> {
+            Ok(self.answers.pop_front())
+        }
+    }
+
+    fn info(limit: Option<u64>) -> Value {
+        Value::Map(
+            limit
+                .into_iter()
+                .map(|limit| (int(5), Value::from(limit)))
+                .collect(),
+        )
+    }
+
+    fn key(infos: Vec<Value>) -> (Authenticator<RecordingLink>, Rc<RefCell<Traffic>>) {
+        let traffic = Rc::new(RefCell::new(Traffic::default()));
+        let link = RecordingLink {
+            traffic: traffic.clone(),
+            infos: infos.into(),
+            answers: VecDeque::new(),
+            pending: Vec::new(),
+            length: 0,
+        };
+        (Authenticator::open(link).unwrap(), traffic)
+    }
+
+    fn too_large(error: ClientError, bytes: usize, limit: usize) {
+        assert!(
+            matches!(error, ClientError::RequestTooLarge {
+            encoded_bytes, limit: actual_limit
+        } if encoded_bytes == bytes && actual_limit == limit),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("the encoded CTAP2 request is {bytes} bytes; the limit is {limit} bytes")
+        );
+    }
+
+    #[test]
+    fn absent_limit_defaults_and_discovery_precedes_even_the_first_rejection() {
+        let (mut key, traffic) = key(vec![info(None)]);
+        too_large(
+            key.call(RESET, Some(Value::Bytes(vec![0; 1021])), &mut |_| {})
+                .unwrap_err(),
+            1025,
+            1024,
+        );
+        assert_eq!(traffic.borrow().requests, [vec![GET_INFO]]);
+        assert_eq!(traffic.borrow().reports.len(), 2); // INIT and getInfo only.
+        let before = traffic.borrow().reports.len();
+        key.call(RESET, Some(Value::Bytes(vec![0; 1020])), &mut |_| {})
+            .unwrap();
+        assert!(traffic.borrow().reports.len() > before);
+        assert_eq!(traffic.borrow().requests[1].len(), 1024);
+        assert_eq!(key.max_msg_size, Some(1024));
+        assert_eq!(Info::default().max_msg_size, 1024);
+    }
+
+    #[test]
+    fn command_byte_counts_and_a_refresh_replaces_the_cached_limit() {
+        let (mut key, traffic) = key(vec![info(Some(4)), info(Some(3)), info(None)]);
+        key.toggle_always_uv(None).unwrap(); // No explicit info(), exactly four bytes.
+        assert_eq!(
+            traffic.borrow().requests[1],
+            [AUTHENTICATOR_CONFIG, 0xA1, 1, 2]
+        );
+        assert_eq!(key.info().unwrap().max_msg_size, 3);
+        let before = traffic.borrow().reports.len();
+        too_large(key.toggle_always_uv(None).unwrap_err(), 4, 3);
+        assert_eq!(traffic.borrow().reports.len(), before);
+        assert_eq!(key.info().unwrap().max_msg_size, 1024);
+        key.toggle_always_uv(None).unwrap();
+    }
+
+    #[test]
+    fn large_unsigned_limits_are_retained_without_narrowing_and_bounded_by_hid() {
+        for advertised in [7609, 7610, (1u64 << 32) + 1, u64::MAX] {
+            let (mut key, traffic) = key(vec![info(Some(advertised))]);
+            assert_eq!(key.info().unwrap().max_msg_size, advertised);
+            key.call(RESET, Some(Value::Bytes(vec![0; 7605])), &mut |_| {})
+                .unwrap();
+            assert_eq!(traffic.borrow().requests[1].len(), 7609);
+            let before = traffic.borrow().reports.len();
+            too_large(
+                key.call(RESET, Some(Value::Bytes(vec![0; 7606])), &mut |_| {})
+                    .unwrap_err(),
+                7610,
+                7609,
+            );
+            assert_eq!(traffic.borrow().reports.len(), before);
+        }
+    }
+
+    #[test]
+    fn malformed_limits_never_allow_dependent_commands_or_a_stale_limit() {
+        let mut malformed = vec![
+            int(0),
+            int(-1),
+            text("1768"),
+            Value::Bool(true),
+            Value::Null,
+            Value::Float(1768.0),
+            Value::Bytes(vec![1]),
+            Value::Array(vec![]),
+            Value::Map(vec![]),
+            Value::Tag(2, Box::new(Value::Bytes(vec![1; 9]))),
+        ]
+        .into_iter()
+        .map(|value| Value::Map(vec![(int(5), value)]))
+        .collect::<Vec<_>>();
+        malformed.extend([
+            Value::Map(vec![(int(5), int(1768)), (int(5), int(7609))]),
+            Value::Null,
+        ]);
+        for invalid in malformed {
+            let (mut key, traffic) =
+                key(vec![info(Some(7609)), invalid.clone(), invalid, info(None)]);
+            key.info().unwrap();
+            assert!(matches!(key.info(), Err(ClientError::Malformed(_))));
+            assert_eq!(key.max_msg_size, None);
+            assert!(matches!(
+                key.toggle_always_uv(None),
+                Err(ClientError::Malformed(_))
+            ));
+            assert!(
+                traffic
+                    .borrow()
+                    .requests
+                    .iter()
+                    .all(|request| request == &[GET_INFO])
+            );
+            assert_eq!(traffic.borrow().reports.len(), 4); // INIT plus three discoveries.
+            key.toggle_always_uv(None).unwrap();
+            assert_eq!(key.max_msg_size, Some(1024));
+        }
+    }
+
+    #[test]
+    fn complete_authenticated_configuration_is_checked_without_changing_its_mac_bytes() {
+        let rps = vec!["x".repeat(253); 8];
+        let token = Token(Zeroizing::new(vec![0x37; 32]));
+        let (mut key, traffic) = key(vec![
+            info(Some(1768)),
+            info(Some(2050)),
+            info(Some(2087)),
+            info(Some(2086)),
+        ]);
+        too_large(
+            key.set_min_pin_length(None, Some(6), Some(&rps), None)
+                .unwrap_err(),
+            2050,
+            1768,
+        );
+        assert_eq!(traffic.borrow().reports.len(), 2);
+        too_large(
+            key.set_min_pin_length(Some(&token), Some(6), Some(&rps), None)
+                .unwrap_err(),
+            2087,
+            1768,
+        );
+        assert_eq!(traffic.borrow().reports.len(), 2);
+        key.info().unwrap();
+        key.set_min_pin_length(None, Some(6), Some(&rps), None)
+            .unwrap();
+        let before = traffic.borrow().reports.len();
+        too_large(
+            key.set_min_pin_length(Some(&token), Some(6), Some(&rps), None)
+                .unwrap_err(),
+            2087,
+            2050,
+        );
+        assert_eq!(traffic.borrow().reports.len(), before);
+        key.info().unwrap();
+        key.set_min_pin_length(Some(&token), Some(6), Some(&rps), None)
+            .unwrap();
+        let request = traffic.borrow().requests.last().unwrap().clone();
+        assert_eq!(request.len(), 2087);
+        let parameters = encode(&Value::Map(vec![
+            (int(1), int(6)),
+            (
+                int(2),
+                Value::Array(rps.iter().map(|rp| text(rp)).collect()),
+            ),
+        ]));
+        let mut message = vec![0xFF; 32];
+        message.extend([AUTHENTICATOR_CONFIG, 3]);
+        message.extend_from_slice(&parameters);
+        let mut expected = vec![AUTHENTICATOR_CONFIG, 0xA4, 1, 3, 2];
+        expected.extend(parameters);
+        expected.extend([3, 2, 4, 0x58, 0x20]);
+        expected.extend(authenticate(PROTOCOL, &token.0, &message));
+        assert_eq!(request, expected);
+        key.info().unwrap();
+        let before = traffic.borrow().reports.len();
+        too_large(
+            key.set_min_pin_length(Some(&token), Some(6), Some(&rps), None)
+                .unwrap_err(),
+            2087,
+            2086,
+        );
+        assert_eq!(traffic.borrow().reports.len(), before);
+        key.set_min_pin_length(Some(&token), Some(6), Some(&["small.example".into()]), None)
+            .unwrap();
+    }
+
+    #[test]
+    fn credential_management_checks_the_authenticated_encoding_and_continuations() {
+        let token = Token(Zeroizing::new(vec![0x37; 32]));
+        let (mut key, traffic) = key(vec![info(Some(41)), info(Some(40)), info(Some(3))]);
+        key.management(&token, 2, None).unwrap(); // Exactly 41 bytes, including MAC/protocol.
+        let mut expected = vec![CREDENTIAL_MANAGEMENT, 0xA3, 1, 2, 3, 2, 4, 0x58, 0x20];
+        expected.extend(authenticate(PROTOCOL, &token.0, &[2]));
+        assert_eq!(traffic.borrow().requests[1], expected);
+        let before = traffic.borrow().reports.len();
+        // Even though the credential ID fits, its descriptor and authentication do not.
+        too_large(key.delete(&token, &[0xA5; 40]).unwrap_err(), 106, 41);
+        assert_eq!(traffic.borrow().reports.len(), before);
+        key.info().unwrap();
+        let before = traffic.borrow().reports.len();
+        too_large(key.management(&token, 2, None).unwrap_err(), 41, 40);
+        assert_eq!(traffic.borrow().reports.len(), before);
+        key.management_next(3).unwrap();
+        key.info().unwrap();
+        let before = traffic.borrow().reports.len();
+        too_large(key.management_next(3).unwrap_err(), 4, 3);
+        assert_eq!(traffic.borrow().reports.len(), before);
     }
 }
