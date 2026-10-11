@@ -959,33 +959,24 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
     }
 
     fn clear(&mut self) -> Result<(), StoreError> {
-        // Crash safety.  The steps run in this order; a crash after any prefix
-        // leaves a state that is safe to use and that a repeated `clear`
-        // completes.
+        // Rotate before discarding any state protected by the credential key.
+        // A failure before publication leaves credentials, their counters and
+        // PIN/UV policy intact. Rotation can also fail AFTER publishing the
+        // new key (for example on directory flush): leave all old records in
+        // place on any rotation error. They fail authentication under the new
+        // key, or remain consistent if power loss restores the old key.
+        // Never infer which key is active from an error or reset its counter.
         //
-        // 1. Delete every file in `credentials/`, then flush the directory, and
-        //    delete the global signature counter and large-blob array. A crash
-        //    part-way leaves some credentials, still guarded by the unchanged
-        //    PIN state.
-        //    Nothing is exposed.
-        // 2. Rotate the credential key: the new key is written to a flushed
-        //    temporary file and renamed over the old one, the directory is
-        //    flushed, and the old key's contents are then overwritten.  Before
-        //    the rename is durable the old key is in effect, afterwards the new
-        //    one.  From then on every copy of the old files, and every sealed
-        //    credential ID, is undecryptable.
-        // 3. Write the default PIN state under the new key, atomically.
-        //
-        // The PIN state is only replaced once the key is: sealed credentials
-        // die with the old key, not with their files, so removing the PIN
-        // before the rotation could leave them usable with no PIN.  A crash
-        // between 2 and 3 leaves `pin-state` sealed under a key that no longer
-        // exists.  It reads as corrupt, which the CTAP engine treats as a PIN
-        // that is set and blocked until a reset, and the next `clear`
-        // replaces it.  No step needs the old key, so `clear` also recovers a
-        // store whose credential key is lost or malformed.
+        // Only a successful, durable rotation permits purging credentials,
+        // counters and blobs, establishing empty managed membership, and
+        // finally writing default PIN state. Until that last write, old PIN
+        // state reads as corrupt and the restarted engine fails closed. No
+        // step needs the old key or readable records, so an explicit retry
+        // can recover an interrupted reset or a lost/malformed key.
         let managed =
             exists(&self.root.join(MANAGED_DIR))? || exists(&self.root.join(FORMAT_FILE))?;
+        let root_key = self.keys.rotate(KeyDomain::Credential)?;
+        let keys = CredentialKeys::derive(&root_key)?;
         if managed {
             let dir = self.root.join(MANAGED_DIR);
             fsio::ensure_private_dir(&dir)?;
@@ -1008,8 +999,6 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
         if counter_removed || array_removed {
             fsio::sync_dir(&self.root)?;
         }
-        let root_key = self.keys.rotate(KeyDomain::Credential)?;
-        let keys = CredentialKeys::derive(&root_key)?;
         if managed {
             let sealed = envelope::seal(
                 &keys.record,

@@ -212,6 +212,10 @@ pub trait CredentialStore {
     /// [`FileStore`] also replaces the key protecting credentials and PIN
     /// state, so any copy of the old files becomes undecryptable.  This is
     /// destructive by design; call it only on an explicit reset request.
+    /// A failed reset must preserve the counters and PIN/UV protections of
+    /// every credential that remains usable. A rotation error can mean the
+    /// new key is already published; unreadable state must fail closed, and
+    /// an explicit reset retry must remain able to recover it.
     fn clear(&mut self) -> Result<(), StoreError>;
 
     /// The persistent PIN state, or `None` if it has never been written.

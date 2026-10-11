@@ -152,7 +152,12 @@ pub trait KeySource {
 
     /// Replace the root key for `domain` with a fresh random key, whether or
     /// not the current one is usable, and destroy the old key as thoroughly as
-    /// the backend allows.  Returns the new key once it is durable.
+    /// the backend allows. Returns the new key once it is durable.
+    ///
+    /// An error may occur before or after publication: it does not establish
+    /// which key is active or whether publication is durable. Callers must
+    /// preserve records protected by the preceding key on error, including
+    /// counters and PIN/UV policy, in case that key remains or becomes active.
     fn rotate(&self, domain: KeyDomain) -> Result<RootKey, StoreError>;
 }
 
