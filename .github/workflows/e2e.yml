@@ -58,7 +58,7 @@ jobs:
         # dbus-daemon: the session bus the presence notification tests use.
         run: |
           sudo apt-get update
-          sudo apt-get install -y fido2-tools dbus-daemon
+          sudo apt-get install -y fido2-tools dbus-daemon dbus-user-session acl
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # Release mode, as the daemon ships.
@@ -180,15 +180,44 @@ jobs:
           if [ -n "${E2E_UNANSWERED_HIDRAW:-}" ]; then
             tests/e2e/daemon.sh stop unanswered 0004 || failed=1
           fi
+          exit "$failed"
+
+      # The runner is disposable. This is the only E2E mode that runs the
+      # installer and writes a real systemd user unit; developer runs skip it.
+      - name: Prepare the installer E2E user manager
+        if: success()
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          runtime="/run/user/$(id -u)"
+          for _attempt in $(seq 1 50); do
+            if [ -S "$runtime/systemd/private" ]; then break; fi
+            sleep 0.2
+          done
+          test -S "$runtime/systemd/private"
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+
+      - name: Actual installer and setup over real HID
+        if: success()
+        timeout-minutes: 10
+        env:
+          PQKEY_INSTALLER_E2E: "1"
+        run: |
+          "$RUNNER_TEMP/e2e-venv/bin/python" -m pytest tests/e2e/test_setup.py -v \
+            --junitxml="$RUNNER_TEMP/e2e-diagnostics/setup-junit.xml"
+
+      - name: Stop the installer E2E session bus
+        if: always() && env.E2E_WORK != ''
+        run: |
           if [ -e "$E2E_WORK/session-bus.pid" ]; then
             kill "$(cat "$E2E_WORK/session-bus.pid")" || true
           fi
-          exit "$failed"
 
       - name: Collect diagnostics
         if: failure() || cancelled()
         run: |
           mkdir -p "$RUNNER_TEMP/e2e-diagnostics"
+          # Only dmesg needs sudo; the runner owns the output file.
+          # shellcheck disable=SC2024
           sudo dmesg > "$RUNNER_TEMP/e2e-diagnostics/dmesg.txt" 2>&1 || true
           # A race in the kernel's uhid driver can kill the key's thread on
           # arm64 (drivers/hid/uhid.c reads its queue without the queue lock).

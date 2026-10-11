@@ -66,6 +66,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 
+  installer:
+    name: installer regressions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: scripts/install-tests.sh
+
   # Lints: any clippy or rustc warning fails the job, including the workspace
   # lints in the root Cargo.toml and the crate-level ones in each crate root.
   # A finding that is deliberately kept carries an `#[allow]` with a comment

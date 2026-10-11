@@ -17,7 +17,8 @@ systems before creating logs, installing tools or changing system setup.
 
 | Script | What it does |
 |---|---|
-| `scripts/check.sh` | Runs every check CI runs: formatting, lints, tests, docs, the minimum Rust version, dependencies and coverage. `--quick` runs only formatting, lints and tests. |
+| `scripts/check.sh` | Runs every check CI runs: formatting, lints, tests, docs, the minimum Rust version, dependencies and coverage. `--quick` runs formatting, installer checks, lints and tests. |
+| `scripts/install-tests.sh` | Runs the actual installer in disposable Docker filesystems with controlled prerequisites, PTYs and fault injection; requires Docker. |
 | `scripts/e2e.sh` | Runs the end-to-end tests against four test keys, through libfido2 and python-fido2. |
 | `scripts/fuzz.sh` | Runs each fuzz target for 30 seconds, or one target for as long as you ask. |
 | `scripts/diagnose.sh` | Shows the state of the key on this computer: binary, service, devices and log. |
@@ -89,6 +90,37 @@ host with `/dev/uhid`.
 On macOS, test the portable crates natively and use a Linux environment,
 such as Docker, for daemon and fuzz checks. Container unit tests can use
 socket-backed devices; real HID E2E tests require access to `/dev/uhid`.
+
+## Installer regression checks
+
+Run `scripts/install-tests.sh` with Docker running. It sends the installer and
+fixtures to disposable Linux containers, with no writable host mounts, host
+sudo or host devices. `INSTALL_TEST_IMAGE` may select a compatible preloaded
+image (Bash, Python 3 and coreutils); the default is `rust:1.89-bookworm`.
+Both `scripts/check.sh` modes and the CI installer job run these checks.
+Missing Docker is a failed required check rather than an implicit pass.
+
+Fixtures execute the real `install.sh`, recording prerequisite commands,
+installed executables, recovery copies, output and exit statuses. A PTY checks
+confirmation and hidden PIN input. Rust setup tests run the shared setup
+orchestration in child processes and verify PIN readiness against the existing
+socket-backed CTAP client/daemon. No protocol or state-format test seam is
+added to the shipped executable.
+
+The E2E workflow additionally runs `tests/e2e/test_setup.py` with
+`PQKEY_INSTALLER_E2E=1` after the other test keys stop. This opt-in test requires
+a disposable Linux host with sudo, a systemd user manager and `/dev/uhid`.
+It executes installation, setup reruns and executable updates using real HID
+clients and the existing fake desktop notification server. It is skipped in
+ordinary developer E2E runs so it cannot install over a personal key.
+
+For macOS Linux validation, send a source snapshot to Docker and extract it
+with `tar -m` (or `tar -xm`) so container rebuilds use the snapshot's contents.
+Exclude build artifacts and macOS extended attributes, retain pipeline failure
+statuses with `set -o pipefail`, and reuse the `pqkey-cargo`,
+`pqkey-cargo-registry`, `pqkey-rustup` and `pqkey-target` volumes. Keep fuzz
+build outputs separate within the target volume. Containers without
+`/dev/uhid` can run fixture and socket-backed tests, but cannot verify real HID.
 
 ## Adding a signature algorithm
 
