@@ -1188,6 +1188,10 @@ fn exists(path: &Path) -> Result<bool, StoreError> {
 mod replacement_tests;
 
 #[cfg(test)]
+#[path = "reset_tests.rs"]
+mod reset_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::CoseAlg;

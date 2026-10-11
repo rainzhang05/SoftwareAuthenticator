@@ -989,11 +989,12 @@ fn attestation_and_device_key_survive_clear() {
     assert_eq!(scratch.open().attestation().unwrap(), Some(attestation));
 }
 
-/// Recreate on disk the state `clear` leaves behind when it is interrupted
-/// after each of its steps, and check that the store is consistent in each.
+/// Retain recovery coverage for partial deletion under the preceding key
+/// (including older reset ordering), and for rotation before PIN replacement.
+/// Actual current reset checkpoints are exercised by the store's unit tests.
 #[test]
 fn interrupted_clear_leaves_consistent_states() {
-    // Crash during step 1: some credential files are gone; the PIN and the
+    // Partial deletion under the preceding key: some files are gone; the PIN and the
     // key are untouched.
     let scratch = Scratch::new();
     let pin = pin_with_hash();
@@ -1015,7 +1016,7 @@ fn interrupted_clear_leaves_consistent_states() {
     assert_eq!(store.count().unwrap(), 0);
     assert_eq!(store.pin_state().unwrap(), Some(PinStateRecord::default()));
 
-    // Crash after step 1: no credential files; the PIN, the key and so the
+    // Complete deletion under the preceding key: the PIN, the key and so the
     // sealed credentials are untouched, and the PIN still guards them.
     let scratch = Scratch::new();
     let pin = pin_with_hash();
@@ -1036,7 +1037,7 @@ fn interrupted_clear_leaves_consistent_states() {
     assert!(store.open_credential_id(&sealed, b"aad").unwrap().is_none());
     assert_eq!(store.pin_state().unwrap(), Some(PinStateRecord::default()));
 
-    // Crash after step 2: new key, and the PIN state still sealed under the old
+    // Interrupted after rotation and purge: the PIN state is still under the old
     // one.  It reads as corrupt, which the engine takes for a PIN set and
     // blocked, and no credential, stored or sealed, is left to use.
     let scratch = Scratch::new();
