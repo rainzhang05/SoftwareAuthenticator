@@ -5,7 +5,8 @@
 //!      0       4  magic, the ASCII bytes "FTSA"
 //!      4       1  format version, 1
 //!      5       1  record type: 1 credential, 2 PIN state, 3 attestation,
-//!                             4 signature counter, 5 large-blob array
+//!                             4 signature counter, 5 large-blob array,
+//!                             6 credential set, 7 credential format
 //!      6      24  XChaCha20-Poly1305 nonce, freshly random for every write
 //!     30       n  XChaCha20-Poly1305 ciphertext of the n-byte encoded record
 //!   30+n      16  Poly1305 tag

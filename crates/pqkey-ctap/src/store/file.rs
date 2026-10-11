@@ -42,8 +42,8 @@ const ATTESTATION_FILE: &str = "attestation";
 /// [`large_blob_array`](CredentialStore::large_blob_array), and
 /// [`attestation`](CredentialStore::attestation)) or skipped with a warning
 /// (by [`list`](CredentialStore::list) and [`count`](CredentialStore::count)),
-/// and never deleted except by [`delete`](CredentialStore::delete) or
-/// [`clear`](CredentialStore::clear).
+/// and never deleted as a corruption repair. Unreferenced ciphertext in the
+/// managed namespace may be reclaimed by transaction cleanup.
 ///
 /// # Layout
 ///
@@ -125,11 +125,12 @@ const ATTESTATION_FILE: &str = "attestation";
 ///
 /// # Records
 ///
-/// The plaintext is a CBOR map with unsigned integer keys, written in
+/// Types 1–5 have a plaintext CBOR map with unsigned integer keys, written in
 /// ascending key order with shortest-form integers and lengths.  Optional
 /// fields are omitted when absent.  Decoding accepts the keys in any order and
 /// longer encodings than needed, but nothing else: unknown, duplicate or
-/// missing keys and wrong types make the record corrupt.
+/// missing keys and wrong types make the record corrupt. Transaction
+/// metadata types 6–7 have the separate encodings specified below.
 ///
 /// ```text
 /// credential record (type 1)

@@ -217,17 +217,57 @@ minimum PIN length and its RP IDs, whether a PIN change is required, the
 PIN's length and always-UV. A PIN state written before these fields existed
 reads with their defaults, and its PIN counts as 4 code points long.
 
-Files are replaced atomically, never changed in place. If flushing the
-directory fails after the new file is in place, the write reports an error
-although the new file stays. Large-blob writes instead treat the atomic
-rename as the commit: a later directory-flush failure is logged and the
-command succeeds. Such a failure can lose an acknowledged write after a
-power failure. All errors before the rename keep the previous array.
-A missing or unreadable large-blob file is served as the initial array;
-the next committed write replaces it. A reset deletes the array and the
-stored credentials and replaces `credential.key`, so old copies of files
-and every sealed credential ID can no longer be decrypted.
-[SECURITY.md](../SECURITY.md) describes what this protects against.
+Discoverable registration replaces all stored discoverable credentials with
+exactly the same RP ID and user handle through one store transaction. The
+new registration retains its fresh ID, key, extension secrets and creation
+order. Replacement succeeds at logical capacity without deleting an old
+credential first. Physical space for staging remains necessary; a new account
+still respects the configured limit, including stored non-discoverable keys.
+
+Existing stores remain readable. The first atomic registration writes an
+encrypted `credential-format` marker and stages the candidate and encrypted
+membership manifest inside the legacy directory, where legacy lookup ignores
+them. After flushing preparation, an atomic rename from `credentials/` to
+`credential-set/` commits the new set. Later transactions commit by atomically
+replacing `credential-set/active`. The manifest records sorted, unique opaque
+filename HMACs and their locations. Retained legacy ciphertext keeps its
+original authenticated logical name; new records live in
+`credential-set/records/`. Credential encodings and existing key domains stay
+unchanged. The manifest and marker use envelope types 6 and 7 under the
+credential record key, authenticated with their logical paths. Membership
+metadata has the existing 1 MiB envelope bound.
+
+Only manifest members can be read, listed, counted, asserted or managed.
+Staging and retired ciphertext consume no logical slots. Pre-publication
+errors preserve the preceding usable credentials. Atomic registration returns
+an explicit committed result after publication: `Flushed` or `Unconfirmed`,
+with a separate pending-cleanup flag. MemoryStore reports `Volatile`.
+`Unconfirmed` means a process restart sees publication, while power loss may
+roll it back. Old ciphertext is retained until publication and its namespace
+have both been flushed successfully. Cleanup failure never changes membership,
+including after restart, further replacement or deletion of the new credential.
+A later membership transaction retries cleanup. Managed inserts and deletes
+also return success after publication and log subsequent problems.
+
+Missing, corrupt or inconsistent authoritative metadata fails closed; it is
+never rebuilt by scanning leftover records. Individual corrupt records retain
+the existing lookup-error/list-skip behavior, but replacement must read every
+active record successfully to avoid leaving an unknown matching record usable.
+Explicit reset purges managed records, rotates the credential key, establishes
+empty membership and resets policy. The existing reset failure semantics are
+otherwise unchanged. Upgrade is forward-only: back up the complete store and
+do not use an older binary on upgraded state.
+
+Other record writes retain their atomic file replacement behavior. Most report
+a directory-flush error even though the renamed file remains visible;
+large-blob writes return success after rename and log that error. Successful
+flushes rely on filesystem and hardware guarantees. Unsupported directory
+flushes abort credential transaction preparation or produce `Unconfirmed`
+after publication. Authentication provides no trusted anti-rollback counter;
+whole-store snapshot restoration or removal of all format evidence cannot be
+distinguished reliably from older state. A missing or unreadable large-blob
+array is served as the initial array; its next committed write replaces it.
+[SECURITY.md](../SECURITY.md) describes the encryption-at-rest threat model.
 
 Discoverable credential IDs are `0x01` and 32 random bytes. Sealed IDs are
 107 bytes starting with `0x02`, carrying the algorithm, credProtect, 32-byte

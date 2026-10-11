@@ -58,7 +58,7 @@
 //!
 //! # Corruption
 //!
-//! A record that fails authentication or decoding never crashes the
+//! An active record that fails authentication or decoding never crashes the
 //! authenticator and is never deleted automatically.  [`CredentialStore::get`],
 //! [`CredentialStore::pin_state`], [`CredentialStore::large_blob_array`], and
 //! [`CredentialStore::attestation`] report
@@ -70,6 +70,8 @@
 //! metadata returns [`StoreError::CredentialSetUnavailable`], and cannot be
 //! skipped or rebuilt from records. Atomic replacement refuses unreadable
 //! active records rather than risk leaving a matching credential usable.
+//! Unreferenced ciphertext in a managed store is cleanup garbage, even if
+//! corrupt; it cannot be repaired back into membership by a read or reopen.
 //!
 //! # Concurrency
 //!
@@ -128,7 +130,8 @@ pub enum CommitDurability {
 pub struct CredentialCommit {
     /// Whether publication was flushed to backing storage.
     pub durability: CommitDurability,
-    /// Retired ciphertext remains to be removed. It is never active.
+    /// Physical cleanup failed or was deferred. Any retained retired
+    /// ciphertext is inactive.
     pub cleanup_pending: bool,
 }
 
