@@ -352,7 +352,8 @@ with `tar -xm`, with separate cached outputs for each compiler and architecture.
 
 ## Third-party payment verification
 
-CTAP 2.3 §12.9 support is tested at the authenticator boundary for every
+[CTAP 2.3 §12.9 and §6.8, February 26, 2026 Proposed Standard](https://fidoalliance.org/specs/fido-v2.3-ps-20260226/fido-client-to-authenticator-protocol-v2.3-ps-20260226.html)
+support is tested at the authenticator boundary for every
 advertised algorithm and both credential modalities. Rust regressions verify
 signed bytes and counters, mixed next assertions, legacy record encodings,
 credential enumeration and updates, restart/reset/replacement, capacity,
