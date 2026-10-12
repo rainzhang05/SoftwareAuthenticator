@@ -24,6 +24,7 @@ rust-version = "1.89"
 ciborium = { version = "0.2", default-features = false, features = ["std"] }
 ed25519-dalek = "3.0"
 getrandom = { version = "0.4", features = ["sys_rng"] }
+libc = "0.2"
 log = { version = "0.4", default-features = false }
 p256 = "0.14"
 pqkey-ctap = { path = "crates/pqkey-ctap" }

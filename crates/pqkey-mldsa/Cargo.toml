@@ -36,6 +36,10 @@ shake.workspace = true
 # The known-answer tests need the `hazmat` interfaces.
 pqkey-mldsa = { workspace = true, features = ["hazmat"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Test-only seccomp injection of a real OS randomness failure.
+libc.workspace = true
+
 # A program of its own: it reads the stack other functions left behind.
 [[test]]
 name = "residue"

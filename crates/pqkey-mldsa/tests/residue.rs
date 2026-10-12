@@ -2,10 +2,12 @@
 //!
 //! FIPS 204 §3.6.3: "implementations of ML-DSA shall ensure that any
 //! potentially sensitive intermediate data is destroyed as soon as it is no
-//! longer needed."  ρ′ = SHAKE256(ξ ‖ k ‖ ℓ)[32..64] alone regenerates the
+//! longer needed."  ρ′ = SHAKE256(ξ ‖ k ‖ ℓ)[32..96] alone regenerates the
 //! secret vectors s1 and s2, and K = [96..128] is the signing key's PRF key.
 //! After each entry point returns, this test scans the dead stack below its
-//! caller for both, and for a control value nobody computed.
+//! caller for both 32-byte halves of ρ′, K, and a control nobody computed.
+//! Fixtures precede the wipe; verification follows the scans. Linux also
+//! repeats the operations in a child whose OS RNG is forced to fail.
 //!
 //! It is its own program (`harness = false`), single-threaded on the main
 //! thread, because it reads stack memory that other functions left behind:
@@ -16,9 +18,33 @@
 
 use core::mem::MaybeUninit;
 
-use pqkey_mldsa::{ParamSet, try_public_key_from_seed, try_sign_from_seed};
+use pqkey_mldsa::{
+    MAX_CONTEXT_LEN, MlDsaError, ParamSet, PublicKey, SecretKey, try_keypair_from_seed,
+    try_public_key, try_public_key_from_seed, try_sign, try_sign_deterministic, try_sign_from_seed,
+    try_sign_from_seed_with_context, try_sign_with_context, verify_with_context,
+};
 use shake::Shake256;
 use shake::digest::{ExtendableOutput, Update, XofReader};
+
+#[cfg(target_os = "linux")]
+#[path = "support/rng_failure.rs"]
+mod rng_failure;
+
+#[cfg(target_os = "linux")]
+use pqkey_mldsa::try_keypair;
+
+enum Output {
+    Signature(Vec<u8>),
+    PublicKey(PublicKey),
+    Keypair(PublicKey, SecretKey),
+}
+
+type Operation<'a> = (
+    &'static str,
+    &'a [u8],
+    &'a dyn Fn() -> Result<Output, MlDsaError>,
+    Option<MlDsaError>,
+);
 
 /// How far below `main` the scan reaches, more than signing ever uses.
 const SCAN: usize = 2 * 1024 * 1024;
@@ -58,7 +84,7 @@ fn scan(needle: &[u8]) -> usize {
 }
 
 /// ρ′ and K of the key generated from `seed` with parameters (k, ℓ).
-fn rho_prime_and_key(seed: &[u8; 32], k: u8, l: u8) -> ([u8; 32], [u8; 32]) {
+fn rho_prime_and_key(seed: &[u8; 32], k: u8, l: u8) -> ([u8; 32], [u8; 32], [u8; 32]) {
     let mut out = [0u8; 128];
     let mut shake = Shake256::default();
     shake.update(seed);
@@ -67,10 +93,16 @@ fn rho_prime_and_key(seed: &[u8; 32], k: u8, l: u8) -> ([u8; 32], [u8; 32]) {
     (
         out[32..64].try_into().expect("32 bytes"),
         out[96..128].try_into().expect("32 bytes"),
+        out[64..96].try_into().expect("32 bytes"),
     )
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    let rng_failed = rng_failure::is_child();
+    #[cfg(not(target_os = "linux"))]
+    let rng_failed = false;
+
     let seed = [0x5A; 32];
     let mut control = [0u8; 32];
     let mut shake = Shake256::default();
@@ -86,25 +118,158 @@ fn main() {
         if !ps.is_enabled() {
             continue;
         }
-        let (rho_prime, key) = rho_prime_and_key(&seed, k, l);
-        let operations: [(&str, &dyn Fn()); 2] = [
-            ("try_sign_from_seed", &|| {
-                core::hint::black_box(try_sign_from_seed(ps, &seed, b"message").expect("sign"));
-            }),
-            ("try_public_key_from_seed", &|| {
-                core::hint::black_box(try_public_key_from_seed(ps, &seed).expect("public key"));
-            }),
+        let (rho_prime, key, rho_prime_tail) = rho_prime_and_key(&seed, k, l);
+        let (pk, sk) = try_keypair_from_seed(ps, &seed).expect("fixture");
+        let mut malformed = SecretKey::from_slice(sk.as_bytes());
+        malformed.0[128] = 0xff; // out-of-range first s1 coefficient
+        let maximum = [0xaa; MAX_CONTEXT_LEN];
+        let overlong = [0xaa; MAX_CONTEXT_LEN + 1];
+        let rnd = [0; 32];
+        let message = b"message";
+        let signing_error = rng_failed.then_some(MlDsaError::SigningFailed);
+        let operations: [Operation<'_>; 15] = [
+            (
+                "try_sign_from_seed",
+                &[],
+                &|| try_sign_from_seed(ps, &seed, message).map(Output::Signature),
+                signing_error,
+            ),
+            (
+                "try_public_key_from_seed",
+                &[],
+                &|| try_public_key_from_seed(ps, &seed).map(Output::PublicKey),
+                None,
+            ),
+            (
+                "seed context",
+                b"ctx",
+                &|| {
+                    try_sign_from_seed_with_context(ps, &seed, message, b"ctx")
+                        .map(Output::Signature)
+                },
+                signing_error,
+            ),
+            (
+                "seed maximum context",
+                &maximum,
+                &|| {
+                    try_sign_from_seed_with_context(ps, &seed, message, &maximum)
+                        .map(Output::Signature)
+                },
+                signing_error,
+            ),
+            (
+                "try_keypair_from_seed",
+                &[],
+                &|| try_keypair_from_seed(ps, &seed).map(|(pk, sk)| Output::Keypair(pk, sk)),
+                None,
+            ),
+            (
+                "try_public_key",
+                &[],
+                &|| try_public_key(ps, &sk).map(Output::PublicKey),
+                None,
+            ),
+            (
+                "try_sign",
+                &[],
+                &|| try_sign(ps, &sk, message).map(Output::Signature),
+                signing_error,
+            ),
+            (
+                "expanded context",
+                b"ctx",
+                &|| try_sign_with_context(ps, &sk, message, b"ctx").map(Output::Signature),
+                signing_error,
+            ),
+            (
+                "deterministic signing",
+                &[],
+                &|| try_sign_deterministic(ps, &sk, message, &[], &rnd).map(Output::Signature),
+                None,
+            ),
+            (
+                "deterministic maximum context",
+                &maximum,
+                &|| try_sign_deterministic(ps, &sk, message, &maximum, &rnd).map(Output::Signature),
+                None,
+            ),
+            (
+                "seed overlong context",
+                &overlong,
+                &|| {
+                    try_sign_from_seed_with_context(ps, &seed, message, &overlong)
+                        .map(Output::Signature)
+                },
+                Some(MlDsaError::SigningFailed),
+            ),
+            (
+                "expanded overlong context",
+                &overlong,
+                &|| try_sign_with_context(ps, &sk, message, &overlong).map(Output::Signature),
+                Some(MlDsaError::SigningFailed),
+            ),
+            (
+                "malformed expanded signing",
+                &[],
+                &|| try_sign(ps, &malformed, message).map(Output::Signature),
+                Some(MlDsaError::InvalidKeyLength),
+            ),
+            (
+                "malformed public key",
+                &[],
+                &|| try_public_key(ps, &malformed).map(Output::PublicKey),
+                Some(MlDsaError::InvalidKeyLength),
+            ),
+            (
+                "malformed deterministic signing",
+                &[],
+                &|| {
+                    try_sign_deterministic(ps, &malformed, message, &[], &rnd)
+                        .map(Output::Signature)
+                },
+                Some(MlDsaError::InvalidKeyLength),
+            ),
         ];
-        for (name, operation) in operations {
+        #[cfg(target_os = "linux")]
+        if rng_failed
+            && ps
+                == ParamSet::ALL
+                    .into_iter()
+                    .find(|ps| ps.is_enabled())
+                    .expect("enabled set")
+        {
+            rng_failure::block_getrandom();
+            assert_eq!(try_keypair(ps).err(), Some(MlDsaError::KeyGenFailed));
+        }
+        for (name, context, operation, expected_error) in operations {
             wipe();
-            operation();
-            let found = (scan(&rho_prime), scan(&key), scan(&control));
-            println!(
-                "{ps} {name}: rho' {}x, K {}x, control {}x",
-                found.0, found.1, found.2
+            let result = core::hint::black_box(operation());
+            let found = (
+                scan(&rho_prime),
+                scan(&key),
+                scan(&control),
+                scan(&rho_prime_tail),
             );
-            if found != (0, 0, 0) {
+            println!(
+                "{ps} {name} (RNG failure: {rng_failed}): rho' {}x/{}x, K {}x, control {}x",
+                found.0, found.3, found.1, found.2
+            );
+            if found != (0, 0, 0, 0) {
                 failures.push(format!("{ps} {name}"));
+            }
+            match (result, expected_error) {
+                (Err(actual), Some(expected)) => assert_eq!(actual, expected, "{ps} {name}"),
+                (Ok(Output::Signature(signature)), None) => assert!(
+                    verify_with_context(ps, &pk, message, &signature, context),
+                    "{ps} {name}"
+                ),
+                (Ok(Output::PublicKey(actual)), None) => assert_eq!(actual, pk, "{ps} {name}"),
+                (Ok(Output::Keypair(actual_pk, actual_sk)), None) => {
+                    assert_eq!(actual_pk, pk, "{ps} {name}");
+                    assert_eq!(actual_sk.as_bytes(), sk.as_bytes(), "{ps} {name}");
+                }
+                _ => panic!("unexpected result: {ps} {name}"),
             }
         }
     }
@@ -113,4 +278,8 @@ fn main() {
         "secrets left in the stack after {failures:?}"
     );
     println!("no ML-DSA secrets left in the stack");
+    #[cfg(target_os = "linux")]
+    if !rng_failed {
+        rng_failure::run_child();
+    }
 }

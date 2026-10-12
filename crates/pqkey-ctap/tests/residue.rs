@@ -70,6 +70,10 @@ use pqkey_ctap::{
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use shake::{ExtendableOutput, Shake256, Update, XofReader};
 
+#[cfg(target_os = "linux")]
+#[path = "../../pqkey-mldsa/tests/support/rng_failure.rs"]
+mod rng_failure;
+
 const SCAN: usize = 2 * 1024 * 1024;
 
 /// A point's affine x and y, big-endian.
@@ -674,7 +678,89 @@ fn check_rsa(alg: &CoseAlg) -> Vec<String> {
     found
 }
 
+/// Exercise ML-DSA's two wrapper operations independently: a later signing
+/// call must not erase evidence from public-key derivation before we scan it.
+fn check_mldsa(rng_failed: bool) -> Vec<String> {
+    use pqkey_mldsa::{MlDsaError, ParamSet, try_public_key_from_seed, verify};
+
+    let seed = [0x5a; 32];
+    let control = Sha256::digest(b"never computed by the signer").to_vec();
+    let mut failures = Vec::new();
+    for (alg, ps, k, l) in [
+        (CoseAlg::MLDSA44, ParamSet::MLDSA44, 4, 4),
+        (CoseAlg::MLDSA65, ParamSet::MLDSA65, 6, 5),
+        (CoseAlg::MLDSA87, ParamSet::MLDSA87, 8, 7),
+    ] {
+        let public = try_public_key_from_seed(ps, &seed).expect("fixture public key");
+        let key = try_credential_secret_from_bytes(alg, &seed).expect("fixture key");
+        let mut output = [0; 128];
+        let mut shake = Shake256::default();
+        shake.update(&seed);
+        shake.update(&[k, l]);
+        shake.finalize_xof().read(&mut output);
+        let needles: Vec<(&str, Vec<u8>, Vec<u8>)> = [
+            ("rho' first", output[32..64].to_vec()),
+            ("rho' second", output[64..96].to_vec()),
+            ("K", output[96..128].to_vec()),
+            ("control", control.clone()),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| (name, bytes.iter().rev().copied().collect(), bytes))
+        .collect();
+        type Operation<'a> = (&'static str, &'a dyn Fn() -> Result<Vec<u8>, CryptoError>);
+        let operations: [Operation<'_>; 2] = [
+            ("public key", &|| try_cose_public_key(alg, &key)),
+            ("sign", &|| {
+                try_sign_challenge(alg, &key, &AUTH_DATA, &CLIENT_DATA_HASH)
+            }),
+        ];
+        #[cfg(target_os = "linux")]
+        if rng_failed && ps == ParamSet::MLDSA44 {
+            rng_failure::block_getrandom();
+        }
+        for (name, operation) in operations {
+            wipe();
+            let result = core::hint::black_box(operation());
+            let found: Vec<_> = needles
+                .iter()
+                .map(|(label, reversed, bytes)| (*label, scan(bytes), scan(reversed)))
+                .collect();
+            for (label, hits, reversed) in found {
+                println!("{alg:?} {name} (RNG failure: {rng_failed}): {label} {hits}x/{reversed}x");
+                if hits + reversed > 0 {
+                    failures.push(format!("{alg:?} {name}: {label} {hits}x/{reversed}x"));
+                }
+            }
+            // All verification and CBOR decoding follow the residue scans.
+            if name == "public key" {
+                assert_eq!(
+                    cose_bytes(&result.expect("public key"), -1),
+                    public.as_bytes()
+                );
+            } else if rng_failed {
+                assert!(matches!(
+                    result,
+                    Err(CryptoError::MlDsa(MlDsaError::SigningFailed))
+                ));
+            } else {
+                let message = [AUTH_DATA.as_slice(), CLIENT_DATA_HASH.as_slice()].concat();
+                assert!(verify(ps, &public, &message, &result.expect("sign")));
+            }
+        }
+    }
+    failures
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    if rng_failure::is_child() {
+        let failures = check_mldsa(true);
+        assert!(
+            failures.is_empty(),
+            "RNG-failure stack residue: {failures:?}"
+        );
+        return;
+    }
     let mut failures: Vec<String> = ECDSA_CASES
         .iter()
         .flat_map(check_ecdsa)
@@ -712,9 +798,12 @@ fn main() {
             &[0x42; 32],
         ));
     }
+    failures.extend(check_mldsa(false));
     assert!(
         failures.is_empty(),
         "secrets left in the stack after signing: {failures:?}"
     );
-    println!("no ECDSA, EdDSA or RSA secrets left in the stack");
+    println!("no ECDSA, EdDSA, RSA or ML-DSA secrets left in the stack");
+    #[cfg(target_os = "linux")]
+    rng_failure::run_child();
 }

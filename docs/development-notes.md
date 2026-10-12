@@ -33,6 +33,39 @@ retains freed blocks until they have been scanned, and live controls prove
 that the scan finds each secret pattern. CI and `scripts/check.sh` run it in
 debug and release, as they do the stack residue tests.
 The final cleanup scan also checks blocks released by the last controls.
+
+ML-DSA drops its owned expanded keys inside a separate operation frame, then
+scrubs the retired stack before returning either success or an error. The
+bounds are 512 KiB for ML-DSA-44, 768 KiB for ML-DSA-65 and 1 MiB for
+ML-DSA-87. Rust 1.89.0 debug on Linux/aarch64 left copies of ML-DSA-65's
+rho-prime and K about 567 KiB below the cleanup frame, outside the former
+512 KiB wipe. Seed expansion creates plain locals, moves SHAKE state and
+clones an expanded key; wiping the final owned values does not erase all
+retired copies. Stable's different temporary layout happened to leave no
+detected residue. Parameter dispatch now precedes the secret-handling closure,
+so each retired frame holds only one parameter set's key and decode result;
+the previous combined frame also escaped cleanup on expanded-key success and
+malformed-key errors. The larger bound covers the originally measured locations
+with about 200 KiB of margin, without additional secret-bearing allocations.
+
+The stack probes retain their 2 MiB scans and controls, and check both
+32-byte halves of the 64-byte rho-prime and K after individual seed,
+expanded-key, context, malformed-key and CTAP wrapper operations. Linux
+children also force an OS randomness failure after seed expansion to check
+the returned-error cleanup path. CI forces Rust 1.89.0 for runtime stack
+and heap probes in debug and release on x86_64 and aarch64, alongside the
+stable tests and the declared-MSRV compilation check.
+
+These are bounded empirical checks of selected patterns and operations.
+The stack scanners read uninitialized, retired storage, outside Rust's
+defined memory model; a clean scan is weaker evidence than a detected
+copy. Compiler, profile and CPU backend change layouts and incidental
+overwrites. The probes do not establish erasure of every intermediate,
+register, live caller-owned key, unwinding frame or swap copy. Heap probes
+separately retain surrendered allocations and require every byte to be
+zero; that guarantee comes from the daemon's wiping allocator. Standalone
+wrapper consumers still depend on each owned secret's explicit drop cleanup.
+
 U2F residue cases cover registration certificates and signatures,
 authentication with and without presence, and the provisioned attestation
 key. Stack checks independently reconstruct the nonces of U2F signing

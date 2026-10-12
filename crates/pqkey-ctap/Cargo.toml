@@ -66,6 +66,10 @@ pqkey-mldsa = { workspace = true, features = ["mldsa44", "mldsa65", "mldsa87", "
 # The residue test multiplies the base point by an Ed25519 key's scalar.
 ed25519-dalek = { workspace = true, features = ["hazmat"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Test-only seccomp injection shared with the ML-DSA residue probe.
+libc.workspace = true
+
 # A program of its own: it reads the stack other functions left behind.
 [[test]]
 name = "residue"

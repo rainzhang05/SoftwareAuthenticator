@@ -359,11 +359,19 @@ macro_rules! dispatch {
 /// the signing key's K in plain locals.  They stay in the stack after the
 /// call returns.  `operation` therefore runs in a frame of its own below the
 /// caller, and [`scrub_stack`] then fills that much of the stack with zeros.
-/// `tests/residue.rs` checks that nothing is left.
+/// Dispatch is outside the closure: each operation frame contains only one
+/// parameter set's key and decode result. Dispatch inside it made debug frames
+/// reserve temporaries for all three key types, exceeding the scrub bounds on
+/// expanded-key success and malformed-key errors as well as seed expansion.
+/// Owned keys are dropped inside `operation` before this overwrite. A returned
+/// `Result::Err` takes the same cleanup path as a success. The bounded probes
+/// in `tests/residue.rs` check selected secret patterns, not every intermediate
+/// or compiler-generated copy; this is not an erasure guarantee during unwind.
 fn with_scrubbed_stack<T>(ps: ParamSet, operation: impl FnOnce() -> T) -> T {
     let result = run_below(operation);
     match ps {
-        ParamSet::MLDSA44 | ParamSet::MLDSA65 => scrub_stack::<{ 512 * 1024 / 8 }>(),
+        ParamSet::MLDSA44 => scrub_stack::<{ 512 * 1024 / 8 }>(),
+        ParamSet::MLDSA65 => scrub_stack::<{ 768 * 1024 / 8 }>(),
         ParamSet::MLDSA87 => scrub_stack::<{ 1024 * 1024 / 8 }>(),
     }
     result
@@ -379,10 +387,15 @@ fn run_below<T>(operation: impl FnOnce() -> T) -> T {
 /// Overwrite the `WORDS` × 8 bytes of stack below the caller with zeros.
 ///
 /// The sizes [`with_scrubbed_stack`] uses cover the deepest residue
-/// `tests/residue.rs` found, with room to spare: about 380 KiB below the
-/// caller for ML-DSA-44 and -65, and 790 KiB for ML-DSA-87, in debug builds
-/// (less optimised, so deeper) on aarch64 with `ml-dsa` 0.1.1.  `zeroize`
-/// writes with volatile stores the compiler may not remove.
+/// probes found, with room to spare. With `ml-dsa` 0.1.1 on aarch64, Rust
+/// 1.89 debug left ML-DSA-65's rho-prime and K at depths 580,544–580,688
+/// bytes below this helper's caller, beyond the old 512 KiB bound. The
+/// 768 KiB bound includes those retired frames with about 200 KiB of margin.
+/// ML-DSA-44's seed locals were about 413 KiB down; earlier ML-DSA-87 probes
+/// reached about 790 KiB, covered by 1 MiB. Frame layouts and incidental
+/// overwrites change with compiler, CPU backend and profile, so CI runs the
+/// probes on stable and Rust 1.89 in debug and release on both Linux arches.
+/// `zeroize` writes with volatile stores the compiler may not remove.
 #[inline(never)]
 fn scrub_stack<const WORDS: usize>() {
     let mut words = [0u64; WORDS];
@@ -484,10 +497,10 @@ fn keypair_from_seed(
     ps: ParamSet,
     seed: &[u8; SEED_LEN],
 ) -> Result<(PublicKey, SecretKey), MlDsaError> {
-    with_scrubbed_stack(ps, || {
-        dispatch!(
-            ps,
-            |P| {
+    dispatch!(
+        ps,
+        |P| {
+            with_scrubbed_stack(ps, || {
                 let sk = expand_seed::<P>(seed);
                 let pk = public_key_of(&sk);
                 // `to_expanded` is deprecated upstream in favour of storing seeds;
@@ -497,10 +510,10 @@ fn keypair_from_seed(
                 let secret = SecretKey(encoded.to_vec());
                 encoded.zeroize();
                 Ok((pk, secret))
-            },
-            Err(MlDsaError::InvalidParameterSet)
-        )
-    })
+            })
+        },
+        Err(MlDsaError::InvalidParameterSet)
+    )
 }
 
 /// Derive the public key of the key pair determined by the 32-byte FIPS 204
@@ -510,13 +523,11 @@ pub fn try_public_key_from_seed(
     ps: ParamSet,
     seed: &[u8; SEED_LEN],
 ) -> Result<PublicKey, MlDsaError> {
-    with_scrubbed_stack(ps, || {
-        dispatch!(
-            ps,
-            |P| { Ok(public_key_of(&expand_seed::<P>(seed))) },
-            Err(MlDsaError::InvalidParameterSet)
-        )
-    })
+    dispatch!(
+        ps,
+        |P| { with_scrubbed_stack(ps, || Ok(public_key_of(&expand_seed::<P>(seed)))) },
+        Err(MlDsaError::InvalidParameterSet)
+    )
 }
 
 /// Recover the public key that belongs to `sk`.  Never panics.
@@ -524,16 +535,16 @@ pub fn try_public_key_from_seed(
 /// Useful when only the secret key was persisted, and as a cheap integrity
 /// check on a decoded secret key.
 pub fn try_public_key(ps: ParamSet, sk: &SecretKey) -> Result<PublicKey, MlDsaError> {
-    with_scrubbed_stack(ps, || {
-        dispatch!(
-            ps,
-            |P| {
+    dispatch!(
+        ps,
+        |P| {
+            with_scrubbed_stack(ps, || {
                 let sk = decode_expanded::<P>(ps, sk)?;
                 Ok(public_key_of(&sk))
-            },
-            Err(MlDsaError::InvalidParameterSet)
-        )
-    })
+            })
+        },
+        Err(MlDsaError::InvalidParameterSet)
+    )
 }
 
 /// Try to sign `message` with the supplied secret key.  Returns the raw
@@ -616,13 +627,15 @@ pub fn try_sign_from_seed_with_context(
     if ctx.len() > MAX_CONTEXT_LEN {
         return Err(MlDsaError::SigningFailed);
     }
-    with_scrubbed_stack(ps, || {
-        dispatch!(
-            ps,
-            |P| { sign_with_key(&expand_seed::<P>(seed), message, ctx, None) },
-            Err(MlDsaError::InvalidParameterSet)
-        )
-    })
+    dispatch!(
+        ps,
+        |P| {
+            with_scrubbed_stack(ps, || {
+                sign_with_key(&expand_seed::<P>(seed), message, ctx, None)
+            })
+        },
+        Err(MlDsaError::InvalidParameterSet)
+    )
 }
 
 fn sign_expanded(
@@ -639,13 +652,15 @@ fn sign_expanded(
     if ctx.len() > MAX_CONTEXT_LEN {
         return Err(MlDsaError::SigningFailed);
     }
-    with_scrubbed_stack(ps, || {
-        dispatch!(
-            ps,
-            |P| { sign_with_key(&decode_expanded::<P>(ps, sk)?, message, ctx, rnd) },
-            Err(MlDsaError::InvalidParameterSet)
-        )
-    })
+    dispatch!(
+        ps,
+        |P| {
+            with_scrubbed_stack(ps, || {
+                sign_with_key(&decode_expanded::<P>(ps, sk)?, message, ctx, rnd)
+            })
+        },
+        Err(MlDsaError::InvalidParameterSet)
+    )
 }
 
 /// FIPS 204 Algorithm 2, `ML-DSA.Sign`, over the external interface.
