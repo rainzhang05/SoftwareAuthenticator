@@ -22,6 +22,7 @@ fn record(id: &[u8]) -> CredentialRecord {
         cred_random_without_uv: [2; 32],
         cred_blob: Some(vec![7; 32]),
         large_blob_key: Some([9; 32]),
+        third_party_payment: false,
         cred_protect: 1,
         sign_count: 0,
         created_at: 0,

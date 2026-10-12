@@ -24,6 +24,7 @@
 //!   13  created_at              unsigned integer, 64 bits
 //!   14  cred_blob               byte string, at most 32 bytes, optional
 //!   15  large_blob_key          byte string, 32 bytes, optional
+//!   16  third_party_payment     boolean, default false, omitted when false
 //!
 //! PIN state record (record type 2)
 //!    1  pin_hash                byte string, 16 bytes, omitted when no PIN is set
@@ -129,6 +130,9 @@ pub(crate) fn encode_credential(
     if let Some(key) = &record.large_blob_key {
         entries.push((15, Value::Bytes(key.to_vec())));
     }
+    if record.third_party_payment {
+        entries.push((16, Value::Bool(true)));
+    }
     encode_map(entries)
 }
 
@@ -165,6 +169,7 @@ pub(crate) fn decode_credential(bytes: &[u8]) -> Result<CredentialRecord, Corrup
         created_at: fields.uint(13)?,
         cred_blob: fields.optional_bytes(14)?,
         large_blob_key: fields.optional_array(15)?,
+        third_party_payment: fields.optional_bool(16)?.unwrap_or(false),
     };
     fields.finish()?;
     validate_credential(&record).map_err(|_| Corruption::Inconsistent)?;
@@ -496,10 +501,62 @@ mod tests {
             cred_random_without_uv: [0xbb; 32],
             cred_blob: None,
             large_blob_key: None,
+            third_party_payment: false,
             cred_protect: 2,
             sign_count: 300,
             created_at: 70_000,
         }
+    }
+
+    /// Optional payment metadata leaves the existing known-answer encodings unchanged.
+    #[test]
+    fn payment_field_is_optional_boolean_and_false_keeps_legacy_bytes() {
+        let mut record = credential();
+        let legacy = encode_credential(&record, record.created_at).unwrap();
+        assert!(!decode_credential(&legacy).unwrap().third_party_payment);
+        let explicit_false = edited(&legacy, |e| set(e, 16, Value::Bool(false)));
+        assert_eq!(decode_credential(&explicit_false).unwrap(), record);
+        assert_eq!(
+            encode_credential(
+                &decode_credential(&explicit_false).unwrap(),
+                record.created_at
+            )
+            .unwrap(),
+            legacy
+        );
+
+        record.third_party_payment = true;
+        assert_ne!(record, decode_credential(&legacy).unwrap());
+        // Field 16 and CBOR true, independently encoded per RFC 8949.
+        let mut expected = legacy.to_vec();
+        expected[0] += 1;
+        expected.extend_from_slice(&[0x10, 0xf5]);
+        assert_eq!(
+            encode_credential(&record, record.created_at)
+                .unwrap()
+                .as_slice(),
+            expected
+        );
+        assert_eq!(decode_credential(&expected).unwrap(), record);
+        for value in [
+            Value::Null,
+            Value::Integer(1.into()),
+            Value::Text("true".into()),
+            Value::Bytes(vec![]),
+            Value::Array(vec![]),
+            Value::Map(vec![]),
+        ] {
+            let malformed = edited(&legacy, |e| set(e, 16, value));
+            assert_eq!(decode_credential(&malformed), Err(Corruption::Encoding));
+        }
+        record.credential_id = vec![0; crate::credential_id::SEALED_ID_LENGTH];
+        record.credential_id[0] = crate::credential_id::SEALED_MARKER;
+        assert!(validate_credential(&record).is_err());
+        let inconsistent = encode_credential(&record, record.created_at).unwrap();
+        assert_eq!(
+            decode_credential(&inconsistent),
+            Err(Corruption::Inconsistent)
+        );
     }
 
     /// Field 14, written independently from RFC 8949 as the other vectors.

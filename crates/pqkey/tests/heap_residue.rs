@@ -214,6 +214,7 @@ fn exercise(alg: CoseAlg, material: PrivateKeyMaterial) {
             cred_random_without_uv: [0x44; 32],
             cred_blob: Some(blob),
             large_blob_key: Some(large_blob_key),
+            third_party_payment: false,
             cred_protect: 1,
             sign_count: 0,
             created_at: 0,

@@ -225,6 +225,7 @@ fn sealed_credential(
         cred_random_without_uv: [0; 32],
         cred_blob: None,
         large_blob_key: None,
+        third_party_payment: false,
         cred_protect: *cred_protect,
         sign_count: 0,
         created_at: 0,

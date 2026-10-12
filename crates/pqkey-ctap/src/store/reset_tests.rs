@@ -148,6 +148,7 @@ fn stored_record() -> CredentialRecord {
         cred_random_without_uv: [2; 32],
         cred_blob: None,
         large_blob_key: None,
+        third_party_payment: false,
         cred_protect: 1,
         sign_count: 7,
         created_at: 0,

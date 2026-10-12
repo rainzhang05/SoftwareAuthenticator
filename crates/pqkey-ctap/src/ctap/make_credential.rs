@@ -375,6 +375,7 @@ impl CtapApp<'_> {
             cred_random_without_uv: [0; 32],
             cred_blob: None,
             large_blob_key: large_blob_key_requested.then(|| self.random_array()),
+            third_party_payment: false,
             cred_protect: cred_protect_value,
             sign_count: 0,
             created_at: 0,

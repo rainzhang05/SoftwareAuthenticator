@@ -264,6 +264,9 @@ pub struct CredentialRecord {
     /// The secret large-blob encryption key of a discoverable credential
     /// (CTAP 2.3 §12.3), if requested at registration.
     pub large_blob_key: Option<[u8; 32]>,
+    /// Whether registration enabled third-party payment authentication (CTAP 2.3 §12.9).
+    /// This is credential metadata; the client platform determines payment eligibility.
+    pub third_party_payment: bool,
     /// The `credProtect` level: 1 (`userVerificationOptional`), 2
     /// (`userVerificationOptionalWithCredentialIDList`), or 3
     /// (`userVerificationRequired`).  Credentials created without the
@@ -343,6 +346,7 @@ impl PartialEq for CredentialRecord {
             && self.user_name == other.user_name
             && self.user_display_name == other.user_display_name
             && self.alg == other.alg
+            && self.third_party_payment == other.third_party_payment
             && self.cred_protect == other.cred_protect
             && self.sign_count == other.sign_count
             && self.created_at == other.created_at
@@ -367,6 +371,7 @@ impl fmt::Debug for CredentialRecord {
             .field("cred_random_without_uv", &Redacted)
             .field("cred_blob", &Redacted)
             .field("large_blob_key", &Redacted)
+            .field("third_party_payment", &self.third_party_payment)
             .field("cred_protect", &self.cred_protect)
             .field("sign_count", &self.sign_count)
             .field("created_at", &self.created_at)
@@ -620,6 +625,7 @@ mod tests {
             cred_random_without_uv: [0x44; 32],
             cred_blob: None,
             large_blob_key: None,
+            third_party_payment: false,
             cred_protect: 1,
             sign_count: 7,
             created_at: 0,
@@ -848,6 +854,7 @@ mod tests {
             cred_random_without_uv: [secret; 32],
             cred_blob: Some(vec![secret; 32]),
             large_blob_key: Some([secret; 32]),
+            third_party_payment: false,
             cred_protect: 2,
             sign_count: 5,
             created_at: 9,

@@ -440,6 +440,11 @@ pub(crate) fn validate_credential(record: &CredentialRecord) -> Result<(), Store
     if record.credential_id.is_empty() {
         return Err(StoreError::InvalidRecord("credential ID is empty"));
     }
+    if record.third_party_payment && crate::credential_id::is_sealed(&record.credential_id) {
+        return Err(StoreError::InvalidRecord(
+            "third-party payment metadata requires a stored credential",
+        ));
+    }
     if record.private_key.kind() != record.alg.key_kind() {
         return Err(StoreError::InvalidRecord(
             "alg does not match the private key material",
