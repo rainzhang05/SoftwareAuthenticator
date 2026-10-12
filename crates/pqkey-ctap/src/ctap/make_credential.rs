@@ -214,6 +214,7 @@ impl CtapApp<'_> {
         let mut min_pin_length_requested = false;
         let mut pin_complexity_requested = false;
         let mut hmac_secret_requested = false;
+        let mut third_party_payment_requested = false;
         let mut hmac_secret_mc_input = None;
         let mut cred_blob_input = None;
         let mut large_blob_key_input = None;
@@ -227,6 +228,10 @@ impl CtapApp<'_> {
             };
             for (key, value) in extension_map.iter() {
                 match key {
+                    Value::Text(text) if text == "thirdPartyPayment" => match value {
+                        Value::Bool(flag) => third_party_payment_requested = *flag,
+                        _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+                    },
                     Value::Text(text) if text == "minPinLength" => match value {
                         Value::Bool(flag) => min_pin_length_requested = *flag,
                         _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
@@ -375,12 +380,14 @@ impl CtapApp<'_> {
             cred_random_without_uv: [0; 32],
             cred_blob: None,
             large_blob_key: large_blob_key_requested.then(|| self.random_array()),
-            third_party_payment: false,
+            third_party_payment: third_party_payment_requested,
             cred_protect: cred_protect_value,
             sign_count: 0,
             created_at: 0,
         };
-        let stored = rk || !alg.key_kind().is_sealable();
+        // Payment metadata does not fit the existing sealed ID format (§12.9
+        // requires support for non-discoverable credentials too).
+        let stored = rk || third_party_payment_requested || !alg.key_kind().is_sealable();
         // CTAP 2.3 §12.2: sealed IDs cannot carry a blob; stored credentials
         // can keep an empty blob too. A refused blob does not fail creation.
         record.cred_blob = cred_blob_input

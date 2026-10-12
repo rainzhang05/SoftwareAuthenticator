@@ -75,6 +75,7 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         text("largeBlobKey"),
         text("minPinLength"),
         text("pinComplexityPolicy"),
+        text("thirdPartyPayment"),
     ]);
 
     let algorithms = Value::Array(

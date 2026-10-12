@@ -1,5 +1,5 @@
 //! The authenticatorGetAssertion and authenticatorGetNextAssertion commands,
-//! including hmac-secret, credBlob and largeBlobKey extension processing.
+//! including hmac-secret, credBlob, thirdPartyPayment and largeBlobKey processing.
 
 use super::CtapApp;
 use super::cbor::{self, canonical_map, canonical_sort};
@@ -43,6 +43,7 @@ pub(super) struct PendingAssertion {
     hmac_secret: Option<PendingHmacSecret>,
     cred_blob: bool,
     large_blob_key: bool,
+    third_party_payment: bool,
     /// When authenticatorGetAssertion or the last
     /// authenticatorGetNextAssertion was answered.
     timer_started: Duration,
@@ -143,6 +144,7 @@ impl CtapApp<'_> {
 
         let mut hmac_secret_request: Option<HmacSecretRequest> = None;
         let mut cred_blob_requested = false;
+        let mut third_party_payment_requested = false;
         let mut large_blob_key_input = None;
         if let Some(value) = parameter(4) {
             let Value::Map(extension_map) = value else {
@@ -150,6 +152,12 @@ impl CtapApp<'_> {
             };
             for (key, value) in extension_map.iter() {
                 match key {
+                    Value::Text(text) if text == "thirdPartyPayment" => {
+                        let Value::Bool(requested) = value else {
+                            return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+                        };
+                        third_party_payment_requested = *requested;
+                    }
                     Value::Text(text) if text == "hmac-secret" => {
                         hmac_secret_request = Some(parse_hmac_secret_request(value)?);
                     }
@@ -315,6 +323,12 @@ impl CtapApp<'_> {
                 Value::Bytes(credential.cred_blob.clone().unwrap_or_default()),
             ));
         }
+        if third_party_payment_requested {
+            extension_entries.push((
+                Value::Text("thirdPartyPayment".into()),
+                Value::Bool(credential.third_party_payment),
+            ));
+        }
         let extension_bytes = cbor::encode_extensions(extension_entries)?;
 
         let (credential, auth_data, signature) = self.sign_assertion(
@@ -336,6 +350,7 @@ impl CtapApp<'_> {
                 hmac_secret: pending_hmac_secret,
                 cred_blob: cred_blob_requested,
                 large_blob_key: large_blob_key_requested,
+                third_party_payment: third_party_payment_requested,
                 timer_started: self.pin_state.now(),
                 token,
             });
@@ -401,6 +416,12 @@ impl CtapApp<'_> {
             extension_entries.push((
                 Value::Text("credBlob".into()),
                 Value::Bytes(credential.cred_blob.clone().unwrap_or_default()),
+            ));
+        }
+        if pending.third_party_payment {
+            extension_entries.push((
+                Value::Text("thirdPartyPayment".into()),
+                Value::Bool(credential.third_party_payment),
             ));
         }
         let extension_bytes = cbor::encode_extensions(extension_entries)?;

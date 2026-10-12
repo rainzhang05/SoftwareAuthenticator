@@ -71,6 +71,7 @@ impl CtapApp<'_> {
                 text("largeBlobKey"),
                 text("minPinLength"),
                 text("pinComplexityPolicy"),
+                text("thirdPartyPayment"),
             ]),
         ));
         map.push((uint(3), Value::Bytes(self.aaguid.to_vec())));

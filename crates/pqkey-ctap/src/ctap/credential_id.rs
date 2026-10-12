@@ -56,6 +56,9 @@ impl CtapApp<'_> {
         key: &SealableKeyMaterial,
         rp_id_hash: &[u8; 32],
     ) -> Result<Vec<u8>, u8> {
+        if record.third_party_payment {
+            return Err(CTAP2_ERR_PROCESSING);
+        }
         let alg = i8::try_from(record.alg.identifier()).map_err(|_| CTAP2_ERR_PROCESSING)?;
         let seed = Zeroizing::new(self.random_array::<32>());
         derive_sealed_cred_randoms(record, &seed)?;

@@ -214,7 +214,7 @@ impl CtapApp<'_> {
     /// One credential of an enumeration.  `total` is totalCredentials, which
     /// only enumerateCredentialsBegin reports: the enumerateCredentialsGetNext
     /// response is user, credentialID, publicKey, credProtect and an optional
-    /// largeBlobKey (CTAP 2.3 §6.8.4).
+    /// largeBlobKey, plus thirdPartyPayment (CTAP 2.3 §6.8.4).
     fn cm_credential_response(
         credential: &CredentialRecord,
         total: Option<usize>,
@@ -268,6 +268,10 @@ impl CtapApp<'_> {
                 Value::Bytes(key.to_vec()),
             ));
         }
+        entries.push((
+            Value::Integer(Integer::from(12)),
+            Value::Bool(credential.third_party_payment),
+        ));
         Ok(entries)
     }
 
