@@ -50,6 +50,15 @@ fn create(
     user: u8,
 ) -> CredentialRecord {
     let request = creation_request(alg, rk, extensions(input.map(Value::Bool)), None, user);
+    let request = parameter(
+        &request,
+        3,
+        Some(canonical_map(vec![
+            (text("id"), Value::Bytes(vec![user])),
+            (text("name"), text("alice")),
+            (text("displayName"), text("Alice")),
+        ])),
+    );
     let request = if input.is_none() {
         parameter(&request, 6, None)
     } else {
@@ -411,14 +420,15 @@ fn stored_payment_capacity_and_faults_do_not_publish_success() {
 
 #[test]
 fn atomic_replacement_uses_new_metadata_and_failures_keep_old_metadata() {
-    for enabled in [false, true] {
+    for input in [None, Some(false), Some(true)] {
+        let enabled = input != Some(true);
         let store = TestStore::with_max_credentials(1);
         let mut app = new_app(store.clone(), [0x79; 16]);
         let old = create(&mut app, CoseAlg::ES256, true, Some(enabled), 1);
         let request = creation_request(
             CoseAlg::ES256,
             true,
-            extensions(Some(Value::Bool(!enabled))),
+            extensions(input.map(Value::Bool)),
             None,
             1,
         );
@@ -435,7 +445,7 @@ fn atomic_replacement_uses_new_metadata_and_failures_keep_old_metadata() {
             f.replacement_write = false;
             f.delete = true;
         });
-        let new = create(&mut app, CoseAlg::ES256, true, Some(!enabled), 1);
+        let new = create(&mut app, CoseAlg::ES256, true, input, 1);
         assert_eq!(new.third_party_payment, !enabled);
         let mut restarted = new_app(store, [0x78; 16]);
         assert_eq!(
