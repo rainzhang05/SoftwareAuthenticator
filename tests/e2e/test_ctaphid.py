@@ -298,3 +298,51 @@ def test_python_fido_lock_and_unlock(device):
     finally:
         device.lock(0)
     assert device.ping(b"released") == b"released"
+
+
+def test_init_during_long_transmission_preserves_the_lease(hid):
+    owner, competitor = hid.allocate_channel(), hid.allocate_channel()
+    with hid.lease(owner):
+        payload = os.urandom(7609)
+        send_long_ping(hid, owner, payload)
+        first = hid.read_packet()
+        assert struct.unpack(">IBH", first[:7]) == (owner, 0x80 | ctaphid.PING, len(payload))
+        nonce = os.urandom(8)
+        hid.send(owner, ctaphid.INIT, nonce)
+        sequence = 0
+        while True:
+            packet = hid.read_packet()
+            cid, command = struct.unpack(">IB", packet[:5])
+            assert cid == owner
+            if command == 0x80 | ctaphid.INIT:
+                assert packet[7:15] == nonce
+                break
+            assert command == sequence
+            sequence += 1
+        assert sequence < 128
+        hid.send(competitor, ctaphid.PING)
+        assert hid.expect(competitor, ctaphid.ERROR).payload == b"\x06"
+
+
+def test_lease_expiry_during_a_long_response_retains_transaction_ownership(hid):
+    owner, competitor = hid.allocate_channel(), hid.allocate_channel()
+    with hid.lease(owner, 1):
+        payload = os.urandom(7609)
+        started = time.monotonic()
+        # The 129 request reports take about 130 ms. Start them near expiry
+        # so the separately paced 129 response reports span the boundary.
+        time.sleep(max(0, started + 0.85 - time.monotonic()))
+        send_long_ping(hid, owner, payload)
+        first = hid.read_packet()
+        assert struct.unpack(">IBH", first[:7]) == (owner, 0x80 | ctaphid.PING, len(payload))
+        echoed = first[7:]
+        hid.send(competitor, ctaphid.PING, b"during response")
+        for sequence in range(128):
+            packet = hid.read_packet()
+            assert struct.unpack(">IB", packet[:5]) == (owner, sequence)
+            echoed += packet[5:]
+        assert echoed == payload
+        assert hid.expect(competitor, ctaphid.ERROR).payload == b"\x06"
+        time.sleep(max(0, started + 1.1 - time.monotonic()))
+        hid.send(competitor, ctaphid.PING, b"after response")
+        assert hid.expect(competitor, ctaphid.PING).payload == b"after response"
