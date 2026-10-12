@@ -67,6 +67,30 @@ Read, write and worker errors end the session without acknowledging failed
 writes. Shutdown is checked before writes; teardown cancels the worker,
 destroys the device and joins the worker.
 
+CTAPHID_LOCK (`0x04`) accepts one byte, zero through ten seconds. Its
+volatile CID lease is separate from transaction ownership: the owner can
+renew it or release it with zero, and other CIDs are busy until it expires.
+Expiry is exact at the monotonic transport deadline and is checked before
+input arbitration and during paced transmission. It releases only the lease,
+including during a long response. Unlock retains ordinary ownership until its
+response is successfully written. Same-CID INIT preserves an unexpired lease;
+authenticatorReset also preserves it. Transport teardown discards it.
+
+CTAPHID_WINK (`0x08`) accepts and returns an empty payload. It sends a
+normal-urgency, transient desktop notification naming `pqkey-<pid>`, with no
+site or credential data, no approval actions, and a two-second expiry. One
+identification worker has at most one running and one queued delivery attempt.
+Queueing, connecting, Notify and closing share a 500 ms deadline. Full queues,
+platform errors and expiry return CTAPHID ERR_OTHER without ending the session.
+INIT invalidates identification tokens, and late results are discarded.
+
+Identification uses its own Linux D-Bus connection, without presence signal
+subscriptions or action-capability checks. It runs in every presence mode,
+independently of PIN, complexity and alwaysUv policy. Neither WINK nor LOCK
+calls the CTAP engine, collects presence, establishes UV, consumes a token or
+resets an engine continuation. Identification notifications are never prompt
+records and cannot approve a later presence request.
+
 Two details carry ML-DSA's large messages across the kernel:
 
 - The transport paces its reports 1 ms apart, because a hidraw reader buffers
@@ -158,7 +182,8 @@ suite requires `/dev/uhid`.
 ## What the key supports
 
 - CTAP 2.3, 2.1, 2.0 and CTAP1/U2F over USB HID. CTAPHID_INIT advertises
-  CBOR, with NMSG and WINK clear; WINK and LOCK remain unimplemented.
+  CBOR and WINK (`0x05`), with NMSG and reserved capability bits clear.
+  WINK identifies the daemon; LOCK provides an exclusive channel lease.
 - ES256 (-7), ML-DSA-44 (-48), ML-DSA-65 (-49), ML-DSA-87 (-50), ESP256 (-9),
   ES384 (-35), ESP384 (-51), ES512 (-36), ESP512 (-52), ES256K (-47), EdDSA
   (-8), Ed25519 (-19), Ed448 (-53), RS256 (-257), RS384 (-258), RS512 (-259),

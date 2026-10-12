@@ -326,3 +326,26 @@ or cancel the waiting request first.
 **The service and the command use different passkeys.** If you set
 `XDG_DATA_HOME` in your shell, set it for the systemd user manager too (see
 `environment.d(5)`).
+
+## Identification and channel lease regression checks
+
+The CTAPHID state machine tests inject monotonic milliseconds and check exact
+lease and identification expiry, resynchronization, selected output, and final
+successful writes. The independent fuzz model tracks leases and identification
+tokens separately from transactions and the CTAP worker. Regenerate only these
+seeds with `cargo run --locked --manifest-path fuzz/Cargo.toml --example seeds
+-- --ctaphid-only`; the encoder round-trips each seed and runs the oracle.
+
+Real HID tests allocate competing CIDs before acquiring a lease and release
+leases in cleanup, including after failed assertions and partial responses.
+The disposable notification server checks Python FIDO WINK and libfido2's
+forced-U2F touch API, which sends WINK before its separate presence operation.
+The two notifications are checked independently. Prepare the pinned Python
+environment before running `tests/e2e/libfido2.sh`; `E2E_PYTHON` selects it.
+
+On macOS, distinguish E2E syntax and collection from actual HID execution.
+Containers without `/dev/uhid` can run simulated-device tests and sanitizer
+fuzzing, but cannot execute the real HID suite. Record validation architecture,
+compiler versions, command exit statuses, and each fuzz target's explicit
+30-second budget. Source snapshots must come from `git archive`, extracted
+with `tar -xm`, with separate cached outputs for each compiler and architecture.

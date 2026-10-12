@@ -25,6 +25,10 @@ your presence waits for you to approve it in a desktop notification.
 - **U2F:** CTAP1 registration and authentication over USB HID, using ES256
   credentials that also work over CTAP2. U2F uses approval rather than a
   PIN, and its prompt cannot identify the site. Always-UV disables it.
+- **Device identification:** CTAPHID_WINK briefly names the software key in a
+  desktop notification with no approval buttons. It expires after two seconds
+  and does not authorize an operation. CTAPHID_LOCK supports channel leases
+  of up to ten seconds, renewed or released by their owner.
 - **Rust throughout:** pure-Rust cryptography, and `unsafe` code only where
   pqkey calls into the operating system.
 
@@ -33,6 +37,13 @@ your presence waits for you to approve it in a desktop notification.
 > hardware key: its private keys are files in your home directory, which
 > anything running as you, or as root, can use. See [SECURITY.md](SECURITY.md)
 > for the threat model.
+
+FIDO clients can identify a connection with WINK even when a notification
+server cannot show action buttons. If delivery fails or exceeds 500 ms, WINK
+returns a transport error; the key remains usable. Identification also works
+with PIN complexity and always-UV enabled. LOCK is volatile: expiry or daemon
+shutdown releases it, while channel resynchronization and authenticator reset
+preserve an unexpired lease. Clients should release leases in cleanup handlers.
 
 ## Install
 
