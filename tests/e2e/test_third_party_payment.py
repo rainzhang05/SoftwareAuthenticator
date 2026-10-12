@@ -143,5 +143,7 @@ def test_cm_enumeration_and_user_updates_keep_metadata(ctap, protocol):
         entry = next(e for e in cm.enumerate_creds(client.sha256(RP.encode())) if e[7]["id"] == credential.credential_id)
         assert entry[0x0C] is enabled
         assert entry[6] == updated
+    # Presence on an assertion consumes token permissions; finish CM updates first.
+    for credential, _, enabled in records:
         _, data = client.authenticate(ctap, credential, extensions={NAME: True})
         assert data.extensions == {NAME: enabled}
