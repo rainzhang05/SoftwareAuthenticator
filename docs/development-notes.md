@@ -381,7 +381,4 @@ still require a Linux host with `/dev/uhid`.
 Browser/WebAuthn and Secure Payment Confirmation verification are separate.
 The client platform determines payment eligibility and UI; advertising this
 extension does not establish browser or SPC support. Historical client results
-above concern authentication, and do not claim payment verification. The
-October 12, 2026 local environment supports portable macOS and Linux/aarch64
-container validation but exposes no uhid kernel device. Its emulated x86_64
-Rust compiler preflight also fails; neither limitation is a successful check.
+above concern authentication, and do not claim payment verification.

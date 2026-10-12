@@ -20,8 +20,8 @@ your presence waits for you to approve it in a desktop notification.
 - **CTAP 2.3:** PIN (protocols 1 and 2), passkeys with credential management,
   always-UV, minimum PIN length and PIN complexity configuration,
   `minPinLength`, `pinComplexityPolicy`, `credBlob`,
-  `hmac-secret`, `hmac-secret-mc`, `credProtect`, `largeBlobKey`, `thirdPartyPayment`, fragmented
-  large-blob storage, and packed self-attestation.
+  `hmac-secret`, `hmac-secret-mc`, `credProtect`, `largeBlobKey`,
+  `thirdPartyPayment`, fragmented large-blob storage, and packed self-attestation.
 - **U2F:** CTAP1 registration and authentication over USB HID, using ES256
   credentials that also work over CTAP2. U2F uses approval rather than a
   PIN, and its prompt cannot identify the site. Always-UV disables it.

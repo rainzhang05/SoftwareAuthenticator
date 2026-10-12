@@ -151,6 +151,7 @@ const ATTESTATION_FILE: &str = "attestation";
 ///   13  created_at              unsigned, 64 bits
 ///   14  cred_blob               byte string, at most 32 bytes, optional
 ///   15  large_blob_key          byte string, 32 bytes, optional
+///   16  third_party_payment     boolean, default false, omitted when false
 ///
 /// PIN state record (type 2)
 ///    1  pin_hash                byte string, 16 bytes, optional

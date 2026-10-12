@@ -139,8 +139,8 @@ impl CtapApp<'_> {
 
     /// existingResidentCredentialsCount counts discoverable credentials.
     /// maxPossibleRemainingResidentCredentialsCount is the free space of the
-    /// store, which stored non-discoverable credentials (RSA, payment-enabled and older ones)
-    /// take up too.
+    /// store, which stored non-discoverable credentials (RSA, payment-enabled
+    /// and older ones) take up too.
     fn cm_get_metadata(&mut self) -> Result<Vec<(Value, Value)>, u8> {
         let existing = self.discoverable_credentials()?.len();
         let stored = self

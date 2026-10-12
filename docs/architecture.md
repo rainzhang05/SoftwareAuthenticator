@@ -232,8 +232,8 @@ suite requires `/dev/uhid`.
   expiry discards the staged write. Credential deletion leaves the array
   for platforms to collect. Reset restores the initial empty array.
 - The `credBlob`, `credProtect`, `hmac-secret`, `hmac-secret-mc`,
-  `largeBlobKey`, `thirdPartyPayment` and `minPinLength` extensions. `credBlob` stores up to 32
-  bytes with a stored credential; sealed credentials refuse it.
+  `largeBlobKey`, `thirdPartyPayment` and `minPinLength` extensions. `credBlob`
+  stores up to 32 bytes with a stored credential; sealed credentials refuse it.
   `hmac-secret-mc` evaluates the PRF when a credential is created.
   `minPinLength` reports the minimum PIN length at registration, only to the
   RP IDs on the stored list. `largeBlobKey` creates a random 32-byte key only
