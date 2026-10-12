@@ -107,6 +107,7 @@ enum Op {
     MakeCredential {
         cred_blob: Option<u8>,
         large_blob_key: Option<bool>,
+        third_party_payment: Option<bool>,
         min_pin_length: bool,
         complexity: Option<bool>,
         hmac_secret_mc: Option<(bool, bool)>,
@@ -121,6 +122,7 @@ enum Op {
     GetAssertion {
         cred_blob: bool,
         large_blob_key: Option<bool>,
+        third_party_payment: Option<bool>,
         auth: Auth,
         rp: u8,
         hmac_secret: Option<(bool, bool)>,
@@ -185,11 +187,13 @@ enum Op {
     /// A complete registration, alongside the parameter-mutating generator.
     CreateCredential {
         large_blob_key: Option<bool>,
+        third_party_payment: Option<bool>,
         rk: bool,
         user: u8,
     },
     AssertCredentials {
         large_blob_key: Option<bool>,
+        third_party_payment: Option<bool>,
         discoverable: bool,
     },
     EnumerateCredentials {
@@ -225,6 +229,7 @@ struct Credential {
     counter: u32,
     cred_blob: Option<Vec<u8>>,
     large_blob_key: Option<LargeBlobKey>,
+    third_party_payment: bool,
     discoverable: bool,
     id: Vec<u8>,
     rp_id: String,
@@ -264,6 +269,7 @@ struct Platform {
     /// getNextAssertion may return.
     assertion_rp: Option<String>,
     assertion_large_blob_key: bool,
+    assertion_third_party_payment: bool,
     minimum: u8,
     always_uv: bool,
     force_change: bool,
@@ -428,6 +434,7 @@ impl Platform {
             retired: Vec::new(),
             assertion_rp: None,
             assertion_large_blob_key: false,
+            assertion_third_party_payment: false,
             minimum: 4,
             always_uv: false,
             force_change: false,
@@ -581,6 +588,7 @@ impl Platform {
         self.pending = PendingArray::default();
         self.assertion_rp = None;
         self.assertion_large_blob_key = false;
+        self.assertion_third_party_payment = false;
         let response = self.engine.call_u2f(request);
         let end = response.len() - 2;
         let status = u16::from_be_bytes(response[end..].try_into().unwrap());
@@ -611,6 +619,7 @@ impl Platform {
                 counter: 0,
                 cred_blob: None,
                 large_blob_key: None,
+                third_party_payment: false,
                 discoverable: false,
                 id: response[67..174].to_vec(),
                 rp_id: rp.to_owned(),
@@ -810,13 +819,16 @@ impl Platform {
             self.assertion_rp.take()
         };
         let assertion_large_blob_key = self.assertion_large_blob_key;
+        let assertion_payment = self.assertion_third_party_payment;
         if code != CTAP_CMD_GET_NEXT_ASSERTION {
             self.assertion_large_blob_key = false;
+            self.assertion_third_party_payment = false;
         }
         if status(response) != CTAP2_OK {
             if code == CTAP_CMD_GET_NEXT_ASSERTION {
                 self.assertion_rp = None;
                 self.assertion_large_blob_key = false;
+                self.assertion_third_party_payment = false;
             }
             return;
         }
@@ -866,7 +878,9 @@ impl Platform {
                     // An RSA key (kty 3) does not fit a sealed ID, so it is
                     // stored.
                     let kty = get_int(&public_key, 1);
-                    if matches!(kty, Some(Value::Integer(kty)) if i128::from(*kty) == 3) {
+                    if extension_requested(&parameters, 6, "thirdPartyPayment")
+                        || matches!(kty, Some(Value::Integer(kty)) if i128::from(*kty) == 3)
+                    {
                         (33, 0x00)
                     } else {
                         (107, 0x02)
@@ -923,6 +937,14 @@ impl Platform {
                 if expected_complexity.is_some() {
                     assert_ne!(auth_data[32] & 0x80, 0);
                 }
+                assert!(
+                    get_text(&outputs, "thirdPartyPayment").is_none(),
+                    "creation payment output"
+                );
+                if extension_requested(&parameters, 6, "thirdPartyPayment") {
+                    assert_eq!(length, 33, "payment credential must be stored");
+                    assert_eq!(auth_data[55], u8::from(discoverable));
+                }
                 let user_id = match get_int(&parameters, 3) {
                     Some(Value::Map(user)) => match get_text(user, "id") {
                         Some(Value::Bytes(id)) => id.clone(),
@@ -958,6 +980,7 @@ impl Platform {
                     public_key: cbor::encode(&public_key),
                     counter: 0,
                     large_blob_key: key,
+                    third_party_payment: extension_requested(&parameters, 6, "thirdPartyPayment"),
                     discoverable,
                     cred_blob: match (get_int(&parameters, 6), auth_data.get(55 + length..)) {
                         (Some(Value::Map(inputs)), Some(mut rest)) => {
@@ -1036,8 +1059,26 @@ impl Platform {
                     Sha256::digest(rp_id.as_bytes())[..],
                     "rpIdHash"
                 );
+                let payment_requested = if code == CTAP_CMD_GET_ASSERTION {
+                    extension_requested(&parameters, 4, "thirdPartyPayment")
+                } else {
+                    assertion_payment
+                };
+                let outputs = if auth_data[32] & 0x80 != 0 {
+                    decode_map(&auth_data[37..]).expect("extensions")
+                } else {
+                    Vec::new()
+                };
+                let expected_payment =
+                    payment_requested.then_some(Value::Bool(credential.third_party_payment));
+                assert_eq!(
+                    get_text(&outputs, "thirdPartyPayment"),
+                    expected_payment.as_ref()
+                );
+                if payment_requested {
+                    assert_ne!(auth_data[32] & 0x80, 0);
+                }
                 if auth_data[32] & 0x80 != 0 {
-                    let outputs = decode_map(&auth_data[37..]).expect("extensions");
                     assert!(get_text(&outputs, "largeBlobKey").is_none());
                     assert!(get_text(&outputs, "pinComplexityPolicy").is_none());
                     if let Some(Value::Bytes(blob)) = get_text(&outputs, "credBlob") {
@@ -1056,10 +1097,12 @@ impl Platform {
                     if get_int(&body, 5).is_some() {
                         self.assertion_rp = Some(rp_id);
                         self.assertion_large_blob_key = key_requested;
+                        self.assertion_third_party_payment = payment_requested;
                     }
                 } else {
                     self.assertion_rp = assertion_rp;
                     self.assertion_large_blob_key = assertion_large_blob_key;
+                    self.assertion_third_party_payment = assertion_payment;
                 }
             }
             CTAP_CMD_CREDENTIAL_MANAGEMENT => match get_int(&parameters, 1) {
@@ -1071,6 +1114,10 @@ impl Platform {
                         panic!("enumerated credential without id");
                     };
                     let credential = self.known(id).expect("enumerated an unknown credential");
+                    assert_eq!(
+                        get_int(&body, 12),
+                        Some(&Value::Bool(credential.third_party_payment))
+                    );
                     assert!(
                         credential.discoverable,
                         "enumerated a non-discoverable credential"
@@ -1529,6 +1576,7 @@ impl Platform {
             Op::MakeCredential {
                 cred_blob,
                 large_blob_key,
+                third_party_payment,
                 min_pin_length,
                 complexity,
                 auth,
@@ -1562,6 +1610,7 @@ impl Platform {
                         min_pin_length: min_pin_length.then_some(Value::Bool(true)),
                         pin_complexity_policy: complexity.map(Value::Bool),
                         large_blob_key: large_blob_key.map(Value::Bool),
+                        third_party_payment: third_party_payment.map(Value::Bool),
                         options: rk.then(|| Value::Map(vec![(text("rk"), Value::Bool(true))])),
                         no_allow_list: false,
                         credential_parameters: alg.map(|alg| {
@@ -1596,6 +1645,7 @@ impl Platform {
             Op::GetAssertion {
                 cred_blob,
                 large_blob_key,
+                third_party_payment,
                 auth,
                 rp,
                 hmac_secret,
@@ -1620,6 +1670,7 @@ impl Platform {
                         min_pin_length: None,
                         pin_complexity_policy: None,
                         large_blob_key: large_blob_key.map(Value::Bool),
+                        third_party_payment: third_party_payment.map(Value::Bool),
                         options: Some(Value::Map(vec![(text("up"), Value::Bool(up))])),
                         no_allow_list: discoverable,
                         credential_parameters: None,
@@ -1770,6 +1821,7 @@ impl Platform {
                 self.pending = PendingArray::default();
                 self.assertion_rp = None;
                 self.assertion_large_blob_key = false;
+                self.assertion_third_party_payment = false;
             }
             Op::Presence(selector) => self.engine.presence().select(selector),
             Op::Structured => {
@@ -1862,6 +1914,7 @@ impl Platform {
             }
             Op::CreateCredential {
                 large_blob_key,
+                third_party_payment,
                 rk,
                 user,
             } => {
@@ -1885,11 +1938,15 @@ impl Platform {
                 if let Some(requested) = large_blob_key {
                     extensions.push((text("largeBlobKey"), Value::Bool(requested)));
                 }
+                if let Some(requested) = third_party_payment {
+                    extensions.push((text("thirdPartyPayment"), Value::Bool(requested)));
+                }
                 entries.push((int(6), Value::Map(extensions)));
                 self.call(&command(CTAP_CMD_MAKE_CREDENTIAL, &Value::Map(entries)));
             }
             Op::AssertCredentials {
                 large_blob_key,
+                third_party_payment,
                 discoverable,
             } => {
                 let mut entries = vec![
@@ -1913,11 +1970,15 @@ impl Platform {
                         ),
                     ));
                 }
+                let mut extensions = Vec::new();
                 if let Some(requested) = large_blob_key {
-                    entries.push((
-                        int(4),
-                        Value::Map(vec![(text("largeBlobKey"), Value::Bool(requested))]),
-                    ));
+                    extensions.push((text("largeBlobKey"), Value::Bool(requested)));
+                }
+                if let Some(requested) = third_party_payment {
+                    extensions.push((text("thirdPartyPayment"), Value::Bool(requested)));
+                }
+                if !extensions.is_empty() {
+                    entries.push((int(4), Value::Map(extensions)));
                 }
                 self.call(&command(CTAP_CMD_GET_ASSERTION, &Value::Map(entries)));
                 // Target retired IDs individually: a mixed allowList could
@@ -2142,6 +2203,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
             enroll(v2),
             Op::CreateCredential {
                 large_blob_key: None,
+                third_party_payment: None,
                 rk: false,
                 user: 9,
             },
@@ -2156,51 +2218,61 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
         cases.push(vec![
             Op::CreateCredential {
                 large_blob_key: Some(true),
+                third_party_payment: None,
                 rk: true,
                 user: 1,
             },
             Op::CreateCredential {
                 large_blob_key: None,
+                third_party_payment: None,
                 rk: true,
                 user: 2,
             },
             Op::CreateCredential {
                 large_blob_key: Some(true),
+                third_party_payment: None,
                 rk: true,
                 user: 3,
             },
             Op::CreateCredential {
                 large_blob_key: None,
+                third_party_payment: None,
                 rk: false,
                 user: 4,
             },
             Op::CreateCredential {
                 large_blob_key: Some(true),
+                third_party_payment: None,
                 rk: false,
                 user: 5,
             },
             Op::CreateCredential {
                 large_blob_key: Some(false),
+                third_party_payment: None,
                 rk: true,
                 user: 6,
             },
             Op::AssertCredentials {
                 large_blob_key: Some(true),
+                third_party_payment: None,
                 discoverable: true,
             },
             Op::GetNextAssertion,
             Op::GetNextAssertion,
             Op::AssertCredentials {
                 large_blob_key: None,
+                third_party_payment: None,
                 discoverable: true,
             },
             Op::GetNextAssertion,
             Op::AssertCredentials {
                 large_blob_key: Some(false),
+                third_party_payment: None,
                 discoverable: true,
             },
             Op::AssertCredentials {
                 large_blob_key: Some(true),
+                third_party_payment: None,
                 discoverable: false,
             },
             Op::Enroll {
@@ -2227,6 +2299,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     cases.push(vec![
         Op::CreateCredential {
             large_blob_key: None,
+            third_party_payment: None,
             rk: false,
             user: 1,
         },
@@ -2252,6 +2325,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
         Op::U2fVersion,
         Op::AssertCredentials {
             large_blob_key: None,
+            third_party_payment: None,
             discoverable: false,
         },
         Op::U2fAuthenticate {
@@ -2532,11 +2606,13 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
             },
             Op::CreateCredential {
                 large_blob_key: Some(true),
+                third_party_payment: None,
                 rk: true,
                 user: 1,
             },
             Op::AssertCredentials {
                 large_blob_key: Some(true),
+                third_party_payment: None,
                 discoverable: true,
             },
             Op::Restart,
@@ -2545,6 +2621,104 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
             Op::GetInfo,
         ]);
     }
+    for requested in [None, Some(false), Some(true)] {
+        cases.push(vec![
+            Op::CreateCredential {
+                large_blob_key: None,
+                third_party_payment: Some(true),
+                rk: true,
+                user: 1,
+            },
+            Op::CreateCredential {
+                large_blob_key: None,
+                third_party_payment: Some(false),
+                rk: true,
+                user: 2,
+            },
+            Op::AssertCredentials {
+                large_blob_key: None,
+                third_party_payment: requested,
+                discoverable: true,
+            },
+            Op::GetNextAssertion,
+            Op::Restart,
+            enroll(true),
+            Op::EnumerateCredentials {
+                auth: Auth::Token,
+                next: false,
+            },
+            Op::EnumerateCredentials {
+                auth: Auth::Token,
+                next: true,
+            },
+        ]);
+    }
+    for enabled in [false, true] {
+        cases.push(vec![
+            Op::CreateCredential {
+                large_blob_key: None,
+                third_party_payment: Some(enabled),
+                rk: true,
+                user: 1,
+            },
+            Op::CreateCredential {
+                large_blob_key: None,
+                third_party_payment: Some(!enabled),
+                rk: true,
+                user: 1,
+            },
+            Op::Restart,
+            Op::AssertCredentials {
+                large_blob_key: None,
+                third_party_payment: Some(true),
+                discoverable: true,
+            },
+            Op::Reset,
+            Op::AssertCredentials {
+                large_blob_key: None,
+                third_party_payment: Some(true),
+                discoverable: false,
+            },
+        ]);
+    }
+    for rk in [false, true] {
+        cases.push(vec![
+            Op::CreateCredential {
+                large_blob_key: rk.then_some(true),
+                third_party_payment: Some(true),
+                rk,
+                user: 1,
+            },
+            Op::AssertCredentials {
+                large_blob_key: None,
+                third_party_payment: Some(true),
+                discoverable: false,
+            },
+            Op::Presence(0),
+            Op::U2fAuthenticate {
+                credential: 0,
+                rp: 0,
+                control: 3,
+                corrupt: false,
+            },
+            Op::Restart,
+            Op::AssertCredentials {
+                large_blob_key: None,
+                third_party_payment: Some(true),
+                discoverable: false,
+            },
+        ]);
+    }
+    let mut capacity: Vec<_> = (0..9)
+        .map(|user| Op::CreateCredential {
+            large_blob_key: None,
+            third_party_payment: Some(true),
+            rk: false,
+            user,
+        })
+        .collect();
+    capacity.push(Op::GetInfo);
+    cases.push(capacity);
     cases.iter().map(|ops| encode_fixture(ops)).collect()
 }
 
@@ -2655,19 +2829,23 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
             }
             Op::CreateCredential {
                 large_blob_key,
+                third_party_payment,
                 rk,
                 user,
             } => {
                 variant(&mut output, 20, 30);
                 option_bool(&mut output, *large_blob_key);
+                option_bool(&mut output, *third_party_payment);
                 output.extend_from_slice(&[u8::from(*rk), *user]);
             }
             Op::AssertCredentials {
                 large_blob_key,
+                third_party_payment,
                 discoverable,
             } => {
                 variant(&mut output, 21, 30);
                 option_bool(&mut output, *large_blob_key);
+                option_bool(&mut output, *third_party_payment);
                 output.push(u8::from(*discoverable));
             }
             Op::EnumerateCredentials { auth: value, next } => {
@@ -2832,6 +3010,7 @@ mod tests {
             .step(
                 Op::AssertCredentials {
                     large_blob_key: None,
+                    third_party_payment: None,
                     discoverable: false,
                 },
                 &mut input,
@@ -2866,6 +3045,7 @@ mod tests {
                 .step(
                     Op::CreateCredential {
                         large_blob_key: rk.then_some(true),
+                        third_party_payment: None,
                         rk,
                         user,
                     },
@@ -2884,6 +3064,7 @@ mod tests {
                 .step(
                     Op::AssertCredentials {
                         large_blob_key: Some(true),
+                        third_party_payment: None,
                         discoverable,
                     },
                     &mut input,
@@ -2912,7 +3093,7 @@ mod tests {
     #[test]
     fn seeds_exercise_commits_abandoned_writes_and_stable_keys() {
         let seeds = seed_corpus();
-        assert_eq!(seeds.len(), 60);
+        assert_eq!(seeds.len(), 68);
         let traces: Vec<_> = seeds.iter().map(|seed| run_traced(seed)).collect();
         for pair in [
             (0x81, 0x9000),

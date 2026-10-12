@@ -649,6 +649,41 @@ fn ctap_request(dir: &Path) {
             seeds.push(pqkey_fuzz::requests::u2f_apdu(3, 0, &[], short, le));
         }
     }
+    for input in [
+        Value::Bool(true),
+        Value::Bool(false),
+        Value::Null,
+        int(1),
+        text("true"),
+        bytes(&[]),
+        Value::Array(vec![]),
+        map(vec![]),
+    ] {
+        for rk in [false, true] {
+            seeds.push(command(
+                0x01,
+                &map(vec![
+                    (int(1), bytes(&hash)),
+                    (int(2), rp.clone()),
+                    (int(3), user.clone()),
+                    (int(4), params(-7)),
+                    (int(7), map(vec![(text("rk"), Value::Bool(rk))])),
+                    (
+                        int(6),
+                        map(vec![(text("thirdPartyPayment"), input.clone())]),
+                    ),
+                ]),
+            ));
+        }
+        seeds.push(command(
+            0x02,
+            &map(vec![
+                (int(1), text("example.com")),
+                (int(2), bytes(&hash)),
+                (int(4), map(vec![(text("thirdPartyPayment"), input)])),
+            ]),
+        ));
+    }
     write_all(dir, &seeds);
 }
 

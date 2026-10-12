@@ -226,6 +226,7 @@ pub struct Overrides {
     pub min_pin_length: Option<Value>,
     pub pin_complexity_policy: Option<Value>,
     pub large_blob_key: Option<Value>,
+    pub third_party_payment: Option<Value>,
     /// The options map, instead of a generated one.
     pub options: Option<Value>,
     /// Leave the allowList out.
@@ -312,6 +313,7 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
             let min_pin_length = optional(u, |u| Ok(Value::Bool(u.arbitrary()?)))?;
             let complexity = optional(u, extension_bool)?;
             let large_blob_key = optional(u, extension_bool)?;
+            let third_party_payment = optional(u, extension_bool)?;
             map(
                 u,
                 vec![
@@ -322,6 +324,7 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
                     (text("minPinLength"), min_pin_length),
                     (text("pinComplexityPolicy"), complexity),
                     (text("largeBlobKey"), large_blob_key),
+                    (text("thirdPartyPayment"), third_party_payment),
                 ],
             )
         })?
@@ -341,6 +344,11 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
         overrides.pin_complexity_policy,
     );
     extension_override(&mut extensions, "largeBlobKey", overrides.large_blob_key);
+    extension_override(
+        &mut extensions,
+        "thirdPartyPayment",
+        overrides.third_party_payment,
+    );
     let options = match overrides.options {
         Some(options) => Some(options),
         None => optional(u, options)?,
@@ -415,17 +423,24 @@ pub fn get_assertion(u: &mut Unstructured<'_>, overrides: Overrides) -> Result<V
         None => optional(u, |u| {
             let hmac_secret = field(u, hmac_secret_input)?;
             let large_blob_key = optional(u, extension_bool)?;
+            let third_party_payment = optional(u, extension_bool)?;
             map(
                 u,
                 vec![
                     (text("hmac-secret"), hmac_secret),
                     (text("credBlob"), cred_blob),
                     (text("largeBlobKey"), large_blob_key),
+                    (text("thirdPartyPayment"), third_party_payment),
                 ],
             )
         })?,
     };
     extension_override(&mut extensions, "largeBlobKey", overrides.large_blob_key);
+    extension_override(
+        &mut extensions,
+        "thirdPartyPayment",
+        overrides.third_party_payment,
+    );
     let options = match overrides.options {
         Some(options) => Some(options),
         None => optional(u, options)?,
