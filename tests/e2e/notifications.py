@@ -64,6 +64,8 @@ class FakeNotificationServer:
         self._open: set[int] = set()
         self._pending: list[tuple[float, int, str]] = []
         self._answers: queue.SimpleQueue[tuple[int, str]] = queue.SimpleQueue()
+        self._signals: queue.SimpleQueue[tuple[int, str]] = queue.SimpleQueue()
+        self.emitted_actions: list[tuple[int, str]] = []
         self._stop = threading.Event()
         self._conn = None
         self._thread: threading.Thread | None = None
@@ -95,6 +97,10 @@ class FakeNotificationServer:
     def answer_notification(self, notification_id: int, answer: str) -> None:
         """Queue an action on the server thread after a test observes a prompt."""
         self._answers.put((notification_id, answer))
+
+    def signal_action(self, notification_id: int, action: str) -> None:
+        """Emit even for a closed or actionless identification notification."""
+        self._signals.put((notification_id, action))
 
     # The server thread.
 
@@ -144,6 +150,13 @@ class FakeNotificationServer:
             self._conn.send(new_error(message, "org.freedesktop.DBus.Error.UnknownMethod"))
 
     def _answer_due(self) -> None:
+        while True:
+            try:
+                notification_id, action = self._signals.get_nowait()
+            except queue.Empty:
+                break
+            self._conn.send(new_signal(self._emitter, "ActionInvoked", "us", (notification_id, action)))
+            self.emitted_actions.append((notification_id, action))
         now = time.monotonic()
         expired = [entry for entry in self._expiry if entry[0] <= now]
         self._expiry = [entry for entry in self._expiry if entry[0] > now]

@@ -81,8 +81,9 @@ def test_identification_action_cannot_approve_a_presence_request(key, server):
         future = executor.submit(Ctap2(key).selection)
         prompt = server.wait_for_shown(2)
         try:
-            server.answer_notification(identification.id, "approve")
-            wait_for(lambda: identification.id not in server._open, 1, "action was not emitted")
+            server.signal_action(identification.id, "approve")
+            wait_for(lambda: (identification.id, "approve") in server.emitted_actions,
+                     1, "identification action was not emitted")
             time.sleep(0.05)
             assert not future.done(), "identification approved a presence request"
             server.answer_notification(prompt.id, "approve")
