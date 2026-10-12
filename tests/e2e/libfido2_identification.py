@@ -5,7 +5,7 @@ import ctypes.util
 import os
 import sys
 
-from notifications import FakeNotificationServer
+from notifications import FakeNotificationServer, wait_for
 
 
 def main():
@@ -44,21 +44,26 @@ def main():
         assert identification.expire_timeout == 2000
         assert "pqkey-" in identification.body
         prompt = server.wait_for_shown(2)
-        assert prompt.summary == "Register a security key"
+        assert prompt.summary == "Register a U2F security key"
         assert prompt.actions == ["approve", "Approve", "deny", "Deny"]
         # WINK did not supply the touch the separate MSG request needs.
         touched = ctypes.c_int(-1)
         assert lib.fido_dev_get_touch_status(device, ctypes.byref(touched), 150) == 0
         assert touched.value == 0
-        server.answer_notification(prompt.id, "deny")
     finally:
-        for shown in server.shown:
-            if shown.actions:
+        try:
+            prompts = [shown for shown in server.shown if shown.actions]
+            for shown in prompts:
                 server.answer_notification(shown.id, "deny")
-        if opened:
-            lib.fido_dev_close(device)
-        lib.fido_dev_free(ctypes.byref(device))
-        server.stop()
+            # Keep the server alive until the daemon consumes the denial and
+            # withdraws its prompt, so the next test inherits an idle key.
+            wait_for(lambda: all(shown.id in server.close_requests for shown in prompts),
+                     5, "the daemon did not withdraw the presence prompt")
+        finally:
+            if opened:
+                lib.fido_dev_close(device)
+            lib.fido_dev_free(ctypes.byref(device))
+            server.stop()
 
 
 if __name__ == "__main__":

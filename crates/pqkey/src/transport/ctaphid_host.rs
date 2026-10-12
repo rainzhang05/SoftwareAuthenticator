@@ -26,8 +26,9 @@
 //! The app answers CTAPHID_CBOR and CTAPHID_MSG. INIT and PING are
 //! answered as soon as they are complete. LOCK changes a separate volatile
 //! CID lease; WINK delegates identification to the daemon with a bounded
-//! deadline. Other commands fail with ERR_INVALID_CMD. U2F presence polling retains a worker operation across
-//! completed MSG transactions; identical repeats collect its answer once.
+//! deadline. Other commands fail with ERR_INVALID_CMD. U2F presence polling
+//! retains a worker operation across completed MSG transactions; identical
+//! repeats collect its answer once.
 //! While a transaction or a U2F prompt is under way:
 //!
 //! * a request on any other channel fails with ERR_CHANNEL_BUSY;
