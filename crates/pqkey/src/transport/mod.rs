@@ -851,6 +851,34 @@ mod transmission_tests {
     }
 
     #[test]
+    fn identification_errors_leave_the_device_and_ctap_worker_usable() {
+        let interrupt = InterruptFlag::new();
+        let mut transport = transport(&interrupt, 1);
+        transport.flush_pending().unwrap();
+        transport
+            .host
+            .handle_frame(&packet(1, Command::Wink, &[]), 0);
+        assert!(transport.poll().unwrap());
+        assert_eq!(
+            transport.device.written.borrow().last().unwrap(),
+            &packet(1, Command::Error, &[0x7f])
+        );
+        transport
+            .host
+            .handle_frame(&packet(1, Command::Ping, b"usable"), 1);
+        transport.flush_pending().unwrap();
+        assert_eq!(
+            transport.device.written.borrow().last().unwrap(),
+            &packet(1, Command::Ping, b"usable")
+        );
+        transport
+            .host
+            .handle_frame(&packet(1, Command::Cbor, &[4]), 2);
+        assert_eq!(transport.host.take_app_request().unwrap().payload, [4]);
+        assert!(!transport.waiting.get());
+    }
+
+    #[test]
     fn init_read_between_selection_and_write_invalidates_the_local_frame() {
         for length in [58, MAX_MESSAGE_SIZE] {
             let interrupt = InterruptFlag::new();

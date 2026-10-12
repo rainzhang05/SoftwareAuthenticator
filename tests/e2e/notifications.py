@@ -57,6 +57,9 @@ class FakeNotificationServer:
         self.answer: str | None = "approve"
         self.shown: list[Shown] = []
         self.close_requests: list[int] = []
+        self.notify_error = False
+        self.ignore_notify = False
+        self._expiry: list[tuple[float, int]] = []
         self._next_id = 1
         self._open: set[int] = set()
         self._pending: list[tuple[float, int, str]] = []
@@ -115,12 +118,19 @@ class FakeNotificationServer:
         elif member == "GetServerInformation":
             self._conn.send(new_method_return(message, "ssss", (self.server_name, "e2e", "1", "1.2")))
         elif member == "Notify":
+            if self.notify_error:
+                self._conn.send(new_error(message, "org.freedesktop.DBus.Error.Failed"))
+                return
+            if self.ignore_notify:
+                return
             app_name, _replaces, _icon, summary, body, actions, hints, expire_timeout = message.body
             notification_id = self._next_id
             self._next_id += 1
             self._open.add(notification_id)
             self.shown.append(Shown(notification_id, app_name, summary, body, list(actions), dict(hints), expire_timeout))
             self._conn.send(new_method_return(message, "u", (notification_id,)))
+            if expire_timeout > 0:
+                self._expiry.append((time.monotonic() + expire_timeout / 1000, notification_id))
             # Nothing to answer on a notification without buttons.
             if self.answer is not None and actions:
                 self._pending.append((time.monotonic() + ANSWER_DELAY_S, notification_id, self.answer))
@@ -135,6 +145,11 @@ class FakeNotificationServer:
 
     def _answer_due(self) -> None:
         now = time.monotonic()
+        expired = [entry for entry in self._expiry if entry[0] <= now]
+        self._expiry = [entry for entry in self._expiry if entry[0] > now]
+        for _, notification_id in expired:
+            if notification_id in self._open:
+                self._closed(notification_id, 1)
         while True:
             try:
                 notification_id, answer = self._answers.get_nowait()

@@ -228,3 +228,73 @@ def test_a_stalled_message_times_out(hid):
     payload = os.urandom(16)
     hid.send(cid, ctaphid.PING, payload)
     assert hid.expect(cid, ctaphid.PING).payload == payload
+
+
+@pytest.mark.parametrize("command,payload,error", [
+    (ctaphid.WINK, b"x", 0x03),
+    (ctaphid.WINK, b"x" * 70, 0x03),
+    (ctaphid.LOCK, b"", 0x03),
+    (ctaphid.LOCK, b"\0\0", 0x03),
+    (ctaphid.LOCK, b"\x0b", 0x02),
+    (ctaphid.LOCK, b"\xff", 0x02),
+])
+def test_identification_and_lease_validation(hid, command, payload, error):
+    cid = hid.allocate_channel()
+    hid.send(cid, command, payload)
+    assert hid.expect(cid, ctaphid.ERROR).payload == bytes([error])
+    hid.send(cid, ctaphid.PING, b"usable")
+    assert hid.expect(cid, ctaphid.PING).payload == b"usable"
+
+
+def test_lock_arbitration_init_and_zero_release(hid):
+    owner, competitor = hid.allocate_channel(), hid.allocate_channel()
+    with hid.lease(owner):
+        for command, payload in [(ctaphid.PING, b""), (ctaphid.WINK, b""),
+                                 (ctaphid.LOCK, b"\0"), (ctaphid.INIT, os.urandom(8))]:
+            hid.send(competitor, command, payload)
+            assert hid.expect(competitor, ctaphid.ERROR).payload == b"\x06"
+        hid.send(ctaphid.BROADCAST_CID, ctaphid.INIT, os.urandom(8))
+        assert hid.expect(ctaphid.BROADCAST_CID, ctaphid.ERROR).payload == b"\x06"
+        hid.send(owner, ctaphid.INIT, b"resync!!")
+        assert hid.expect(owner, ctaphid.INIT).payload[:8] == b"resync!!"
+        hid.send(competitor, ctaphid.PING)
+        assert hid.expect(competitor, ctaphid.ERROR).payload == b"\x06"
+        hid.send(owner, ctaphid.CANCEL)
+        hid.send(competitor, ctaphid.CANCEL)
+        hid.send(owner, ctaphid.PING, b"owner")
+        assert hid.expect(owner, ctaphid.PING).payload == b"owner"
+    hid.send(competitor, ctaphid.PING, b"released")
+    assert hid.expect(competitor, ctaphid.PING).payload == b"released"
+
+
+def test_lock_renewal_and_expiry(hid):
+    owner, competitor = hid.allocate_channel(), hid.allocate_channel()
+    with hid.lease(owner, 1):
+        time.sleep(0.6)
+        hid.send(owner, ctaphid.LOCK, b"\x01")
+        assert hid.expect(owner, ctaphid.LOCK).payload == b""
+        renewed = time.monotonic()
+        time.sleep(0.5)
+        hid.send(competitor, ctaphid.PING)
+        assert hid.expect(competitor, ctaphid.ERROR).payload == b"\x06"
+        time.sleep(max(0, renewed + 1.05 - time.monotonic()))
+        hid.send(competitor, ctaphid.PING, b"expired")
+        assert hid.expect(competitor, ctaphid.PING).payload == b"expired"
+
+
+def test_authenticator_reset_preserves_a_transport_lease(hid):
+    owner, competitor = hid.allocate_channel(), hid.allocate_channel()
+    with hid.lease(owner):
+        hid.send(owner, ctaphid.CBOR, bytes([Ctap2.CMD.RESET]))
+        assert hid.expect(owner, ctaphid.CBOR).payload == b"\0"
+        hid.send(competitor, ctaphid.PING)
+        assert hid.expect(competitor, ctaphid.ERROR).payload == b"\x06"
+
+
+def test_python_fido_lock_and_unlock(device):
+    try:
+        device.lock(1)
+        assert device.ping(b"leased") == b"leased"
+    finally:
+        device.lock(0)
+    assert device.ping(b"released") == b"released"

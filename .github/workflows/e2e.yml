@@ -139,9 +139,6 @@ jobs:
           node=$(tests/e2e/daemon.sh start unanswered 0004 --presence unanswered)
           echo "E2E_UNANSWERED_HIDRAW=$node" >> "$GITHUB_ENV"
 
-      - name: libfido2 tests
-        run: tests/e2e/libfido2.sh "$E2E_HIDRAW"
-
       - name: Set up Python
         if: success() || failure()
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -155,6 +152,11 @@ jobs:
           python -m venv "$RUNNER_TEMP/e2e-venv"
           "$RUNNER_TEMP/e2e-venv/bin/python" -m pip install --require-hashes --only-binary :all: \
             -r tests/e2e/requirements.txt
+      - name: libfido2 tests
+        env:
+          E2E_PYTHON: ${{ runner.temp }}/e2e-venv/bin/python
+        run: tests/e2e/libfido2.sh "$E2E_HIDRAW"
+
       # Runs even if the libfido2 tests failed: the two clients are independent.
       - name: python-fido2 tests
         if: (success() || failure()) && env.E2E_HIDRAW != ''

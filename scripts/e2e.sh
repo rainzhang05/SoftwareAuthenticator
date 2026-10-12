@@ -75,9 +75,10 @@ start_keys() {
 step "Test keys started" start_keys || finish
 export E2E_HIDRAW E2E_CERTIFICATE_HIDRAW E2E_NOTIFY_HIDRAW E2E_UNANSWERED_HIDRAW DBUS_SESSION_BUS_ADDRESS
 
+step "Python test packages" python_env || finish
+export E2E_PYTHON="$python"
 step "libfido2 tests" tests/e2e/libfido2.sh "$E2E_HIDRAW"
-step "Python test packages" python_env &&
-  step "python-fido2 tests" "$python" -m pytest tests/e2e -q
+step "python-fido2 tests" "$python" -m pytest tests/e2e -q
 
 cleanup
 finish

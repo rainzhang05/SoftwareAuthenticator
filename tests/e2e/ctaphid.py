@@ -16,6 +16,8 @@ BROADCAST_CID = 0xFFFFFFFF
 
 PING = 0x01
 MSG = 0x03
+LOCK = 0x04
+WINK = 0x08
 INIT = 0x06
 CBOR = 0x10
 CANCEL = 0x11
@@ -105,3 +107,38 @@ class RawHid:
         assert response.payload[:8] == nonce, "INIT nonce not echoed"
         (cid,) = struct.unpack(">I", response.payload[8:12])
         return cid
+
+    def release_lease(self, cid: int) -> None:
+        """Resynchronize and unlock, including after a partially read response."""
+        import time
+        nonce = os.urandom(8)
+        self.send(cid, INIT, nonce)
+        deadline = time.monotonic() + 5
+        while True:
+            packet = self.read_packet(max(0, deadline - time.monotonic()))
+            if (packet[:4] == struct.pack(">I", cid)
+                    and packet[4] == 0x80 | INIT and packet[7:15] == nonce):
+                break
+        self.send(cid, LOCK, b"\0")
+        assert self.expect(cid, LOCK).payload == b""
+
+    def lease(self, cid: int, seconds: int = 10):
+        """Release even if acquisition checks or assertions fail."""
+        import contextlib
+        import sys
+
+        @contextlib.contextmanager
+        def held():
+            try:
+                self.send(cid, LOCK, bytes([seconds]))
+                assert self.expect(cid, LOCK).payload == b""
+                yield
+            finally:
+                failure = sys.exception()
+                try:
+                    self.release_lease(cid)
+                except Exception as cleanup:
+                    if failure is None:
+                        raise
+                    failure.add_note(f"lease cleanup failed: {cleanup}")
+        return held()

@@ -878,6 +878,67 @@ mod tests {
         shut_down(&host, &shutdown, result);
     }
 
+    #[test]
+    fn transport_commands_preserve_engine_assertion_continuations() {
+        let dir = TempDir::new("transport-continuations");
+        let data = app_data(&dir);
+        let shutdown = ShutdownSignal::new();
+        let loop_shutdown = shutdown.clone();
+        let (mut host, result) = start(move |device, on_ready| {
+            crate::test_support::serve_ctap(device, data, loop_shutdown, on_ready)
+        });
+        let cid = host.init();
+        for user in [1, 2] {
+            ctap(
+                &mut host,
+                cid,
+                CTAP_MAKE_CREDENTIAL,
+                vec![
+                    (int(1), Value::Bytes(vec![0x11; 32])),
+                    (
+                        int(2),
+                        Value::Map(vec![(text("id"), text("continuation.example"))]),
+                    ),
+                    (
+                        int(3),
+                        Value::Map(vec![(text("id"), Value::Bytes(vec![user]))]),
+                    ),
+                    (
+                        int(4),
+                        Value::Array(vec![Value::Map(vec![
+                            (text("alg"), int(-7)),
+                            (text("type"), text("public-key")),
+                        ])]),
+                    ),
+                    (int(7), Value::Map(vec![(text("rk"), Value::Bool(true))])),
+                ],
+            );
+        }
+        let first = ctap(
+            &mut host,
+            cid,
+            CTAP_GET_ASSERTION,
+            vec![
+                (int(1), text("continuation.example")),
+                (int(2), Value::Bytes(vec![0x22; 32])),
+            ],
+        );
+        assert_eq!(get(&first, int(5)), int(2));
+        host.send(cid, 0x84, &[1]);
+        assert_eq!(host.receive(cid), (0x84, vec![]));
+        host.send(cid, 0x88, &[]);
+        let (command, payload) = host.receive(cid);
+        assert!(matches!(
+            (command, payload.as_slice()),
+            (0x88, []) | (0xbf, [0x7f])
+        ));
+        host.send(cid, 0x84, &[0]);
+        assert_eq!(host.receive(cid), (0x84, vec![]));
+        let next = ctap(&mut host, cid, 0x08, vec![]);
+        assert_ne!(get(&first, int(1)), get(&next, int(1)));
+        shut_down(&host, &shutdown, result);
+    }
+
     /// A presence double that waits like a prompt: until the test answers,
     /// the request is cancelled, or a minute passes. It reports when it is
     /// asked and how each request ended.

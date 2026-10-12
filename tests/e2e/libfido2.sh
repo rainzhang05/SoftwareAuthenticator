@@ -161,6 +161,12 @@ test_pin_policy() {
 
 run_test "libfido2 numeric PIN compatibility and enabled complexity" test_pin_policy
 
+test_identification() {
+  "${E2E_PYTHON:-python3}" tests/e2e/libfido2_identification.py "${E2E_NOTIFY_HIDRAW:?disposable notification key is required}"
+}
+
+run_test "libfido2 WINK identifies without approving a touch" test_identification
+
 if [ "$failures" -ne 0 ]; then
   echo "$failures libfido2 test(s) failed"
   exit 1

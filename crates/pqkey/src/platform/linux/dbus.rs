@@ -326,12 +326,85 @@ fn parse_signal(message: &Message) -> Option<NotificationEvent> {
     }
 }
 
+/// Identify this daemon without subscribing to or accepting presence actions.
+/// Connection, Notify and closing share one absolute delivery deadline.
+pub(crate) fn identify(device: &str, deadline: Instant) -> std::io::Result<()> {
+    let builder = connection::Builder::session().map_err(std::io::Error::other)?;
+    identify_on_bus(builder, device, deadline)
+}
+
+fn identify_on_bus(
+    builder: connection::Builder<'_>,
+    device: &str,
+    deadline: Instant,
+) -> std::io::Result<()> {
+    if Instant::now() >= deadline {
+        return Err(std::io::Error::other("identification delivery timed out"));
+    }
+    let notification = async {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let connection = builder.method_timeout(remaining).build().await?;
+        let hints = HashMap::from([
+            ("urgency", Value::U8(URGENCY_NORMAL)),
+            ("transient", Value::Bool(true)),
+            ("category", Value::from("device")),
+        ]);
+        let body = format!("pqkey software security key (device {device}).");
+        let reply = connection
+            .call_method(
+                Some(NOTIFICATIONS_NAME),
+                NOTIFICATIONS_PATH,
+                Some(NOTIFICATIONS_INTERFACE),
+                "Notify",
+                &(
+                    APP_NAME,
+                    0u32,
+                    APP_ICON,
+                    "Identify the security key",
+                    body,
+                    &[] as &[&str],
+                    hints,
+                    2_000i32,
+                ),
+            )
+            .await?;
+        let _: u32 = reply.body().deserialize()?;
+        connection.close().await?;
+        Ok::<(), zbus::Error>(())
+    };
+    let expire = async {
+        async_io::Timer::at(deadline).await;
+        Err(zbus::Error::Failure(
+            "identification delivery timed out".into(),
+        ))
+    };
+    async_io::block_on(future::or(notification, expire)).map_err(std::io::Error::other)
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::net::UnixListener;
 
     use super::*;
     use crate::test_support::TempDir;
+
+    #[test]
+    fn identification_bounds_the_entire_bus_connection_attempt() {
+        let dir = TempDir::new("silent-identification-bus");
+        let path = dir.path().join("bus");
+        let _listener = UnixListener::bind(&path).unwrap();
+        let address = format!("unix:path={}", path.display());
+        let started = Instant::now();
+        let budget = Duration::from_millis(50);
+        let result = identify_on_bus(
+            connection::Builder::address(address.as_str()).unwrap(),
+            "pqkey-123",
+            started + budget,
+        );
+        assert!(result.is_err());
+        assert!(started.elapsed() >= budget);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     #[test]
     fn closed_signals_distinguish_expiry_from_every_other_reason() {
@@ -378,50 +451,4 @@ mod tests {
             "gave up only after {elapsed:?}"
         );
     }
-}
-
-/// Identify this daemon without subscribing to or accepting presence actions.
-/// Connection, Notify and closing share one absolute delivery deadline.
-pub(crate) fn identify(device: &str, deadline: Instant) -> std::io::Result<()> {
-    let notification = async {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let connection = connection::Builder::session()?
-            .method_timeout(remaining)
-            .build()
-            .await?;
-        let hints = HashMap::from([
-            ("urgency", Value::U8(URGENCY_NORMAL)),
-            ("transient", Value::Bool(true)),
-            ("category", Value::from("device")),
-        ]);
-        let body = format!("pqkey software security key (device {device}).");
-        let reply = connection
-            .call_method(
-                Some(NOTIFICATIONS_NAME),
-                NOTIFICATIONS_PATH,
-                Some(NOTIFICATIONS_INTERFACE),
-                "Notify",
-                &(
-                    APP_NAME,
-                    0u32,
-                    APP_ICON,
-                    "Identify the security key",
-                    body,
-                    &[] as &[&str],
-                    hints,
-                    2_000i32,
-                ),
-            )
-            .await?;
-        let _: u32 = reply.body().deserialize()?;
-        connection.close().await?;
-        Ok::<(), zbus::Error>(())
-    };
-    let expire = async {
-        async_io::Timer::at(deadline).await;
-        Err(zbus::Error::Failure(
-            "identification delivery timed out".into(),
-        ))
-    };
-    async_io::block_on(future::or(notification, expire)).map_err(std::io::Error::other)
 }
