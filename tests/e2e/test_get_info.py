@@ -27,7 +27,7 @@ def test_get_info(ctap: Ctap2):
     assert "FIDO_2_2" not in info[1], "CTAP 2.3 6.4: FIDO_2_2 MUST not be present"
     assert set(info[2]) >= {
         "credBlob", "credProtect", "hmac-secret", "hmac-secret-mc",
-        "largeBlobKey", "minPinLength", "pinComplexityPolicy",
+        "largeBlobKey", "minPinLength", "pinComplexityPolicy", "thirdPartyPayment",
     }, info[2]
     assert "largeBlob" not in info[2]
     assert info[3] == client.DEFAULT_AAGUID

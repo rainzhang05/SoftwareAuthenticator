@@ -80,6 +80,8 @@ test_token_info() {
     || fail "largeBlobKey is not advertised"
   grep -qE '^extension strings: (.*, )?pinComplexityPolicy(,|$)' <<<"$info" \
     || fail "pinComplexityPolicy is not advertised"
+  grep -qE '^extension strings: (.*, )?thirdPartyPayment(,|$)' <<<"$info" \
+    || fail "thirdPartyPayment is not advertised"
   grep -qxF 'maxlargeblob: 16384' <<<"$info" \
     || fail "unexpected large-blob array capacity"
   grep -qxF 'minpinlen: 4' <<<"$info" || fail "unexpected minimum PIN length"
@@ -166,6 +168,12 @@ test_identification() {
 }
 
 run_test "libfido2 WINK identifies without approving a touch" test_identification
+
+test_payment() {
+  "${E2E_PYTHON:-python3}" tests/e2e/libfido2_payment.py "$device"
+}
+
+run_test "libfido2 1.14 payment metadata and signed-byte compatibility" test_payment
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures libfido2 test(s) failed"
