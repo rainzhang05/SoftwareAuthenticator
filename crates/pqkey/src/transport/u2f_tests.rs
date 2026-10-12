@@ -242,3 +242,76 @@ fn the_worker_keeps_one_prompt_and_shutdown_cancels_it_before_joining() {
     assert!(destroyed.load(Ordering::SeqCst));
     assert_eq!(prompts.load(Ordering::SeqCst), 4);
 }
+
+#[test]
+fn late_identification_after_init_and_shutdown_never_collects_presence() {
+    let (input, requests) = mpsc::channel();
+    let (answers, output) = mpsc::channel();
+    let (wake, peer_wake) = UnixStream::pair().unwrap();
+    wake.set_nonblocking(true).unwrap();
+    let destroyed = Arc::new(AtomicBool::new(false));
+    let device = Device {
+        input: requests,
+        output: answers,
+        wake,
+        destroyed: destroyed.clone(),
+    };
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let presence = Presence {
+        decision: Arc::new(AtomicU8::new(0)),
+        prompts: prompts.clone(),
+    };
+    let (entered, entering) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let shutdown = ShutdownSignal::new();
+    let stop = shutdown.clone();
+    let worker = thread::spawn(move || {
+        let interrupt = InterruptFlag::new();
+        let waiting = WaitingForUser::new();
+        let mut app = CtapApp::new(
+            MemoryStore::new(),
+            rand_core::UnwrapErr(getrandom::SysRng),
+            presence,
+            &interrupt,
+            [0; 16],
+        );
+        exec_with_identifier(
+            device,
+            &mut app,
+            &waiting,
+            shutdown,
+            || Ok(()),
+            move |deadline: Instant| {
+                entered.send(()).unwrap();
+                released
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .map_err(io::Error::other)?;
+                Ok(())
+            },
+        )
+    });
+    send(&input, &peer_wake, 1, Command::Wink, &[]);
+    entering.recv_timeout(Duration::from_secs(5)).unwrap();
+    send(&input, &peer_wake, 2, Command::Ping, &[]);
+    assert_eq!(receive(&output), (2, Command::Error as u8, vec![6]));
+    send(&input, &peer_wake, 1, Command::Init, &[7; 8]);
+    assert_eq!(receive(&output).1, Command::Init as u8);
+    send(&input, &peer_wake, 1, Command::Cbor, &[4]);
+    let info = receive(&output);
+    assert_eq!((info.0, info.1, info.2[0]), (1, Command::Cbor as u8, 0));
+    release.send(()).unwrap();
+    send(&input, &peer_wake, 1, Command::Ping, b"after abort");
+    assert_eq!(
+        receive(&output),
+        (1, Command::Ping as u8, b"after abort".to_vec())
+    );
+    send(&input, &peer_wake, 1, Command::Wink, &[]);
+    entering.recv_timeout(Duration::from_secs(5)).unwrap();
+    stop.request();
+    release.send(()).unwrap();
+    assert!(crate::shutdown::is_shutdown(
+        &worker.join().unwrap().unwrap_err()
+    ));
+    assert!(destroyed.load(Ordering::SeqCst));
+    assert_eq!(prompts.load(Ordering::SeqCst), 0);
+}
