@@ -120,7 +120,12 @@ class RawHid:
                     and packet[4] == 0x80 | INIT and packet[7:15] == nonce):
                 break
         self.send(cid, LOCK, b"\0")
-        assert self.expect(cid, LOCK).payload == b""
+        deadline = time.monotonic() + 5
+        while True:
+            packet = self.read_packet(max(0, deadline - time.monotonic()))
+            if (packet[:4] == struct.pack(">I", cid)
+                    and packet[4] == 0x80 | LOCK and packet[5:7] == b"\0\0"):
+                break
 
     def lease(self, cid: int, seconds: int = 10):
         """Release even if acquisition checks or assertions fail."""
