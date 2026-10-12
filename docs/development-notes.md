@@ -349,3 +349,38 @@ fuzzing, but cannot execute the real HID suite. Record validation architecture,
 compiler versions, command exit statuses, and each fuzz target's explicit
 30-second budget. Source snapshots must come from `git archive`, extracted
 with `tar -xm`, with separate cached outputs for each compiler and architecture.
+
+## Third-party payment verification
+
+CTAP 2.3 §12.9 support is tested at the authenticator boundary for every
+advertised algorithm and both credential modalities. Rust regressions verify
+signed bytes and counters, mixed next assertions, legacy record encodings,
+credential enumeration and updates, restart/reset/replacement, capacity,
+filesystem fault/crash recovery, protection and ES256 protocol crossings.
+The fuzz model independently follows registration metadata, assertion requests
+and per-credential next-assertion outputs. Regenerate all seeds after changing
+its input layout; fixture encoders round-trip against the locked `arbitrary`
+dependency before the corpus is written.
+
+`tests/e2e/test_third_party_payment.py` covers real Python FIDO HID requests.
+Its malformed-input tests bypass client validation and send CBOR null directly,
+because python-fido2 2.2.1 cannot encode null. `libfido2_payment.py` uses only
+libfido2 1.14.0 APIs: that version cannot request the extension or expose its CM
+flag, but must tolerate CM field 0x0C, assert payment-enabled credentials and
+verify signed authenticator data containing the unknown extension. The shell
+runner includes the check before its final summary.
+
+The portable `payment_compatibility` example emits 12 real CTAP engine
+assertions. Pass its stdout to `libfido2_payment.py --fixtures PATH` in the pinned
+Python environment to verify absent/false/true requests, increasing counters
+and signature rejection after changing the payment boolean without a HID node.
+This verifies signed-byte compatibility; real transport and enumeration checks
+still require a Linux host with `/dev/uhid`.
+
+Browser/WebAuthn and Secure Payment Confirmation verification are separate.
+The client platform determines payment eligibility and UI; advertising this
+extension does not establish browser or SPC support. Historical client results
+above concern authentication, and do not claim payment verification. The
+October 12, 2026 local environment supports portable macOS and Linux/aarch64
+container validation but exposes no uhid kernel device. Its emulated x86_64
+Rust compiler preflight also fails; neither limitation is a successful check.

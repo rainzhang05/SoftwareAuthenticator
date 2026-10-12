@@ -56,9 +56,10 @@ def authenticate(ctap1, handle, public_key, control=3):
 
 def assert_ctap2(ctap, handle, public_key):
     challenge = os.urandom(32)
-    response = client.get_assertion(ctap, RP_ID, challenge, [handle])
+    response = client.get_assertion(ctap, RP_ID, challenge, [handle], extensions={"thirdPartyPayment": True})
     auth_data = client.AuthData.parse(response[2])
     auth_data.check(RP_ID, up=True, uv=False, at=False)
+    assert auth_data.extensions == {"thirdPartyPayment": False}
     ES256.from_ctap1(public_key).verify(response[2] + challenge, response[3])
     assert response[1] == {"type": "public-key", "id": handle}
     return auth_data.sign_count
@@ -81,10 +82,11 @@ def test_version_registration_authentication_and_protocol_crossing(device, ctap)
 
 
 @pytest.mark.parametrize("protection", [1, 2, 3])
-def test_ctap2_credentials_over_u2f(device, ctap, protection):
+@pytest.mark.parametrize("payment", [False, True])
+def test_ctap2_credentials_over_u2f(device, ctap, protection, payment):
     credential = client.register(
         ctap, RP_ID, client.ES256, options={"rk": False},
-        extensions={"credProtect": protection},
+        extensions={"credProtect": protection, "thirdPartyPayment": payment},
     )
     ctap1 = Ctap1(device)
     public = b"\x04" + credential.public_key[-2] + credential.public_key[-3]
@@ -96,7 +98,8 @@ def test_ctap2_credentials_over_u2f(device, ctap, protection):
             assert error.value.code == APDU.WRONG_DATA
         return
     first = authenticate(ctap1, credential.credential_id, public)
-    _, assertion = client.authenticate(ctap, credential)
+    _, assertion = client.authenticate(ctap, credential, extensions={"thirdPartyPayment": True})
+    assert assertion.extensions == {"thirdPartyPayment": payment}
     last = authenticate(ctap1, credential.credential_id, public, 8)
     assert first < assertion.sign_count < last
 

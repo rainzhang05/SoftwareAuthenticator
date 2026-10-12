@@ -219,7 +219,8 @@ suite requires `/dev/uhid`.
     [the PIN policy](pin-complexity-policy.md).
 - Up to 1,000 stored credentials. Credential management lists and counts
   discoverable credentials only. Non-discoverable credentials are sealed
-  into their own ID when their key fits; RSA credentials are stored and
+  into their own ID when their key fits and payment metadata is disabled; RSA
+  and payment-enabled non-discoverable credentials are stored and
   consume a slot too.
 - authenticatorLargeBlobs (§6.10), with a serialized-array capacity of
   16,384 bytes and fragments of up to 1,704 bytes, maxMsgSize minus 64.
@@ -231,7 +232,7 @@ suite requires `/dev/uhid`.
   expiry discards the staged write. Credential deletion leaves the array
   for platforms to collect. Reset restores the initial empty array.
 - The `credBlob`, `credProtect`, `hmac-secret`, `hmac-secret-mc`,
-  `largeBlobKey` and `minPinLength` extensions. `credBlob` stores up to 32
+  `largeBlobKey`, `thirdPartyPayment` and `minPinLength` extensions. `credBlob` stores up to 32
   bytes with a stored credential; sealed credentials refuse it.
   `hmac-secret-mc` evaluates the PRF when a credential is created.
   `minPinLength` reports the minimum PIN length at registration, only to the
@@ -407,6 +408,24 @@ RSA non-discoverable credentials instead use
 RSA records contain no user ID or names, and keep random CredRandom values,
 credProtect and a counter of their own. They work only through an allowList,
 are excluded by an excludeList, consume a slot, and are erased by reset.
+
+The `thirdPartyPayment` boolean is optional credential-record field 16. Older
+records default to false, and false is omitted on writes to preserve existing
+encodings. Enabled non-discoverable credentials use the same stored `0x00` IDs
+as RSA, clear user information and retain their own counters. Eligible ordinary
+credentials keep the existing 107-byte sealed format and sealing domains;
+sealed and U2F-created credentials report false when the extension is requested.
+
+MakeCredential accepts true/false, persists only explicit true and returns no
+payment extension output. GetAssertion requesting true signs the selected
+credential's boolean with other extension outputs. GetNextAssertion remembers
+the request and reads each selected record's flag. Absent/false requests omit
+that output. Credential enumeration always includes boolean field `0x0C`;
+older peers can omit it, represented by `None` in the management client.
+Updates and counter writes preserve metadata; atomic replacement takes the new
+registration's value. The flag changes no RP binding, discovery, protection,
+PIN/UV, presence or U2F eligibility rule. Payment semantics and UI belong to the
+client platform, not the authenticator.
 
 ## User presence
 

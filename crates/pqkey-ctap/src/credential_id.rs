@@ -10,7 +10,7 @@ pub(crate) const CREDENTIAL_ID_LENGTH: usize = 33;
 pub(crate) const DISCOVERABLE_MARKER: u8 = 0x01;
 
 /// The first byte of the ID of a stored credential created with "rk" false,
-/// including RSA and older non-discoverable credentials.
+/// including RSA, payment-enabled and older non-discoverable credentials.
 pub(crate) const NON_DISCOVERABLE_MARKER: u8 = 0x00;
 
 /// The first byte of a sealed credential ID.
@@ -47,16 +47,17 @@ pub(crate) fn is_sealed(credential_id: &[u8]) -> bool {
 /// * A discoverable credential is a stored record with a
 ///   [`CREDENTIAL_ID_LENGTH`]-byte ID, [`DISCOVERABLE_MARKER`] and 32 random
 ///   bytes.
-/// * A non-discoverable credential whose key fits is not stored. Its ID is
+/// * A non-discoverable credential whose key fits and payment metadata is disabled is not stored. Its ID is
 ///   [`SEALED_ID_LENGTH`] bytes: [`SEALED_MARKER`], then its algorithm,
 ///   credProtect level, private key and the random seed of its hmac-secret
 ///   CredRandom values, sealed by the store under a key that a reset replaces
 ///   and bound to the relying party.  It has no signature counter of its
 ///   own, and counts on the global one instead.
-/// * RSA credentials, whose primes do not fit a sealed ID, and older
+/// * RSA credentials, whose primes do not fit a sealed ID, payment-enabled
+///   credentials, and older
 ///   non-discoverable credentials are stored records whose ID is
 ///   [`NON_DISCOVERABLE_MARKER`] and 32 random bytes.  They keep their own
-///   signature counters and random CredRandom values, and RSA records keep no
+///   signature counters and random CredRandom values, and newly created non-discoverable records keep no
 ///   user ID or names.  They take room in the store and a reset erases them,
 ///   but credential management neither lists nor counts them.
 /// * Any other stored ID, such as the 32 random bytes of credentials created

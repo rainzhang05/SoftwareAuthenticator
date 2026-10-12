@@ -20,7 +20,7 @@ your presence waits for you to approve it in a desktop notification.
 - **CTAP 2.3:** PIN (protocols 1 and 2), passkeys with credential management,
   always-UV, minimum PIN length and PIN complexity configuration,
   `minPinLength`, `pinComplexityPolicy`, `credBlob`,
-  `hmac-secret`, `hmac-secret-mc`, `credProtect`, `largeBlobKey`, fragmented
+  `hmac-secret`, `hmac-secret-mc`, `credProtect`, `largeBlobKey`, `thirdPartyPayment`, fragmented
   large-blob storage, and packed self-attestation.
 - **U2F:** CTAP1 registration and authentication over USB HID, using ES256
   credentials that also work over CTAP2. U2F uses approval rather than a
@@ -155,6 +155,20 @@ large-blob write permission when a PIN is set or always-UV is on. Reset
 restores the empty array; deleting a credential leaves blob collection to
 the client. Discoverable credentials registered with `largeBlobKey` keep a
 secret 32-byte key for platforms to encrypt and decrypt their blobs.
+
+Credentials explicitly registered with `thirdPartyPayment: true` retain that
+metadata for both discoverable and non-discoverable credentials. Assertions
+requesting it return the stored boolean inside signed authenticator data;
+creation returns no payment extension output. `pqkey passkeys` marks enabled
+passkeys in its PAYMENT column. Enabled non-discoverable credentials consume
+storage but still require their RP's allow list and remain outside passkey
+management. Ordinary eligible credentials continue to use sealed IDs.
+
+The flag does not grant cross-RP access or implement a payment prompt. The client
+platform determines payment eligibility and UI, including Secure Payment
+Confirmation (SPC). Authenticator regressions and libfido2 signed-byte checks
+are separate from browser/SPC verification; see the
+[verification notes](docs/development-notes.md#third-party-payment-verification).
 
 ## Clients
 
