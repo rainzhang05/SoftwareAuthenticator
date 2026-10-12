@@ -114,24 +114,28 @@ mod tests {
 
     #[test]
     fn expired_queued_work_is_never_delivered_and_errors_are_results() {
-        let (wake, _reader) = UnixStream::pair().unwrap();
-        thread::scope(|scope| {
-            let (mut worker, handle) = IdentificationWorker::spawn(
-                scope,
-                |_| Err(io::Error::other("scripted notification error")),
-                wake,
-            )
-            .unwrap();
-            assert!(worker.submit(
-                IdentificationRequest {
-                    token: 0,
-                    deadline: 0
-                },
-                Instant::now()
-            ));
-            worker.stop();
-            handle.join().unwrap();
-            assert_eq!(worker.response(), Some((0, false)));
-        });
+        for deadline in [0, 500] {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let attempts = calls.clone();
+            let (wake, _reader) = UnixStream::pair().unwrap();
+            thread::scope(|scope| {
+                let (mut worker, handle) = IdentificationWorker::spawn(
+                    scope,
+                    move |_| {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        Err(io::Error::other("scripted notification error"))
+                    },
+                    wake,
+                )
+                .unwrap();
+                assert!(
+                    worker.submit(IdentificationRequest { token: 0, deadline }, Instant::now())
+                );
+                worker.stop();
+                handle.join().unwrap();
+                assert_eq!(worker.response(), Some((0, false)));
+            });
+            assert_eq!(calls.load(Ordering::SeqCst), usize::from(deadline != 0));
+        }
     }
 }

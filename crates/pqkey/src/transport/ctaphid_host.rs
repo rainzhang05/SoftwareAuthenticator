@@ -1179,6 +1179,33 @@ impl<R: CryptoRng> CtaphidHost<R> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn wink_and_lock_preserve_a_cached_u2f_approval_and_its_expiry() {
+        let mut host = host();
+        let request = start_u2f(&mut host, 0);
+        host.app_presence(true);
+        host.handle_timeout(100);
+        sent(&mut host);
+        host.app_response(vec![5, 0x90, 0], 101, Some(100));
+        let expires = host.u2f.as_ref().unwrap().answer.as_ref().unwrap().1;
+        send(&mut host, FIRST, Command::Lock, &[1], 102);
+        assert_eq!(sent(&mut host), [message(FIRST, Command::Lock, &[])]);
+        send(&mut host, FIRST, Command::Wink, &[], 103);
+        let identification = host.take_identification_request().unwrap();
+        host.identification_response(identification.token, true, 104);
+        assert_eq!(sent(&mut host), [message(FIRST, Command::Wink, &[])]);
+        assert_eq!(
+            host.u2f.as_ref().unwrap().answer.as_ref().unwrap().1,
+            expires
+        );
+        send(&mut host, FIRST, Command::Msg, &request, 105);
+        assert_eq!(
+            sent(&mut host),
+            [message(FIRST, Command::Msg, &[5, 0x90, 0])]
+        );
+        assert!(host.u2f.is_none());
+    }
+
+    #[test]
     fn wink_validation_delivery_deadline_and_late_results() {
         let mut host = host();
         for length in [1, 57, 58, MAX_MESSAGE_SIZE, MAX_MESSAGE_SIZE + 1] {
