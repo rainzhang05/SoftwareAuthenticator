@@ -1,8 +1,9 @@
 """Payment compatibility using only libfido2 1.14.0 public APIs.
 
-1.14 has no payment extension setter/getter. Raw CTAP provisions and checks
-metadata; libfido2 must tolerate CM field 0x0C and verify signed unknown
-extension bytes. --fixtures verifies actual engine CTAP responses without HID.
+1.14 has no payment extension setter/getter and its management API always
+sends prototype command 0x41. Raw CTAP provisions and checks standard metadata;
+libfido2 verifies signed unknown extension bytes. --fixtures verifies actual
+engine CTAP responses without HID.
 """
 import ctypes as C
 import ctypes.util
@@ -133,6 +134,9 @@ def hid(path):
         token = pin.get_pin_token(PIN, ClientPin.PERMISSION.CREDENTIAL_MGMT)
         entries = CredentialManagement(ctap, protocol, token).enumerate_creds(client.sha256(RP.encode()))
         assert {entry[0x0C] for entry in entries} == {False, True}
+        expected_ids = {record.credential_id for record, _, rk in records if rk}
+        assert {entry[7]["id"] for entry in entries} == expected_ids
+        preview = ctap.info.options.get("credentialMgmtPreview", False)
 
     lib = library()
     dev, rk_list = allocation(lib.fido_dev_new), allocation(lib.fido_credman_rk_new)
@@ -140,12 +144,19 @@ def hid(path):
     try:
         check(lib, lib.fido_dev_open(dev, os.fsencode(path)))
         opened = True
-        check(lib, lib.fido_credman_get_dev_rk(dev, RP.encode(), rk_list, PIN.encode()))
-        ids = set()
-        for index in range(lib.fido_credman_rk_count(rk_list)):
-            cred = lib.fido_credman_rk(rk_list, index)
-            ids.add(C.string_at(lib.fido_cred_id_ptr(cred), lib.fido_cred_id_len(cred)))
-        assert ids == {record.credential_id for record, _, rk in records if rk}
+        status = lib.fido_credman_get_dev_rk(dev, RP.encode(), rk_list, PIN.encode())
+        if preview:
+            check(lib, status)
+            ids = set()
+            for index in range(lib.fido_credman_rk_count(rk_list)):
+                cred = lib.fido_credman_rk(rk_list, index)
+                ids.add(C.string_at(lib.fido_cred_id_ptr(cred), lib.fido_cred_id_len(cred)))
+            assert ids == expected_ids
+        else:
+            # libfido2 1.14 credman_tx hardcodes CTAP_CBOR_CRED_MGMT_PRE.
+            # A key without that optional command must reject it precisely.
+            assert status == 0x01, lib.fido_strerr(status).decode("ascii")
+            assert lib.fido_credman_rk_count(rk_list) == 0
         for record, public, _ in records:
             assertion = allocation(lib.fido_assert_new)
             digest = os.urandom(32)

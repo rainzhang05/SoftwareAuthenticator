@@ -367,8 +367,11 @@ dependency before the corpus is written.
 Its malformed-input tests bypass client validation and send CBOR null directly,
 because python-fido2 2.2.1 cannot encode null. `libfido2_payment.py` uses only
 libfido2 1.14.0 APIs: that version cannot request the extension or expose its CM
-flag, but must tolerate CM field 0x0C, assert payment-enabled credentials and
-verify signed authenticator data containing the unknown extension. The shell
+flag. Its management API always sends prototype command `0x41`, so the check
+expects INVALID_COMMAND when `credentialMgmtPreview` is absent and verifies
+enumeration when that option is enabled. Standard `0x0A` enumeration is checked
+through Python FIDO. The native library asserts payment-enabled credentials and
+verifies signed authenticator data containing the unknown extension. The shell
 runner includes the check before its final summary.
 
 The portable `payment_compatibility` example emits 12 real CTAP engine
