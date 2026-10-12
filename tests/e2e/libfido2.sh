@@ -78,6 +78,8 @@ test_token_info() {
     || fail "minPinLength is not advertised"
   grep -qE '^extension strings: (.*, )?largeBlobKey(,|$)' <<<"$info" \
     || fail "largeBlobKey is not advertised"
+  grep -qE '^extension strings: (.*, )?pinComplexityPolicy(,|$)' <<<"$info" \
+    || fail "pinComplexityPolicy is not advertised"
   grep -qxF 'maxlargeblob: 16384' <<<"$info" \
     || fail "unexpected large-blob array capacity"
   grep -qxF 'minpinlen: 4' <<<"$info" || fail "unexpected minimum PIN length"
@@ -89,8 +91,6 @@ test_token_info() {
   # parameter sets, ESP256, ESP384, ES512, ESP512, ES256K, Ed25519 and Ed448
   # and RS384, RS512, PS256, PS384 and PS512 show up as unknown public-key
   # algorithms; RS256 is named rs256.
-  grep -qE '^extension strings: (.*, )?pinComplexityPolicy(,|$)' <<<"$info" \
-    || fail "pinComplexityPolicy is not advertised"
   local expected='algorithms: es256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), es384 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), eddsa (public-key), unknown (public-key), unknown (public-key), rs256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key)'
   grep -qxF "$expected" <<<"$info" || fail "expected '$expected'"
   grep -qE '^aaguid: 5931e805a1664eb7845a7f6aa93d9cd8$' <<<"$info" || fail "unexpected AAGUID"
@@ -166,4 +166,3 @@ if [ "$failures" -ne 0 ]; then
   exit 1
 fi
 echo "All libfido2 tests passed"
-

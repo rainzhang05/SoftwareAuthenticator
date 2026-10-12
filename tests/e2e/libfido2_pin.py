@@ -33,10 +33,11 @@ def main():
     lib.fido_strerr.restype = ctypes.c_char_p
     lib.fido_init(0)
 
-    def check(code, expected="FIDO_OK"):
-        actual = lib.fido_strerr(code).decode("ascii")
-        if actual != expected:
-            raise AssertionError(f"libfido2 returned {actual}; expected {expected}")
+    def check(code, expected=0):
+        if code != expected:
+            actual = lib.fido_strerr(code).decode("ascii")
+            expected_name = lib.fido_strerr(expected).decode("ascii")
+            raise AssertionError(f"libfido2 returned {actual}; expected {expected_name}")
 
     def pins(cases):
         device = ctypes.c_void_p(lib.fido_dev_new())
@@ -53,17 +54,17 @@ def main():
                 lib.fido_dev_close(device)
             lib.fido_dev_free(ctypes.byref(device))
 
-    pins([("1234", None, "FIDO_OK"), ("5678", "1234", "FIDO_OK")])
+    pins([("1234", None, 0), ("5678", "1234", 0)])
     result = subprocess.run([
         os.environ.get("PQKEY", "target/release/pqkey"), "config", "pin-complexity", "--yes",
         "--state-dir", str(Path(sys.argv[2])),
     ], input="5678\n", text=True, capture_output=True, timeout=40, check=True)
     assert "PIN complexity: on." in result.stdout
     pins([
-        ("9999", "5678", "FIDO_ERR_PIN_POLICY_VIOLATION"),
-        ("abcd", "5678", "FIDO_ERR_PIN_POLICY_VIOLATION"),
-        ("Ab12", "5678", "FIDO_OK"),
-        ("éA23", "Ab12", "FIDO_OK"),
+        ("9999", "5678", 0x37),
+        ("abcd", "5678", 0x37),
+        ("Ab12", "5678", 0),
+        ("éA23", "Ab12", 0),
     ])
 
 

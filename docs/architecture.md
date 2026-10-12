@@ -244,8 +244,9 @@ protected by the same encryption as their private keys, and an optional
 redacted from debug output and compared in constant time. Older records read
 without a large-blob key. The PIN state also keeps the configuration: the
 minimum PIN length and its RP IDs, whether a PIN change is required, the
-PIN's length, always-UV and PIN complexity (optional boolean field 10). A PIN state written before these fields existed
-reads with their defaults, and its PIN counts as 4 code points long.
+PIN's length, always-UV and PIN complexity (optional boolean field 10). A PIN
+state written before these fields existed reads with their defaults, and its
+PIN counts as 4 code points long.
 
 Discoverable registration replaces all stored discoverable credentials with
 exactly the same RP ID and user handle through one store transaction. The

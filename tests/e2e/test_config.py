@@ -197,7 +197,6 @@ def test_minimum_policy_failures_do_not_change_settings(ctap: Ctap2):
         ({1: 7, 2: [f"{i}.example" for i in range(9)]}, ERR.KEY_STORE_FULL),
         ({1: 7, 2: ["x" * 254]}, ERR.KEY_STORE_FULL),
         ({1: 7, 3: True}, ERR.PIN_NOT_SET),
-
         # Lowering the minimum precedes the missing-PIN and storage checks.
         ({1: 5, 2: ["x" * 254], 3: True}, ERR.PIN_POLICY_VIOLATION),
     ):
@@ -451,7 +450,19 @@ def test_complexity_signed_extension_authorization_types_and_composition(ctap, e
         assert credential.auth_data.extensions == expected
         _, auth_data = client.authenticate(ctap, credential, extensions={"pinComplexityPolicy": True})
         assert auth_data.extensions is None
-    for value in (1, "true", None, b"", [], {}):
+    for value in (1, "true", b"", [], {}):
         with pytest.raises(CtapError) as excinfo:
             client.register(ctap, OTHER_RP_ID, client.ES256, extensions={"pinComplexityPolicy": value})
         assert excinfo.value.code == ERR.CBOR_UNEXPECTED_TYPE
+    # python-fido2 cannot encode null. Replace the final false value in an
+    # otherwise canonical request and send the resulting bytes directly.
+    payload = cbor.encode({
+        1: os.urandom(32),
+        2: {"id": OTHER_RP_ID},
+        3: client.user_entity("alice"),
+        4: [{"type": "public-key", "alg": client.ES256}],
+        6: {"pinComplexityPolicy": False},
+    })
+    assert payload[-1:] == b"\xf4"
+    request = bytes([Ctap2.CMD.MAKE_CREDENTIAL]) + payload[:-1] + b"\xf6"
+    assert ctap.device.call(CTAPHID.CBOR, request) == bytes([ERR.CBOR_UNEXPECTED_TYPE])
