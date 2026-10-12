@@ -97,9 +97,12 @@ impl CtapApp<'_> {
             }
             persistent.force_pin_change = true;
         }
-        // No complexity policy is implemented; an enabled policy is rejected.
-        if bool_parameter(4)? {
-            return Err(CTAP1_ERR_INVALID_PARAMETER);
+        if bool_parameter(4)? && !persistent.pin_complexity_policy {
+            persistent.pin_complexity_policy = true;
+            // A stored hash cannot establish whether the preceding PIN qualifies.
+            if self.pin_state.is_set() {
+                persistent.force_pin_change = true;
+            }
         }
         if self.pin_state.is_set() && u64::from(persistent.pin_code_point_length) < minimum {
             persistent.force_pin_change = true;

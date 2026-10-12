@@ -42,6 +42,8 @@ pub struct PersistentPinState {
     pub pin_code_point_length: u8,
     /// Always require UV for registration and sign-in with user presence.
     pub always_uv: bool,
+    /// Require an ASCII letter and digit in every new PIN until reset.
+    pub pin_complexity_policy: bool,
 }
 
 impl Default for PersistentPinState {
@@ -54,6 +56,7 @@ impl Default for PersistentPinState {
             force_pin_change: false,
             pin_code_point_length: PinStateRecord::DEFAULT_MIN_PIN_LENGTH,
             always_uv: false,
+            pin_complexity_policy: false,
         }
     }
 }
@@ -68,6 +71,7 @@ impl fmt::Debug for PersistentPinState {
             .field("force_pin_change", &self.force_pin_change)
             .field("pin_code_point_length", &self.pin_code_point_length)
             .field("always_uv", &self.always_uv)
+            .field("pin_complexity_policy", &self.pin_complexity_policy)
             .finish()
     }
 }

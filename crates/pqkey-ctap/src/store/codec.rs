@@ -199,6 +199,7 @@ pub(crate) fn encode_pin_state(state: &PinStateRecord) -> Result<Zeroizing<Vec<u
             Value::Integer(Integer::from(state.pin_code_point_length)),
         ),
         (9, Value::Bool(state.always_uv)),
+        (10, Value::Bool(state.pin_complexity_policy)),
     ]);
     encode_map(entries)
 }
@@ -220,6 +221,7 @@ pub(crate) fn decode_pin_state(bytes: &[u8]) -> Result<PinStateRecord, Corruptio
             .optional_uint(8)?
             .unwrap_or(PinStateRecord::DEFAULT_MIN_PIN_LENGTH),
         always_uv: fields.optional_bool(9)?.unwrap_or(false),
+        pin_complexity_policy: fields.optional_bool(10)?.unwrap_or(false),
     };
     fields.finish()?;
     validate_pin_state(&state).map_err(|_| Corruption::Inconsistent)?;
@@ -642,19 +644,23 @@ mod tests {
     fn pin_policy_known_answers_and_legacy_defaults() {
         let legacy = unhex("a4015000112233445566778899aabbccddeeff0205030204f5");
         assert_eq!(decode_pin_state(&legacy).unwrap(), pin_state());
+        let previous =
+            unhex("a9015000112233445566778899aabbccddeeff0205030204f50504068007f4080409f4");
+        assert_eq!(decode_pin_state(&previous).unwrap(), pin_state());
         let mut record = pin_state();
         record.min_pin_length = 8;
         record.min_pin_length_rp_ids = vec!["example.com".into(), "a".into()];
         record.force_pin_change = true;
         record.pin_code_point_length = 6;
         record.always_uv = true;
+        record.pin_complexity_policy = true;
         let complete = unhex(concat!(
-            "a9015000112233445566778899aabbccddeeff0205030204f5",
-            "050806826b6578616d706c652e636f6d616107f5080609f5"
+            "aa015000112233445566778899aabbccddeeff0205030204f5",
+            "050806826b6578616d706c652e636f6d616107f5080609f50af5"
         ));
         assert_eq!(encode_pin_state(&record).unwrap().as_slice(), complete);
         assert_eq!(decode_pin_state(&complete).unwrap(), record);
-        for key in 5..=9 {
+        for key in 5..=10 {
             let missing = edited(&complete, |entries| remove(entries, key));
             assert!(decode_pin_state(&missing).is_ok(), "optional field {key}");
             let invalid = edited(&complete, |entries| set(entries, key, Value::Null));
@@ -763,7 +769,7 @@ mod tests {
         let pin = encode_pin_state(&pin_state()).unwrap();
         assert_eq!(
             pin.as_slice(),
-            unhex("a9015000112233445566778899aabbccddeeff0205030204f50504068007f4080409f4")
+            unhex("aa015000112233445566778899aabbccddeeff0205030204f50504068007f4080409f40af4")
                 .as_slice()
         );
 

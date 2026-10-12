@@ -305,6 +305,79 @@ fn published_minimum_and_forced_change_invalidate_tokens_and_apply_on_restart() 
 }
 
 #[test]
+fn published_complexity_invalidates_tokens_and_applies_on_restart() {
+    for managed in [false, true] {
+        for protocol in PROTOCOLS {
+            for failing in PRE.into_iter().chain(POST) {
+                let scratch = TempDir::new();
+                let path = scratch.path().join("state");
+                setup(&path, managed);
+                let mut engine = app(&path);
+                let session = Session::new(&mut engine, protocol);
+                assert_eq!(session.set(&mut engine), [CTAP2_OK]);
+                let token = session
+                    .shared
+                    .decrypt(&bytes(field(&session.token(&mut engine, PIN), 2)))
+                    .unwrap();
+                let params = Value::Map(vec![
+                    (int(1), int(6)),
+                    (int(2), Value::Array(vec![text(RP)])),
+                    (int(4), Value::Bool(true)),
+                ]);
+                let response = fault(failing, 1, || {
+                    configure(&mut engine, protocol, Some(&token), 3, Some(params))
+                });
+                let committed = POST.contains(&failing);
+                assert_eq!(
+                    response,
+                    [if committed {
+                        CTAP2_OK
+                    } else {
+                        CTAP2_ERR_PROCESSING
+                    }]
+                );
+                let stored = FileStore::open(&path)
+                    .unwrap()
+                    .pin_state()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stored.force_pin_change, committed);
+                assert_eq!(stored.pin_complexity_policy, committed);
+                assert_eq!(stored.min_pin_length, if committed { 6 } else { 4 });
+                assert_eq!(
+                    stored.min_pin_length_rp_ids,
+                    if committed { vec![RP] } else { vec![] }
+                );
+                assert_eq!(
+                    configure(&mut engine, protocol, Some(&token), 2, None),
+                    [if committed {
+                        CTAP2_ERR_PIN_AUTH_INVALID
+                    } else {
+                        CTAP2_OK
+                    }]
+                );
+                let mut restarted = app(&path);
+                assert_eq!(options(&mut engine), options(&mut restarted));
+                for instance in [&mut engine, &mut restarted] {
+                    let response = instance.call(&[CTAP_CMD_GET_INFO]);
+                    assert_eq!(field(&response, 12), Value::Bool(committed));
+                    assert_eq!(field(&response, 13), int(if committed { 6 } else { 4 }));
+                    let session = Session::new(instance, protocol);
+                    assert_eq!(
+                        session.token(instance, PIN)[0],
+                        if committed {
+                            CTAP2_ERR_PIN_POLICY_VIOLATION
+                        } else {
+                            CTAP2_OK
+                        }
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn real_file_unconfirmed_retry_debits_stop_before_verification_and_restart_recovers() {
     for managed in [false, true] {
         for protocol in PROTOCOLS {

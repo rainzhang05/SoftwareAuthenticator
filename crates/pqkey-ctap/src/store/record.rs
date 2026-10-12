@@ -398,6 +398,8 @@ pub struct PinStateRecord {
     pub pin_code_point_length: u8,
     /// Whether registration and sign-in with user presence require UV.
     pub always_uv: bool,
+    /// Require an ASCII letter and digit in every new PIN until reset.
+    pub pin_complexity_policy: bool,
 }
 
 impl PinStateRecord {
@@ -427,6 +429,7 @@ impl Default for PinStateRecord {
             force_pin_change: false,
             pin_code_point_length: Self::DEFAULT_MIN_PIN_LENGTH,
             always_uv: false,
+            pin_complexity_policy: false,
         }
     }
 }
@@ -448,6 +451,7 @@ impl PartialEq for PinStateRecord {
             && self.force_pin_change == other.force_pin_change
             && self.pin_code_point_length == other.pin_code_point_length
             && self.always_uv == other.always_uv
+            && self.pin_complexity_policy == other.pin_complexity_policy
     }
 }
 
@@ -466,6 +470,7 @@ impl fmt::Debug for PinStateRecord {
             .field("force_pin_change", &self.force_pin_change)
             .field("pin_code_point_length", &self.pin_code_point_length)
             .field("always_uv", &self.always_uv)
+            .field("pin_complexity_policy", &self.pin_complexity_policy)
             .finish()
     }
 }

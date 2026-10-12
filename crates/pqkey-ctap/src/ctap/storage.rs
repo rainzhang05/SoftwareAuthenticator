@@ -56,6 +56,7 @@ pub(super) fn load_pin_state(store: &dyn CredentialStore, rng: &mut dyn Rng) -> 
                 force_pin_change: record.force_pin_change,
                 pin_code_point_length: record.pin_code_point_length,
                 always_uv: record.always_uv,
+                pin_complexity_policy: record.pin_complexity_policy,
             }),
             true,
         ),
@@ -143,6 +144,7 @@ impl CtapApp<'_> {
             force_pin_change: persistent.force_pin_change,
             pin_code_point_length: persistent.pin_code_point_length,
             always_uv: persistent.always_uv,
+            pin_complexity_policy: persistent.pin_complexity_policy,
             ..PinStateRecord::default()
         };
         self.store

@@ -362,7 +362,7 @@ fn minimum_policy_checks_errors_in_order_without_mutating() {
                 (int(4), Value::Bool(true)),
                 (int(2), too_many.clone()),
             ]),
-            CTAP1_ERR_INVALID_PARAMETER,
+            CTAP2_ERR_KEY_STORE_FULL,
         ),
         (
             canonical_map(vec![(int(2), too_many)]),
@@ -847,3 +847,100 @@ fn legacy_length_conservatively_forces_change_and_corruption_requires_uv() {
     assert_eq!(unreadable.call(&[CTAP_CMD_RESET]), [CTAP2_OK]);
     assert!(!unreadable.pin_state.persistent().always_uv);
 }
+
+#[test]
+fn complexity_is_enable_only_and_only_the_transition_forces_change() {
+    for protocol in PROTOCOLS {
+        for existing in [false, true] {
+            let store = TestStore::new();
+            let mut app = new_app(store.clone(), [0x89; 16]);
+            if existing {
+                set_pin_padded(&mut app, protocol, &padded_pin(b"Ab12")).unwrap();
+            }
+            let mut policy = false;
+            for enabled in [false, true, true, false] {
+                policy |= enabled;
+                if existing {
+                    token(&mut app, protocol, PIN_PERMISSION_ACFG);
+                }
+                configure(
+                    &mut app,
+                    3,
+                    Some(canonical_map(vec![(int(4), Value::Bool(enabled))])),
+                    existing.then_some(protocol),
+                )
+                .unwrap();
+                let saved = store.pin_state().unwrap().unwrap();
+                assert_eq!(saved.pin_complexity_policy, policy);
+                assert_eq!(saved.force_pin_change, existing && policy);
+                assert_eq!(
+                    app.pin_state.persistent().pin_complexity_policy,
+                    saved.pin_complexity_policy
+                );
+                if saved.force_pin_change {
+                    assert!(app.pin_state.pin_uv_auth_token().is_none());
+                }
+            }
+            let mut restarted = new_app(store.clone(), [0x89; 16]);
+            assert!(restarted.pin_state.persistent().pin_complexity_policy);
+            assert_eq!(restarted.call(&[CTAP_CMD_RESET]), [CTAP2_OK]);
+            assert!(!restarted.pin_state.persistent().pin_complexity_policy);
+            assert!(!store.pin_state().unwrap().unwrap().pin_complexity_policy);
+        }
+    }
+}
+
+#[test]
+fn complexity_validates_the_whole_request_before_publication() {
+    for protocol in PROTOCOLS {
+        for unconfirmed in [false, true] {
+            let store = TestStore::new();
+            let mut app = new_app(store.clone(), [0x8a; 16]);
+            set_pin_padded(&mut app, protocol, &padded_pin(PIN)).unwrap();
+            token(&mut app, protocol, PIN_PERMISSION_ACFG);
+            let before = store.pin_state().unwrap();
+            let invalid = canonical_map(vec![
+                (int(4), Value::Bool(true)),
+                (int(2), Value::Array(vec![text("a"); 9])),
+            ]);
+            assert_eq!(
+                configure(&mut app, 3, Some(invalid), Some(protocol)),
+                Err(CTAP2_ERR_KEY_STORE_FULL)
+            );
+            assert_eq!(store.pin_state().unwrap(), before);
+            assert_eq!(app.pin_state.pin_uv_auth_token(), Some(TOKEN));
+            store.faults(|f| {
+                f.set_pin_state = !unconfirmed;
+                f.pin_state_unconfirmed_after = unconfirmed.then_some(0);
+            });
+            let response = configure(
+                &mut app,
+                3,
+                Some(canonical_map(vec![(int(4), Value::Bool(true))])),
+                Some(protocol),
+            );
+            assert_eq!(
+                response,
+                if unconfirmed {
+                    Ok(vec![CTAP2_OK])
+                } else {
+                    Err(CTAP2_ERR_PROCESSING)
+                }
+            );
+            assert_eq!(
+                app.pin_state.persistent().pin_complexity_policy,
+                unconfirmed
+            );
+            assert_eq!(app.pin_state.persistent().force_pin_change, unconfirmed);
+            assert_eq!(
+                app.pin_state.pin_uv_auth_token(),
+                (!unconfirmed).then_some(TOKEN)
+            );
+            assert_eq!(
+                store.pin_state().unwrap().unwrap().pin_complexity_policy,
+                unconfirmed
+            );
+        }
+    }
+}
+

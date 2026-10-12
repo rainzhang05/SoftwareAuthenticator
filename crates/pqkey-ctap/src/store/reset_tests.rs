@@ -280,6 +280,7 @@ fn policy() -> PinStateRecord {
         force_pin_change: true,
         pin_code_point_length: 4,
         always_uv: true,
+        pin_complexity_policy: true,
         ..PinStateRecord::default()
     }
 }
