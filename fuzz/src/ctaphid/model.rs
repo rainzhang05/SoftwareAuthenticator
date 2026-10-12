@@ -22,6 +22,7 @@ struct Owner {
     responding: bool,
     keepalive_at: u64,
     status: u8,
+    identification: Option<(u64, u64)>,
 }
 
 struct Worker {
@@ -55,6 +56,8 @@ pub(super) struct Model {
     denied: Vec<(u32, Vec<u8>, u64)>,
     replies: VecDeque<Reply>,
     next_id: u64,
+    lease: Option<(u32, u64)>,
+    next_identification: u64,
 }
 
 impl Model {
@@ -68,6 +71,8 @@ impl Model {
             denied: Vec::new(),
             replies: VecDeque::new(),
             next_id: 0,
+            lease: None,
+            next_identification: 0,
         }
     }
 
@@ -87,6 +92,7 @@ impl Model {
             responding: false,
             keepalive_at: now,
             status: 1,
+            identification: None,
         });
     }
 
@@ -128,6 +134,9 @@ impl Model {
 
     /// Return the channel whose unsent output was explicitly aborted.
     pub fn packet(&mut self, packet: &[u8; 64], now: u64) -> Option<u32> {
+        if self.lease.is_some_and(|(_, expires)| now >= expires) {
+            self.lease = None;
+        }
         let channel = u32::from_be_bytes(packet[..4].try_into().unwrap());
         if packet[4] & 0x80 == 0 {
             if let Some(owner) = &mut self.owner
@@ -170,6 +179,10 @@ impl Model {
                     true,
                 );
             }
+            return None;
+        }
+        if self.lease.is_some_and(|(owner, _)| channel != owner) {
+            self.error(channel, 6, false);
             return None;
         }
         if command == Command::Init as u8 {
@@ -234,7 +247,7 @@ impl Model {
             self.begin(channel, command, length, &packet[7..], now);
             let mut payload = packet[7..15].to_vec();
             payload.extend_from_slice(&assigned.to_be_bytes());
-            payload.extend_from_slice(&[2, 0, 0, 0, 4]);
+            payload.extend_from_slice(&[2, 0, 0, 0, 5]);
             self.reply(channel, command, payload, true);
             return Some(channel);
         }
@@ -258,9 +271,13 @@ impl Model {
         self.begin(channel, command, length, &packet[7..], now);
         if channel == 0 || channel == BROADCAST {
             self.error(channel, 0x0b, true);
-        } else if !matches!(command, 1 | 3 | 0x10) {
+        } else if !matches!(command, 1 | 3 | 4 | 8 | 0x10) {
             self.error(channel, 1, true);
-        } else if length > MAX_MESSAGE_SIZE || command != Command::Ping as u8 && length == 0 {
+        } else if length > MAX_MESSAGE_SIZE
+            || matches!(command, 3 | 0x10) && length == 0
+            || command == 4 && length != 1
+            || command == 8 && length != 0
+        {
             self.error(channel, 3, true);
         } else if length <= INIT_DATA {
             self.complete(now);
@@ -274,6 +291,22 @@ impl Model {
         owner.keepalive_at = now;
         let owner = self.owner.as_ref().unwrap();
         let (channel, command, request) = (owner.channel, owner.command, owner.request.clone());
+        if command == 4 {
+            let seconds = request[0];
+            if seconds > 10 {
+                self.error(channel, 2, true);
+            } else {
+                self.lease = (seconds != 0).then_some((channel, now + u64::from(seconds) * 1_000));
+                self.reply(channel, command, vec![], true);
+            }
+            return;
+        }
+        if command == 8 {
+            let token = self.next_identification;
+            self.next_identification += 1;
+            self.owner.as_mut().unwrap().identification = Some((token, now + 500));
+            return;
+        }
         if command == Command::Ping as u8 {
             self.reply(channel, command, request, true);
             return;
@@ -319,6 +352,17 @@ impl Model {
     }
 
     pub fn timeout(&mut self, now: u64) {
+        if self.lease.is_some_and(|(_, expires)| now >= expires) {
+            self.lease = None;
+        }
+        if let Some(owner) = &self.owner
+            && !owner.responding
+            && owner
+                .identification
+                .is_some_and(|(_, deadline)| now >= deadline)
+        {
+            self.error(owner.channel, 0x7f, true);
+        }
         self.denied
             .retain(|(_, _, last)| now.saturating_sub(*last) <= U2F_POLL_TIMEOUT_MS);
         if self.poll.as_ref().is_some_and(|poll| {
@@ -373,6 +417,33 @@ impl Model {
         let channel = owner.channel;
         self.reply(channel, Command::KeepAlive as u8, vec![status], false);
         true
+    }
+
+    pub fn wants_identification(&self) -> bool {
+        self.owner.as_ref().is_some_and(|owner| {
+            owner.identification.is_some() && !owner.submitted && !owner.responding
+        })
+    }
+
+    pub fn take_identification(&mut self, token: u64, deadline: u64) {
+        assert!(self.wants_identification());
+        let owner = self.owner.as_mut().unwrap();
+        assert_eq!(owner.identification, Some((token, deadline)));
+        owner.submitted = true;
+    }
+
+    pub fn identification_result(&mut self, token: u64, delivered: bool, now: u64) {
+        if let Some(owner) = &self.owner
+            && !owner.responding
+            && let Some((expected, deadline)) = owner.identification
+            && token == expected
+        {
+            if delivered && now < deadline {
+                self.reply(owner.channel, 8, vec![], true);
+            } else {
+                self.error(owner.channel, 0x7f, true);
+            }
+        }
     }
 
     pub fn wants_request(&self) -> bool {

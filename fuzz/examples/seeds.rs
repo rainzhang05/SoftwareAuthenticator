@@ -38,6 +38,10 @@ use sha2::{Digest, Sha256};
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("seeds");
     if let Some(argument) = std::env::args().nth(1) {
+        if argument == "--ctaphid-only" {
+            ctaphid_packets(&root.join("ctaphid_packets"));
+            return;
+        }
         assert_eq!(
             argument, "--sequence-only",
             "unknown seed generation option"
@@ -675,14 +679,14 @@ impl Encoder {
 
     fn action(&mut self, action: &Action) -> &mut Self {
         match action {
-            Action::Packet(packet) => self.variant(0, 18).raw(&packet[..]),
+            Action::Packet(packet) => self.variant(0, 20).raw(&packet[..]),
             Action::Init {
                 channel,
                 command,
                 length,
                 data,
             } => self
-                .variant(1, 18)
+                .variant(1, 20)
                 .channel(channel)
                 .raw(&[*command])
                 .raw(&length.to_le_bytes())
@@ -692,7 +696,7 @@ impl Encoder {
                 sequence,
                 data,
             } => self
-                .variant(2, 18)
+                .variant(2, 20)
                 .channel(channel)
                 .raw(&[*sequence])
                 .raw(&data[..]),
@@ -704,7 +708,7 @@ impl Encoder {
                 mangle,
                 gap_ms,
             } => {
-                self.variant(3, 18)
+                self.variant(3, 20)
                     .channel(channel)
                     .raw(&[*command])
                     .raw(&length.to_le_bytes())
@@ -717,28 +721,35 @@ impl Encoder {
                 };
                 self.raw(&gap_ms.to_le_bytes())
             }
-            Action::Advance(ms) => self.variant(4, 18).raw(&ms.to_le_bytes()),
-            Action::Timeout => self.variant(5, 18),
-            Action::Keepalive(waiting) => self.variant(6, 18).raw(&[u8::from(*waiting)]),
-            Action::TakeRequest => self.variant(7, 18),
+            Action::Advance(ms) => self.variant(4, 20).raw(&ms.to_le_bytes()),
+            Action::Timeout => self.variant(5, 20),
+            Action::Keepalive(waiting) => self.variant(6, 20).raw(&[u8::from(*waiting)]),
+            Action::TakeRequest => self.variant(7, 20),
             Action::Respond { length, fill } => {
-                self.variant(8, 18).raw(&length.to_le_bytes()).raw(&[*fill])
+                self.variant(8, 20).raw(&length.to_le_bytes()).raw(&[*fill])
             }
-            Action::TakeInterrupt => self.variant(9, 18),
+            Action::TakeInterrupt => self.variant(9, 20),
             Action::Apdu { channel, payload } => {
-                self.variant(10, 18).channel(channel);
+                self.variant(10, 20).channel(channel);
                 for byte in payload {
                     self.raw(&[1, *byte]);
                 }
                 self.raw(&[0])
             }
-            Action::U2fRespond { approved } => self.variant(11, 18).raw(&[u8::from(*approved)]),
-            Action::SelectOutput => self.variant(12, 18),
-            Action::WriteOutput => self.variant(13, 18),
-            Action::FailOutput => self.variant(14, 18),
-            Action::Transmit(count) => self.variant(15, 18).raw(&[*count]),
-            Action::Abort(channel) => self.variant(16, 18).channel(channel),
-            Action::Shutdown => self.variant(17, 18),
+            Action::U2fRespond { approved } => self.variant(11, 20).raw(&[u8::from(*approved)]),
+            Action::SelectOutput => self.variant(12, 20),
+            Action::WriteOutput => self.variant(13, 20),
+            Action::FailOutput => self.variant(14, 20),
+            Action::Transmit(count) => self.variant(15, 20).raw(&[*count]),
+            Action::Abort(channel) => self.variant(16, 20).channel(channel),
+            Action::Shutdown => self.variant(17, 20),
+            Action::TakeIdentification => self.variant(18, 20),
+            Action::IdentificationResult {
+                previous,
+                delivered,
+            } => self
+                .variant(19, 20)
+                .raw(&[u8::from(*previous), u8::from(*delivered)]),
         }
     }
 }
@@ -1111,6 +1122,90 @@ fn ctaphid_packets(dir: &Path) {
     narrow[8..10].copy_from_slice(&0u16.to_le_bytes());
     pqkey_fuzz::ctaphid::run(&narrow);
     seeds.push(narrow);
+    for delivered in [false, true] {
+        for delay in [0, 499, 500, 501] {
+            seeds.push(partial_exchange(&[
+                init(),
+                Action::Transmit(255),
+                init(),
+                Action::Transmit(255),
+                message(first(), 4, 1, 1),
+                Action::SelectOutput,
+                message(second(), PING, 0, 0),
+                Action::FailOutput,
+                Action::WriteOutput,
+                Action::Transmit(255),
+                message(first(), WINK, 0, 0),
+                Action::TakeIdentification,
+                Action::Advance(delay),
+                Action::IdentificationResult {
+                    previous: false,
+                    delivered,
+                },
+                Action::Timeout,
+                Action::SelectOutput,
+                Action::Abort(first()),
+                Action::WriteOutput,
+                Action::Transmit(255),
+                message(first(), WINK, 0, 0),
+                Action::TakeIdentification,
+                Action::IdentificationResult {
+                    previous: true,
+                    delivered: true,
+                },
+                Action::IdentificationResult {
+                    previous: false,
+                    delivered: true,
+                },
+                Action::Transmit(255),
+                message(first(), 4, 1, 0),
+                Action::SelectOutput,
+                message(second(), PING, 0, 0),
+                Action::WriteOutput,
+                Action::Transmit(255),
+            ]));
+        }
+    }
+    for seconds in [0, 1, 10, 11, 255] {
+        seeds.push(exchange(&[
+            init(),
+            init(),
+            message(first(), 4, 1, seconds),
+            message(first(), 4, 2, 0),
+            message(first(), WINK, 1, 0),
+            message(second(), 4, 1, 0),
+            Action::Advance(999),
+            Action::Timeout,
+            message(second(), PING, 0, 0),
+            Action::Advance(1),
+            Action::Timeout,
+            message(first(), 4, 1, 1),
+            Action::Advance(1_000),
+            Action::Timeout,
+            message(second(), PING, 0, 0),
+        ]));
+    }
+    seeds.push(partial_exchange(&[
+        init(),
+        Action::Transmit(255),
+        init(),
+        Action::Transmit(255),
+        message(first(), 4, 1, 1),
+        Action::Transmit(255),
+        message(first(), PING, 7609, 7),
+        Action::Transmit(1),
+        Action::SelectOutput,
+        Action::Advance(1_000),
+        Action::Timeout,
+        message(second(), PING, 0, 0),
+        Action::WriteOutput,
+        Action::Transmit(255),
+        message(second(), PING, 0, 0),
+        Action::Transmit(255),
+        message(first(), WINK, 0, 0),
+        Action::TakeIdentification,
+        Action::Shutdown,
+    ]));
     write_all(dir, &seeds);
 }
 

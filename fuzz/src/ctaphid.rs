@@ -41,7 +41,7 @@ pub const INIT_DATA: usize = CTAPHID_FRAME_LEN - 7;
 pub const CONT_DATA: usize = CTAPHID_FRAME_LEN - 5;
 const BROADCAST: u32 = 0xffff_ffff;
 
-const ERROR_CODES: &[u8] = &[0x01, 0x03, 0x04, 0x05, 0x06, 0x0B, 0x7F];
+const ERROR_CODES: &[u8] = &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x0B, 0x7F];
 
 #[derive(Arbitrary, Debug)]
 pub enum Channel {
@@ -120,6 +120,13 @@ pub enum Action {
     Abort(Channel),
     /// End the session, allowing pending output to be discarded on teardown.
     Shutdown,
+    /// Hand identification to the independent daemon worker.
+    TakeIdentification,
+    /// Complete the latest or previous identification attempt.
+    IdentificationResult {
+        previous: bool,
+        delivered: bool,
+    },
 }
 
 struct Harness {
@@ -134,6 +141,8 @@ struct Harness {
     selected: Option<OutgoingFrame>,
     assembly: Option<Assembly>,
     stopped: bool,
+    identification: Option<u64>,
+    previous_identification: Option<u64>,
 }
 
 struct Assembly {
@@ -302,6 +311,10 @@ impl Harness {
                     assert_eq!(assigned, channel, "INIT on a channel keeps it");
                 }
             }
+            Command::Lock | Command::Wink => {
+                assert!(payload.is_empty());
+                assert_ne!(channel, BROADCAST);
+            }
             Command::Ping => assert_ne!(channel, BROADCAST),
             Command::Cbor | Command::Msg => assert_ne!(channel, BROADCAST),
             Command::Cancel => panic!("CTAPHID_CANCEL is never sent"),
@@ -466,6 +479,31 @@ impl Harness {
                 self.packet(Self::message_packets(channel, Command::Init as u8, &[0xA5; 8], 8)[0]);
             }
             Action::Shutdown => self.stopped = true,
+            Action::TakeIdentification => {
+                let request = self.host.take_identification_request();
+                assert_eq!(request.is_some(), self.model.wants_identification());
+                if let Some(request) = request {
+                    self.model
+                        .take_identification(request.token, request.deadline);
+                    self.previous_identification = self.identification;
+                    self.identification = Some(request.token);
+                }
+            }
+            Action::IdentificationResult {
+                previous,
+                delivered,
+            } => {
+                let token = if previous {
+                    self.previous_identification
+                } else {
+                    self.identification
+                };
+                if let Some(token) = token {
+                    self.model.identification_result(token, delivered, self.now);
+                    self.host
+                        .identification_response(token, delivered, self.now);
+                }
+            }
         }
         self.check_timers();
     }
@@ -487,8 +525,10 @@ pub fn run(data: &[u8]) {
         selected: None,
         assembly: None,
         stopped: false,
+        identification: None,
+        previous_identification: None,
     };
-    harness.host.set_capabilities(0x04);
+    harness.host.set_capabilities(0x05);
     while let Ok(action) = u.arbitrary::<Action>() {
         harness.act(action);
         if u.is_empty() || harness.stopped {

@@ -1496,7 +1496,7 @@ mod tests {
     #[test]
     fn terminal_transport_errors_and_held_cancellation_are_owned() {
         let mut host = host();
-        host.handle_frame(&message_packets(FIRST, 0x08, &[])[0], 0);
+        host.handle_frame(&message_packets(FIRST, 0x02, &[])[0], 0);
         assert_eq!(host.busy_channel(), Some(FIRST));
         send(&mut host, SECOND, Command::Ping, &[], 1);
         assert_eq!(
@@ -2219,10 +2219,8 @@ mod tests {
     #[test]
     fn requests_the_app_does_not_answer_are_invalid_commands() {
         let mut host = host();
-        for command in [0x02] {
-            host.handle_frame(&message_packets(FIRST, command, &[0; 70])[0], 0);
-            assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidCommand)]);
-        }
+        host.handle_frame(&message_packets(FIRST, 0x02, &[0; 70])[0], 0);
+        assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidCommand)]);
         // Nothing is left half received.
         send(&mut host, SECOND, Command::Ping, &[1], 0);
         assert_eq!(sent(&mut host), [message(SECOND, Command::Ping, &[1])]);
