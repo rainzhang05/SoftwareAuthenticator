@@ -18,7 +18,7 @@ PIN = "4821"
 
 
 def library():
-    path = C.util.find_library("fido2")
+    path = os.environ.get("LIBFIDO2_LIBRARY") or C.util.find_library("fido2")
     if path is None:
         raise RuntimeError("libfido2 is required")
     lib = C.CDLL(path)
