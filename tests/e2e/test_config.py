@@ -403,8 +403,18 @@ def test_complexity_first_pin_composition_and_boundaries(ctap, protocol, value, 
         pin.set_pin(value)
         assert pin.get_pin_token(value, ClientPin.PERMISSION.AUTHENTICATOR_CFG)
     else:
+        # Bypass the platform's PIN-length precheck so the authenticator
+        # receives every rejected composition and code-point boundary case.
+        peer = ctap.client_pin(protocol.VERSION, ClientPin.CMD.GET_KEY_AGREEMENT)[1]
+        key_agreement, shared_secret = protocol.encapsulate(peer)
+        encrypted = protocol.encrypt(shared_secret, value.encode("utf-8").ljust(64, b"\0"))
         with pytest.raises(CtapError) as excinfo:
-            pin.set_pin(value)
+            ctap.client_pin(
+                protocol.VERSION, ClientPin.CMD.SET_PIN,
+                key_agreement=key_agreement,
+                pin_uv_param=protocol.authenticate(shared_secret, encrypted),
+                new_pin_enc=encrypted,
+            )
         assert excinfo.value.code == ERR.PIN_POLICY_VIOLATION
         assert _info(ctap)[4]["clientPin"] is False
 
