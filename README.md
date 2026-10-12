@@ -18,7 +18,8 @@ your presence waits for you to approve it in a desktop notification.
   EdDSA (EdDSA, Ed25519 and Ed448), and RSA-2048 (RS256, RS384, RS512,
   PS256, PS384 and PS512).
 - **CTAP 2.3:** PIN (protocols 1 and 2), passkeys with credential management,
-  always-UV and minimum PIN length configuration, `minPinLength`, `credBlob`,
+  always-UV, minimum PIN length and PIN complexity configuration,
+  `minPinLength`, `pinComplexityPolicy`, `credBlob`,
   `hmac-secret`, `hmac-secret-mc`, `credProtect`, `largeBlobKey`, fragmented
   large-blob storage, and packed self-attestation.
 - **U2F:** CTAP1 registration and authentication over USB HID, using ES256
@@ -99,6 +100,7 @@ the notification that appears.
 | `pqkey config` | Shows always-UV and PIN policy settings |
 | `pqkey config always-uv on\|off` | Requires or stops requiring the PIN |
 | `pqkey config min-pin-length N [--rp RP_ID]...` | Raises the PIN minimum |
+| `pqkey config pin-complexity [--yes]` | Enables the ASCII letter and digit rule |
 | `pqkey config force-pin-change` | Requires a different PIN |
 | `pqkey passkeys` | Lists the passkeys stored on the key |
 | `pqkey passkeys delete QUERY` | Deletes the passkey whose site, user or ID contains `QUERY` |
@@ -121,6 +123,11 @@ and PIN authentication. If it is too large, pqkey reports its encoded size
 and limit before sending the command; use fewer or shorter RP IDs. The list
 is applied in one operation. If a PIN change becomes required,
 run `pqkey pin` and choose a different PIN meeting the current minimum.
+
+Enable [PIN complexity](docs/pin-complexity-policy.md) with
+`pqkey config pin-complexity`. New PINs must then contain an ASCII letter and
+digit in addition to meeting the length requirements. Only reset disables it;
+enabling with an existing PIN requires one replacement.
 
 `pqkey passkeys` lists only passkeys, which are discoverable credentials. A
 site that registers the key as a second factor keeps the credential's ID and

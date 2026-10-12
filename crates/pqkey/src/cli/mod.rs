@@ -155,6 +155,12 @@ pub(super) enum ConfigAction {
         #[clap(long)]
         yes: bool,
     },
+    /// Require an ASCII letter and digit in new PINs; only reset disables it
+    PinComplexity {
+        /// Do not ask for confirmation on the terminal
+        #[clap(long)]
+        yes: bool,
+    },
     /// Require a different PIN before the key can issue another token
     ForcePinChange,
 }
@@ -548,6 +554,16 @@ mod tests {
                 action: Some(ConfigAction::ForcePinChange)
             })
         ));
+        for yes in [false, true] {
+            let args = if yes {
+                vec!["config", "pin-complexity", "--yes"]
+            } else {
+                vec!["config", "pin-complexity"]
+            };
+            assert!(
+                matches!(parse(&args).unwrap().command, Some(Command::Config { action: Some(ConfigAction::PinComplexity { yes: actual }) }) if yes == actual)
+            );
+        }
         let Some(Command::Config {
             action: Some(action),
         }) = parse(&[
@@ -578,6 +594,8 @@ mod tests {
         for args in [
             &["config", "always-uv", "yes"][..],
             &["config", "always-uv"],
+            &["config", "pin-complexity", "off"],
+            &["config", "pin-complexity", "--pin", "1234"],
             &["config", "min-pin-length", "3"],
             &["config", "min-pin-length", "64"],
             &["config", "min-pin-length", "6", "--rp"],

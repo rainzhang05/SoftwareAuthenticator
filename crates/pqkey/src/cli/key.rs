@@ -407,7 +407,7 @@ fn new_pin_error<L: ReportLink>(
 ) -> io::Error {
     if matches!(err, ClientError::Status(CTAP2_ERR_PIN_POLICY_VIOLATION)) {
         let updated = key.info().ok();
-        let message = if same_pin
+        let mut message = if same_pin
             && updated
                 .as_ref()
                 .is_some_and(|info| info.force_pin_change == Some(true))
@@ -417,8 +417,23 @@ fn new_pin_error<L: ReportLink>(
                 .into()
         } else {
             let minimum = updated.as_ref().map_or(minimum, minimum_pin_length);
-            format!("the new PIN is too short; choose at least {minimum} characters")
+            if updated
+                .as_ref()
+                .is_some_and(|info| info.pin_complexity_policy == Some(true))
+            {
+                format!("choose a PIN with at least {minimum} characters")
+            } else {
+                format!("the new PIN is too short; choose at least {minimum} characters")
+            }
         };
+        if updated
+            .as_ref()
+            .is_some_and(|info| info.pin_complexity_policy == Some(true))
+        {
+            message = format!(
+                "the new PIN must contain at least one ASCII letter (A-Z or a-z) and one ASCII digit (0-9), meet the minimum length, and use at most 63 UTF-8 bytes; {message}"
+            );
+        }
         return io::Error::new(io::ErrorKind::InvalidInput, message);
     }
     pin_error(key, err)
@@ -534,6 +549,10 @@ fn config_lines(info: &Info) -> Vec<String> {
         format!("Always UV: {}", on_off(info.always_uv == Some(true))),
         format!("Minimum PIN length: {}", minimum_pin_length(info)),
         format!(
+            "PIN complexity: {}",
+            on_off(info.pin_complexity_policy == Some(true))
+        ),
+        format!(
             "PIN change required: {}",
             if info.force_pin_change == Some(true) {
                 "yes"
@@ -581,7 +600,9 @@ fn configure<L: ReportLink>(
     };
     let subcommand = match action {
         ConfigAction::AlwaysUv { .. } => 2,
-        ConfigAction::MinPinLength { .. } | ConfigAction::ForcePinChange => 3,
+        ConfigAction::MinPinLength { .. }
+        | ConfigAction::ForcePinChange
+        | ConfigAction::PinComplexity { .. } => 3,
     };
     if info.authenticator_config != Some(true) || !info.config_commands.contains(&subcommand) {
         return Err(io::Error::new(
@@ -629,12 +650,40 @@ fn configure<L: ReportLink>(
             } else {
                 Some(rp_ids.as_slice())
             };
-            key.set_min_pin_length(token.as_ref(), Some(*minimum), rp_ids, None)
+            key.set_min_pin_length(token.as_ref(), Some(*minimum), rp_ids, None, None)
                 .map_err(|err| config_error(key, err, &info))?;
             let updated = key.info().map_err(client_error)?;
             lines.push(format!(
                 "Minimum PIN length: {}.",
                 minimum_pin_length(&updated)
+            ));
+            if updated.force_pin_change == Some(true) {
+                lines.push("A PIN change is required; run `pqkey pin`.".into());
+            }
+        }
+        ConfigAction::PinComplexity { yes } => {
+            let enabled = info.pin_complexity_policy.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "the key does not support PIN complexity; update pqkey and restart it",
+                )
+            })?;
+            if !enabled {
+                if !yes
+                    && !confirmation(
+                        "Enable PIN complexity, requiring at least one ASCII letter (A-Z or a-z) and one ASCII digit (0-9)? Only a reset, which erases every passkey and large blob, can disable it. An existing PIN must change.",
+                    )?
+                {
+                    return Ok(vec!["Nothing was changed.".into()]);
+                }
+                let token = config_token(key, pins, &info)?;
+                key.set_min_pin_length(token.as_ref(), None, None, None, Some(true))
+                    .map_err(|err| config_error(key, err, &info))?;
+            }
+            let updated = key.info().map_err(client_error)?;
+            lines.push(format!(
+                "PIN complexity: {}.",
+                on_off(updated.pin_complexity_policy == Some(true))
             ));
             if updated.force_pin_change == Some(true) {
                 lines.push("A PIN change is required; run `pqkey pin`.".into());
@@ -648,7 +697,7 @@ fn configure<L: ReportLink>(
                 ));
             }
             let token = config_token(key, pins, &info)?;
-            key.set_min_pin_length(token.as_ref(), None, None, Some(true))
+            key.set_min_pin_length(token.as_ref(), None, None, Some(true), None)
                 .map_err(|err| config_error(key, err, &info))?;
             lines.push("A PIN change is required; run `pqkey pin`.".into());
         }
@@ -939,6 +988,7 @@ fn reset_error(err: ClientError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use unicode_normalization::UnicodeNormalization;
 
     use pqkey_ctap::store::{CredentialStore, FileStore};
 
@@ -957,7 +1007,7 @@ mod tests {
         fn next(&mut self) -> io::Result<Pin> {
             self.0
                 .pop_front()
-                .map(|pin| Pin::new(pin.into()))
+                .map(|pin| Pin::new(pin.nfc().collect()))
                 .ok_or_else(|| io::Error::other("asked for a PIN the script does not have"))
         }
     }
@@ -1047,7 +1097,7 @@ mod tests {
         let (_daemon, mut key) = start(&dir);
         key.set_pin(b"1234").unwrap();
         let token = key.config_token(b"1234").unwrap();
-        key.set_min_pin_length(Some(&token), None, None, Some(true))
+        key.set_min_pin_length(Some(&token), None, None, Some(true), None)
             .unwrap();
         assert!(ensure_pin_on(&mut key, false, &mut Script::of(&[])).is_err());
         assert_eq!(key.info().unwrap().force_pin_change, Some(true));
@@ -1132,6 +1182,7 @@ mod tests {
             [
                 "Always UV: off",
                 "Minimum PIN length: 4",
+                "PIN complexity: off",
                 "PIN change required: no",
             ]
         );
@@ -1459,11 +1510,12 @@ mod tests {
         let dir = TempDir::new("cli-config-restart");
         {
             let (_daemon, mut key) = start(&dir);
-            key.set_min_pin_length(None, Some(6), None, None).unwrap();
+            key.set_min_pin_length(None, Some(6), None, None, None)
+                .unwrap();
             key.set_pin(b"123456").unwrap();
             let token = key.config_token(b"123456").unwrap();
             key.toggle_always_uv(Some(&token)).unwrap();
-            key.set_min_pin_length(Some(&token), None, None, Some(true))
+            key.set_min_pin_length(Some(&token), None, None, Some(true), None)
                 .unwrap();
         }
         let (_daemon, mut key) = start(&dir);
@@ -1476,6 +1528,7 @@ mod tests {
             [
                 "Always UV: on",
                 "Minimum PIN length: 6",
+                "PIN complexity: off",
                 "PIN change required: yes"
             ]
         );
@@ -1639,5 +1692,83 @@ mod tests {
             }),
             "set (8 retries left)"
         );
+    }
+    #[test]
+    fn complexity_confirmation_errors_normalization_restart_and_reset() {
+        for existing in [false, true] {
+            let dir = TempDir::new("cli-complexity");
+            {
+                let (_daemon, mut key) = start(&dir);
+                if existing {
+                    key.set_pin(b"1234").unwrap();
+                }
+                let action = ConfigAction::PinComplexity { yes: false };
+                let lines = configure(
+                    &mut key,
+                    &mut Script::of(&[]),
+                    Some(&action),
+                    &mut |question| {
+                        assert!(question.contains("ASCII letter"));
+                        assert!(question.contains("ASCII digit"));
+                        assert!(question.contains("Only a reset"));
+                        assert!(question.contains("existing PIN must change"));
+                        Ok(false)
+                    },
+                )
+                .unwrap();
+                assert_eq!(lines, ["Nothing was changed."]);
+                assert_eq!(key.info().unwrap().pin_complexity_policy, Some(false));
+                let pins = if existing { &["1234"][..] } else { &[][..] };
+                configure(
+                    &mut key,
+                    &mut Script::of(pins),
+                    Some(&ConfigAction::PinComplexity { yes: true }),
+                    &mut |_| panic!("--yes"),
+                )
+                .unwrap();
+                assert_eq!(key.info().unwrap().force_pin_change, Some(existing));
+                configure(&mut key, &mut Script::of(&[]), Some(&action), &mut |_| {
+                    panic!("already enabled")
+                })
+                .unwrap();
+                let pins = if existing {
+                    &["1234", "5678"][..]
+                } else {
+                    &["5678"][..]
+                };
+                let error = set_or_change_pin(&mut key, &mut Script::of(pins))
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("ASCII letter"), "{error}");
+                assert!(error.contains("ASCII digit"), "{error}");
+                assert!(!error.contains("5678"));
+                // NFC turns e + acute into one non-ASCII letter: it is permitted,
+                // but cannot satisfy the ASCII requirement by itself.
+                let pins = if existing {
+                    &["1234", "e\u{301}234"][..]
+                } else {
+                    &["e\u{301}234"][..]
+                };
+                assert!(
+                    set_or_change_pin(&mut key, &mut Script::of(pins))
+                        .unwrap_err()
+                        .to_string()
+                        .contains("ASCII letter")
+                );
+                let pins = if existing {
+                    &["1234", "e\u{301}A12"][..]
+                } else {
+                    &["e\u{301}A12"][..]
+                };
+                set_or_change_pin(&mut key, &mut Script::of(pins)).unwrap();
+                key.config_token("éA12".as_bytes()).unwrap();
+            }
+            let (_daemon, mut key) = start(&dir);
+            assert_eq!(key.info().unwrap().pin_complexity_policy, Some(true));
+            assert_eq!(key.info().unwrap().force_pin_change, Some(false));
+            key.reset(&mut |_| {}).unwrap();
+            assert_eq!(key.info().unwrap().pin_complexity_policy, Some(false));
+            key.set_pin(b"1234").unwrap();
+        }
     }
 }

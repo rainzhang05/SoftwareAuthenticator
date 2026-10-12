@@ -94,6 +94,8 @@ pub struct Info {
     pub set_min_pin_length: Option<bool>,
     /// forcePINChange: a new PIN is required before issuing tokens.
     pub force_pin_change: Option<bool>,
+    /// pinComplexityPolicy: ASCII letter and digit requirements are enabled.
+    pub pin_complexity_policy: Option<bool>,
     /// minPINLength, in Unicode code points.
     pub min_pin_length: Option<u64>,
     /// maxRPIDsForSetMinPINLength.
@@ -114,6 +116,7 @@ impl Default for Info {
             always_uv: None,
             set_min_pin_length: None,
             force_pin_change: None,
+            pin_complexity_policy: None,
             min_pin_length: None,
             max_rp_ids_for_min_pin_length: None,
             config_commands: Vec::new(),
@@ -330,6 +333,7 @@ impl<L: ReportLink> Authenticator<L> {
             always_uv: option("alwaysUv"),
             set_min_pin_length: option("setMinPINLength"),
             force_pin_change: member(&info, 0x0C).and_then(Value::as_bool),
+            pin_complexity_policy: member(&info, 0x1B).and_then(Value::as_bool),
             min_pin_length: number(0x0D),
             max_rp_ids_for_min_pin_length: number(0x10),
             config_commands,
@@ -501,12 +505,14 @@ impl<L: ReportLink> Authenticator<L> {
 
     /// setMinPINLength (§6.11.4). Omitted values leave their settings alone;
     /// an empty RP list also preserves the authorized relying parties.
+    /// Complexity can only be enabled; false preserves the current policy.
     pub fn set_min_pin_length(
         &mut self,
         token: Option<&Token>,
         minimum: Option<u8>,
         rp_ids: Option<&[String]>,
         force_change: Option<bool>,
+        complexity: Option<bool>,
     ) -> Result<(), ClientError> {
         let mut parameters = Vec::new();
         if let Some(minimum) = minimum {
@@ -520,6 +526,9 @@ impl<L: ReportLink> Authenticator<L> {
         }
         if let Some(force_change) = force_change {
             parameters.push((int(3), Value::Bool(force_change)));
+        }
+        if let Some(complexity) = complexity {
+            parameters.push((int(4), Value::Bool(complexity)));
         }
         self.configuration(token, 0x03, Some(Value::Map(parameters)))
     }
@@ -865,32 +874,32 @@ mod size_tests {
             info(Some(2086)),
         ]);
         too_large(
-            key.set_min_pin_length(None, Some(6), Some(&rps), None)
+            key.set_min_pin_length(None, Some(6), Some(&rps), None, None)
                 .unwrap_err(),
             2050,
             1768,
         );
         assert_eq!(traffic.borrow().reports.len(), 2);
         too_large(
-            key.set_min_pin_length(Some(&token), Some(6), Some(&rps), None)
+            key.set_min_pin_length(Some(&token), Some(6), Some(&rps), None, None)
                 .unwrap_err(),
             2087,
             1768,
         );
         assert_eq!(traffic.borrow().reports.len(), 2);
         key.info().unwrap();
-        key.set_min_pin_length(None, Some(6), Some(&rps), None)
+        key.set_min_pin_length(None, Some(6), Some(&rps), None, None)
             .unwrap();
         let before = traffic.borrow().reports.len();
         too_large(
-            key.set_min_pin_length(Some(&token), Some(6), Some(&rps), None)
+            key.set_min_pin_length(Some(&token), Some(6), Some(&rps), None, None)
                 .unwrap_err(),
             2087,
             2050,
         );
         assert_eq!(traffic.borrow().reports.len(), before);
         key.info().unwrap();
-        key.set_min_pin_length(Some(&token), Some(6), Some(&rps), None)
+        key.set_min_pin_length(Some(&token), Some(6), Some(&rps), None, None)
             .unwrap();
         let request = traffic.borrow().requests.last().unwrap().clone();
         assert_eq!(request.len(), 2087);
@@ -912,14 +921,56 @@ mod size_tests {
         key.info().unwrap();
         let before = traffic.borrow().reports.len();
         too_large(
-            key.set_min_pin_length(Some(&token), Some(6), Some(&rps), None)
+            key.set_min_pin_length(Some(&token), Some(6), Some(&rps), None, None)
                 .unwrap_err(),
             2087,
             2086,
         );
         assert_eq!(traffic.borrow().reports.len(), before);
-        key.set_min_pin_length(Some(&token), Some(6), Some(&["small.example".into()]), None)
+        key.set_min_pin_length(
+            Some(&token),
+            Some(6),
+            Some(&["small.example".into()]),
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn complexity_configuration_covers_mac_and_complete_request_limit() {
+        let token = Token(Zeroizing::new(vec![0x37; 32]));
+        let (mut key, traffic) = key(vec![info(Some(45)), info(Some(44))]);
+        key.set_min_pin_length(Some(&token), None, None, None, Some(true))
             .unwrap();
+        let mut expected = vec![
+            AUTHENTICATOR_CONFIG,
+            0xa4,
+            1,
+            3,
+            2,
+            0xa1,
+            4,
+            0xf5,
+            3,
+            2,
+            4,
+            0x58,
+            0x20,
+        ];
+        let mut message = vec![0xff; 32];
+        message.extend([AUTHENTICATOR_CONFIG, 3, 0xa1, 4, 0xf5]);
+        expected.extend(authenticate(PROTOCOL, &token.0, &message));
+        assert_eq!(traffic.borrow().requests.last(), Some(&expected));
+        key.info().unwrap();
+        let before = traffic.borrow().reports.len();
+        too_large(
+            key.set_min_pin_length(Some(&token), None, None, None, Some(true))
+                .unwrap_err(),
+            45,
+            44,
+        );
+        assert_eq!(traffic.borrow().reports.len(), before);
     }
 
     #[test]

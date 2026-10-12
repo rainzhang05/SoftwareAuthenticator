@@ -317,12 +317,12 @@ fn configuration_uses_its_permission_and_survives_a_restart() {
         key.toggle_always_uv(None).unwrap();
         assert_eq!(key.info().unwrap().always_uv, Some(true));
         assert!(matches!(
-            key.set_min_pin_length(None, Some(6), None, None),
+            key.set_min_pin_length(None, Some(6), None, None, None),
             Err(ClientError::Status(0x36))
         ));
         key.toggle_always_uv(None).unwrap();
         let rps = vec!["example.com".into(), "other.example".into()];
-        key.set_min_pin_length(None, Some(6), Some(&rps), None)
+        key.set_min_pin_length(None, Some(6), Some(&rps), None, None)
             .unwrap();
         key.set_pin(b"123456").unwrap();
         let management = key.management_token(b"123456").unwrap();
@@ -331,7 +331,7 @@ fn configuration_uses_its_permission_and_survives_a_restart() {
             Err(ClientError::Status(0x33))
         ));
         let config = key.config_token(b"123456").unwrap();
-        key.set_min_pin_length(Some(&config), None, Some(&[]), None)
+        key.set_min_pin_length(Some(&config), None, Some(&[]), None, None)
             .unwrap();
         key.toggle_always_uv(Some(&config)).unwrap();
     }
@@ -349,7 +349,7 @@ fn configuration_uses_its_permission_and_survives_a_restart() {
     assert_eq!(info.always_uv, Some(true));
     assert_eq!(info.min_pin_length, Some(6));
     let token = key.config_token(b"123456").unwrap();
-    key.set_min_pin_length(Some(&token), Some(7), None, None)
+    key.set_min_pin_length(Some(&token), Some(7), None, None, None)
         .unwrap();
     assert_eq!(key.info().unwrap().force_pin_change, Some(true));
     assert!(matches!(
@@ -363,7 +363,7 @@ fn configuration_uses_its_permission_and_survives_a_restart() {
     key.change_pin(b"123456", b"1234567").unwrap();
     assert_eq!(key.info().unwrap().force_pin_change, Some(false));
     let token = key.config_token(b"1234567").unwrap();
-    key.set_min_pin_length(Some(&token), None, None, Some(true))
+    key.set_min_pin_length(Some(&token), None, None, Some(true), None)
         .unwrap();
     assert!(matches!(
         key.change_pin(b"1234567", b"1234567"),
@@ -400,6 +400,7 @@ fn pin_publication_invalidates_client_tokens_and_forced_change_survives_restart(
             Some(6),
             Some(&["example.com".into()]),
             Some(true),
+            None,
         )
         .unwrap();
         assert!(matches!(
@@ -424,4 +425,45 @@ fn pin_publication_invalidates_client_tokens_and_forced_change_survives_restart(
     assert_eq!(key.info().unwrap().force_pin_change, Some(false));
     assert_eq!(key.pin_retries().unwrap().retries, 8);
     assert!(key.config_token(b"678901").is_ok());
+}
+
+#[test]
+fn complexity_configuration_is_atomic_enable_only_and_survives_restart() {
+    let dir = TempDir::new("client-complexity");
+    {
+        let (_daemon, mut key) = start(&dir);
+        assert_eq!(key.info().unwrap().pin_complexity_policy, Some(false));
+        key.set_pin(b"1234").unwrap();
+        let token = key.config_token(b"1234").unwrap();
+        key.set_min_pin_length(
+            Some(&token),
+            Some(6),
+            Some(&["example.com".into()]),
+            None,
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(key.info().unwrap().pin_complexity_policy, Some(true));
+        assert_eq!(key.info().unwrap().force_pin_change, Some(true));
+        assert!(matches!(
+            key.toggle_always_uv(Some(&token)),
+            Err(ClientError::Status(0x33))
+        ));
+        assert!(matches!(
+            key.change_pin(b"1234", b"567890"),
+            Err(ClientError::Status(0x37))
+        ));
+        key.change_pin(b"1234", b"Ab1234").unwrap();
+        let token = key.config_token(b"Ab1234").unwrap();
+        for input in [Some(true), Some(false), None] {
+            key.set_min_pin_length(Some(&token), None, None, None, input)
+                .unwrap();
+            assert_eq!(key.info().unwrap().force_pin_change, Some(false));
+        }
+    }
+    let (_daemon, mut key) = start(&dir);
+    assert_eq!(key.info().unwrap().pin_complexity_policy, Some(true));
+    assert_eq!(key.info().unwrap().min_pin_length, Some(6));
+    key.reset(&mut |_| {}).unwrap();
+    assert_eq!(key.info().unwrap().pin_complexity_policy, Some(false));
 }
