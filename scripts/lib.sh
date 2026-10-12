@@ -1,10 +1,11 @@
+# shellcheck shell=bash
 # Shared by the scripts in this directory; sourced, not run.
 #
 # Each step prints one line, ✓ or ✗, and its output goes to a log that is
 # shown only when it fails.
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-cd "$root"
+cd "$root" || exit 1
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   bold=$'\e[1m' green=$'\e[1;32m' yellow=$'\e[1;33m' red=$'\e[1;31m' reset=$'\e[0m'

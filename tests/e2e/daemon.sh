@@ -53,7 +53,7 @@ start() {
 
   # Poll for the hidraw node the kernel creates for the device, and for udev
   # to hand it to this user.
-  local deadline=$((SECONDS + 60)) node= sys
+  local deadline=$((SECONDS + 60)) node='' sys
   while :; do
     if [ -e "$status_file" ]; then
       echo "::error::pqkey ($name) exited with status $(cat "$status_file") before the device was ready" >&2
