@@ -226,6 +226,45 @@ jobs:
           RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
         run: cargo check --workspace --locked --all-targets
 
+  # A compilation check does not exercise compiler-dependent stack layouts.
+  # Force the supported compiler: rust-toolchain.toml otherwise selects stable.
+  msrv-residue:
+    name: MSRV residue (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    env:
+      RUSTUP_TOOLCHAIN: 1.89.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust 1.89.0
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: 1.89.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: msrv-residue-1.89.0
+      - name: Record actual compiler
+        run: |
+          rustc -Vv
+          cargo -V
+      - name: Stack residue (debug)
+        run: cargo test --locked -p pqkey-mldsa -p pqkey-ctap --test residue
+      - name: Stack residue (release)
+        run: cargo test --locked --release -p pqkey-mldsa -p pqkey-ctap --test residue
+      - name: Heap residue (debug)
+        run: cargo test --locked -p pqkey --test heap_residue
+      - name: Heap residue (release)
+        run: cargo test --locked --release -p pqkey --test heap_residue
+
   # Rustdoc, with warnings denied. Catches broken intra-doc links and malformed
   # doc attributes, which are easy to introduce and invisible until someone
   # builds the docs. Built twice: the public API as a reader of the crates sees
