@@ -79,7 +79,7 @@ def verify(lib, public, digest, auth, signature, *, valid=True):
         if valid:
             check(lib, result)
         else:
-            assert result == -7, lib.fido_strerr(result).decode("ascii")  # FIDO_ERR_INVALID_SIG
+            assert result == -6, lib.fido_strerr(result).decode("ascii")  # FIDO_ERR_INVALID_SIG
     finally:
         lib.fido_assert_free(C.byref(assertion))
         lib.es256_pk_free(C.byref(key))
