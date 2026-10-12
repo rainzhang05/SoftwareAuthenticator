@@ -379,3 +379,49 @@ mod tests {
         );
     }
 }
+
+/// Identify this daemon without subscribing to or accepting presence actions.
+/// Connection, Notify and closing share one absolute delivery deadline.
+pub(crate) fn identify(device: &str, deadline: Instant) -> std::io::Result<()> {
+    let notification = async {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let connection = connection::Builder::session()?
+            .method_timeout(remaining)
+            .build()
+            .await?;
+        let hints = HashMap::from([
+            ("urgency", Value::U8(URGENCY_NORMAL)),
+            ("transient", Value::Bool(true)),
+            ("category", Value::from("device")),
+        ]);
+        let body = format!("pqkey software security key (device {device}).");
+        let reply = connection
+            .call_method(
+                Some(NOTIFICATIONS_NAME),
+                NOTIFICATIONS_PATH,
+                Some(NOTIFICATIONS_INTERFACE),
+                "Notify",
+                &(
+                    APP_NAME,
+                    0u32,
+                    APP_ICON,
+                    "Identify the security key",
+                    body,
+                    &[] as &[&str],
+                    hints,
+                    2_000i32,
+                ),
+            )
+            .await?;
+        let _: u32 = reply.body().deserialize()?;
+        connection.close().await?;
+        Ok::<(), zbus::Error>(())
+    };
+    let expire = async {
+        async_io::Timer::at(deadline).await;
+        Err(zbus::Error::Failure(
+            "identification delivery timed out".into(),
+        ))
+    };
+    async_io::block_on(future::or(notification, expire)).map_err(std::io::Error::other)
+}

@@ -43,7 +43,7 @@ def test_init_allocates_distinct_channels(hid):
     assert protocol == 2
     assert capabilities & 0x04, "CBOR capability"
     assert not capabilities & 0x08, "MSG is implemented"
-    assert not capabilities & 0x01, "WINK is unimplemented"
+    assert capabilities & 0x01, "WINK capability"
     assert hid.allocate_channel() != cid
 
 

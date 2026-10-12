@@ -10,7 +10,7 @@ def test_ctaphid_init_reports_cbor_and_msg(device, ctap):
     assert device.version == 2
     assert device.capabilities & CAPABILITY.CBOR
     assert not device.capabilities & CAPABILITY.NMSG
-    assert not device.capabilities & CAPABILITY.WINK
+    assert device.capabilities & CAPABILITY.WINK
     # The default IDs: pid.codes' open source vendor ID and its first test
     # product ID.
     assert device.descriptor.vid == 0x1209

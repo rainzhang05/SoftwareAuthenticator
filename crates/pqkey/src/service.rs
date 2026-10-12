@@ -13,14 +13,14 @@ use pqkey_ctap::store::{AttestationRecord, CredentialStore, FileStore};
 use crate::{
     WaitingForUser,
     attestation::{IdentityConfig, certificate_aaguid, generate_attestation_certificate},
-    create_device, exec,
+    create_device,
     platform::{self, BootTimeClock},
     presence::{
         PresenceMode, Unanswered,
         notification::{NotificationPresence, PROMPT_FILE},
     },
     shutdown::{ShutdownSignal, is_shutdown, ok_if_shutdown},
-    transport::{HidDevice, HidDeviceDescriptor},
+    transport::{HidDevice, HidDeviceDescriptor, exec_with_identifier},
 };
 
 /// Who a newly provisioned attestation certificate names.
@@ -355,7 +355,7 @@ pub(crate) fn serve_ctap_with_clock<C: Clock + 'static>(
 /// [`serve_ctap`] with `presence` asking the user for presence. `data.presence`
 /// names the mode `presence` implements.
 ///
-/// The app runs on a worker thread (see [`exec`]), so `presence` may block
+/// The app runs on a worker thread (see [`exec_with_identifier`]), so `presence` may block
 /// while the user decides: the transport keeps sending keepalives meanwhile,
 /// and CTAPHID_CANCEL, resynchronisation of the channel and shutdown reach
 /// `presence` through its
@@ -387,7 +387,15 @@ pub fn serve_ctap_with_presence<C: Clock + 'static>(
     ctap.set_reset_window(window);
     let app_waiting = waiting.clone();
     ctap.set_keepalive_callback(move |waiting| app_waiting.set(waiting));
-    exec(device, &mut ctap, &waiting, shutdown, on_ready)
+    let identity = device_uniq(std::process::id());
+    exec_with_identifier(
+        device,
+        &mut ctap,
+        &waiting,
+        shutdown,
+        on_ready,
+        move |deadline| platform::identify(&identity, deadline),
+    )
 }
 
 /// The shortest user action timeout CTAP allows: "This timeout MUST be at

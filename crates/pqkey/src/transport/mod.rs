@@ -1,5 +1,8 @@
 pub mod ctaphid_host;
 mod device;
+mod identification;
+use identification::IdentificationWorker;
+pub use identification::Identifier;
 #[cfg(test)]
 mod u2f_tests;
 pub use device::CTAPHID_REPORT_DESCRIPTOR;
@@ -28,6 +31,7 @@ use pqkey_ctap::ctap::constants::{
 use pqkey_ctap::ctap::{CtapApp, InterruptFlag};
 
 // CTAPHID capability flags (CTAP spec section 11.2.9.1.3)
+pub const CAPABILITY_WINK: u8 = 0x01; // Implements CTAPHID_WINK
 pub const CAPABILITY_CBOR: u8 = 0x04; // Implements CTAPHID_CBOR
 pub const CAPABILITY_NMSG: u8 = 0x08; // Does NOT implement CTAPHID_MSG
 
@@ -243,6 +247,7 @@ pub struct Transport<'interrupt, D: HidDevice> {
     device: D,
     host: CtaphidHost,
     app: AppWorker<'interrupt>,
+    identification: Option<IdentificationWorker>,
     waiting: WaitingForUser,
     epoch: Instant,
     shutdown: ShutdownSignal,
@@ -282,6 +287,13 @@ impl<D: HidDevice> Transport<'_, D> {
             self.host
                 .app_response(response.payload, self.now(), finished);
             received = true;
+        }
+        if let Some(worker) = &self.identification {
+            while let Some((token, delivered)) = worker.response() {
+                self.host
+                    .identification_response(token, delivered, self.now());
+                received = true;
+            }
         }
         Ok(received)
     }
@@ -345,6 +357,17 @@ impl<D: HidDevice> Transport<'_, D> {
             did_work = true;
         }
 
+        if let Some(request) = self.host.take_identification_request() {
+            if !self
+                .identification
+                .as_ref()
+                .is_some_and(|worker| worker.submit(request, self.epoch))
+            {
+                self.host
+                    .identification_response(request.token, false, self.now());
+            }
+            did_work = true;
+        }
         let now = self.now();
         self.observe_presence();
         self.host.handle_timeout(now);
@@ -407,6 +430,24 @@ where
     A: App<'interrupt> + Send + ?Sized,
     D: HidDevice,
 {
+    exec_with_identifier(device, app, waiting, shutdown, on_ready, |_| {
+        Err(io::Error::other("device identification is unavailable"))
+    })
+}
+
+/// Serve with a bounded platform identifier independent of the CTAP app.
+pub fn exec_with_identifier<'interrupt, A, D>(
+    device: D,
+    app: &mut A,
+    waiting: &WaitingForUser,
+    shutdown: ShutdownSignal,
+    on_ready: impl FnOnce() -> io::Result<()>,
+    identifier: impl Identifier,
+) -> io::Result<()>
+where
+    A: App<'interrupt> + Send + ?Sized,
+    D: HidDevice,
+{
     let interrupt = app.interrupt();
     let (wake, worker_wake) = UnixStream::pair()?;
     wake.set_nonblocking(true)?;
@@ -414,6 +455,7 @@ where
     let (request_sender, request_receiver) = mpsc::channel();
     let (response_sender, response_receiver) = mpsc::channel();
 
+    let worker_wake_clone = worker_wake.try_clone()?;
     thread::scope(|scope| {
         let worker = thread::Builder::new()
             .name("ctap-app".into())
@@ -421,13 +463,15 @@ where
                 run_app(app, request_receiver, response_sender, worker_wake, waiting)
             })?;
 
+        let (identification, identification_thread) =
+            IdentificationWorker::spawn(scope, identifier, worker_wake_clone)?;
         let mut host = CtaphidHost::new();
         host.set_version(Version {
             major: 2,
             minor: 1,
             build: 0,
         });
-        host.set_capabilities(CAPABILITY_CBOR);
+        host.set_capabilities(CAPABILITY_CBOR | CAPABILITY_WINK);
         let mut transport = Transport {
             device,
             host,
@@ -438,6 +482,7 @@ where
                 interrupt,
                 presence_before: None,
             },
+            identification: Some(identification),
             waiting: waiting.clone(),
             epoch: Instant::now(),
             shutdown,
@@ -446,7 +491,12 @@ where
         let result = on_ready().and_then(|()| serve(&mut transport));
 
         transport.app.stop();
+        transport.identification.as_mut().unwrap().stop();
         drop(transport);
+        let identification_result = identification_thread.join();
+        if identification_result.is_err() {
+            log::error!("the identification worker panicked");
+        }
         match worker.join() {
             Ok(()) => result,
             Err(_) => Err(io::Error::other("the CTAP app panicked")),
@@ -643,6 +693,7 @@ mod tests {
                 interrupt: &interrupt,
                 presence_before: None,
             },
+            identification: None,
             waiting: WaitingForUser::new(),
             epoch: Instant::now(),
             shutdown: ShutdownSignal::new(),
@@ -792,6 +843,7 @@ mod transmission_tests {
                 interrupt,
                 presence_before: None,
             },
+            identification: None,
             waiting: WaitingForUser::new(),
             epoch: Instant::now(),
             shutdown: ShutdownSignal::new(),

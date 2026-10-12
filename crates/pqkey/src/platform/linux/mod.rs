@@ -39,3 +39,8 @@ pub(crate) fn warn_device_access() -> io::Result<()> {
 }
 #[cfg(test)]
 pub(crate) mod test_support;
+
+/// Deliver identification without user presence or approval actions.
+pub(crate) fn identify(device: &str, deadline: std::time::Instant) -> io::Result<()> {
+    dbus::identify(device, deadline)
+}

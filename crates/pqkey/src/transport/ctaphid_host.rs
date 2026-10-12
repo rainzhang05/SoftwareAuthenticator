@@ -138,6 +138,16 @@ pub const CONTINUATION_TIMEOUT_MS: u64 = 550;
 /// delays.
 pub const KEEPALIVE_INTERVAL_MS: u64 = 50;
 
+/// Total identification budget, including queueing and platform delivery.
+pub const IDENTIFICATION_TIMEOUT_MS: u64 = 500;
+
+/// A daemon identification operation, never a CTAP application request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdentificationRequest {
+    pub token: u64,
+    pub deadline: u64,
+}
+
 /// CTAP2_ERR_KEEPALIVE_CANCEL, the CTAP status of a cancelled request.
 pub const CTAP2_ERR_KEEPALIVE_CANCEL: u8 = 0x2D;
 
@@ -162,6 +172,7 @@ pub enum Command {
     Msg = 0x03,
     Lock = 0x04,
     Init = 0x06,
+    Wink = 0x08,
     Cbor = 0x10,
     Cancel = 0x11,
     KeepAlive = 0x3B,
@@ -185,6 +196,7 @@ impl TryFrom<u8> for Command {
             0x03 => Command::Msg,
             0x04 => Command::Lock,
             0x06 => Command::Init,
+            0x08 => Command::Wink,
             0x10 => Command::Cbor,
             0x11 => Command::Cancel,
             0x3B => Command::KeepAlive,
@@ -289,6 +301,11 @@ enum State {
         last_packet_at: u64,
     },
     Processing(Processing),
+    Identifying {
+        channel: u32,
+        request: IdentificationRequest,
+        submitted: bool,
+    },
     Transmitting {
         channel: u32,
         final_frame: u64,
@@ -321,6 +338,7 @@ pub struct CtaphidHost<R = OsRng> {
     message: Vec<u8>,
     pending: VecDeque<OutgoingFrame>,
     next_token: u64,
+    next_identification: u64,
     channels: Channels,
     rng: R,
     capabilities: u8,
@@ -355,6 +373,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
             message: Vec::with_capacity(MAX_MESSAGE_SIZE),
             pending: VecDeque::new(),
             next_token: 0,
+            next_identification: 0,
             channels: Channels::default(),
             rng,
             capabilities: 0,
@@ -403,6 +422,13 @@ impl<R: CryptoRng> CtaphidHost<R> {
     /// Expire a message whose next packet is overdue.
     pub fn handle_timeout(&mut self, now: u64) {
         self.expire_lease(now);
+        if let State::Identifying {
+            channel, request, ..
+        } = self.state
+            && now >= request.deadline
+        {
+            self.finish_error(channel, ErrorCode::Other);
+        }
         self.denied_polls
             .retain(|poll| now.saturating_sub(poll.last_poll) <= U2F_POLL_TIMEOUT_MS);
         if let Some(poll) = &self.u2f
@@ -518,6 +544,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
                 Some(last_packet_at + CONTINUATION_TIMEOUT_MS)
             }
             State::Processing(processing) => Some(processing.keepalive_at + KEEPALIVE_INTERVAL_MS),
+            State::Identifying { request, .. } => Some(request.deadline),
         };
         let polling = self.u2f.as_ref().map(|poll| {
             if poll.answer.is_none() && poll.presence_started
@@ -540,6 +567,39 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
     fn lease_conflicts(&self, channel: u32) -> bool {
         self.lease.is_some_and(|(owner, _)| owner != channel)
+    }
+
+    /// Submit identification once. Its result must carry this token back.
+    pub fn take_identification_request(&mut self) -> Option<IdentificationRequest> {
+        let State::Identifying {
+            request, submitted, ..
+        } = &mut self.state
+        else {
+            return None;
+        };
+        if *submitted {
+            return None;
+        }
+        *submitted = true;
+        Some(*request)
+    }
+
+    /// Complete only the current identification, within its original budget.
+    pub fn identification_response(&mut self, token: u64, delivered: bool, now: u64) {
+        let State::Identifying {
+            channel, request, ..
+        } = self.state
+        else {
+            return;
+        };
+        if request.token != token {
+            return;
+        }
+        if delivered && now < request.deadline {
+            self.enqueue_message(channel, Command::Wink, &[]);
+        } else {
+            self.finish_error(channel, ErrorCode::Other);
+        }
     }
 
     /// The CBOR or MSG request the app should work on next,
@@ -691,6 +751,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
                 .map(|poll| poll.channel),
             State::Receiving { channel, .. } => Some(*channel),
             State::Processing(processing) => Some(processing.channel),
+            State::Identifying { channel, .. } => Some(*channel),
             State::Transmitting { channel, .. } => Some(*channel),
         }
     }
@@ -834,7 +895,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
             if busy != channel
                 || matches!(
                     self.state,
-                    State::Processing(_) | State::Transmitting { .. }
+                    State::Processing(_) | State::Identifying { .. } | State::Transmitting { .. }
                 )
                 || (matches!(self.state, State::Idle) && command != Some(Command::Msg))
             {
@@ -856,9 +917,13 @@ impl<R: CryptoRng> CtaphidHost<R> {
             return;
         }
         let command = match command {
-            Some(command @ (Command::Ping | Command::Cbor | Command::Msg | Command::Lock)) => {
-                command
-            }
+            Some(
+                command @ (Command::Ping
+                | Command::Cbor
+                | Command::Msg
+                | Command::Lock
+                | Command::Wink),
+            ) => command,
             _ => {
                 self.finish_error(channel, ErrorCode::InvalidCommand);
                 return;
@@ -869,6 +934,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
         if length > MAX_MESSAGE_SIZE
             || (matches!(command, Command::Cbor | Command::Msg) && length == 0)
             || (command == Command::Lock && length != 1)
+            || (command == Command::Wink && length != 0)
         {
             self.finish_error(channel, ErrorCode::InvalidLength);
             return;
@@ -925,6 +991,21 @@ impl<R: CryptoRng> CtaphidHost<R> {
     }
 
     fn complete_message(&mut self, channel: u32, command: Command, now: u64) {
+        if command == Command::Wink {
+            let token = self.next_identification;
+            self.next_identification = token
+                .checked_add(1)
+                .expect("identification token exhausted");
+            self.state = State::Identifying {
+                channel,
+                request: IdentificationRequest {
+                    token,
+                    deadline: now.saturating_add(IDENTIFICATION_TIMEOUT_MS),
+                },
+                submitted: false,
+            };
+            return;
+        }
         if command == Command::Lock {
             let seconds = self.message[0];
             if seconds > 10 {
@@ -1096,6 +1177,73 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wink_validation_delivery_deadline_and_late_results() {
+        let mut host = host();
+        for length in [1, 57, 58, MAX_MESSAGE_SIZE, MAX_MESSAGE_SIZE + 1] {
+            host.handle_frame(&message_packets(FIRST, 8, &vec![0; length])[0], 0);
+            assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidLength)]);
+            assert!(host.take_identification_request().is_none());
+        }
+        for (delivered, now, expected) in [
+            (true, 499, message(FIRST, Command::Wink, &[])),
+            (true, 500, error(FIRST, ErrorCode::Other)),
+            (false, 1, error(FIRST, ErrorCode::Other)),
+        ] {
+            send(&mut host, FIRST, Command::Wink, &[], 0);
+            let request = host.take_identification_request().unwrap();
+            assert!(host.take_app_request().is_none());
+            assert!(host.take_identification_request().is_none());
+            assert!(!host.send_keepalive(true, 100));
+            send(&mut host, FIRST, Command::Cancel, &[], 1);
+            assert!(!host.take_interrupt());
+            host.identification_response(request.token, delivered, now);
+            assert_eq!(sent(&mut host), [expected]);
+            host.identification_response(request.token, true, now);
+            assert!(sent(&mut host).is_empty());
+        }
+        send(&mut host, FIRST, Command::Wink, &[], 1_000);
+        let old = host.take_identification_request().unwrap();
+        host.handle_timeout(1_500);
+        assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::Other)]);
+        send(&mut host, FIRST, Command::Wink, &[], 1_501);
+        let new = host.take_identification_request().unwrap();
+        host.identification_response(old.token, true, 1_502);
+        assert!(host.next_outgoing_frame().is_none());
+        host.identification_response(new.token, true, 1_503);
+        assert_eq!(sent(&mut host), [message(FIRST, Command::Wink, &[])]);
+    }
+
+    #[test]
+    fn init_invalidates_identification_and_its_selected_result_but_not_a_lease() {
+        let mut host = host_with_channels(&[FIRST]);
+        init_on(&mut host, BROADCAST_CID);
+        send(&mut host, FIRST, Command::Lock, &[10], 0);
+        sent(&mut host);
+        for completed in [false, true] {
+            send(&mut host, FIRST, Command::Wink, &[], 1);
+            let request = host.take_identification_request().unwrap();
+            send(&mut host, SECOND, Command::Ping, &[], 2);
+            if completed {
+                host.identification_response(request.token, true, 3);
+            }
+            send(&mut host, FIRST, Command::Init, &[0; 8], 4);
+            host.identification_response(request.token, true, 5);
+            let output = sent(&mut host);
+            assert_eq!(output.len(), 2);
+            assert_eq!(output[0], error(SECOND, ErrorCode::ChannelBusy));
+            assert_eq!(output[1].command, Command::Init as u8);
+            assert_eq!(host.lease, Some((FIRST, 10_000)));
+        }
+        send(&mut host, FIRST, Command::Wink, &[], 10);
+        let request = host.take_identification_request().unwrap();
+        host.identification_response(request.token, true, 11);
+        let selected = host.next_outgoing_frame().unwrap();
+        send(&mut host, FIRST, Command::Init, &[0; 8], 12);
+        assert!(!host.is_outgoing_current(&selected));
+        assert!(!host.outgoing_frame_written(&selected));
+    }
+
     #[test]
     fn lock_validation_renewal_and_exact_expiry() {
         let mut host = host();
@@ -2071,7 +2219,7 @@ mod tests {
     #[test]
     fn requests_the_app_does_not_answer_are_invalid_commands() {
         let mut host = host();
-        for command in [0x08, 0x02] {
+        for command in [0x02] {
             host.handle_frame(&message_packets(FIRST, command, &[0; 70])[0], 0);
             assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidCommand)]);
         }

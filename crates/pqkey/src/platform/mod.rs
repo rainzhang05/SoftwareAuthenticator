@@ -14,7 +14,8 @@ use std::io;
 pub(crate) use linux::test_support;
 pub(crate) use linux::{
     BootTimeClock, PRESENCE_NOTIFY_HELP, RUN_HELP, START_HELP, current_executable_identity,
-    disable_core_dumps, notification_connect_error, notification_failure, warn_device_access,
+    disable_core_dumps, identify, notification_connect_error, notification_failure,
+    warn_device_access,
 };
 pub use linux::{
     ClientLink, Device, Notifications, System, UserService, default_state_dir, notifications,
