@@ -799,7 +799,7 @@ const NOT_LISTED: &str = "A site that registered it as a security key (a second 
                           not listed here.";
 
 /// Columns of [`passkey_table`].
-const HEADINGS: [&str; 4] = ["SITE", "USER", "ALGORITHM", "ID"];
+const HEADINGS: [&str; 5] = ["SITE", "USER", "ALGORITHM", "PAYMENT", "ID"];
 /// The most of a site or user name the table shows.
 const MAX_COLUMN_CHARS: usize = 40;
 /// Hex digits of a credential ID the table shows: enough to tell passkeys
@@ -841,15 +841,31 @@ fn hex(bytes: &[u8]) -> String {
 
 /// The passkeys as an aligned table, sorted by site and user, with a heading.
 fn passkey_table(passkeys: &[Passkey]) -> Vec<String> {
-    let mut rows: Vec<[String; 4]> = passkeys
+    let mut rows: Vec<([String; 4], bool)> = passkeys
         .iter()
         .map(|passkey| {
             let mut id = hex(&passkey.credential_id);
             id.truncate(SHORT_ID_DIGITS);
-            [site(passkey), user(passkey), algorithm(passkey.alg), id]
+            (
+                [site(passkey), user(passkey), algorithm(passkey.alg), id],
+                passkey.third_party_payment == Some(true),
+            )
         })
         .collect();
-    rows.sort();
+    // The new display column must not change the original ordering.
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    let rows: Vec<_> = rows
+        .into_iter()
+        .map(|([site, user, alg, id], payment)| {
+            [
+                site,
+                user,
+                alg,
+                if payment { "enabled" } else { "-" }.into(),
+                id,
+            ]
+        })
+        .collect();
     let mut widths = HEADINGS.map(str::len);
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
@@ -1574,6 +1590,7 @@ mod tests {
             user_display_name: display.map(Into::into),
             credential_id: [0x01].into_iter().chain([id; 32]).collect(),
             alg: Some(-49),
+            third_party_payment: None,
         }
     }
 
@@ -1602,6 +1619,36 @@ mod tests {
     }
 
     #[test]
+    fn payment_display_keeps_id_order_and_delete_matching() {
+        let mut enabled = passkey("example.com", Some("alice"), None, 0x11);
+        enabled.third_party_payment = Some(true);
+        let mut disabled = passkey("example.com", Some("alice"), None, 0x22);
+        disabled.third_party_payment = Some(false);
+        let legacy = passkey("example.com", Some("alice"), None, 0x33);
+        let passkeys = [legacy, disabled, enabled];
+        let table = passkey_table(&passkeys);
+        let rows: Vec<_> = table[1..]
+            .iter()
+            .map(|r| r.split_whitespace().collect::<Vec<_>>())
+            .collect();
+        assert_eq!(
+            rows.iter().map(|r| (r[3], r[4])).collect::<Vec<_>>(),
+            [
+                ("enabled", "0111111111111111"),
+                ("-", "0122222222222222"),
+                ("-", "0133333333333333")
+            ]
+        );
+        assert_eq!(
+            matching_passkey(&passkeys, "011111")
+                .unwrap()
+                .third_party_payment,
+            Some(true)
+        );
+        assert!(matching_passkey(&passkeys, "enabled").is_err());
+    }
+
+    #[test]
     fn the_table_is_aligned_sorted_and_safe_to_print() {
         let passkeys = [
             passkey("z.example", Some("zed"), Some("Zed"), 0x22),
@@ -1617,10 +1664,10 @@ mod tests {
         assert_eq!(
             table,
             [
-                "SITE          USER               ALGORITHM  ID",
-                "a.example     -                  ML-DSA-65  0133333333333333",
-                "evil.example  a [2Jbc (Mallory)  ML-DSA-65  0111111111111111",
-                "z.example     zed (Zed)          ML-DSA-65  0122222222222222",
+                "SITE          USER               ALGORITHM  PAYMENT  ID",
+                "a.example     -                  ML-DSA-65  -        0133333333333333",
+                "evil.example  a [2Jbc (Mallory)  ML-DSA-65  -        0111111111111111",
+                "z.example     zed (Zed)          ML-DSA-65  -        0122222222222222",
             ]
         );
         for line in &table {

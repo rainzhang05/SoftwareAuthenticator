@@ -88,7 +88,7 @@ class Pqkey:
         """The rows of `pqkey passkeys`, whose columns are at least two spaces
         apart."""
         heading, *rows = self.ok("passkeys", stdin=f"{PIN}\n").splitlines()
-        assert re.split(r"\s{2,}", heading) == ["SITE", "USER", "ALGORITHM", "ID"], heading
+        assert re.split(r"\s{2,}", heading) == ["SITE", "USER", "ALGORITHM", "PAYMENT", "ID"], heading
         return [re.split(r"\s{2,}", row) for row in rows]
 
     def start(self, presence: str = "auto-approve", *options: str) -> int:
@@ -192,7 +192,8 @@ def test_passkeys_are_listed_and_deleted(pqkey: Pqkey):
         ctap = Ctap2(device)
         for name in ("alice", "bob"):
             client.register(
-                ctap, "example.com", client.ML_DSA_65, user=client.user_entity(name), options={"rk": True}
+                ctap, "example.com", client.ML_DSA_65, user=client.user_entity(name), options={"rk": True},
+                extensions={"thirdPartyPayment": name == "alice"}
             )
 
     assert "`pqkey pin` sets one" in pqkey.error("passkeys")
@@ -203,7 +204,8 @@ def test_passkeys_are_listed_and_deleted(pqkey: Pqkey):
         ["example.com", "alice (Alice)", "ML-DSA-65"],
         ["example.com", "bob (Bob)", "ML-DSA-65"],
     ], listing
-    assert all(re.fullmatch(r"[0-9a-f]{16}", row[3]) for row in listing), listing
+    assert all(re.fullmatch(r"[0-9a-f]{16}", row[4]) for row in listing), listing
+    assert [row[3] for row in listing] == ["enabled", "-"], listing
 
     # An ambiguous query lists the passkeys it matches after the error.
     result = pqkey.run("passkeys", "delete", "example", "--yes", stdin=f"{PIN}\n")
@@ -546,7 +548,7 @@ def test_replacement_old_id_rejection_survives_restart_and_deletion(pqkey: Pqkey
         assert [row[1] for row in listing] == expected_users
         if not deleted:
             replacement = next(row for row in listing if row[1] == "replacement (Replacement)")
-            assert pqkey.ok("passkeys", "delete", replacement[3], "--yes", stdin=f"{PIN}\n") == "Passkey deleted.\n"
+            assert pqkey.ok("passkeys", "delete", replacement[4], "--yes", stdin=f"{PIN}\n") == "Passkey deleted.\n"
 
 
 @pytest.mark.parametrize("existing", [False, True])

@@ -143,6 +143,8 @@ pub struct Passkey {
     pub credential_id: Vec<u8>,
     /// The COSE algorithm of its public key.
     pub alg: Option<i64>,
+    /// Payment metadata, or `None` when an older authenticator omits it.
+    pub third_party_payment: Option<bool>,
 }
 
 /// A pinUvAuthToken.
@@ -631,6 +633,7 @@ impl<L: ReportLink> Authenticator<L> {
                         .and_then(|key| member(key, 3))
                         .and_then(Value::as_integer)
                         .and_then(|alg| i64::try_from(alg).ok()),
+                    third_party_payment: member(&credential, 0x0C).and_then(Value::as_bool),
                 });
             }
         }
@@ -671,6 +674,7 @@ mod size_tests {
     struct RecordingLink {
         traffic: Rc<RefCell<Traffic>>,
         infos: VecDeque<Value>,
+        management_replies: VecDeque<Value>,
         answers: VecDeque<Report>,
         pending: Vec<u8>,
         length: usize,
@@ -716,6 +720,8 @@ mod size_tests {
                     let mut response = vec![0];
                     if self.pending == [GET_INFO] {
                         response.extend(encode(&self.infos.pop_front().expect("scripted getInfo")));
+                    } else if let Some(reply) = self.management_replies.pop_front() {
+                        response.extend(encode(&reply));
                     }
                     let mut header = *report;
                     header[4] = 0x90;
@@ -740,15 +746,50 @@ mod size_tests {
     }
 
     fn key(infos: Vec<Value>) -> (Authenticator<RecordingLink>, Rc<RefCell<Traffic>>) {
+        key_with_management(infos, vec![])
+    }
+
+    fn key_with_management(
+        infos: Vec<Value>,
+        replies: Vec<Value>,
+    ) -> (Authenticator<RecordingLink>, Rc<RefCell<Traffic>>) {
         let traffic = Rc::new(RefCell::new(Traffic::default()));
         let link = RecordingLink {
             traffic: traffic.clone(),
             infos: infos.into(),
+            management_replies: replies.into(),
             answers: VecDeque::new(),
             pending: Vec::new(),
             length: 0,
         };
         (Authenticator::open(link).unwrap(), traffic)
+    }
+
+    #[test]
+    fn payment_metadata_distinguishes_older_peers_from_both_boolean_values() {
+        for payment in [None, Some(false), Some(true)] {
+            let rp = Value::Map(vec![
+                (int(3), Value::Map(vec![(text("id"), text("r"))])),
+                (int(4), Value::Bytes(vec![0; 32])),
+            ]);
+            let mut credential = vec![
+                (
+                    int(6),
+                    Value::Map(vec![(text("id"), Value::Bytes(vec![1]))]),
+                ),
+                (
+                    int(7),
+                    Value::Map(vec![(text("id"), Value::Bytes(vec![2]))]),
+                ),
+            ];
+            credential.extend(payment.map(|value| (int(12), Value::Bool(value))));
+            let (mut key, _) =
+                key_with_management(vec![info(None)], vec![rp, Value::Map(credential)]);
+            let passkeys = key.passkeys(&Token(Zeroizing::new(vec![1; 32]))).unwrap();
+            assert_eq!(passkeys.len(), 1);
+            assert_eq!(passkeys[0].third_party_payment, payment);
+            assert_eq!(passkeys[0].credential_id, [2]);
+        }
     }
 
     fn too_large(error: ClientError, bytes: usize, limit: usize) {
