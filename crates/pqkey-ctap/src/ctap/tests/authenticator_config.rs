@@ -95,8 +95,8 @@ fn dispatch_logging_and_get_info_advertise_configuration() {
         panic!("extensions")
     };
     assert!(extensions.contains(&text("minPinLength")));
-    assert!(!extensions.contains(&text("pinComplexityPolicy")));
-    assert!(map_get(&fields, int(0x1b)).is_none());
+    assert!(extensions.contains(&text("pinComplexityPolicy")));
+    assert_eq!(map_get(&fields, int(0x1b)), Some(&Value::Bool(false)));
     let Value::Map(options) = map_get(&fields, int(4)).unwrap() else {
         panic!("options")
     };
@@ -1047,6 +1047,107 @@ fn complexity_replacement_authorizes_old_pin_and_repeated_enable_keeps_tokens() 
             change_pin(&mut app, protocol, b"New9", "éA23".as_bytes()).unwrap();
             assert!(app.pin_state.pin_uv_auth_token().is_none());
             assert!(store.pin_state().unwrap().unwrap().pin_complexity_policy);
+        }
+    }
+}
+
+#[test]
+fn complexity_extension_is_requested_authorized_typed_and_signed() {
+    for enabled in [false, true] {
+        let mut app = test_app([0x8e; 16]);
+        configure(
+            &mut app,
+            3,
+            Some(canonical_map(vec![
+                (int(2), Value::Array(vec![text(RP)])),
+                (int(4), Value::Bool(enabled)),
+            ])),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            map_get(&info(&mut app), int(0x1b)),
+            Some(&Value::Bool(enabled))
+        );
+        for rp in [RP, "other.example"] {
+            for input in [Some(Value::Bool(true)), Some(Value::Bool(false)), None] {
+                let Value::Map(mut params) =
+                    from_reader(&make_credential_request(&HASH, rp, None)[..]).unwrap()
+                else {
+                    panic!("map")
+                };
+                if let Some(input) = input.clone() {
+                    params.push((
+                        int(6),
+                        canonical_map(vec![
+                            (text("pinComplexityPolicy"), input),
+                            (text("minPinLength"), Value::Bool(true)),
+                        ]),
+                    ));
+                }
+                let response = app
+                    .handle_make_credential(&encode(&canonical_map(params)))
+                    .unwrap();
+                let credential = created_credential(&app, &response, rp);
+                let outputs = extension_outputs(&response, Some(&credential));
+                let expected =
+                    (rp == RP && input == Some(Value::Bool(true))).then_some(Value::Bool(enabled));
+                assert_eq!(
+                    map_get(&outputs, text("pinComplexityPolicy")),
+                    expected.as_ref()
+                );
+                assert_eq!(
+                    map_get(&outputs, text("minPinLength")),
+                    (rp == RP && input.is_some()).then_some(int(4)).as_ref()
+                );
+                verify_response(&response, &credential, true);
+                let request = get_assertion_request(
+                    &HASH,
+                    rp,
+                    None,
+                    Some(canonical_map(vec![(
+                        text("pinComplexityPolicy"),
+                        Value::Bool(true),
+                    )])),
+                );
+                let Value::Map(mut params) = from_reader(&request[..]).unwrap() else {
+                    panic!("map")
+                };
+                params.push((
+                    int(3),
+                    Value::Array(vec![canonical_map(vec![
+                        (text("type"), text("public-key")),
+                        (text("id"), Value::Bytes(credential.credential_id.clone())),
+                    ])]),
+                ));
+                let assertion = app
+                    .handle_get_assertion(&encode(&canonical_map(params)))
+                    .unwrap();
+                assert!(extension_outputs(&assertion, None).is_empty());
+                verify_response(&assertion, &credential, false);
+            }
+            for input in [
+                int(1),
+                text("true"),
+                Value::Null,
+                Value::Bytes(vec![]),
+                Value::Array(vec![]),
+                canonical_map(vec![]),
+            ] {
+                let Value::Map(mut params) =
+                    from_reader(&make_credential_request(&HASH, rp, None)[..]).unwrap()
+                else {
+                    panic!("map")
+                };
+                params.push((
+                    int(6),
+                    canonical_map(vec![(text("pinComplexityPolicy"), input)]),
+                ));
+                assert_eq!(
+                    app.handle_make_credential(&encode(&canonical_map(params))),
+                    Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE)
+                );
+            }
         }
     }
 }

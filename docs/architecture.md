@@ -186,8 +186,12 @@ suite requires `/dev/uhid`.
     11.2.4). The HID sender independently checks capacity before its first
     report. Oversized RP lists are rejected locally as one operation;
     shorten the list to fit pqkey's advertised 1,768 bytes.
-  - There is no PIN complexity policy: `pinComplexityPolicy` true is refused
-    with CTAP1_ERR_INVALID_PARAMETER, and false changes nothing.
+  - PIN complexity starts disabled. `pinComplexityPolicy` true enables a
+    requirement for an ASCII letter and digit in every new PIN. Only reset
+    disables it; false and omitted inputs preserve it. Enabling with a PIN
+    forces one replacement and invalidates tokens. Authorized RP IDs can
+    read the current boolean through the creation extension; see
+    [the PIN policy](pin-complexity-policy.md).
 - Up to 1,000 stored credentials. Credential management lists and counts
   discoverable credentials only. Non-discoverable credentials are sealed
   into their own ID when their key fits; RSA credentials are stored and
@@ -240,7 +244,7 @@ protected by the same encryption as their private keys, and an optional
 redacted from debug output and compared in constant time. Older records read
 without a large-blob key. The PIN state also keeps the configuration: the
 minimum PIN length and its RP IDs, whether a PIN change is required, the
-PIN's length and always-UV. A PIN state written before these fields existed
+PIN's length, always-UV and PIN complexity (optional boolean field 10). A PIN state written before these fields existed
 reads with their defaults, and its PIN counts as 4 code points long.
 
 Discoverable registration replaces all stored discoverable credentials with

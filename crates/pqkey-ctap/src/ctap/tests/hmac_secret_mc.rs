@@ -245,6 +245,17 @@ fn replacement_refreshes_prfs_blob_protection_and_large_blob_key() {
     for protocol in PROTOCOLS {
         for uv in [false, true] {
             let mut app = test_app([0x85; 16]);
+            let config = canonical_map(vec![
+                (int(1), int(3)),
+                (
+                    int(2),
+                    canonical_map(vec![
+                        (int(2), Value::Array(vec![text(RP)])),
+                        (int(4), Value::Bool(true)),
+                    ]),
+                ),
+            ]);
+            app.handle_authenticator_config(&encode(&config)).unwrap();
             let salts = [0x53; 64];
             let mut preceding: Option<(CredentialRecord, Vec<u8>)> = None;
             for generation in 0..2 {
@@ -268,6 +279,8 @@ fn replacement_refreshes_prfs_blob_protection_and_large_blob_key() {
                     (text("credBlob"), Value::Bytes(vec![generation; 32])),
                     (text("credProtect"), int(if uv { 3 } else { 2 })),
                     (text("largeBlobKey"), Value::Bool(true)),
+                    (text("minPinLength"), Value::Bool(true)),
+                    (text("pinComplexityPolicy"), Value::Bool(true)),
                 ]);
                 let response = app
                     .handle_make_credential(&creation_request(
@@ -284,6 +297,11 @@ fn replacement_refreshes_prfs_blob_protection_and_large_blob_key() {
                 assert_eq!(credential.cred_protect, if uv { 3 } else { 2 });
                 assert_eq!(credential.cred_blob, Some(vec![generation; 32]));
                 let outputs = extension_outputs(&response, Some(&credential));
+                assert_eq!(
+                    map_get(&outputs, text("pinComplexityPolicy")),
+                    Some(&Value::Bool(true))
+                );
+                assert_eq!(map_get(&outputs, text("minPinLength")), Some(&int(4)));
                 let Value::Bytes(encrypted) = map_get(&outputs, text("hmac-secret-mc")).unwrap()
                 else {
                     panic!("creation PRF");

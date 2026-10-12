@@ -551,3 +551,29 @@ fn reset_and_restart_observe_the_same_u2f_credentials() {
         SW_COMMAND_NOT_ALLOWED.to_be_bytes()
     );
 }
+
+#[test]
+fn complexity_and_forced_pin_change_do_not_independently_block_u2f() {
+    for force_pin_change in [false, true] {
+        let store = TestStore::new();
+        store
+            .clone()
+            .set_pin_state(&PinStateRecord {
+                pin_hash: force_pin_change.then_some(pin_hash(b"1234")),
+                pin_complexity_policy: true,
+                force_pin_change,
+                min_pin_length_rp_ids: Vec::new(),
+                ..PinStateRecord::default()
+            })
+            .unwrap();
+        let (mut app, _) = app_with_store(store, [14; 16], [], &NEVER_INTERRUPTED);
+        let registration = register(&mut app);
+        verify_auth(
+            &app.call_u2f(&auth_request(8, handle(&registration), &application())),
+            &registration[1..66],
+            &application(),
+            0,
+        );
+        assert_eq!(data(&app.call_u2f(&[0, 3, 0, 0])), b"U2F_V2");
+    }
+}

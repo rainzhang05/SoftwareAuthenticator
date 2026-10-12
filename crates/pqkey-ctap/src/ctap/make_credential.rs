@@ -212,6 +212,7 @@ impl CtapApp<'_> {
         };
 
         let mut min_pin_length_requested = false;
+        let mut pin_complexity_requested = false;
         let mut hmac_secret_requested = false;
         let mut hmac_secret_mc_input = None;
         let mut cred_blob_input = None;
@@ -228,6 +229,10 @@ impl CtapApp<'_> {
                 match key {
                     Value::Text(text) if text == "minPinLength" => match value {
                         Value::Bool(flag) => min_pin_length_requested = *flag,
+                        _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+                    },
+                    Value::Text(text) if text == "pinComplexityPolicy" => match value {
+                        Value::Bool(flag) => pin_complexity_requested = *flag,
                         _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
                     },
                     Value::Text(text) if text == "hmac-secret" => match value {
@@ -411,6 +416,18 @@ impl CtapApp<'_> {
             extension_entries.push((
                 Value::Text("minPinLength".into()),
                 Value::Integer(Integer::from(self.pin_state.persistent().min_pin_length)),
+            ));
+        }
+        if pin_complexity_requested
+            && self
+                .pin_state
+                .persistent()
+                .min_pin_length_rp_ids
+                .contains(&record.rp_id)
+        {
+            extension_entries.push((
+                Value::Text("pinComplexityPolicy".into()),
+                Value::Bool(self.pin_state.persistent().pin_complexity_policy),
             ));
         }
         if cred_blob_input.is_some() {

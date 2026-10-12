@@ -74,6 +74,7 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         text("hmac-secret-mc"),
         text("largeBlobKey"),
         text("minPinLength"),
+        text("pinComplexityPolicy"),
     ]);
 
     let algorithms = Value::Array(
@@ -124,6 +125,8 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         (uint(0x1F), Value::Array(vec![uint(2), uint(3)])),
         (uint(0x14), uint(remaining)),
         (uint(0x16), Value::Array(vec![text("packed")])),
+        (uint(0x1B), Value::Bool(false)),
+        (uint(0x1C), Value::Bytes(b"https://github.com/rainzhang05/SoftwareAuthenticator/blob/main/docs/pin-complexity-policy.md".to_vec())),
     ]);
 
     let mut expected_bytes = Vec::new();

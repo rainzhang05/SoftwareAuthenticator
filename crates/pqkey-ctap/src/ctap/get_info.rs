@@ -70,6 +70,7 @@ impl CtapApp<'_> {
                 text("hmac-secret-mc"),
                 text("largeBlobKey"),
                 text("minPinLength"),
+                text("pinComplexityPolicy"),
             ]),
         ));
         map.push((uint(3), Value::Bytes(self.aaguid.to_vec())));
@@ -157,6 +158,14 @@ impl CtapApp<'_> {
             }
             AttestationMode::None => {}
         }
+
+        map.push((uint(0x1B), Value::Bool(persistent.pin_complexity_policy)));
+        map.push((
+            uint(0x1C),
+            Value::Bytes(
+                b"https://github.com/rainzhang05/SoftwareAuthenticator/blob/main/docs/pin-complexity-policy.md".to_vec(),
+            ),
+        ));
 
         // authenticatorConfigCommands: toggleAlwaysUv and setMinPINLength.
         map.push((uint(0x1F), Value::Array(vec![uint(2), uint(3)])));

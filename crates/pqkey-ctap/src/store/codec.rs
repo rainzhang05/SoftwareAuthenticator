@@ -36,6 +36,7 @@
 //!    7  force_pin_change        boolean, default false
 //!    8  pin_code_point_length   unsigned integer, 4-63, default 4
 //!    9  always_uv               boolean, default false
+//!   10  pin_complexity_policy   boolean, default false
 //!
 //! attestation record (record type 3)
 //!    1  private_key             byte string, 32 bytes
