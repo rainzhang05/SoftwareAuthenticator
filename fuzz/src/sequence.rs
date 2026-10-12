@@ -28,7 +28,9 @@
 //!   assertion and credential enumeration;
 //! * reads return only the last committed large-blob array, with its valid
 //!   trailing hash; partial and abandoned writes never become visible;
-//! * the minimum PIN length never falls without reset;
+//! * the minimum PIN length and complexity policy never fall without reset;
+//! * an enabled policy requires an ASCII letter and digit in newly published
+//!   PINs; enabling with any existing PIN requires a qualifying replacement;
 //! * alwaysUv prevents makeCredential and getAssertion with up=true from
 //!   succeeding without pinUvAuthParam, and U2F from signing;
 //! * counters never decrease between successful resets, including the shared global
@@ -61,6 +63,13 @@ const PINS: &[&[u8]] = &[
     "\u{1F510}\u{1F510}\u{1F510}\u{1F510}".as_bytes(),
     b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    b"Ab12",
+    b"New5678",
+    "éA12".as_bytes(),
+    "é234".as_bytes(),
+    "a٢٣٤".as_bytes(),
+    "Ａ１２３".as_bytes(),
+    b"a1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 ];
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -99,6 +108,7 @@ enum Op {
         cred_blob: Option<u8>,
         large_blob_key: Option<bool>,
         min_pin_length: bool,
+        complexity: Option<bool>,
         hmac_secret_mc: Option<(bool, bool)>,
         auth: Auth,
         rp: u8,
@@ -257,6 +267,8 @@ struct Platform {
     minimum: u8,
     always_uv: bool,
     force_change: bool,
+    complexity: bool,
+    pin_qualified: bool,
     min_pin_length_rp_ids: Vec<String>,
     committed: Vec<u8>,
     pending: PendingArray,
@@ -318,8 +330,9 @@ fn unpadded(padded: &[u8]) -> &[u8] {
     &padded[..end]
 }
 
-fn acceptable_pin(pin: &[u8], minimum: u8) -> bool {
-    pin.len() <= 63
+fn acceptable_pin(pin: &[u8], minimum: u8, complexity: bool) -> bool {
+    (!complexity || (pin.iter().any(u8::is_ascii_alphabetic) && pin.iter().any(u8::is_ascii_digit)))
+        && pin.len() <= 63
         && std::str::from_utf8(pin).is_ok_and(|pin| pin.chars().count() >= usize::from(minimum))
 }
 
@@ -418,6 +431,8 @@ impl Platform {
             minimum: 4,
             always_uv: false,
             force_change: false,
+            complexity: false,
+            pin_qualified: false,
             min_pin_length_rp_ids: Vec::new(),
             committed: INITIAL_LARGE_BLOB_ARRAY.to_vec(),
             pending: PendingArray::default(),
@@ -518,6 +533,17 @@ impl Platform {
             assert_eq!(record.min_pin_length, self.minimum);
             assert_eq!(record.always_uv, self.always_uv);
             assert_eq!(record.force_pin_change, self.force_change);
+            assert_eq!(record.pin_complexity_policy, self.complexity);
+            if self.complexity
+                && !self.force_change
+                && let Some(pin) = &self.pin
+            {
+                assert!(
+                    self.pin_qualified,
+                    "unqualified PIN authorized after enablement"
+                );
+                assert!(acceptable_pin(pin, self.minimum, true));
+            }
             assert_eq!(record.min_pin_length_rp_ids, self.min_pin_length_rp_ids);
         }
     }
@@ -887,6 +913,16 @@ impl Platform {
                         "minimum disclosed without an authorized request"
                     );
                 }
+                let expected_complexity = (authorized
+                    && extension_requested(&parameters, 6, "pinComplexityPolicy"))
+                .then_some(Value::Bool(self.complexity));
+                assert_eq!(
+                    get_text(&outputs, "pinComplexityPolicy"),
+                    expected_complexity.as_ref()
+                );
+                if expected_complexity.is_some() {
+                    assert_ne!(auth_data[32] & 0x80, 0);
+                }
                 let user_id = match get_int(&parameters, 3) {
                     Some(Value::Map(user)) => match get_text(user, "id") {
                         Some(Value::Bytes(id)) => id.clone(),
@@ -1003,6 +1039,7 @@ impl Platform {
                 if auth_data[32] & 0x80 != 0 {
                     let outputs = decode_map(&auth_data[37..]).expect("extensions");
                     assert!(get_text(&outputs, "largeBlobKey").is_none());
+                    assert!(get_text(&outputs, "pinComplexityPolicy").is_none());
                     if let Some(Value::Bytes(blob)) = get_text(&outputs, "credBlob") {
                         assert_eq!(
                             blob.as_slice(),
@@ -1081,6 +1118,8 @@ impl Platform {
                 self.minimum = 4;
                 self.always_uv = false;
                 self.force_change = false;
+                self.complexity = false;
+                self.pin_qualified = false;
                 self.min_pin_length_rp_ids.clear();
                 self.committed = INITIAL_LARGE_BLOB_ARRAY.to_vec();
                 self.pending = PendingArray::default();
@@ -1132,10 +1171,13 @@ impl Platform {
                                 .collect();
                         }
                     }
-                    assert!(
-                        !matches!(get_int(params, 4), Some(Value::Bool(true))),
-                        "unsupported PIN complexity policy enabled"
-                    );
+                    if matches!(get_int(params, 4), Some(Value::Bool(true))) && !self.complexity {
+                        self.complexity = true;
+                        self.pin_qualified = false;
+                        if self.pin.is_some() {
+                            self.force_change = true;
+                        }
+                    }
                     if self.force_change {
                         self.token = None;
                     }
@@ -1143,6 +1185,10 @@ impl Platform {
                 _ => panic!("unsupported config subcommand succeeded"),
             },
             CTAP_CMD_GET_INFO => {
+                assert_eq!(get_int(&body, 0x1b), Some(&Value::Bool(self.complexity)));
+                assert!(
+                    matches!(get_int(&body, 0x1c), Some(Value::Bytes(url)) if url == b"https://github.com/rainzhang05/SoftwareAuthenticator/blob/main/docs/pin-complexity-policy.md")
+                );
                 let versions = get_int(&body, 1).unwrap().as_array().unwrap();
                 assert_eq!(versions.contains(&text("U2F_V2")), !self.always_uv);
                 assert_eq!(
@@ -1346,10 +1392,11 @@ impl Platform {
                     );
                     let pin = unpadded(&padded);
                     assert!(
-                        acceptable_pin(pin, self.minimum),
+                        acceptable_pin(pin, self.minimum, self.complexity),
                         "setPIN accepted a PIN the policy forbids"
                     );
                     self.pin = Some(pin.to_vec());
+                    self.pin_qualified = self.complexity;
                     self.token = None;
                     self.force_change = false;
                 }
@@ -1397,7 +1444,7 @@ impl Platform {
                 }
                 if status(&response) == CTAP2_OK {
                     assert!(knows_pin, "changePIN with the wrong PIN");
-                    assert!(acceptable_pin(new, self.minimum));
+                    assert!(acceptable_pin(new, self.minimum, self.complexity));
                     if self.force_change {
                         assert_ne!(
                             self.pin.as_deref(),
@@ -1406,6 +1453,7 @@ impl Platform {
                         );
                     }
                     self.pin = Some(new.to_vec());
+                    self.pin_qualified = self.complexity;
                     self.token = None;
                     self.force_change = false;
                 }
@@ -1482,6 +1530,7 @@ impl Platform {
                 cred_blob,
                 large_blob_key,
                 min_pin_length,
+                complexity,
                 auth,
                 rp,
                 rk,
@@ -1511,6 +1560,7 @@ impl Platform {
                         hmac_secret_mc,
                         cred_blob,
                         min_pin_length: min_pin_length.then_some(Value::Bool(true)),
+                        pin_complexity_policy: complexity.map(Value::Bool),
                         large_blob_key: large_blob_key.map(Value::Bool),
                         options: rk.then(|| Value::Map(vec![(text("rk"), Value::Bool(true))])),
                         no_allow_list: false,
@@ -1568,6 +1618,7 @@ impl Platform {
                         hmac_secret_mc: None,
                         cred_blob: cred_blob.then_some(Value::Bool(true)),
                         min_pin_length: None,
+                        pin_complexity_policy: None,
                         large_blob_key: large_blob_key.map(Value::Bool),
                         options: Some(Value::Map(vec![(text("up"), Value::Bool(up))])),
                         no_allow_list: discoverable,
@@ -1597,7 +1648,7 @@ impl Platform {
                 if self.pin.is_none() {
                     let set_pin = Op::SetPin {
                         v2,
-                        pin: 0,
+                        pin: if self.complexity { 12 } else { 0 },
                         bad_auth: false,
                         pad_to: 2,
                     };
@@ -1827,12 +1878,14 @@ impl Platform {
                     ),
                     (int(7), Value::Map(vec![(text("rk"), Value::Bool(rk))])),
                 ];
+                let mut extensions = vec![
+                    (text("pinComplexityPolicy"), Value::Bool(true)),
+                    (text("minPinLength"), Value::Bool(true)),
+                ];
                 if let Some(requested) = large_blob_key {
-                    entries.push((
-                        int(6),
-                        Value::Map(vec![(text("largeBlobKey"), Value::Bool(requested))]),
-                    ));
+                    extensions.push((text("largeBlobKey"), Value::Bool(requested)));
                 }
+                entries.push((int(6), Value::Map(extensions)));
                 self.call(&command(CTAP_CMD_MAKE_CREDENTIAL, &Value::Map(entries)));
             }
             Op::AssertCredentials {
@@ -2365,6 +2418,133 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
             Op::Restart,
         ]);
     }
+    for v2 in [false, true] {
+        let set = || Op::SetPin {
+            v2,
+            pin: 0,
+            bad_auth: false,
+            pad_to: 2,
+        };
+        let token = || Op::GetToken {
+            v2,
+            right_pin: true,
+            legacy: false,
+            permissions: 6,
+            rp: None,
+        };
+        let enable = |complexity| Op::AuthenticatorConfig {
+            auth: Auth::Token,
+            subcommand: 3,
+            minimum: None,
+            rp_ids: None,
+            force_change: None,
+            complexity,
+        };
+        cases.push(vec![
+            set(),
+            token(),
+            enable(Some(true)),
+            Op::GetInfo,
+            token(),
+            Op::ChangePin {
+                v2,
+                right_pin: true,
+                new_pin: 0,
+            },
+            Op::ChangePin {
+                v2,
+                right_pin: true,
+                new_pin: 6,
+            },
+            token(),
+            enable(Some(true)),
+            enable(Some(false)),
+            Op::Restart,
+            Op::GetInfo,
+            Op::Reset,
+            Op::GetInfo,
+        ]);
+        for mode in [2, 3] {
+            cases.push(vec![
+                set(),
+                token(),
+                Op::PinWriteFault { mode, after: 0 },
+                enable(Some(true)),
+                Op::Restart,
+                Op::GetInfo,
+                Op::ChangePin {
+                    v2,
+                    right_pin: true,
+                    new_pin: 6,
+                },
+                token(),
+                Op::PinWriteFault { mode, after: 0 },
+                Op::Reset,
+                Op::GetInfo,
+                Op::Restart,
+                Op::GetInfo,
+            ]);
+            cases.push(vec![
+                set(),
+                token(),
+                enable(Some(true)),
+                Op::PinWriteFault { mode, after: 2 },
+                Op::ChangePin {
+                    v2,
+                    right_pin: true,
+                    new_pin: 6,
+                },
+                Op::Restart,
+                Op::GetInfo,
+                token(),
+            ]);
+        }
+        cases.push(vec![
+            enable(Some(true)),
+            Op::SetPin {
+                v2,
+                pin: 0,
+                bad_auth: false,
+                pad_to: 2,
+            },
+            Op::SetPin {
+                v2,
+                pin: 7,
+                bad_auth: false,
+                pad_to: 2,
+            },
+            Op::Restart,
+            Op::GetInfo,
+            Op::Reset,
+            set(),
+            Op::GetInfo,
+        ]);
+    }
+    for enabled in [false, true] {
+        cases.push(vec![
+            Op::AuthenticatorConfig {
+                auth: Auth::None,
+                subcommand: 3,
+                minimum: None,
+                rp_ids: Some(vec![0]),
+                force_change: None,
+                complexity: Some(enabled),
+            },
+            Op::CreateCredential {
+                large_blob_key: Some(true),
+                rk: true,
+                user: 1,
+            },
+            Op::AssertCredentials {
+                large_blob_key: Some(true),
+                discoverable: true,
+            },
+            Op::Restart,
+            Op::GetInfo,
+            Op::Reset,
+            Op::GetInfo,
+        ]);
+    }
     cases.iter().map(|ops| encode_fixture(ops)).collect()
 }
 
@@ -2513,13 +2693,21 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 auth: value,
                 subcommand,
                 minimum: None,
-                rp_ids: None,
+                rp_ids,
                 force_change: None,
-                complexity: None,
+                complexity,
             } => {
                 variant(&mut output, 8, 30);
                 auth(&mut output, *value);
-                output.extend_from_slice(&[*subcommand, 0, 0, 0, 0]);
+                output.extend_from_slice(&[*subcommand, 0, u8::from(rp_ids.is_some())]);
+                if let Some(ids) = rp_ids {
+                    for id in ids {
+                        output.extend_from_slice(&[1, *id]);
+                    }
+                    output.push(0);
+                }
+                output.push(0);
+                option_bool(&mut output, *complexity);
             }
             Op::PinWriteFault { mode, after } => {
                 variant(&mut output, 28, 30);
@@ -2591,7 +2779,11 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
         platform
             .step(decoded, &mut input)
             .expect("fixture parameters");
-        assert_eq!(before - input.len(), extra, "fixture auxiliary encoding");
+        assert_eq!(
+            before - input.len(),
+            extra,
+            "fixture auxiliary encoding: {op:?}"
+        );
     }
     assert!(input.is_empty());
     assert_eq!(run_traced(&output), platform.engine.into_trace());
@@ -2720,7 +2912,7 @@ mod tests {
     #[test]
     fn seeds_exercise_commits_abandoned_writes_and_stable_keys() {
         let seeds = seed_corpus();
-        assert_eq!(seeds.len(), 46);
+        assert_eq!(seeds.len(), 60);
         let traces: Vec<_> = seeds.iter().map(|seed| run_traced(seed)).collect();
         for pair in [
             (0x81, 0x9000),

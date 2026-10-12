@@ -224,6 +224,7 @@ pub struct Overrides {
     pub hmac_secret_mc: Option<Value>,
     pub cred_blob: Option<Value>,
     pub min_pin_length: Option<Value>,
+    pub pin_complexity_policy: Option<Value>,
     pub large_blob_key: Option<Value>,
     /// The options map, instead of a generated one.
     pub options: Option<Value>,
@@ -309,6 +310,7 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
             let cred_protect = field(u, |u| Ok(int(u.int_in_range(0..=4)?)))?;
             let hmac_secret_mc = optional(u, hmac_secret_input)?;
             let min_pin_length = optional(u, |u| Ok(Value::Bool(u.arbitrary()?)))?;
+            let complexity = optional(u, extension_bool)?;
             let large_blob_key = optional(u, extension_bool)?;
             map(
                 u,
@@ -318,6 +320,7 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
                     (text("hmac-secret-mc"), hmac_secret_mc),
                     (text("credBlob"), cred_blob),
                     (text("minPinLength"), min_pin_length),
+                    (text("pinComplexityPolicy"), complexity),
                     (text("largeBlobKey"), large_blob_key),
                 ],
             )
@@ -332,6 +335,11 @@ pub fn make_credential(u: &mut Unstructured<'_>, overrides: Overrides) -> Result
             _ => extensions = Some(Value::Map(vec![(text("minPinLength"), input)])),
         }
     }
+    extension_override(
+        &mut extensions,
+        "pinComplexityPolicy",
+        overrides.pin_complexity_policy,
+    );
     extension_override(&mut extensions, "largeBlobKey", overrides.large_blob_key);
     let options = match overrides.options {
         Some(options) => Some(options),

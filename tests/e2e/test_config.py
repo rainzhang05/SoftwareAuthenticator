@@ -197,7 +197,7 @@ def test_minimum_policy_failures_do_not_change_settings(ctap: Ctap2):
         ({1: 7, 2: [f"{i}.example" for i in range(9)]}, ERR.KEY_STORE_FULL),
         ({1: 7, 2: ["x" * 254]}, ERR.KEY_STORE_FULL),
         ({1: 7, 3: True}, ERR.PIN_NOT_SET),
-        ({1: 7, 4: True}, ERR.INVALID_PARAMETER),
+
         # Lowering the minimum precedes the missing-PIN and storage checks.
         ({1: 5, 2: ["x" * 254], 3: True}, ERR.PIN_POLICY_VIOLATION),
     ):
@@ -389,3 +389,69 @@ def test_pin_change_invalidates_configuration_token_and_preserves_policy(ctap: C
     for rp_id, expected in ((RP_ID, {"minPinLength": 6}), (OTHER_RP_ID, None)):
         credential = client.register(ctap, rp_id, client.ES256, extensions={"minPinLength": True})
         assert credential.auth_data.extensions == expected
+
+
+@pytest.mark.parametrize("value,valid", [
+    ("1234", False), ("abcd", False), ("Ab12", True), ("éA12", True),
+    ("🔐a12", True), ("é234", False), ("a٢٣٤", False), ("Ａ１２３", False),
+    ("éa1", False), ("é" * 30 + "a12", True), ("a1" + "a" * 61, True),
+])
+def test_complexity_first_pin_composition_and_boundaries(ctap, protocol, value, valid):
+    Config(ctap).set_min_pin_length(pin_complexity_policy=True)
+    assert _info(ctap)[0x1B] is True
+    pin = ClientPin(ctap, protocol)
+    if valid:
+        pin.set_pin(value)
+        assert pin.get_pin_token(value, ClientPin.PERMISSION.AUTHENTICATOR_CFG)
+    else:
+        with pytest.raises(CtapError) as excinfo:
+            pin.set_pin(value)
+        assert excinfo.value.code == ERR.PIN_POLICY_VIOLATION
+        assert _info(ctap)[4]["clientPin"] is False
+
+
+def test_complexity_transition_forces_replacement_and_invalidates_token(ctap, protocol):
+    pin = ClientPin(ctap, protocol)
+    pin.set_pin(PIN)
+    token = pin.get_pin_token(PIN, ClientPin.PERMISSION.AUTHENTICATOR_CFG)
+    config = Config(ctap, protocol, token)
+    config.set_min_pin_length(pin_complexity_policy=True)
+    assert _info(ctap)[0x1B] is True and _info(ctap)[0x0C] is True
+    with pytest.raises(CtapError) as excinfo:
+        config.toggle_always_uv()
+    assert excinfo.value.code == ERR.PIN_AUTH_INVALID
+    for replacement in (PIN, "letters", "567890"):
+        with pytest.raises(CtapError) as excinfo:
+            pin.change_pin(PIN, replacement)
+        assert excinfo.value.code == ERR.PIN_POLICY_VIOLATION
+    assert pin.get_pin_retries()[0] == MAX_RETRIES
+    pin.change_pin(PIN, "Ab1234")
+    config = _config(ctap, protocol, "Ab1234")
+    for value in (True, True, False):
+        config.set_min_pin_length(pin_complexity_policy=value)
+        assert _info(ctap)[0x1B] is True and _info(ctap)[0x0C] is False
+    config.set_min_pin_length()
+    assert _info(ctap)[0x1B] is True
+    ctap.reset()
+    assert _info(ctap)[0x1B] is False
+    pin.set_pin(PIN)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_complexity_signed_extension_authorization_types_and_composition(ctap, enabled):
+    Config(ctap).set_min_pin_length(rp_ids=[RP_ID], pin_complexity_policy=enabled)
+    for rp, value, expected in (
+        (RP_ID, True, {"pinComplexityPolicy": enabled, "minPinLength": 4, "hmac-secret": True}),
+        (OTHER_RP_ID, True, {"hmac-secret": True}),
+        (RP_ID, False, {"minPinLength": 4, "hmac-secret": True}),
+    ):
+        credential = client.register(ctap, rp, client.ES256, extensions={
+            "pinComplexityPolicy": value, "minPinLength": True, "hmac-secret": True,
+        })
+        assert credential.auth_data.extensions == expected
+        _, auth_data = client.authenticate(ctap, credential, extensions={"pinComplexityPolicy": True})
+        assert auth_data.extensions is None
+    for value in (1, "true", None, b"", [], {}):
+        with pytest.raises(CtapError) as excinfo:
+            client.register(ctap, OTHER_RP_ID, client.ES256, extensions={"pinComplexityPolicy": value})
+        assert excinfo.value.code == ERR.CBOR_UNEXPECTED_TYPE

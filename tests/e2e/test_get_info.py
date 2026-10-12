@@ -27,10 +27,9 @@ def test_get_info(ctap: Ctap2):
     assert "FIDO_2_2" not in info[1], "CTAP 2.3 6.4: FIDO_2_2 MUST not be present"
     assert set(info[2]) >= {
         "credBlob", "credProtect", "hmac-secret", "hmac-secret-mc",
-        "largeBlobKey", "minPinLength",
+        "largeBlobKey", "minPinLength", "pinComplexityPolicy",
     }, info[2]
     assert "largeBlob" not in info[2]
-    assert "pinComplexityPolicy" not in info[2]
     assert info[3] == client.DEFAULT_AAGUID
 
     options = info[4]
@@ -51,7 +50,10 @@ def test_get_info(ctap: Ctap2):
     assert info[0x0D] == 4, "minPINLength"
     assert info[0x10] == 8, "maxRPIDsForSetMinPINLength"
     assert info[0x1F] == [2, 3], "authenticatorConfigCommands"
-    assert 0x1B not in info, "pinComplexityPolicy"
+    assert info[0x1B] is False, "pinComplexityPolicy"
+    assert isinstance(info[0x1C], bytes)
+    assert info[0x1C] == b"https://github.com/rainzhang05/SoftwareAuthenticator/blob/main/docs/pin-complexity-policy.md"
+    assert ctap.info.pin_complexity_policy is False
     assert ctap.info.force_pin_change is False
     assert ctap.info.min_pin_length == 4
     assert ctap.info.max_rpids_for_min_pin == 8

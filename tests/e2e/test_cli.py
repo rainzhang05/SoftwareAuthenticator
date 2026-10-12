@@ -270,7 +270,7 @@ def test_ctrl_c_cancels_a_reset_waiting_for_approval(pqkey: Pqkey):
 def test_config_without_a_pin_and_idempotent_always_uv(pqkey: Pqkey):
     pqkey.start()
     assert pqkey.config() == {
-        "Always UV": "off", "Minimum PIN length": "4", "PIN change required": "no",
+        "Always UV": "off", "Minimum PIN length": "4", "PIN complexity": "off", "PIN change required": "no",
     }
     assert pqkey.ok("config", "always-uv", "off").startswith("Always UV: off.\n")
     output = pqkey.ok("config", "always-uv", "on")
@@ -428,7 +428,7 @@ def test_config_survives_restart_and_reset_restores_defaults(pqkey: Pqkey):
     pqkey.ok("config", "min-pin-length", "6", "--rp", "restart.config.example", "--yes", stdin=f"{PIN}\n")
     settings = pqkey.config()
     assert settings == {
-        "Always UV": "on", "Minimum PIN length": "6", "PIN change required": "yes",
+        "Always UV": "on", "Minimum PIN length": "6", "PIN complexity": "off", "PIN change required": "yes",
     }
     pqkey.ok("stop")
     pqkey.start()
@@ -448,7 +448,7 @@ def test_config_survives_restart_and_reset_restores_defaults(pqkey: Pqkey):
         assert credential.auth_data.extensions == {"minPinLength": 6}
     pqkey.ok("reset", "--yes")
     assert pqkey.config() == {
-        "Always UV": "off", "Minimum PIN length": "4", "PIN change required": "no",
+        "Always UV": "off", "Minimum PIN length": "4", "PIN complexity": "off", "PIN change required": "no",
     }
     with client.open_device(pqkey.status()["Device"]) as device:
         credential = client.register(
@@ -547,3 +547,31 @@ def test_replacement_old_id_rejection_survives_restart_and_deletion(pqkey: Pqkey
         if not deleted:
             replacement = next(row for row in listing if row[1] == "replacement (Replacement)")
             assert pqkey.ok("passkeys", "delete", replacement[3], "--yes", stdin=f"{PIN}\n") == "Passkey deleted.\n"
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_pin_complexity_confirmation_replacement_nfc_restart_and_reset(pqkey, existing):
+    pqkey.start()
+    if existing:
+        pqkey.ok("pin", stdin=f"{PIN}\n")
+    assert pqkey.ok("config", "pin-complexity", stdin="n\n") == "Nothing was changed.\n"
+    assert pqkey.config()["PIN complexity"] == "off"
+    output = pqkey.ok("config", "pin-complexity", "--yes", stdin=f"{PIN}\n" if existing else "")
+    assert "PIN complexity: on." in output
+    assert pqkey.config()["PIN change required"] == ("yes" if existing else "no")
+    assert "PIN complexity: on." in pqkey.ok("config", "pin-complexity")
+    prefix = f"{PIN}\n" if existing else ""
+    error = pqkey.error("pin", stdin=prefix + "5678\n")
+    assert "ASCII letter" in error and "ASCII digit" in error
+    assert "5678" not in error
+    assert "ASCII letter" in pqkey.error("pin", stdin=prefix + "e\u0301234\n")
+    pqkey.ok("pin", stdin=prefix + "e\u0301A12\n")
+    pqkey.ok("stop")
+    pqkey.start()
+    assert pqkey.config()["PIN complexity"] == "on"
+    assert pqkey.config()["PIN change required"] == "no"
+    with client.open_device(pqkey.status()["Device"]) as device:
+        ClientPin(Ctap2(device)).get_pin_token("éA12", ClientPin.PERMISSION.AUTHENTICATOR_CFG)
+    pqkey.ok("reset", "--yes")
+    assert pqkey.config()["PIN complexity"] == "off"
+    pqkey.ok("pin", stdin=f"{PIN}\n")

@@ -75,7 +75,11 @@ impl Session {
     }
 
     fn change(&self, app: &mut CtapApp<'_>) -> Vec<u8> {
-        let new = self.encrypted(&padded_pin(NEW).unwrap()[..]);
+        self.change_to(app, NEW)
+    }
+
+    fn change_to(&self, app: &mut CtapApp<'_>, pin: &[u8]) -> Vec<u8> {
+        let new = self.encrypted(&padded_pin(pin).unwrap()[..]);
         let old = self.encrypted(&pin_hash(PIN)[..]);
         let message = [new.as_slice(), old.as_slice()].concat();
         self.command(
@@ -652,4 +656,167 @@ fn reset_reports_unconfirmed_metadata_even_when_defaults_are_flushed() {
     .unwrap();
     assert_eq!(outcome, CommitDurability::Unconfirmed);
     assert_defaults(&path, true, &id, &record);
+}
+
+#[test]
+fn legacy_and_corrupt_complexity_records_preserve_file_store_authority() {
+    for managed in [false, true] {
+        for invalid in [None, Some(Value::Null), Some(Value::Bool(true))] {
+            let scratch = TempDir::new();
+            let path = scratch.path().join("state");
+            setup(&path, managed);
+            let mut store = FileStore::open(&path).unwrap();
+            let record = PinStateRecord {
+                pin_hash: Some(*pin_hash(PIN)),
+                min_pin_length_rp_ids: Vec::new(),
+                ..PinStateRecord::default()
+            };
+            store.set_pin_state(&record).unwrap();
+            let encoded = codec::encode_pin_state(&record).unwrap();
+            let Value::Map(mut fields) = ciborium::de::from_reader(&encoded[..]).unwrap() else {
+                panic!("record")
+            };
+            fields.retain(|(key, _)| *key != int(10));
+            if let Some(value) = invalid.clone() {
+                fields.push((int(10), value.clone()));
+                if value == Value::Bool(true) {
+                    fields.push((int(10), value));
+                }
+            }
+            let mut plaintext = Vec::new();
+            ciborium::ser::into_writer(&Value::Map(fields), &mut plaintext).unwrap();
+            let keys = store.credential_keys().unwrap().unwrap();
+            let encrypted = envelope::seal(
+                &keys.record,
+                RecordType::PinState,
+                PIN_STATE_FILE,
+                &plaintext,
+            )
+            .unwrap();
+            fs::write(path.join(PIN_STATE_FILE), &encrypted).unwrap();
+            let mut engine = app(&path);
+            let session = Session::new(&mut engine, ClassicPinProtocol::V2);
+            if invalid.is_none() {
+                assert!(!store.pin_state().unwrap().unwrap().pin_complexity_policy);
+                assert_eq!(session.token(&mut engine, PIN)[0], CTAP2_OK);
+            } else {
+                assert!(store.pin_state().is_err());
+                assert_eq!(session.token(&mut engine, PIN), [CTAP2_ERR_PIN_BLOCKED]);
+                assert_eq!(session.set(&mut engine), [CTAP2_ERR_PIN_AUTH_INVALID]);
+                assert_eq!(fs::read(path.join(PIN_STATE_FILE)).unwrap(), encrypted);
+                assert_eq!(engine.call(&[CTAP_CMD_RESET]), [CTAP2_OK]);
+                assert!(!store.pin_state().unwrap().unwrap().pin_complexity_policy);
+            }
+        }
+    }
+}
+
+#[test]
+fn complexity_replacement_publishes_once_after_confirmed_authorization() {
+    for managed in [false, true] {
+        for protocol in PROTOCOLS {
+            for write in 1..=3 {
+                for failing in PRE.into_iter().chain(POST) {
+                    let scratch = TempDir::new();
+                    let path = scratch.path().join("state");
+                    setup(&path, managed);
+                    let mut engine = app(&path);
+                    let session = Session::new(&mut engine, protocol);
+                    assert_eq!(session.set(&mut engine), [CTAP2_OK]);
+                    let token = session
+                        .shared
+                        .decrypt(&bytes(field(&session.token(&mut engine, PIN), 2)))
+                        .unwrap();
+                    assert_eq!(
+                        configure(
+                            &mut engine,
+                            protocol,
+                            Some(&token),
+                            3,
+                            Some(Value::Map(vec![(int(4), Value::Bool(true))]))
+                        ),
+                        [CTAP2_OK]
+                    );
+                    observation::take();
+                    let response =
+                        fault(failing, write, || session.change_to(&mut engine, b"Ab12"));
+                    let published = write == 3 && POST.contains(&failing);
+                    assert_eq!(
+                        response,
+                        [if published {
+                            CTAP2_OK
+                        } else {
+                            CTAP2_ERR_PROCESSING
+                        }]
+                    );
+                    let seen = observation::take();
+                    assert_eq!(seen[0], usize::from(write > 1));
+                    assert_eq!(seen[1], usize::from(write > 1));
+                    let saved = FileStore::open(&path)
+                        .unwrap()
+                        .pin_state()
+                        .unwrap()
+                        .unwrap();
+                    assert!(saved.pin_complexity_policy);
+                    assert_eq!(saved.force_pin_change, !published);
+                    assert_eq!(
+                        saved.pin_hash,
+                        Some(*pin_hash(if published { b"Ab12" } else { PIN }))
+                    );
+                    for instance in [&mut engine, &mut app(&path)] {
+                        let session = Session::new(instance, protocol);
+                        assert_eq!(
+                            session.token(instance, if published { b"Ab12" } else { PIN })[0],
+                            if published {
+                                CTAP2_OK
+                            } else {
+                                CTAP2_ERR_PIN_POLICY_VIOLATION
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn first_pin_obeys_only_published_complexity_configuration() {
+    for managed in [false, true] {
+        for protocol in PROTOCOLS {
+            for failing in PRE.into_iter().chain(POST) {
+                let scratch = TempDir::new();
+                let path = scratch.path().join("state");
+                setup(&path, managed);
+                let mut engine = app(&path);
+                let published = POST.contains(&failing);
+                assert_eq!(
+                    fault(failing, 1, || configure(
+                        &mut engine,
+                        protocol,
+                        None,
+                        3,
+                        Some(Value::Map(vec![(int(4), Value::Bool(true))]))
+                    )),
+                    [if published {
+                        CTAP2_OK
+                    } else {
+                        CTAP2_ERR_PROCESSING
+                    }]
+                );
+                for instance in [&mut engine, &mut app(&path)] {
+                    let session = Session::new(instance, protocol);
+                    // Each independent live/reopened engine sees the same preceding policy.
+                    assert_eq!(
+                        session.set(instance),
+                        [if published {
+                            CTAP2_ERR_PIN_POLICY_VIOLATION
+                        } else {
+                            CTAP2_OK
+                        }]
+                    );
+                }
+            }
+        }
+    }
 }

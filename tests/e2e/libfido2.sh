@@ -89,6 +89,8 @@ test_token_info() {
   # parameter sets, ESP256, ESP384, ES512, ESP512, ES256K, Ed25519 and Ed448
   # and RS384, RS512, PS256, PS384 and PS512 show up as unknown public-key
   # algorithms; RS256 is named rs256.
+  grep -qE '^extension strings: (.*, )?pinComplexityPolicy(,|$)' <<<"$info" \
+    || fail "pinComplexityPolicy is not advertised"
   local expected='algorithms: es256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), es384 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), eddsa (public-key), unknown (public-key), unknown (public-key), rs256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key)'
   grep -qxF "$expected" <<<"$info" || fail "expected '$expected'"
   grep -qE '^aaguid: 5931e805a1664eb7845a7f6aa93d9cd8$' <<<"$info" || fail "unexpected AAGUID"
@@ -153,8 +155,15 @@ run_test "U2F ES256 fido2-cred -M -u and fido2-assert -G -u" test_register_and_a
 run_test "U2F registration asserted over CTAP2" test_register_and_assert es256 u2f ctap2
 run_test "CTAP2 registration asserted over U2F" test_register_and_assert es256 ctap2 u2f
 
+test_pin_policy() {
+  python3 tests/e2e/libfido2_pin.py "$device" "${E2E_WORK:?E2E_WORK must name the disposable key directory}/auto-approve-state"
+}
+
+run_test "libfido2 numeric PIN compatibility and enabled complexity" test_pin_policy
+
 if [ "$failures" -ne 0 ]; then
   echo "$failures libfido2 test(s) failed"
   exit 1
 fi
 echo "All libfido2 tests passed"
+

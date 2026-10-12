@@ -324,6 +324,7 @@ fn ctap_request(dir: &Path) {
                     (text("credProtect"), int(2)),
                     (text("hmac-secret"), Value::Bool(true)),
                     (text("minPinLength"), Value::Bool(true)),
+                    (text("pinComplexityPolicy"), Value::Bool(true)),
                 ]),
             ),
             (int(8), bytes(&[0x33; 32])),
