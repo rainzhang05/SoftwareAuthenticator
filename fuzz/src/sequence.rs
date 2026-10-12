@@ -2770,6 +2770,10 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 pin_set = true;
             }
             Op::GetNextAssertion => variant(&mut output, 5, 30),
+            Op::Presence(value) => {
+                variant(&mut output, 12, 30);
+                output.push(*value);
+            }
             Op::GetInfo => variant(&mut output, 9, 30),
             Op::Reset => {
                 variant(&mut output, 11, 30);

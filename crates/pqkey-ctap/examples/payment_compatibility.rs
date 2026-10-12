@@ -11,7 +11,12 @@ fn int(v: i32) -> Value {
 fn text(v: &str) -> Value {
     Value::Text(v.into())
 }
-fn map(entries: Vec<(Value, Value)>) -> Value {
+fn map(mut entries: Vec<(Value, Value)>) -> Value {
+    entries.sort_by_cached_key(|(key, _)| {
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(key, &mut encoded).unwrap();
+        (encoded[0] >> 5, encoded.len(), encoded)
+    });
     Value::Map(entries)
 }
 fn get(v: &Value, key: Value) -> &Value {

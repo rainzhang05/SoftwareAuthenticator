@@ -197,6 +197,7 @@ fn false_and_absent_are_no_ops_and_legacy_credentials_return_false() {
 fn malformed_inputs_return_authenticator_type_errors_without_writes() {
     for input in [
         Value::Null,
+        Value::Float(1.0),
         int(0),
         int(1),
         text("true"),
