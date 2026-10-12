@@ -97,8 +97,7 @@ impl CtapApp<'_> {
             }
             persistent.force_pin_change = true;
         }
-        // No complexity policy is implemented. The standard has no unsupported
-        // policy branch; rejecting true avoids advertising an unenforced one.
+        // No complexity policy is implemented; an enabled policy is rejected.
         if bool_parameter(4)? {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
