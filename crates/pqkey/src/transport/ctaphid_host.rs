@@ -154,13 +154,13 @@ const LOG_PREVIEW: usize = 8;
 
 /// The CTAPHID commands this transport handles (CTAP 2.3 §11.2.9), with the
 /// code they carry in an initialization packet, high bit cleared. Every other
-/// code, CTAPHID_WINK and CTAPHID_LOCK included, is answered with
-/// ERR_INVALID_CMD.
+/// code is answered with ERR_INVALID_CMD.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Command {
     Ping = 0x01,
     Msg = 0x03,
+    Lock = 0x04,
     Init = 0x06,
     Cbor = 0x10,
     Cancel = 0x11,
@@ -183,6 +183,7 @@ impl TryFrom<u8> for Command {
         Ok(match code {
             0x01 => Command::Ping,
             0x03 => Command::Msg,
+            0x04 => Command::Lock,
             0x06 => Command::Init,
             0x10 => Command::Cbor,
             0x11 => Command::Cancel,
@@ -205,6 +206,7 @@ pub struct Version {
 #[repr(u8)]
 pub enum ErrorCode {
     InvalidCommand = 0x01,
+    InvalidParameter = 0x02,
     InvalidLength = 0x03,
     InvalidSeq = 0x04,
     Timeout = 0x05,
@@ -313,6 +315,8 @@ impl OutgoingFrame {
 
 pub struct CtaphidHost<R = OsRng> {
     state: State,
+    /// An exclusive channel lease, independent of transaction ownership.
+    lease: Option<(u32, u64)>,
     /// The message being received.
     message: Vec<u8>,
     pending: VecDeque<OutgoingFrame>,
@@ -347,6 +351,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
     pub fn with_rng(rng: R) -> Self {
         Self {
             state: State::Idle,
+            lease: None,
             message: Vec::with_capacity(MAX_MESSAGE_SIZE),
             pending: VecDeque::new(),
             next_token: 0,
@@ -372,6 +377,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
     /// Handle one packet from the host, received at `now` (milliseconds).
     pub fn handle_frame(&mut self, frame: &CtapHidFrame, now: u64) {
+        self.expire_lease(now);
         let packet = frame.as_bytes();
         let channel = u32::from_be_bytes(packet[..4].try_into().unwrap());
         if packet[4] & 0x80 == 0 {
@@ -396,6 +402,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
     /// Expire a message whose next packet is overdue.
     pub fn handle_timeout(&mut self, now: u64) {
+        self.expire_lease(now);
         self.denied_polls
             .retain(|poll| now.saturating_sub(poll.last_poll) <= U2F_POLL_TIMEOUT_MS);
         if let Some(poll) = &self.u2f
@@ -518,7 +525,21 @@ impl<R: CryptoRng> CtaphidHost<R> {
                 poll.started.saturating_add(U2F_RESPONSE_WAIT_MS).min(poll.deadline())
             } else { poll.deadline() }
         });
-        transaction.into_iter().chain(polling).min()
+        transaction
+            .into_iter()
+            .chain(polling)
+            .chain(self.lease.map(|(_, expires)| expires))
+            .min()
+    }
+
+    fn expire_lease(&mut self, now: u64) {
+        if self.lease.is_some_and(|(_, expires)| now >= expires) {
+            self.lease = None;
+        }
+    }
+
+    fn lease_conflicts(&self, channel: u32) -> bool {
+        self.lease.is_some_and(|(owner, _)| owner != channel)
     }
 
     /// The CBOR or MSG request the app should work on next,
@@ -705,6 +726,10 @@ impl<R: CryptoRng> CtaphidHost<R> {
     /// channel, discarding the current transaction, buffers and state as
     /// quickly as possible"; on the broadcast channel it allocates one.
     fn handle_init(&mut self, channel: u32, length: usize, data: &[u8]) {
+        if self.lease_conflicts(channel) {
+            self.enqueue_error(channel, ErrorCode::ChannelBusy);
+            return;
+        }
         match self.busy_channel() {
             Some(busy) if busy != channel => {
                 self.enqueue_error(channel, ErrorCode::ChannelBusy);
@@ -797,6 +822,10 @@ impl<R: CryptoRng> CtaphidHost<R> {
         data: &[u8],
         now: u64,
     ) {
+        if self.lease_conflicts(channel) {
+            self.enqueue_error(channel, ErrorCode::ChannelBusy);
+            return;
+        }
         if let Some(busy) = self.busy_channel() {
             // §11.2.5.1: "If an application tries to access the device from a
             // different channel while the device is busy with a transaction,
@@ -827,7 +856,9 @@ impl<R: CryptoRng> CtaphidHost<R> {
             return;
         }
         let command = match command {
-            Some(command @ (Command::Ping | Command::Cbor | Command::Msg)) => command,
+            Some(command @ (Command::Ping | Command::Cbor | Command::Msg | Command::Lock)) => {
+                command
+            }
             _ => {
                 self.finish_error(channel, ErrorCode::InvalidCommand);
                 return;
@@ -837,6 +868,7 @@ impl<R: CryptoRng> CtaphidHost<R> {
         // (§11.2.9.1.2: "BCNT 1..(n + 1)").
         if length > MAX_MESSAGE_SIZE
             || (matches!(command, Command::Cbor | Command::Msg) && length == 0)
+            || (command == Command::Lock && length != 1)
         {
             self.finish_error(channel, ErrorCode::InvalidLength);
             return;
@@ -893,6 +925,17 @@ impl<R: CryptoRng> CtaphidHost<R> {
     }
 
     fn complete_message(&mut self, channel: u32, command: Command, now: u64) {
+        if command == Command::Lock {
+            let seconds = self.message[0];
+            if seconds > 10 {
+                self.finish_error(channel, ErrorCode::InvalidParameter);
+            } else {
+                self.lease = (seconds != 0)
+                    .then_some((channel, now.saturating_add(u64::from(seconds) * 1_000)));
+                self.enqueue_message(channel, command, &[]);
+            }
+            return;
+        }
         if command == Command::Msg {
             if let Some(poll) = &mut self.u2f {
                 if poll.channel == channel && poll.request == self.message {
@@ -1053,6 +1096,110 @@ impl<R: CryptoRng> CtaphidHost<R> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lock_validation_renewal_and_exact_expiry() {
+        let mut host = host();
+        for payload in [&[][..], &[1, 2][..], &[0; 70][..]] {
+            send(&mut host, FIRST, Command::Lock, payload, 0);
+            assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidLength)]);
+        }
+        send(&mut host, FIRST, Command::Lock, &[10], 100);
+        assert_eq!(sent(&mut host), [message(FIRST, Command::Lock, &[])]);
+        for value in [11, 255] {
+            send(&mut host, FIRST, Command::Lock, &[value], 200);
+            assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidParameter)]);
+            assert_eq!(host.lease, Some((FIRST, 10_100)));
+        }
+        send(&mut host, SECOND, Command::Lock, &[0], 300);
+        assert_eq!(sent(&mut host), [error(SECOND, ErrorCode::ChannelBusy)]);
+        send(&mut host, FIRST, Command::Lock, &[1], 500);
+        sent(&mut host);
+        assert_eq!(host.next_deadline(), Some(1_500));
+        for now in [1_499, 1_500] {
+            send(&mut host, SECOND, Command::Ping, &[], now);
+            let expected = if now == 1_499 {
+                error(SECOND, ErrorCode::ChannelBusy)
+            } else {
+                message(SECOND, Command::Ping, &[])
+            };
+            assert_eq!(sent(&mut host), [expected]);
+        }
+        assert!(host.lease.is_none());
+    }
+
+    #[test]
+    fn unlock_and_expiry_do_not_complete_selected_responses() {
+        for unlock in [false, true] {
+            let mut host = host();
+            send(&mut host, FIRST, Command::Lock, &[1], 0);
+            sent(&mut host);
+            if unlock {
+                send(&mut host, FIRST, Command::Lock, &[0], 10);
+            } else {
+                send(&mut host, FIRST, Command::Ping, &[42; MAX_MESSAGE_SIZE], 10);
+                host.handle_timeout(1_000);
+            }
+            assert!(host.lease.is_none());
+            let selected = host.next_outgoing_frame().unwrap();
+            send(&mut host, SECOND, Command::Ping, &[], 1_001);
+            assert!(host.is_outgoing_current(&selected));
+            assert_eq!(host.busy_channel(), Some(FIRST));
+            let replies = sent(&mut host);
+            assert_eq!(replies.last(), Some(&error(SECOND, ErrorCode::ChannelBusy)));
+            assert!(host.busy_channel().is_none());
+            send(&mut host, SECOND, Command::Ping, &[], 1_002);
+            assert_eq!(sent(&mut host), [message(SECOND, Command::Ping, &[])]);
+        }
+    }
+
+    #[test]
+    fn lock_init_cancel_reserved_channels_and_reset_are_independent() {
+        let mut host = host_with_channels(&[FIRST]);
+        assert_eq!(init_on(&mut host, BROADCAST_CID).channel, BROADCAST_CID);
+        send(&mut host, FIRST, Command::Lock, &[10], 0);
+        let selected = host.next_outgoing_frame().unwrap();
+        for cid in [SECOND, 0, BROADCAST_CID] {
+            send(&mut host, cid, Command::Init, &[0; 8], 1);
+        }
+        send(&mut host, SECOND, Command::Cancel, &[], 2);
+        send(&mut host, FIRST, Command::Init, &[0; 8], 3);
+        assert!(!host.is_outgoing_current(&selected));
+        assert!(!host.outgoing_frame_written(&selected));
+        assert_eq!(host.lease, Some((FIRST, 10_000)));
+        assert_eq!(sent(&mut host).len(), 4);
+        host.reset_u2f();
+        assert_eq!(host.lease, Some((FIRST, 10_000)));
+        send(&mut host, FIRST, Command::Lock, &[0], 4);
+        let selected = host.next_outgoing_frame().unwrap();
+        send(&mut host, FIRST, Command::Init, &[0; 8], 5);
+        assert!(!host.is_outgoing_current(&selected));
+        assert!(host.lease.is_none());
+    }
+
+    #[test]
+    fn lease_expiry_preserves_receiving_processing_and_partial_transmission() {
+        for phase in 0..3 {
+            let mut host = host();
+            send(&mut host, FIRST, Command::Lock, &[1], 0);
+            sent(&mut host);
+            if phase == 0 {
+                host.handle_frame(&message_packets(FIRST, 1, &[7; 100])[0], 900);
+            } else {
+                start_cbor(&mut host, FIRST, &[4], 900);
+                if phase == 2 {
+                    host.app_response(vec![8; MAX_MESSAGE_SIZE], 901, None);
+                    let first = host.next_outgoing_frame().unwrap();
+                    assert!(host.outgoing_frame_written(&first));
+                }
+            }
+            host.handle_timeout(1_000);
+            assert!(host.lease.is_none());
+            assert_eq!(host.busy_channel(), Some(FIRST));
+            send(&mut host, SECOND, Command::Ping, &[], 1_000);
+            assert_eq!(host.busy_channel(), Some(FIRST));
+        }
+    }
+
     #[test]
     fn failed_init_allocation_does_not_replace_an_unwritten_reply() {
         let mut host = host_with_channels(&[0; 128]);
@@ -1924,9 +2071,7 @@ mod tests {
     #[test]
     fn requests_the_app_does_not_answer_are_invalid_commands() {
         let mut host = host();
-        // WINK and LOCK (not advertised), and
-        // an undefined command code.
-        for command in [0x08, 0x04, 0x02] {
+        for command in [0x08, 0x02] {
             host.handle_frame(&message_packets(FIRST, command, &[0; 70])[0], 0);
             assert_eq!(sent(&mut host), [error(FIRST, ErrorCode::InvalidCommand)]);
         }

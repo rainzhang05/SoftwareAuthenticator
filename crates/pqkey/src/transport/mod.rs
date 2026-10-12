@@ -312,6 +312,7 @@ impl<D: HidDevice> Transport<'_, D> {
                 thread::sleep(resume.saturating_duration_since(Instant::now()));
             }
             self.shutdown.check()?;
+            self.host.handle_timeout(self.now());
             if !self.host.is_outgoing_current(&frame) {
                 continue;
             }
