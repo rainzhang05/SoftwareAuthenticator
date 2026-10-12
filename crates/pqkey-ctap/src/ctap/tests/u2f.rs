@@ -249,8 +249,11 @@ fn u2f_and_ctap2_share_a_sealed_credential_and_counter() {
 
 #[test]
 fn ctap2_non_discoverable_es256_credentials_work_over_u2f() {
-    let mut app = test_app([4; 16]);
-    for protection in [1, 2, 3] {
+    for (payment, protection) in [false, true]
+        .into_iter()
+        .flat_map(|payment| (1..=3).map(move |policy| (payment, policy)))
+    {
+        let mut app = test_app([4; 16]);
         let response = ctap(
             &mut app,
             1,
@@ -273,15 +276,23 @@ fn ctap2_non_discoverable_es256_credentials_work_over_u2f() {
                 ),
                 (
                     6,
-                    Value::Map(vec![(
-                        Value::Text("credProtect".into()),
-                        Value::Integer(protection.into()),
-                    )]),
+                    Value::Map(vec![
+                        (
+                            Value::Text("credProtect".into()),
+                            Value::Integer(protection.into()),
+                        ),
+                        (
+                            Value::Text("thirdPartyPayment".into()),
+                            Value::Bool(payment),
+                        ),
+                    ]),
                 ),
             ],
         );
         let auth = response_auth_data(&response);
-        let id = &auth[55..162];
+        let length = usize::from(u16::from_be_bytes([auth[53], auth[54]]));
+        let id = &auth[55..55 + length];
+        assert_eq!(length, if payment { 33 } else { 107 });
         assert_eq!(
             app.call_u2f(&auth_request(7, id, &application())),
             if protection == 3 {
@@ -297,11 +308,61 @@ fn ctap2_non_discoverable_es256_credentials_work_over_u2f() {
             let crate::CredentialSecretKey::P256(key) = key else {
                 panic!("ES256 key")
             };
-            verify_auth(
-                &app.call_u2f(&auth_request(3, id, &application())),
-                key.verifying_key().to_sec1_point(false).as_bytes(),
-                &application(),
-                1,
+            assert_eq!(
+                verify_auth(
+                    &app.call_u2f(&auth_request(3, id, &application())),
+                    key.verifying_key().to_sec1_point(false).as_bytes(),
+                    &application(),
+                    1,
+                ),
+                1
+            );
+            let assertion = ctap(
+                &mut app,
+                2,
+                vec![
+                    (1, Value::Text(RP.into())),
+                    (2, Value::Bytes(CHALLENGE.to_vec())),
+                    (3, Value::Array(vec![descriptor(id)])),
+                    (
+                        4,
+                        Value::Map(vec![(
+                            Value::Text("thirdPartyPayment".into()),
+                            Value::Bool(true),
+                        )]),
+                    ),
+                ],
+            );
+            let auth = response_auth_data(&assertion);
+            assert_eq!(u32::from_be_bytes(auth[33..37].try_into().unwrap()), 2);
+            let output: Value = ciborium::de::from_reader(&auth[37..]).unwrap();
+            assert_eq!(
+                output,
+                Value::Map(vec![(
+                    Value::Text("thirdPartyPayment".into()),
+                    Value::Bool(payment)
+                )])
+            );
+            let Value::Map(response) = ciborium::de::from_reader(&assertion[1..]).unwrap() else {
+                panic!("map")
+            };
+            let signature = response
+                .iter()
+                .find(|(key, _)| *key == Value::Integer(3.into()))
+                .unwrap()
+                .1
+                .as_bytes()
+                .unwrap();
+            let message = [auth.as_slice(), &CHALLENGE].concat();
+            key.verifying_key()
+                .verify(&message, &Signature::from_der(signature).unwrap())
+                .unwrap();
+            assert_eq!(
+                app.credential_for_rp(id, RP)
+                    .unwrap()
+                    .unwrap()
+                    .third_party_payment,
+                payment
             );
         }
     }

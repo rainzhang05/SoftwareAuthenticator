@@ -22,7 +22,7 @@ fn record(id: &[u8]) -> CredentialRecord {
         cred_random_without_uv: [2; 32],
         cred_blob: Some(vec![7; 32]),
         large_blob_key: Some([9; 32]),
-        third_party_payment: false,
+        third_party_payment: id != b"new",
         cred_protect: 1,
         sign_count: 0,
         created_at: 0,
@@ -45,10 +45,16 @@ fn setup(path: &Path, migrating: bool) -> FileStore {
 
 fn assert_set(path: &Path, committed: bool) {
     let store = FileStore::open(path).unwrap().with_max_credentials(3);
-    assert!(store.get(b"other").unwrap().is_some());
+    assert!(store.get(b"other").unwrap().unwrap().third_party_payment);
     assert_eq!(store.get(b"new").unwrap().is_some(), committed);
+    if committed {
+        assert!(!store.get(b"new").unwrap().unwrap().third_party_payment);
+    }
     for old in [b"old".as_slice(), b"duplicate"] {
         assert_eq!(store.get(old).unwrap().is_some(), !committed);
+        if !committed {
+            assert!(store.get(old).unwrap().unwrap().third_party_payment);
+        }
     }
     assert_eq!(store.count().unwrap(), if committed { 2 } else { 3 });
     assert_eq!(store.count().unwrap(), store.list().unwrap().len());

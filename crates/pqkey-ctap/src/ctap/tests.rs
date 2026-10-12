@@ -24,4 +24,5 @@ mod reset;
 mod response_size;
 mod storage;
 mod support;
+mod third_party_payment;
 mod u2f;

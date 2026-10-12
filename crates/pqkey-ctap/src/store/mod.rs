@@ -100,7 +100,7 @@ mod record;
 pub(crate) use record::MAX_CRED_BLOB_LENGTH;
 pub(crate) use record::SealableKeyMaterial;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use envelope::SEALED_ID_OVERHEAD;
 pub use file::FileStore;
