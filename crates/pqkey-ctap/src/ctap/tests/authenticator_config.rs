@@ -944,3 +944,109 @@ fn complexity_validates_the_whole_request_before_publication() {
     }
 }
 
+#[test]
+fn complexity_enforces_ascii_composition_and_existing_length_boundaries() {
+    let cases = [
+        ("1234".to_owned(), false),
+        ("abcd".to_owned(), false),
+        ("Ab12".to_owned(), true),
+        ("éA12".to_owned(), true),
+        ("🔐a12".to_owned(), true),
+        ("é234".to_owned(), false),
+        ("a٢٣٤".to_owned(), false),
+        ("Ａ１２３".to_owned(), false),
+        ("éa1".to_owned(), false),
+        (format!("{}a12", "é".repeat(30)), true),
+        (format!("{}a1", "é".repeat(31)), false),
+        (format!("a1{}", "a".repeat(61)), true),
+        (format!("a1{}", "a".repeat(62)), false),
+    ];
+    for protocol in PROTOCOLS {
+        for (pin, valid) in &cases {
+            let mut app = test_app([0x8b; 16]);
+            configure(
+                &mut app,
+                3,
+                Some(canonical_map(vec![(int(4), Value::Bool(true))])),
+                None,
+            )
+            .unwrap();
+            let mut padded = pin.as_bytes().to_vec();
+            padded.resize(64, 0);
+            assert_eq!(
+                set_pin_padded(&mut app, protocol, &padded),
+                if *valid {
+                    Ok(vec![CTAP2_OK])
+                } else {
+                    Err(CTAP2_ERR_PIN_POLICY_VIOLATION)
+                }
+            );
+            assert_eq!(app.pin_state.is_set(), *valid);
+        }
+        let mut app = test_app([0x8c; 16]);
+        configure(
+            &mut app,
+            3,
+            Some(canonical_map(vec![
+                (int(1), int(8)),
+                (int(4), Value::Bool(true)),
+            ])),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            set_pin_padded(&mut app, protocol, &padded_pin("🔐a12".as_bytes())),
+            Err(CTAP2_ERR_PIN_POLICY_VIOLATION)
+        );
+        set_pin_padded(&mut app, protocol, &padded_pin(b"abcd1234")).unwrap();
+    }
+}
+
+#[test]
+fn complexity_replacement_authorizes_old_pin_and_repeated_enable_keeps_tokens() {
+    for protocol in PROTOCOLS {
+        for old in [b"1234".as_slice(), b"Ab12".as_slice()] {
+            let store = TestStore::new();
+            let mut app = new_app(store.clone(), [0x8d; 16]);
+            set_pin_padded(&mut app, protocol, &padded_pin(old)).unwrap();
+            token(&mut app, protocol, PIN_PERMISSION_ACFG);
+            let params = || canonical_map(vec![(int(4), Value::Bool(true))]);
+            configure(&mut app, 3, Some(params()), Some(protocol)).unwrap();
+            assert_eq!(
+                get_pin_uv_auth_token(&mut app, protocol, old, PIN_PERMISSION_ACFG.into(), None),
+                Err(CTAP2_ERR_PIN_POLICY_VIOLATION)
+            );
+            assert_eq!(
+                change_pin(&mut app, protocol, b"0000", b"5678"),
+                Err(CTAP2_ERR_PIN_INVALID)
+            );
+            assert_eq!(get_pin_retries(&mut app), (7, None));
+            assert_eq!(
+                change_pin(&mut app, protocol, old, b"5678"),
+                Err(CTAP2_ERR_PIN_POLICY_VIOLATION)
+            );
+            assert_eq!(get_pin_retries(&mut app), (8, None));
+            assert!(app.pin_state.persistent().force_pin_change);
+            assert_eq!(
+                change_pin(&mut app, protocol, old, old),
+                Err(CTAP2_ERR_PIN_POLICY_VIOLATION)
+            );
+            change_pin(&mut app, protocol, old, b"New9").unwrap();
+            assert!(!app.pin_state.persistent().force_pin_change);
+            token(&mut app, protocol, PIN_PERMISSION_ACFG);
+            for params in [
+                Some(params()),
+                Some(canonical_map(vec![(int(4), Value::Bool(false))])),
+                None,
+            ] {
+                configure(&mut app, 3, params, Some(protocol)).unwrap();
+                assert!(app.pin_state.persistent().pin_complexity_policy);
+                assert!(!app.pin_state.persistent().force_pin_change);
+                assert_eq!(app.pin_state.pin_uv_auth_token(), Some(TOKEN));
+            }
+            change_pin(&mut app, protocol, b"New9", "éA23".as_bytes()).unwrap();
+            assert!(app.pin_state.pin_uv_auth_token().is_none());
+            assert!(store.pin_state().unwrap().unwrap().pin_complexity_policy);
+        }
+    }
+}

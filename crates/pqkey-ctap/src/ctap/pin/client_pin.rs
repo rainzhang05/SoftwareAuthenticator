@@ -75,7 +75,11 @@ const MAX_PIN_BYTES: usize = 63;
 /// bytes").  A newPin that is not UTF-8 has no length in code points, so it is
 /// refused too ("An authenticator MAY impose arbitrary, additional constraints
 /// on PINs").
-fn decode_new_pin(padded_new_pin: &[u8], minimum: u8) -> Result<(Zeroizing<Vec<u8>>, u8), u8> {
+fn decode_new_pin(
+    padded_new_pin: &[u8],
+    minimum: u8,
+    complexity: bool,
+) -> Result<(Zeroizing<Vec<u8>>, u8), u8> {
     if padded_new_pin.len() != PADDED_PIN_LENGTH {
         return Err(CTAP1_ERR_INVALID_PARAMETER);
     }
@@ -91,7 +95,11 @@ fn decode_new_pin(padded_new_pin: &[u8], minimum: u8) -> Result<(Zeroizing<Vec<u
         .map_err(|_| CTAP2_ERR_PIN_POLICY_VIOLATION)?
         .chars()
         .count();
-    if code_points < usize::from(minimum) {
+    if code_points < usize::from(minimum)
+        || (complexity
+            && (!new_pin.iter().any(u8::is_ascii_alphabetic)
+                || !new_pin.iter().any(u8::is_ascii_digit)))
+    {
         return Err(CTAP2_ERR_PIN_POLICY_VIOLATION);
     }
     Ok((Zeroizing::new(new_pin.to_vec()), code_points as u8))
@@ -128,8 +136,12 @@ impl CtapApp<'_> {
     ) -> Result<(Zeroizing<[u8; 16]>, u8), u8> {
         let padded_new_pin =
             decrypt(protocol, keys, new_pin_enc).ok_or(CTAP2_ERR_PIN_AUTH_INVALID)?;
-        let (new_pin, length) =
-            decode_new_pin(&padded_new_pin, self.pin_state.persistent().min_pin_length)?;
+        let policy = self.pin_state.persistent();
+        let (new_pin, length) = decode_new_pin(
+            &padded_new_pin,
+            policy.min_pin_length,
+            policy.pin_complexity_policy,
+        )?;
         Ok((hash_pin(&new_pin), length))
     }
 
