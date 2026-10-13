@@ -367,10 +367,9 @@ dependency before the corpus is written.
 Its malformed-input tests bypass client validation and send CBOR null directly,
 because python-fido2 2.2.1 cannot encode null. `libfido2_payment.py` uses only
 libfido2 1.14.0 APIs: that version cannot request the extension or expose its CM
-flag. Its management API always sends prototype command `0x41`, so the check
-expects INVALID_COMMAND when `credentialMgmtPreview` is absent and verifies
-enumeration when that option is enabled. Standard `0x0A` enumeration is checked
-through Python FIDO. The native library asserts payment-enabled credentials and
+flag. Its management API always sends prototype command `0x41`; pqkey now
+advertises `credentialMgmtPreview` and its native check requires successful
+enumeration. Standard `0x0A` enumeration is checked through Python FIDO. The native library asserts payment-enabled credentials and
 verifies signed authenticator data containing the unknown extension. The shell
 runner includes the check before its final summary.
 
@@ -385,3 +384,48 @@ Browser/WebAuthn and Secure Payment Confirmation verification are separate.
 The client platform determines payment eligibility and UI; advertising this
 extension does not establish browser or SPC support. Historical client results
 above concern authentication, and do not claim payment verification.
+
+
+## Credential management preview verification
+
+[Final CTAP 2.3 §§6.13, 6.8 and 6.5](https://fidoalliance.org/specs/fido-v2.3-ps-20260226/fido-client-to-authenticator-protocol-v2.3-ps-20260226.html)
+and the [prototype wire format](https://fidoalliance.org/specs/fido2/vendor/CredentialManagementPrototype.pdf)
+define compatibility command `0x41`. Subcommand 7 is a documented backport of
+standard user updates, required by [libfido2 1.14.0's native implementation](https://github.com/Yubico/libfido2/blob/1.14.0/src/credman.c).
+
+Rust engine regressions exercise both PIN protocols, explicit legacy issuance,
+modern permission isolation, RP scopes, expiry and consumption, reissue,
+PIN/policy publication failures, restart/reset, family switches and independent
+cursors. They check all seven operations, public keys for every advertised
+algorithm, capacity, truncation, rejected mutation usability, protection,
+largeBlobKey and thirdPartyPayment preservation. Preview uses the current
+protocol MAC verifier; repeated MAC failures never debit persistent PIN retries.
+The sequence oracle independently tracks authorization and cursor grants,
+including valid MAC use before later permission/data rejection. Fixture encoders
+round-trip against the locked `arbitrary` graph. After input-layout changes,
+regenerate every seed with `cargo run --locked --release --manifest-path
+fuzz/Cargo.toml --example seeds`, repeat, and compare filenames and contents.
+
+`tests/e2e/test_credential_management_preview.py` sends actual HID `0x41`
+requests. python-fido2 2.2.1's convenience API selects `0x0A` when credMgmt is
+present, so preview tests use its raw command API without modifying getInfo.
+Calling `ClientPin.get_pin_token(PIN)` obtains the legacy grant; explicit CM
+permissions obtain a modern grant. Tests include exact authentication statuses,
+RP restrictions, family switches, independent cursors and WINK/LOCK preservation.
+
+`tests/e2e/libfido2_credman.py` keeps libfido2's native HID I/O and exercises
+metadata, multi-RP/credential enumeration, user updates and deletion with ES256,
+ES384, EdDSA and RS256. Raw checks cover mixed payment flags and large-blob keys;
+libfido2 1.14 exposes largeBlobKey but ignores the additional payment field.
+Its separate ML-DSA decoder check expects FIDO_ERR_RX_INVALID_CBOR while raw
+preview enumeration and credential signing still succeed. Supported credentials
+are never filtered for older decoders. Every shell run_test precedes the summary,
+including the existing payment helper's advertised-preview success branch.
+
+Engine checks and E2E syntax/collection can run on macOS and Linux/aarch64
+containers. Actual HID execution requires Linux with `/dev/uhid`; container
+fixtures and collection do not establish native transport success. Keep exact
+commands, statuses, compiler/architecture details, deterministic regeneration
+results and unavailable HID/x86_64 execution in validation evidence outside the
+repository. Use fresh git archives extracted with `tar -xm`, preserve pipeline
+failures, and separate cache outputs by compiler, architecture and sanitizer.

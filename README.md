@@ -182,6 +182,14 @@ are separate from browser/SPC verification; see the
 These were tested on Ubuntu 26.04. Each client's limits are listed under
 [Clients](docs/development-notes.md#clients) in the development notes.
 
+Credential management also supports the backwards-compatible `0x41` command
+used by libfido2 1.14.0, including its user-update operation. It accepts legacy
+ClientPIN tokens and modern CM tokens with their RP restrictions. Older native
+clients can decode only their supported classic algorithms; enumeration still
+returns every supported credential. The native pqkey client continues to use
+standard `0x0A`. See the [preview verification notes](docs/development-notes.md#credential-management-preview-verification)
+for regression coverage and execution limits.
+
 ## Troubleshooting
 
 `pqkey status` names anything that is missing and how to fix it, and

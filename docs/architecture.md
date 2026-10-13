@@ -222,6 +222,27 @@ suite requires `/dev/uhid`.
   into their own ID when their key fits and payment metadata is disabled; RSA
   and payment-enabled non-discoverable credentials are stored and
   consume a slot too.
+- Credential management uses standard `0x0A` (§6.8) and backwards-compatible
+  `0x41` (§6.13). getInfo retains `credMgmt: true` and adds
+  `credentialMgmtPreview: true` and `FIDO_2_1_PRE`. Both families share
+  parsing, data operations and response encodings. Preview implements the six
+  prototype subcommands and backports standard user updates (subcommand 7),
+  which libfido2 1.14 also sends with `0x41`. Biometric commands and their
+  options remain absent.
+  ClientPIN records issuance provenance only in transient token state. Preview
+  accepts an unscoped legacy getPinToken grant without adding CM permission;
+  permission-bearing tokens require CM and the existing RP restrictions.
+  Standard management keeps its permission checks. Both PIN protocols use
+  current MAC verification: failures do not spend persistent PIN retries or
+  introduce the obsolete prototype's MAC-mismatch lockout. Consumption clears
+  legacy eligibility; rotation, invalidation, reset and restart cannot preserve
+  that grant. Token lifetime and user-verification validity still apply.
+  Each independent RP/credential cursor remembers its command family, token
+  issuance identity and authorization mode; credential cursors also retain the
+  initiating RP hash. Next requests carry no MAC but recheck the remembered
+  grant and scope. Switching families clears both cursors before parsing the
+  request, including malformed switches. WINK and LOCK stay outside engine
+  dispatch and preserve continuations. The native pqkey client uses `0x0A`.
 - authenticatorLargeBlobs (§6.10), with a serialized-array capacity of
   16,384 bytes and fragments of up to 1,704 bytes, maxMsgSize minus 64.
   Reads return committed bytes. Writes use a separate in-memory buffer and
