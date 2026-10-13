@@ -549,7 +549,12 @@ pub fn credential_management(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
             (int(4), param),
         ],
     )?;
-    Ok(command(CTAP_CMD_CREDENTIAL_MANAGEMENT, &request))
+    let code = if u.arbitrary::<bool>()? {
+        CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE
+    } else {
+        CTAP_CMD_CREDENTIAL_MANAGEMENT
+    };
+    Ok(command(code, &request))
 }
 
 /// subCommandParams of authenticatorConfig (CTAP 2.3 §6.11.4).
@@ -685,7 +690,7 @@ pub fn any_request(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
                 CTAP_CMD_BIO_ENROLLMENT,
                 CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE,
                 CTAP_CMD_SELECTION,
-                0x41,
+                CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE,
                 0xFF,
             ])?;
             command(code, &arbitrary_value(u, MAX_DEPTH)?)

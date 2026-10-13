@@ -54,6 +54,8 @@ use pqkey_ctap::{ClassicPinProtocol, CoseAlg};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
+mod management;
+
 const MAX_STEPS: usize = 24;
 
 const PINS: &[&[u8]] = &[
@@ -139,6 +141,7 @@ enum Op {
         rp: Option<u8>,
     },
     CredentialManagement {
+        preview: bool,
         auth: Auth,
         subcommand: u8,
     },
@@ -186,6 +189,7 @@ enum Op {
     },
     /// A complete registration, alongside the parameter-mutating generator.
     CreateCredential {
+        rp: u8,
         large_blob_key: Option<bool>,
         third_party_payment: Option<bool>,
         rk: bool,
@@ -218,6 +222,15 @@ enum Op {
         after: u8,
     },
     Restart,
+    /// Deterministic valid parameters complement the malformed-map generator.
+    ManageKnown {
+        preview: bool,
+        auth: Auth,
+        subcommand: u8,
+        rp: u8,
+        credential: u8,
+        valid_user: bool,
+    },
 }
 
 struct Credential {
@@ -282,6 +295,7 @@ struct Platform {
     token_issued_at: Duration,
     token_id: u64,
     token_permissions: u8,
+    management: management::Oracle,
 }
 
 #[derive(Default)]
@@ -447,13 +461,23 @@ impl Platform {
             token_issued_at: Duration::ZERO,
             token_id: 0,
             token_permissions: 0,
+            management: management::Oracle::default(),
         }
     }
 
     fn call(&mut self, request: &[u8]) -> Vec<u8> {
         let response = self.engine.call(request);
+        self.management.check(
+            request,
+            &response,
+            &self.credentials,
+            self.engine.clock().now(),
+        );
         self.audit_pin_writes(request, &response);
         self.observe(request, &response);
+        if self.force_change {
+            self.management.invalidate();
+        }
         response
     }
 
@@ -1105,51 +1129,53 @@ impl Platform {
                     self.assertion_third_party_payment = assertion_payment;
                 }
             }
-            CTAP_CMD_CREDENTIAL_MANAGEMENT => match get_int(&parameters, 1) {
-                Some(v) if *v == int(4) || *v == int(5) => {
-                    let Some(Value::Map(descriptor)) = get_int(&body, 7) else {
-                        panic!("enumerated credential without descriptor");
-                    };
-                    let Some(Value::Bytes(id)) = get_text(descriptor, "id") else {
-                        panic!("enumerated credential without id");
-                    };
-                    let credential = self.known(id).expect("enumerated an unknown credential");
-                    assert_eq!(
-                        get_int(&body, 12),
-                        Some(&Value::Bool(credential.third_party_payment))
-                    );
-                    assert!(
-                        credential.discoverable,
-                        "enumerated a non-discoverable credential"
-                    );
-                    assert_eq!(
-                        response_key(&body, 11).as_ref(),
-                        credential.large_blob_key.as_ref()
-                    );
-                }
-                Some(v) if *v == int(6) => {
-                    let id = match get_int(&parameters, 2) {
-                        Some(Value::Map(params)) => match get_int(params, 2) {
-                            Some(Value::Map(descriptor)) => get_text(descriptor, "id").cloned(),
+            CTAP_CMD_CREDENTIAL_MANAGEMENT | CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE => {
+                match get_int(&parameters, 1) {
+                    Some(v) if *v == int(4) || *v == int(5) => {
+                        let Some(Value::Map(descriptor)) = get_int(&body, 7) else {
+                            panic!("enumerated credential without descriptor");
+                        };
+                        let Some(Value::Bytes(id)) = get_text(descriptor, "id") else {
+                            panic!("enumerated credential without id");
+                        };
+                        let credential = self.known(id).expect("enumerated an unknown credential");
+                        assert_eq!(
+                            get_int(&body, 12),
+                            Some(&Value::Bool(credential.third_party_payment))
+                        );
+                        assert!(
+                            credential.discoverable,
+                            "enumerated a non-discoverable credential"
+                        );
+                        assert_eq!(
+                            response_key(&body, 11).as_ref(),
+                            credential.large_blob_key.as_ref()
+                        );
+                    }
+                    Some(v) if *v == int(6) => {
+                        let id = match get_int(&parameters, 2) {
+                            Some(Value::Map(params)) => match get_int(params, 2) {
+                                Some(Value::Map(descriptor)) => get_text(descriptor, "id").cloned(),
+                                _ => None,
+                            },
                             _ => None,
-                        },
-                        _ => None,
-                    };
-                    let Some(Value::Bytes(id)) = id else {
-                        panic!("deleted a credential without an id");
-                    };
-                    self.credentials.retain(|credential| {
-                        if credential.id == id {
-                            self.retired
-                                .push((credential.id.clone(), credential.rp_id.clone()));
-                            false
-                        } else {
-                            true
-                        }
-                    });
+                        };
+                        let Some(Value::Bytes(id)) = id else {
+                            panic!("deleted a credential without an id");
+                        };
+                        self.credentials.retain(|credential| {
+                            if credential.id == id {
+                                self.retired
+                                    .push((credential.id.clone(), credential.rp_id.clone()));
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             CTAP_CMD_RESET => {
                 self.pin = None;
                 self.token = None;
@@ -1571,6 +1597,18 @@ impl Platform {
                     } else {
                         permission_set(permissions)
                     };
+                    self.management.issue(
+                        protocol,
+                        token,
+                        self.token_permissions,
+                        if legacy {
+                            None
+                        } else {
+                            rp.map(|rp| rp_id(rp).to_owned())
+                        },
+                        legacy,
+                        self.engine.clock().now(),
+                    );
                 }
             }
             Op::MakeCredential {
@@ -1717,7 +1755,76 @@ impl Platform {
             Op::GetNextAssertion => {
                 self.call(&[CTAP_CMD_GET_NEXT_ASSERTION]);
             }
-            Op::CredentialManagement { auth, subcommand } => {
+            Op::ManageKnown {
+                preview,
+                auth,
+                subcommand,
+                rp,
+                credential,
+                valid_user,
+            } => {
+                let family = if preview {
+                    CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE
+                } else {
+                    CTAP_CMD_CREDENTIAL_MANAGEMENT
+                };
+                let sub = subcommand % 8;
+                if sub == 0 {
+                    self.call(&[family, 0xff]);
+                    return Ok(());
+                }
+                let mut params = Vec::new();
+                if sub == 4 {
+                    params.push((int(1), bytes(&Sha256::digest(rp_id(rp).as_bytes()))));
+                }
+                if matches!(sub, 6 | 7) {
+                    let record = self
+                        .credentials
+                        .get(usize::from(credential) % self.credentials.len().max(1));
+                    let id = record.map_or_else(|| vec![1; 33], |r| r.id.clone());
+                    params.push((
+                        int(2),
+                        Value::Map(vec![
+                            (text("id"), bytes(&id)),
+                            (text("type"), text("public-key")),
+                        ]),
+                    ));
+                    if sub == 7 {
+                        let user = record
+                            .filter(|_| valid_user)
+                            .map_or_else(|| vec![0xff], |r| r.user_id.clone());
+                        params.push((
+                            int(3),
+                            Value::Map(vec![
+                                (text("id"), bytes(&user)),
+                                (text("name"), text("Updated")),
+                            ]),
+                        ));
+                    }
+                }
+                let params = (!params.is_empty()).then_some(Value::Map(params));
+                let mut message = vec![sub];
+                if let Some(params) = &params {
+                    message.extend(cbor::encode(params));
+                }
+                let mut fields = vec![(int(1), int(i64::from(sub)))];
+                fields.extend(params.map(|p| (int(2), p)));
+                if !matches!(sub, 3 | 5) {
+                    let (param, protocol) = self.pin_uv_auth(auth, &message);
+                    if let Some(Some(v)) = param {
+                        fields.push((int(4), v));
+                    }
+                    if let Some(Some(v)) = protocol {
+                        fields.push((int(3), v));
+                    }
+                }
+                self.call(&command(family, &Value::Map(fields)));
+            }
+            Op::CredentialManagement {
+                preview,
+                auth,
+                subcommand,
+            } => {
                 let subcommand = match subcommand % 16 {
                     sub @ 1..=7 => sub,
                     0 => 2,
@@ -1751,7 +1858,11 @@ impl Platform {
                     entries.push((int(4), param));
                 }
                 self.call(&command(
-                    CTAP_CMD_CREDENTIAL_MANAGEMENT,
+                    if preview {
+                        CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE
+                    } else {
+                        CTAP_CMD_CREDENTIAL_MANAGEMENT
+                    },
                     &Value::Map(entries),
                 ));
             }
@@ -1815,6 +1926,7 @@ impl Platform {
             Op::PinWriteFault { mode, after } => self.engine.schedule_pin_write(mode, after),
             Op::Restart => {
                 self.engine.restart();
+                self.management.restart();
                 self.retries = self.saved_retries;
                 self.mismatches = 0;
                 self.token = None;
@@ -1913,6 +2025,7 @@ impl Platform {
                 self.engine.clock().advance(millis);
             }
             Op::CreateCredential {
+                rp,
                 large_blob_key,
                 third_party_payment,
                 rk,
@@ -1920,7 +2033,7 @@ impl Platform {
             } => {
                 let mut entries = vec![
                     (int(1), bytes(&[0x55; 32])),
-                    (int(2), Value::Map(vec![(text("id"), text("example.com"))])),
+                    (int(2), Value::Map(vec![(text("id"), text(rp_id(rp)))])),
                     (int(3), Value::Map(vec![(text("id"), bytes(&[user]))])),
                     (
                         int(4),
@@ -2202,6 +2315,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
         cases.push(vec![
             enroll(v2),
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: None,
                 third_party_payment: None,
                 rk: false,
@@ -2217,36 +2331,42 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
         ]);
         cases.push(vec![
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: Some(true),
                 third_party_payment: None,
                 rk: true,
                 user: 1,
             },
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: None,
                 third_party_payment: None,
                 rk: true,
                 user: 2,
             },
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: Some(true),
                 third_party_payment: None,
                 rk: true,
                 user: 3,
             },
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: None,
                 third_party_payment: None,
                 rk: false,
                 user: 4,
             },
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: Some(true),
                 third_party_payment: None,
                 rk: false,
                 user: 5,
             },
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: Some(false),
                 third_party_payment: None,
                 rk: true,
@@ -2298,6 +2418,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     }
     cases.push(vec![
         Op::CreateCredential {
+            rp: 0,
             large_blob_key: None,
             third_party_payment: None,
             rk: false,
@@ -2605,6 +2726,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
                 complexity: Some(enabled),
             },
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: Some(true),
                 third_party_payment: None,
                 rk: true,
@@ -2624,12 +2746,14 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     for requested in [None, Some(false), Some(true)] {
         cases.push(vec![
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: None,
                 third_party_payment: Some(true),
                 rk: true,
                 user: 1,
             },
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: None,
                 third_party_payment: Some(false),
                 rk: true,
@@ -2656,12 +2780,14 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     for enabled in [false, true] {
         cases.push(vec![
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: None,
                 third_party_payment: Some(enabled),
                 rk: true,
                 user: 1,
             },
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: None,
                 third_party_payment: Some(!enabled),
                 rk: true,
@@ -2684,6 +2810,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     for rk in [false, true] {
         cases.push(vec![
             Op::CreateCredential {
+                rp: 0,
                 large_blob_key: rk.then_some(true),
                 third_party_payment: Some(true),
                 rk,
@@ -2711,6 +2838,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     }
     let mut capacity: Vec<_> = (0..9)
         .map(|user| Op::CreateCredential {
+            rp: 0,
             large_blob_key: None,
             third_party_payment: Some(true),
             rk: false,
@@ -2719,6 +2847,114 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
         .collect();
     capacity.push(Op::GetInfo);
     cases.push(capacity);
+    for v2 in [false, true] {
+        let create = |rp, user| Op::CreateCredential {
+            rp,
+            large_blob_key: Some(true),
+            third_party_payment: Some(user == 1),
+            rk: true,
+            user,
+        };
+        let grant = |legacy, permissions, rp| Op::GetToken {
+            v2,
+            right_pin: true,
+            legacy,
+            permissions,
+            rp,
+        };
+        let cm = |preview, subcommand, rp| Op::ManageKnown {
+            preview,
+            auth: Auth::Token,
+            subcommand,
+            rp,
+            credential: 0,
+            valid_user: true,
+        };
+        for legacy in [false, true] {
+            cases.push(vec![
+                create(0, 1),
+                create(0, 2),
+                create(1, 3),
+                Op::SetPin {
+                    v2,
+                    pin: 0,
+                    bad_auth: false,
+                    pad_to: 2,
+                },
+                grant(legacy, 0, None),
+                cm(true, 1, 0),
+                cm(true, 2, 0),
+                cm(true, 4, 0),
+                cm(true, 3, 0),
+                cm(true, 5, 0),
+                cm(true, 7, 0),
+                cm(true, 6, 0),
+                cm(true, 1, 0),
+                cm(false, 1, 0),
+            ]);
+            for end in [
+                Op::Advance(10),
+                Op::Restart,
+                Op::Reset,
+                grant(false, 6, None),
+            ] {
+                cases.push(vec![
+                    create(0, 1),
+                    create(0, 2),
+                    create(1, 3),
+                    Op::SetPin {
+                        v2,
+                        pin: 0,
+                        bad_auth: false,
+                        pad_to: 2,
+                    },
+                    grant(legacy, 0, None),
+                    cm(true, 2, 0),
+                    cm(true, 4, 0),
+                    end,
+                    cm(true, 3, 0),
+                    cm(true, 5, 0),
+                ]);
+            }
+        }
+        for preview in [false, true] {
+            cases.push(vec![
+                create(0, 1),
+                create(0, 2),
+                create(1, 3),
+                Op::SetPin {
+                    v2,
+                    pin: 0,
+                    bad_auth: false,
+                    pad_to: 2,
+                },
+                grant(false, 0, None),
+                cm(preview, 2, 0),
+                cm(preview, 4, 0),
+                cm(!preview, 0, 0),
+                cm(preview, 3, 0),
+                cm(preview, 5, 0),
+            ]);
+        }
+        for permissions in [1, 2, 3, 6, 8] {
+            cases.push(vec![
+                create(0, 1),
+                create(0, 2),
+                Op::SetPin {
+                    v2,
+                    pin: 0,
+                    bad_auth: false,
+                    pad_to: 2,
+                },
+                grant(false, permissions, Some(0)),
+                cm(true, 1, 0),
+                cm(true, 4, 0),
+                cm(true, 4, 1),
+                cm(true, 7, 0),
+                cm(true, 6, 0),
+            ]);
+        }
+    }
     cases.iter().map(|ops| encode_fixture(ops)).collect()
 }
 
@@ -2764,19 +3000,19 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 permissions,
                 rp: None,
             } => {
-                variant(&mut output, 6, 30);
+                variant(&mut output, 6, 31);
                 output.extend_from_slice(&[u8::from(*v2), *permissions, 0]);
                 extra = if pin_set { 17 } else { 34 };
                 pin_set = true;
             }
-            Op::GetNextAssertion => variant(&mut output, 5, 30),
+            Op::GetNextAssertion => variant(&mut output, 5, 31),
             Op::Presence(value) => {
-                variant(&mut output, 12, 30);
+                variant(&mut output, 12, 31);
                 output.push(*value);
             }
-            Op::GetInfo => variant(&mut output, 9, 30),
+            Op::GetInfo => variant(&mut output, 9, 31),
             Op::Reset => {
-                variant(&mut output, 11, 30);
+                variant(&mut output, 11, 31);
                 pin_set = false;
             }
             Op::LargeBlobBegin {
@@ -2786,7 +3022,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 valid_hash,
                 fill,
             } => {
-                variant(&mut output, 15, 30);
+                variant(&mut output, 15, 31);
                 auth(&mut output, *value);
                 output.extend_from_slice(&length.to_le_bytes());
                 output.extend_from_slice(&fragment.to_le_bytes());
@@ -2798,7 +3034,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 length,
                 fragment,
             } => {
-                variant(&mut output, 16, 30);
+                variant(&mut output, 16, 31);
                 auth(&mut output, *value);
                 option_u16(&mut output, *offset);
                 option_u16(&mut output, *length);
@@ -2809,13 +3045,13 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 length,
                 extra,
             } => {
-                variant(&mut output, 17, 30);
+                variant(&mut output, 17, 31);
                 output.extend_from_slice(&offset.to_le_bytes());
                 output.extend_from_slice(&length.to_le_bytes());
                 output.push(*extra);
             }
             Op::Advance(millis) => {
-                variant(&mut output, 18, 30);
+                variant(&mut output, 18, 31);
                 output.extend_from_slice(&millis.to_le_bytes());
             }
             Op::LargeBlobWrite {
@@ -2824,7 +3060,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 fragment,
                 valid_hash,
             } => {
-                variant(&mut output, 19, 30);
+                variant(&mut output, 19, 31);
                 auth(&mut output, *value);
                 output.extend_from_slice(&length.to_le_bytes());
                 output.extend_from_slice(&fragment.to_le_bytes());
@@ -2832,12 +3068,14 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 extra = 1;
             }
             Op::CreateCredential {
+                rp,
                 large_blob_key,
                 third_party_payment,
                 rk,
                 user,
             } => {
-                variant(&mut output, 20, 30);
+                variant(&mut output, 20, 31);
+                output.push(*rp);
                 option_bool(&mut output, *large_blob_key);
                 option_bool(&mut output, *third_party_payment);
                 output.extend_from_slice(&[u8::from(*rk), *user]);
@@ -2847,18 +3085,18 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 third_party_payment,
                 discoverable,
             } => {
-                variant(&mut output, 21, 30);
+                variant(&mut output, 21, 31);
                 option_bool(&mut output, *large_blob_key);
                 option_bool(&mut output, *third_party_payment);
                 output.push(u8::from(*discoverable));
             }
             Op::EnumerateCredentials { auth: value, next } => {
-                variant(&mut output, 22, 30);
+                variant(&mut output, 22, 31);
                 auth(&mut output, *value);
                 output.push(u8::from(*next));
             }
             Op::U2fRegister { rp } => {
-                variant(&mut output, 23, 30);
+                variant(&mut output, 23, 31);
                 output.push(*rp);
             }
             Op::U2fAuthenticate {
@@ -2867,10 +3105,10 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 control,
                 corrupt,
             } => {
-                variant(&mut output, 24, 30);
+                variant(&mut output, 24, 31);
                 output.extend_from_slice(&[*credential, *rp, *control, u8::from(*corrupt)]);
             }
-            Op::U2fVersion => variant(&mut output, 25, 30),
+            Op::U2fVersion => variant(&mut output, 25, 31),
             Op::AuthenticatorConfig {
                 auth: value,
                 subcommand,
@@ -2879,7 +3117,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 force_change: None,
                 complexity,
             } => {
-                variant(&mut output, 8, 30);
+                variant(&mut output, 8, 31);
                 auth(&mut output, *value);
                 output.extend_from_slice(&[*subcommand, 0, u8::from(rp_ids.is_some())]);
                 if let Some(ids) = rp_ids {
@@ -2892,18 +3130,18 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 option_bool(&mut output, *complexity);
             }
             Op::PinWriteFault { mode, after } => {
-                variant(&mut output, 28, 30);
+                variant(&mut output, 28, 31);
                 output.extend_from_slice(&[*mode, *after]);
             }
-            Op::Restart => variant(&mut output, 29, 30),
-            Op::GetPinRetries => variant(&mut output, 10, 30),
+            Op::Restart => variant(&mut output, 29, 31),
+            Op::GetPinRetries => variant(&mut output, 10, 31),
             Op::SetPin {
                 v2,
                 pin,
                 bad_auth,
                 pad_to,
             } => {
-                variant(&mut output, 0, 30);
+                variant(&mut output, 0, 31);
                 output.extend_from_slice(&[u8::from(*v2), *pin, u8::from(*bad_auth), *pad_to]);
                 extra = 17;
                 pin_set = true;
@@ -2913,7 +3151,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 right_pin,
                 new_pin,
             } => {
-                variant(&mut output, 1, 30);
+                variant(&mut output, 1, 31);
                 output.extend_from_slice(&[u8::from(*v2), u8::from(*right_pin), *new_pin]);
                 extra = 33;
             }
@@ -2922,17 +3160,44 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 right_pin,
                 legacy,
                 permissions,
-                rp: None,
+                rp,
             } => {
-                variant(&mut output, 2, 30);
+                variant(&mut output, 2, 31);
                 output.extend_from_slice(&[
                     u8::from(*v2),
                     u8::from(*right_pin),
                     u8::from(*legacy),
                     *permissions,
-                    0,
+                    u8::from(rp.is_some()),
                 ]);
+                if let Some(rp) = rp {
+                    output.push(*rp);
+                }
                 extra = 17;
+            }
+            Op::ManageKnown {
+                preview,
+                auth: value,
+                subcommand,
+                rp,
+                credential,
+                valid_user,
+            } => {
+                variant(&mut output, 30, 31);
+                output.push(u8::from(*preview));
+                auth(&mut output, *value);
+                output.extend_from_slice(&[*subcommand, *rp, *credential, u8::from(*valid_user)]);
+            }
+            Op::CredentialManagement {
+                preview,
+                auth: value,
+                subcommand,
+            } => {
+                variant(&mut output, 7, 31);
+                output.push(u8::from(*preview));
+                auth(&mut output, *value);
+                output.push(*subcommand);
+                extra = 64;
             }
             _ => panic!("operation has no fixture encoder"),
         }
@@ -3048,6 +3313,7 @@ mod tests {
             platform
                 .step(
                     Op::CreateCredential {
+                        rp: 0,
                         large_blob_key: rk.then_some(true),
                         third_party_payment: None,
                         rk,
@@ -3097,8 +3363,15 @@ mod tests {
     #[test]
     fn seeds_exercise_commits_abandoned_writes_and_stable_keys() {
         let seeds = seed_corpus();
-        assert_eq!(seeds.len(), 68);
+        assert_eq!(seeds.len(), 102);
         let traces: Vec<_> = seeds.iter().map(|seed| run_traced(seed)).collect();
+        for status in [CTAP2_OK, CTAP2_ERR_PIN_AUTH_INVALID, CTAP2_ERR_NOT_ALLOWED] {
+            assert!(
+                traces.iter().any(|trace| trace
+                    .contains(&(CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE, u16::from(status)))),
+                "preview seed missed status {status:02x}"
+            );
+        }
         for pair in [
             (0x81, 0x9000),
             (0x82, 0x9000),
@@ -3198,6 +3471,7 @@ mod tests {
                 rp: None,
             },
             Op::CredentialManagement {
+                preview: false,
                 auth: Auth::Token,
                 subcommand: 1,
             },

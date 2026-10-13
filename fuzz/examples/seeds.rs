@@ -684,6 +684,16 @@ fn ctap_request(dir: &Path) {
             ]),
         ));
     }
+    let preview: Vec<_> = seeds
+        .iter()
+        .filter(|seed| seed.first() == Some(&0x0A))
+        .map(|seed| {
+            let mut request = seed.clone();
+            request[0] = 0x41;
+            request
+        })
+        .collect();
+    seeds.extend(preview);
     write_all(dir, &seeds);
 }
 
@@ -1245,7 +1255,7 @@ fn ctaphid_packets(dir: &Path) {
 }
 
 const IMPLEMENTED: &[u8] = &[
-    0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x0C, 0x0D, 0x81, 0x82, 0x83,
+    0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x0C, 0x0D, 0x41, 0x81, 0x82, 0x83,
 ];
 
 /// Keep inputs from a deterministic random search that reach a command and
