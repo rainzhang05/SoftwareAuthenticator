@@ -109,7 +109,7 @@ enum Kept {
     Seed(&'static str),
 }
 
-const ECDSA_CASES: [EcdsaCase; 4] = [
+const ECDSA_CASES: [EcdsaCase; 6] = [
     EcdsaCase {
         alg: CoseAlg::ES256,
         order: "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
@@ -167,6 +167,30 @@ const ECDSA_CASES: [EcdsaCase; 4] = [
         },
         kept: Kept::Seed("secp256k1"),
         key: [0xC3; 32],
+    },
+    EcdsaCase {
+        alg: CoseAlg::ESB256,
+        order: "a9fb57dba1eea9bc3e660a909d838d718c397aa3b561a6f7901e0e82974856a7",
+        digest: digest::<Sha256>,
+        hmac: hmac::<Sha256>,
+        multiply: |scalar| {
+            let secret = bp256::r1::SecretKey::from_slice(scalar).expect("a scalar below n");
+            coordinates(secret.public_key().to_sec1_point(false).as_bytes())
+        },
+        kept: Kept::Seed("brainpoolP256r1"),
+        key: [0x5a; 32],
+    },
+    EcdsaCase {
+        alg: CoseAlg::ESB384,
+        order: "8cb91e82a3386d280f5d6f7e50e641df152f7109ed5456b31f166e6cac0425a7cf3ab6af6b7fc3103b883202e9046565",
+        digest: digest::<Sha384>,
+        hmac: hmac::<Sha384>,
+        multiply: |scalar| {
+            let secret = bp384::r1::SecretKey::from_slice(scalar).expect("a scalar below n");
+            coordinates(secret.public_key().to_sec1_point(false).as_bytes())
+        },
+        kept: Kept::Seed("brainpoolP384r1"),
+        key: [0x9a; 32],
     },
 ];
 
@@ -439,17 +463,12 @@ fn cose_bytes(cose_key: &[u8], wanted: i128) -> Vec<u8> {
 
 /// The RFC 6979 §3.2 nonce for private key `x` and message digest `h1` on a
 /// curve of order `q`, with the case's HMAC, and the HMAC blocks T it was
-/// drawn from.  `h1` is no longer than `q` and below it, true of the curves
-/// and values used here, so bits2octets(`h1`) is `h1` itself, padded to the
-/// length of `q`.
+/// drawn from. The hashes used here are no longer than qlen. bits2octets
+/// reduces the hash modulo q and pads it: Brainpool hashes can exceed q.
 fn rfc6979_k(case: &EcdsaCase, q: &[u8], x: &[u8], h1: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
-    let mut h = vec![0; q.len() - h1.len()];
-    h.extend_from_slice(h1);
-    assert!(
-        h.as_slice() < q,
-        "{:?}: the digest is not below n",
-        case.alg
-    );
+    let reduced = reduce(h1, q);
+    let mut h = vec![0; q.len() - reduced.len()];
+    h.extend_from_slice(&reduced);
     // qlen, the bit length of q, and the bits bits2int drops from rlen bits.
     let excess = q[0].leading_zeros() as usize;
     let qlen = q.len() * 8 - excess;
@@ -485,6 +504,45 @@ fn rfc6979_k(case: &EcdsaCase, q: &[u8], x: &[u8], h1: &[u8]) -> (Vec<u8>, Vec<V
 const AUTH_DATA: [u8; 37] = [0x11; 37];
 /// The client data hash every case signs.
 const CLIENT_DATA_HASH: [u8; 32] = [0x22; 32];
+
+/// Public derivation followed by rejected operations must leave no scalar.
+fn check_brainpool_failures(case: &EcdsaCase) -> Vec<String> {
+    let (d, output) = private_scalar(case, &unhex(case.order));
+    let control = Sha256::digest(b"never computed by the signer").to_vec();
+    let patterns = [
+        ("d", d),
+        ("SHAKE256 output", output.unwrap()),
+        ("control", control),
+    ];
+    wipe();
+    {
+        let key = try_credential_secret_from_bytes(case.alg, &case.key).unwrap();
+        let _ = try_cose_public_key(case.alg, &key).unwrap();
+        assert_eq!(
+            try_sign_challenge(CoseAlg::ES256, &key, &AUTH_DATA, &CLIENT_DATA_HASH),
+            Err(CryptoError::KeyTypeMismatch)
+        );
+        assert_eq!(
+            try_cose_public_key(CoseAlg::ES256, &key),
+            Err(CryptoError::KeyTypeMismatch)
+        );
+        assert_eq!(
+            try_credential_secret_from_bytes(case.alg, &[0; 31]).err(),
+            Some(CryptoError::InvalidKey)
+        );
+    }
+    let mut failures = Vec::new();
+    for (label, bytes) in patterns {
+        let hits = scan(&bytes);
+        let reverse = bytes.iter().rev().copied().collect::<Vec<_>>();
+        let reversed = scan(&reverse);
+        println!("{:?} failures: {label} {hits}x/{reversed}x", case.alg);
+        if hits + reversed != 0 {
+            failures.push(format!("{:?} failures: {label}", case.alg));
+        }
+    }
+    failures
+}
 
 /// The secrets of `case`'s key and signature, checked to be the real ones
 /// and looked for in the stack the engine left: what [`run`] found.
@@ -755,6 +813,12 @@ fn main() {
     #[cfg(target_os = "linux")]
     if rng_failure::is_child() {
         let failures = check_mldsa(true);
+        for alg in [CoseAlg::ESB256, CoseAlg::ESB384] {
+            assert_eq!(
+                pqkey_ctap::store::PrivateKeyMaterial::try_generate(alg).err(),
+                Some(CryptoError::Randomness)
+            );
+        }
         assert!(
             failures.is_empty(),
             "RNG-failure stack residue: {failures:?}"
@@ -797,6 +861,9 @@ fn main() {
             &authentication,
             &[0x42; 32],
         ));
+    }
+    for case in &ECDSA_CASES[4..] {
+        failures.extend(check_brainpool_failures(case));
     }
     failures.extend(check_mldsa(false));
     assert!(

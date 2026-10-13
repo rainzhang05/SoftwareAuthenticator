@@ -190,6 +190,30 @@ fn exercise(alg: CoseAlg, material: PrivateKeyMaterial) {
             bytes: Zeroizing::new(seed.to_vec()),
         }],
     };
+    if matches!(alg, CoseAlg::ESB256 | CoseAlg::ESB384) {
+        let vector = pqkey_ctap::brainpool_fixture::VECTORS
+            .iter()
+            .find(|v| {
+                v.alg == alg
+                    && pqkey_ctap::brainpool_fixture::unhex(v.seed)
+                        == match &material {
+                            PrivateKeyMaterial::Seed { seed } => seed.as_slice(),
+                            PrivateKeyMaterial::P256Scalar { scalar } => scalar.as_slice(),
+                            PrivateKeyMaterial::RsaPrimes { primes } => primes.as_slice(),
+                        }
+            })
+            .expect("independently derived Brainpool private values");
+        for (name, value) in [
+            ("scalar", vector.scalar),
+            ("SHAKE256 output", vector.shake),
+            ("RFC 6979 nonce", vector.nonce),
+        ] {
+            needles.push(PrivateValue {
+                name,
+                bytes: Zeroizing::new(pqkey_ctap::brainpool_fixture::unhex(value)),
+            });
+        }
+    }
     let blob: Vec<u8> = (0xd0..=0xef).collect();
     needles.push(PrivateValue {
         name: "credential blob",
@@ -227,6 +251,22 @@ fn exercise(alg: CoseAlg, material: PrivateKeyMaterial) {
             verify_signature(alg, &public, &rsa_fixture::MESSAGE, &signature).unwrap();
         }
         let mut store = FileStore::open(&dir.0).unwrap();
+        let mut rejected = record.clone();
+        rejected.cred_protect = 0;
+        assert!(store.put(&rejected).is_err());
+        assert!(
+            try_sign_challenge(
+                if alg == CoseAlg::ES256 {
+                    CoseAlg::ESB256
+                } else {
+                    CoseAlg::ES256
+                },
+                &key,
+                &[0x11; 37],
+                &[0x22; 32]
+            )
+            .is_err()
+        );
         store.put(&record).unwrap();
         drop(store);
         let store = FileStore::open(&dir.0).unwrap();
@@ -518,6 +558,16 @@ fn main() {
             alg,
             PrivateKeyMaterial::RsaPrimes {
                 primes: rsa_fixture::PRIMES,
+            },
+        );
+    }
+    for vector in pqkey_ctap::brainpool_fixture::VECTORS {
+        exercise(
+            vector.alg,
+            PrivateKeyMaterial::Seed {
+                seed: pqkey_ctap::brainpool_fixture::unhex(vector.seed)
+                    .try_into()
+                    .unwrap(),
             },
         );
     }
