@@ -289,7 +289,7 @@ fn non_discoverable_credentials_work_across_restarts_until_a_reset() {
     for alg in CoseAlg::ALL {
         let dir = TempDir::new();
         let registration = register_rk(&mut open_app(&dir.state()), &[0x01], alg, false);
-        if alg.key_kind() == pqkey_ctap::KeyKind::RsaPrimes {
+        if !alg.is_sealable() {
             assert_eq!(FileStore::open(dir.state()).unwrap().count().unwrap(), 1);
             assert_eq!(registration.credential_id.len(), 33);
             assert_eq!(registration.credential_id[0], 0);

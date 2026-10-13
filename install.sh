@@ -295,6 +295,7 @@ fi
 # Check the caller's PATH, not the PATH rustup added inside this child shell.
 resolved=$(PATH="$original_path" command -v pqkey || true)
 if [ -z "$resolved" ]; then
+  # shellcheck disable=SC2016 # Show the literal command the user should run.
   fail 'pqkey is not on the terminal PATH; run export PATH="/usr/local/bin:$PATH", then ./install.sh again'
 elif ! [ "$resolved" -ef "$pqkey" ]; then
   fail "pqkey resolves to $resolved; remove that older installation or run export PATH=\"/usr/local/bin:\$PATH\", then ./install.sh again"

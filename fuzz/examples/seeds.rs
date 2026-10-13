@@ -1375,6 +1375,19 @@ fn credential_key(dir: &Path) {
         invalid[125] = 0xfe; // e divides p-1: RSA reconstruction fails.
         seeds.push(layout(alg, alg, &invalid));
     }
+    // Stored Brainpool keys remain 32-byte seeds, with distinct key types.
+    for alg in [19, 20] {
+        for seed in [core::array::from_fn(|i| i as u8), [0xff; 32]] {
+            seeds.push(layout(alg, alg, &seed));
+            for other in 0..CoseAlg::ALL.len() as u8 {
+                seeds.push(layout(alg, other, &seed));
+                seeds.push(layout(other, alg, &seed));
+            }
+        }
+        for length in [0, 31, 33, 48, 64, 96] {
+            seeds.push(layout(alg, alg, &vec![0x42; length]));
+        }
+    }
     write_all(dir, &seeds);
 }
 

@@ -61,7 +61,7 @@ start() {
       return 1
     fi
     if [ -z "$node" ]; then
-      for sys in $device_glob/hidraw/hidraw*; do
+      for sys in "$device_glob"/hidraw/hidraw*; do
         [ -e "$sys" ] && node="/dev/${sys##*/}"
       done
     fi
