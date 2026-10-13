@@ -11,9 +11,19 @@ from fido2.ctap2.pin import PinProtocolV1, PinProtocolV2
 from fido2.hid import CTAPHID
 
 import ctap as client
+from notifications import FakeNotificationServer
 from test_credential_management import PIN, RP_A, RP_B, capacity, registered  # shared fixtures
 
 PRE = Ctap2.CMD.CREDENTIAL_MGMT_PRE
+
+
+@pytest.fixture
+def identification_server():
+    server = FakeNotificationServer().start()
+    try:
+        yield server
+    finally:
+        server.stop()
 
 
 @pytest.fixture(params=[PinProtocolV1, PinProtocolV2], ids=["protocol-1", "protocol-2"])
@@ -116,12 +126,13 @@ def test_family_switch_discards_both_independent_cursors(ctap, registered, proto
         fails(CtapError.ERR.NOT_ALLOWED, lambda: manage(ctap, protocol, token, sub, family=first))
 
 
-def test_wink_and_lock_preserve_preview_cursors(ctap, registered, protocol, grant):
+def test_wink_and_lock_preserve_preview_cursors(ctap, registered, protocol, grant, identification_server):
     manage(ctap, protocol, grant, 2)
     manage(ctap, protocol, grant, 4, {1: client.sha256(RP_A.encode())})
     ctap.device.call(CTAPHID.LOCK, b"\x01")
     try:
         ctap.device.wink()
+        assert identification_server.wait_for_shown().actions == []
         assert manage(ctap, protocol, grant, 3)[4] == client.sha256(RP_B.encode())
         assert manage(ctap, protocol, grant, 5)[7]["id"] in {registered[n][0].credential_id for n in ("alice", "bob")}
     finally:

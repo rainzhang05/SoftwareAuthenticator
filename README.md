@@ -187,7 +187,8 @@ used by libfido2 1.14.0, including its user-update operation. It accepts legacy
 ClientPIN tokens and modern CM tokens with their RP restrictions. Older native
 clients can decode only their supported classic algorithms; enumeration still
 returns every supported credential. The native pqkey client continues to use
-standard `0x0A`. See the [preview verification notes](docs/development-notes.md#credential-management-preview-verification)
+standard `0x0A`. See the
+[preview verification notes](docs/development-notes.md#credential-management-preview-verification)
 for regression coverage and execution limits.
 
 ## Troubleshooting

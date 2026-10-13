@@ -1052,7 +1052,7 @@ mod size_tests {
                     .unwrap();
             }
             drop(store);
-            let (_daemon, mut key) = start_management_transport(&dir);
+            let (daemon, mut key) = start_management_transport(&dir);
             key.set_pin(b"1234").unwrap();
             let token = key.management_token(b"1234").unwrap();
             let begin = |sub, params: Option<Value>| {
@@ -1121,6 +1121,9 @@ mod size_tests {
                     .unwrap()
                     .is_empty()
             );
+            daemon
+                .finish()
+                .expect("management worker shut down cleanly");
         }
     }
 }

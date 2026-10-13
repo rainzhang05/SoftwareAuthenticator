@@ -369,9 +369,10 @@ because python-fido2 2.2.1 cannot encode null. `libfido2_payment.py` uses only
 libfido2 1.14.0 APIs: that version cannot request the extension or expose its CM
 flag. Its management API always sends prototype command `0x41`; pqkey now
 advertises `credentialMgmtPreview` and its native check requires successful
-enumeration. Standard `0x0A` enumeration is checked through Python FIDO. The native library asserts payment-enabled credentials and
-verifies signed authenticator data containing the unknown extension. The shell
-runner includes the check before its final summary.
+enumeration. Standard `0x0A` enumeration is checked through Python FIDO. The
+native library asserts payment-enabled credentials and verifies signed
+authenticator data containing the unknown extension. The shell runner includes
+the check before its final summary.
 
 The portable `payment_compatibility` example emits 12 real CTAP engine
 assertions. Pass its stdout to `libfido2_payment.py --fixtures PATH` in the pinned
@@ -384,7 +385,6 @@ Browser/WebAuthn and Secure Payment Confirmation verification are separate.
 The client platform determines payment eligibility and UI; advertising this
 extension does not establish browser or SPC support. Historical client results
 above concern authentication, and do not claim payment verification.
-
 
 ## Credential management preview verification
 

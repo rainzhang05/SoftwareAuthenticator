@@ -13,7 +13,7 @@ use super::ctaphid::{Report, ReportLink};
 use crate::platform::test_support::Peer;
 use crate::presence::PresenceMode;
 use crate::service::AppData;
-use crate::shutdown::ShutdownSignal;
+use crate::shutdown::{ShutdownSignal, ok_if_shutdown};
 use crate::test_support::TempDir;
 
 /// Reports through the test peer of the selected device.
@@ -33,7 +33,17 @@ impl ReportLink for TestLink {
 /// and a client of it.  The daemon stops when the returned guard drops.
 pub(crate) struct Daemon {
     shutdown: ShutdownSignal,
-    done: mpsc::Receiver<()>,
+    done: mpsc::Receiver<io::Result<()>>,
+}
+
+impl Daemon {
+    /// Stop while the client is still open and surface unexpected worker errors.
+    pub(crate) fn finish(self) -> io::Result<()> {
+        self.shutdown.request();
+        self.done
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(io::Error::other)?
+    }
 }
 
 impl Drop for Daemon {
@@ -66,11 +76,11 @@ pub(crate) fn start_with(
     let (done_sender, done) = mpsc::channel();
     let loop_shutdown = shutdown.clone();
     thread::spawn(move || {
-        let _ = crate::test_support::serve_ctap(device, data, loop_shutdown, move || {
+        let result = crate::test_support::serve_ctap(device, data, loop_shutdown, move || {
             ready_sender.send(()).unwrap();
             Ok(())
         });
-        let _ = done_sender.send(());
+        let _ = done_sender.send(ok_if_shutdown(result));
     });
     ready
         .recv_timeout(Duration::from_secs(10))
@@ -97,7 +107,7 @@ pub(crate) fn start_management_transport(dir: &TempDir) -> (Daemon, Authenticato
             [0; 16],
         );
         let waiting = crate::WaitingForUser::default();
-        crate::transport::exec_with_identifier(
+        let result = crate::transport::exec_with_identifier(
             device,
             &mut app,
             &waiting,
@@ -107,9 +117,8 @@ pub(crate) fn start_management_transport(dir: &TempDir) -> (Daemon, Authenticato
                 Ok(())
             },
             |_| Ok(()),
-        )
-        .unwrap();
-        done_sender.send(()).unwrap();
+        );
+        let _ = done_sender.send(ok_if_shutdown(result));
     });
     ready.recv_timeout(Duration::from_secs(10)).unwrap();
     let key = Authenticator::open(TestLink(peer)).unwrap();
