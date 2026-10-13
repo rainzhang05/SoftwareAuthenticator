@@ -2874,7 +2874,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     cases.push(capacity);
     for v2 in [false, true] {
         let create = |rp, user| Op::CreateCredential {
-            alg,
+            alg: 0,
             rp,
             large_blob_key: Some(true),
             third_party_payment: Some(user == 1),
