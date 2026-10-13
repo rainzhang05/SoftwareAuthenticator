@@ -3,6 +3,7 @@
 use super::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC, requested_pin_permissions};
 use super::protocol::{PinProtocol, decrypt, parse_required_pin_uv_auth_protocol, verify};
 use super::state::MAX_PIN_RETRIES;
+use super::token::{TokenGrant, TokenOrigin};
 use crate::PinUvSessionKeys;
 use crate::ctap::CtapApp;
 use crate::ctap::cbor::{self, canonical_map, required_bytes, required_map};
@@ -287,8 +288,7 @@ impl CtapApp<'_> {
         protocol: PinProtocol,
         key_agreement: &[(Value, Value)],
         pin_hash_enc: &[u8],
-        permissions: u8,
-        rp_id: Option<String>,
+        grant: TokenGrant,
         force_change_error: u8,
     ) -> Result<Vec<u8>, u8> {
         // "If the pinRetries counter is 0, return CTAP2_ERR_PIN_BLOCKED error."
@@ -302,7 +302,7 @@ impl CtapApp<'_> {
         let token = Zeroizing::new(self.random_array::<32>());
         let encrypted = self.encrypt_for_platform(protocol, &keys, &token[..])?;
         self.pin_state
-            .issue_pin_uv_auth_token(protocol, *token, permissions, rp_id);
+            .issue_pin_uv_auth_token(protocol, *token, grant);
         // "The authenticator returns the encrypted pinUvAuthToken for the
         // specified pinUvAuthProtocol" (CTAP 2.3 §6.5.5.7.1, §6.5.5.7.2), and
         // nothing else.
@@ -340,8 +340,11 @@ impl CtapApp<'_> {
             protocol,
             key_agreement,
             pin_hash_enc,
-            permissions,
-            None,
+            TokenGrant {
+                origin: TokenOrigin::LegacyGetPinToken,
+                permissions,
+                rp_id: None,
+            },
             CTAP2_ERR_PIN_INVALID,
         )
     }
@@ -382,8 +385,11 @@ impl CtapApp<'_> {
             protocol,
             key_agreement,
             pin_hash_enc,
-            permissions,
-            rp_id,
+            TokenGrant {
+                origin: TokenOrigin::PermissionBearing,
+                permissions,
+                rp_id,
+            },
             CTAP2_ERR_PIN_POLICY_VIOLATION,
         )
     }

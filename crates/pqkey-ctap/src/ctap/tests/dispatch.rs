@@ -28,12 +28,22 @@ fn request_log_reads_client_pin_subcommand_and_protocol_from_their_keys() {
 #[test]
 fn request_log_reads_credential_management_subcommand_and_protocol_from_their_keys() {
     // subCommand (0x01) = enumerateCredentialsBegin, pinUvAuthProtocol (0x03) = 2.
-    let request = request(
+    for command in [
         CTAP_CMD_CREDENTIAL_MANAGEMENT,
-        vec![(int(1), int(4)), (int(3), int(2))],
-    );
-    let line = CtapApp::request_log_line(&request, &[CTAP2_OK]);
-    assert!(line.contains("sub=0x04 pinProtocol=0x02"), "{line}");
+        CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE,
+    ] {
+        let request = request(
+            command,
+            vec![
+                (int(1), int(4)),
+                (int(3), int(2)),
+                (int(4), Value::Bytes(vec![0x77; 32])),
+            ],
+        );
+        let line = CtapApp::request_log_line(&request, &[CTAP2_OK]);
+        assert!(line.contains("sub=0x04 pinProtocol=0x02"), "{line}");
+        assert!(!line.contains("7777"), "sensitive values leaked");
+    }
 }
 
 #[test]

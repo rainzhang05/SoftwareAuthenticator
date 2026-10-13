@@ -3,7 +3,9 @@
 use super::CtapApp;
 use super::cbor::{self, canonical_map, canonical_sort, required_bytes, required_map};
 use super::credential_id::is_discoverable;
+use super::pin::permissions::PIN_PERMISSION_CM;
 use super::pin::protocol::parse_pin_uv_auth_param;
+use super::pin::token::TokenOrigin;
 use super::request::{self, truncate_utf8};
 use super::storage::store_status;
 use crate::cbor::{SecretValue, encoded_len_bound};
@@ -76,6 +78,26 @@ pub(super) fn truncated_rp_id(rp_id: &str) -> String {
     stored
 }
 
+/// Command family is part of authorization, not merely a dispatch alias.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ManagementFamily {
+    Standard,
+    Preview,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthorizationMode {
+    CmPermission,
+    LegacyPreview,
+}
+
+#[derive(Clone, Copy)]
+struct EnumerationAuthorization {
+    family: ManagementFamily,
+    token: u64,
+    mode: AuthorizationMode,
+}
+
 /// The state of the two stateful subcommands, enumerateRPsGetNextRP and
 /// enumerateCredentialsGetNextCredential (CTAP 2.3 §6).
 ///
@@ -87,12 +109,14 @@ pub(super) fn truncated_rp_id(rp_id: &str) -> String {
 pub(super) struct CredentialManagementState {
     rp_list: Vec<String>,
     rp_index: usize,
-    rp_token: Option<u64>,
+    family: Option<ManagementFamily>,
+    rp_auth: Option<EnumerationAuthorization>,
     /// The IDs of the credentials being enumerated, looked up again for each
     /// enumerateCredentialsGetNextCredential so no private key is kept.
     credential_list: Vec<Vec<u8>>,
     credential_index: usize,
-    credential_token: Option<u64>,
+    credential_auth: Option<EnumerationAuthorization>,
+    credential_rp_hash: Vec<u8>,
 }
 
 impl CredentialManagementState {
@@ -100,23 +124,26 @@ impl CredentialManagementState {
         Self {
             rp_list: Vec::new(),
             rp_index: 0,
-            rp_token: None,
+            family: None,
+            rp_auth: None,
             credential_list: Vec::new(),
             credential_index: 0,
-            credential_token: None,
+            credential_auth: None,
+            credential_rp_hash: Vec::new(),
         }
     }
 
     fn reset_rps(&mut self) {
         self.rp_list.clear();
         self.rp_index = 0;
-        self.rp_token = None;
+        self.rp_auth = None;
     }
 
     fn reset_credentials(&mut self) {
         self.credential_list.clear();
         self.credential_index = 0;
-        self.credential_token = None;
+        self.credential_auth = None;
+        self.credential_rp_hash.clear();
     }
 }
 
@@ -160,7 +187,10 @@ impl CtapApp<'_> {
         ])
     }
 
-    fn cm_enumerate_rps_begin(&mut self) -> Result<Vec<(Value, Value)>, u8> {
+    fn cm_enumerate_rps_begin(
+        &mut self,
+        auth: EnumerationAuthorization,
+    ) -> Result<Vec<(Value, Value)>, u8> {
         let credentials = self.discoverable_credentials()?;
         let mut rp_ids: Vec<String> = credentials.iter().map(|cred| cred.rp_id.clone()).collect();
         rp_ids.sort();
@@ -173,7 +203,7 @@ impl CtapApp<'_> {
         let first = rp_ids[0].clone();
         self.cred_mgmt_state.rp_list = rp_ids;
         self.cred_mgmt_state.rp_index = 1;
-        self.cred_mgmt_state.rp_token = self.pin_state.pin_uv_auth_token_id();
+        self.cred_mgmt_state.rp_auth = Some(auth);
 
         let rp_entry = rp_entity(&first);
         let hash = Self::cm_hash_rp_id(&first);
@@ -191,13 +221,15 @@ impl CtapApp<'_> {
     /// to continue: none was begun, it has returned every RP, or the
     /// pinUvAuthToken that authenticated enumerateRPsBegin has expired
     /// (CTAP 2.3 §6).
-    fn cm_enumerate_rps_next(&mut self) -> Result<Vec<(Value, Value)>, u8> {
-        let token = self.pin_state.pin_uv_auth_token_id();
-        let state = &mut self.cred_mgmt_state;
-        if state.rp_token.is_none() || state.rp_token != token {
-            state.reset_rps();
+    fn cm_enumerate_rps_next(
+        &mut self,
+        family: ManagementFamily,
+    ) -> Result<Vec<(Value, Value)>, u8> {
+        if !self.cm_continuation_authorized(self.cred_mgmt_state.rp_auth, family, None) {
+            self.cred_mgmt_state.reset_rps();
             return Err(CTAP2_ERR_NOT_ALLOWED);
         }
+        let state = &mut self.cred_mgmt_state;
         let Some(rp_id) = state.rp_list.get(state.rp_index).cloned() else {
             state.reset_rps();
             return Err(CTAP2_ERR_NOT_ALLOWED);
@@ -278,6 +310,7 @@ impl CtapApp<'_> {
     fn cm_enumerate_credentials_begin(
         &mut self,
         params: &[(Value, Value)],
+        auth: EnumerationAuthorization,
     ) -> Result<Vec<(Value, Value)>, u8> {
         let rp_hash = required_bytes(params, 1)?;
 
@@ -296,7 +329,8 @@ impl CtapApp<'_> {
             .map(|credential| credential.credential_id.clone())
             .collect();
         self.cred_mgmt_state.credential_index = 1;
-        self.cred_mgmt_state.credential_token = self.pin_state.pin_uv_auth_token_id();
+        self.cred_mgmt_state.credential_auth = Some(auth);
+        self.cred_mgmt_state.credential_rp_hash = rp_hash.to_vec();
 
         Ok(response)
     }
@@ -304,10 +338,16 @@ impl CtapApp<'_> {
     /// enumerateCredentialsGetNextCredential.  CTAP2_ERR_NOT_ALLOWED without
     /// an enumeration to continue, as for [`Self::cm_enumerate_rps_next`].  A
     /// credential deleted since enumerateCredentialsBegin is skipped.
-    fn cm_enumerate_credentials_next(&mut self) -> Result<Vec<(Value, Value)>, u8> {
-        let token = self.pin_state.pin_uv_auth_token_id();
-        let state = &self.cred_mgmt_state;
-        if state.credential_token.is_none() || state.credential_token != token {
+    fn cm_enumerate_credentials_next(
+        &mut self,
+        family: ManagementFamily,
+    ) -> Result<Vec<(Value, Value)>, u8> {
+        let rp_hash = self.cred_mgmt_state.credential_rp_hash.clone();
+        if !self.cm_continuation_authorized(
+            self.cred_mgmt_state.credential_auth,
+            family,
+            Some(&rp_hash),
+        ) {
             self.cred_mgmt_state.reset_credentials();
             return Err(CTAP2_ERR_NOT_ALLOWED);
         }
@@ -406,7 +446,97 @@ impl CtapApp<'_> {
         }
     }
 
+    /// A next request carries no MAC; recheck every aspect of the grant that
+    /// authenticated its begin, including scope changes without token rotation.
+    fn cm_continuation_authorized(
+        &mut self,
+        auth: Option<EnumerationAuthorization>,
+        family: ManagementFamily,
+        rp_hash: Option<&[u8]>,
+    ) -> bool {
+        let Some(auth) = auth else {
+            return false;
+        };
+        if auth.family != family
+            || self.pin_state.pin_uv_auth_token_id() != Some(auth.token)
+            || !self.pin_state.user_verified_flag()
+        {
+            return false;
+        }
+        match auth.mode {
+            AuthorizationMode::LegacyPreview => {
+                family == ManagementFamily::Preview
+                    && self.pin_state.token_origin() == Some(TokenOrigin::LegacyGetPinToken)
+                    && self.pin_state.permissions_rp_id().is_none()
+            }
+            AuthorizationMode::CmPermission => {
+                if !self.pin_state.has_permission(PIN_PERMISSION_CM) {
+                    return false;
+                }
+                match self.pin_state.permissions_rp_id() {
+                    None => true,
+                    Some(binding) => {
+                        rp_hash.is_some_and(|hash| Self::cm_hash_rp_id(&binding) == hash)
+                    }
+                }
+            }
+        }
+    }
+
+    fn cm_authorize(
+        &mut self,
+        family: ManagementFamily,
+        subcommand: u8,
+        params: Option<&[(Value, Value)]>,
+    ) -> Result<EnumerationAuthorization, u8> {
+        let mode = if family == ManagementFamily::Preview {
+            if !self.pin_state.user_verified_flag() {
+                return Err(CTAP2_ERR_PIN_AUTH_INVALID);
+            }
+            match self.pin_state.token_origin() {
+                Some(TokenOrigin::LegacyGetPinToken)
+                    if self.pin_state.permissions_rp_id().is_none() =>
+                {
+                    AuthorizationMode::LegacyPreview
+                }
+                Some(TokenOrigin::PermissionBearing) => {
+                    self.ensure_pin_token_permission_for_cm(subcommand, params)?;
+                    AuthorizationMode::CmPermission
+                }
+                _ => return Err(CTAP2_ERR_PIN_AUTH_INVALID),
+            }
+        } else {
+            // Standard 0x0A retains its existing permission and scope checks.
+            self.ensure_pin_token_permission_for_cm(subcommand, params)?;
+            AuthorizationMode::CmPermission
+        };
+        Ok(EnumerationAuthorization {
+            family,
+            token: self
+                .pin_state
+                .pin_uv_auth_token_id()
+                .ok_or(CTAP2_ERR_PIN_AUTH_INVALID)?,
+            mode,
+        })
+    }
+
+    #[cfg(test)]
     pub(super) fn handle_credential_management(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
+        self.handle_credential_management_family(ManagementFamily::Standard, payload)
+    }
+
+    pub(super) fn handle_credential_management_family(
+        &mut self,
+        family: ManagementFamily,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, u8> {
+        // Switch before parsing: even a rejected request of the other family
+        // cannot leave the preceding enumeration available for later reuse.
+        if self.cred_mgmt_state.family != Some(family) {
+            self.cred_mgmt_state.reset_rps();
+            self.cred_mgmt_state.reset_credentials();
+            self.cred_mgmt_state.family = Some(family);
+        }
         let map = cbor::request_parameters(payload)?;
 
         let subcommand = match cbor::map_get(&map, Value::Integer(Integer::from(1))) {
@@ -432,9 +562,9 @@ impl CtapApp<'_> {
         // sends only the subCommand, and the enumeration's begin subcommand
         // was authenticated instead.
         let response_entries = match subcommand {
-            ENUMERATE_RPS_GET_NEXT_RP => Some(self.cm_enumerate_rps_next()?),
+            ENUMERATE_RPS_GET_NEXT_RP => Some(self.cm_enumerate_rps_next(family)?),
             ENUMERATE_CREDENTIALS_GET_NEXT_CREDENTIAL => {
-                Some(self.cm_enumerate_credentials_next()?)
+                Some(self.cm_enumerate_credentials_next(family)?)
             }
             _ => {
                 // "If pinUvAuthParam is missing from the input map, end the
@@ -473,16 +603,16 @@ impl CtapApp<'_> {
                 }
                 self.verify_pin_uv_auth_param(protocol, &message, &pin_auth_param)?;
 
-                self.ensure_pin_token_permission_for_cm(subcommand, subcommand_params.as_deref())?;
+                let auth = self.cm_authorize(family, subcommand, subcommand_params.as_deref())?;
 
                 let params = subcommand_params
                     .as_ref()
                     .ok_or(CTAP2_ERR_MISSING_PARAMETER);
                 match subcommand {
                     GET_CREDS_METADATA => Some(self.cm_get_metadata()?),
-                    ENUMERATE_RPS_BEGIN => Some(self.cm_enumerate_rps_begin()?),
+                    ENUMERATE_RPS_BEGIN => Some(self.cm_enumerate_rps_begin(auth)?),
                     ENUMERATE_CREDENTIALS_BEGIN => {
-                        Some(self.cm_enumerate_credentials_begin(params?)?)
+                        Some(self.cm_enumerate_credentials_begin(params?, auth)?)
                     }
                     DELETE_CREDENTIAL => {
                         self.cm_delete_credential(params?)?;

@@ -3,6 +3,7 @@
 mod authenticator_config;
 mod cred_blob;
 mod credential_management;
+mod credential_management_preview;
 mod discoverable;
 mod dispatch;
 mod get_assertion;

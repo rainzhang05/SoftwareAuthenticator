@@ -1084,6 +1084,13 @@ pub(super) fn install_pin_uv_auth_token(
     if !app.pin_state.is_set() {
         app.pin_state.set_pin(pin_hash(b"1234"));
     }
-    app.pin_state
-        .issue_pin_uv_auth_token(protocol, token, permissions, rp_id.map(str::to_string));
+    app.pin_state.issue_pin_uv_auth_token(
+        protocol,
+        token,
+        crate::ctap::pin::token::TokenGrant {
+            origin: crate::ctap::pin::token::TokenOrigin::PermissionBearing,
+            permissions,
+            rp_id: rp_id.map(str::to_string),
+        },
+    );
 }

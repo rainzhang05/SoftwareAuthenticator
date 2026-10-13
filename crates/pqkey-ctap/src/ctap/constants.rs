@@ -42,6 +42,9 @@ pub const CTAP_CMD_AUTHENTICATOR_CONFIG: u8 = 0x0D;
 /// Prototype `authenticatorBioEnrollment`, CTAP 2.3 § 6.12 (`FIDO_2_1_PRE`
 /// backwards compatibility).  Not implemented either.
 pub const CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE: u8 = 0x40;
+/// Prototype credential management, CTAP 2.3 §6.13. Subcommands 1–6 use
+/// the prototype wire format; 7 backports standard user-information updates.
+pub const CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE: u8 = 0x41;
 
 /// The longest response the engine produces, status byte included: the
 /// largest CTAPHID message, 64 - 7 + 128 * (64 - 5) = 7609 bytes (CTAP 2.3
@@ -281,5 +284,6 @@ mod tests {
         assert_eq!(CTAP_CMD_LARGE_BLOBS, 0x0C);
         // § 6.12 prototype command.
         assert_eq!(CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE, 0x40);
+        assert_eq!(CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE, 0x41);
     }
 }

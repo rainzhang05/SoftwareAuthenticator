@@ -86,6 +86,21 @@ impl Clock for ManualClock {
     }
 }
 
+/// The ClientPIN operation that issued a transient token. Permission masks
+/// cannot distinguish legacy MC/GA grants from modern permission-bearing ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TokenOrigin {
+    LegacyGetPinToken,
+    PermissionBearing,
+}
+
+/// A grant assigned only after confirmed PIN verification/publication.
+pub(crate) struct TokenGrant {
+    pub(crate) origin: TokenOrigin,
+    pub(crate) permissions: u8,
+    pub(crate) rp_id: Option<String>,
+}
+
 /// An in-use pinUvAuthToken and its state variables.
 ///
 /// "Each PIN/UV auth protocol maintains its own pinUvAuthToken" (§6.5), and
@@ -98,6 +113,8 @@ struct InUseToken {
     value: [u8; 32],
     #[zeroize(skip)]
     protocol: PinProtocol,
+    #[zeroize(skip)]
+    origin: Option<TokenOrigin>,
     permissions: u8,
     permissions_rp_id: Option<String>,
     #[zeroize(skip)]
@@ -133,15 +150,15 @@ impl PinUvAuthTokenState {
         protocol: PinProtocol,
         value: [u8; 32],
         user_is_present: bool,
-        permissions: u8,
-        permissions_rp_id: Option<String>,
+        grant: TokenGrant,
     ) {
         self.issued = self.issued.wrapping_add(1);
         self.in_use = Some(InUseToken {
             value,
             protocol,
-            permissions,
-            permissions_rp_id,
+            origin: Some(grant.origin),
+            permissions: grant.permissions,
+            permissions_rp_id: grant.rp_id,
             started_at: now,
             id: self.issued,
             used: false,
@@ -241,10 +258,18 @@ impl PinUvAuthTokenState {
     pub(crate) fn consume_after_user_presence(&mut self, now: Duration) {
         self.observe(now);
         if let Some(token) = self.in_use.as_mut() {
+            token.origin = None;
             token.user_present = false;
             token.user_verified = false;
             token.permissions &= PIN_PERMISSION_LBW;
         }
+    }
+
+    /// Issuance provenance is volatile and ceases authorizing management when
+    /// user presence consumes the grant, even if an LBW permission remains.
+    pub(crate) fn origin(&mut self, now: Duration) -> Option<TokenOrigin> {
+        self.observe(now);
+        self.in_use.as_ref().and_then(|token| token.origin)
     }
 
     pub(crate) fn has_permission(&mut self, now: Duration, permission: u8) -> bool {

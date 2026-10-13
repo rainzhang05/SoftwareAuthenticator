@@ -3,7 +3,7 @@
 use core::fmt;
 
 use super::protocol::{KeyAgreementKeys, PinProtocol};
-use super::token::{Clock, MonotonicClock, PinUvAuthTokenState};
+use super::token::{Clock, MonotonicClock, PinUvAuthTokenState, TokenGrant, TokenOrigin};
 
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -329,14 +329,12 @@ impl PinState {
         &mut self,
         protocol: PinProtocol,
         token: [u8; 32],
-        permissions: u8,
-        rp_id: Option<String>,
+        grant: TokenGrant,
     ) {
         #[cfg(test)]
         super::observation::record(super::observation::Phase::Token);
         let now = self.clock.now();
-        self.token
-            .begin_using(now, protocol, token, false, permissions, rp_id);
+        self.token.begin_using(now, protocol, token, false, grant);
     }
 
     /// `verify(pinUvAuthToken, message, pinUvAuthParam)`.
@@ -384,6 +382,11 @@ impl PinState {
         self.token.consume_after_user_presence(now);
     }
 
+    pub(crate) fn token_origin(&mut self) -> Option<TokenOrigin> {
+        let now = self.clock.now();
+        self.token.origin(now)
+    }
+
     pub(crate) fn has_permission(&mut self, permission: u8) -> bool {
         let now = self.clock.now();
         self.token.has_permission(now, permission)
@@ -418,7 +421,6 @@ impl PinState {
         self.token.user_present_flag(now)
     }
 
-    #[cfg(test)]
     pub(crate) fn user_verified_flag(&mut self) -> bool {
         let now = self.clock.now();
         self.token.user_verified_flag(now)
@@ -434,7 +436,16 @@ impl PinState {
         #[cfg(test)]
         super::observation::record(super::observation::Phase::Token);
         let now = self.clock.now();
-        self.token
-            .begin_using(now, protocol, token, true, permissions, None);
+        self.token.begin_using(
+            now,
+            protocol,
+            token,
+            true,
+            TokenGrant {
+                origin: TokenOrigin::PermissionBearing,
+                permissions,
+                rp_id: None,
+            },
+        );
     }
 }

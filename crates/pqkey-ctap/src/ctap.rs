@@ -72,7 +72,7 @@ pub use self::pin::token::Clock;
 pub use self::presence::InterruptFlag;
 pub use self::reset::RESET_WINDOW_AFTER_POWER_UP;
 
-use self::credential_management::CredentialManagementState;
+use self::credential_management::{CredentialManagementState, ManagementFamily};
 use self::get_assertion::PendingAssertion;
 use self::large_blobs::LargeBlobState;
 use self::pin::state::PinState;
@@ -328,7 +328,9 @@ impl<'interrupt> CtapApp<'interrupt> {
     ) -> (Option<u8>, Option<u8>) {
         let (sub_command_key, pin_protocol_key) = match ctap_cmd {
             CTAP_CMD_CLIENT_PIN => (Some(2), 1),
-            CTAP_CMD_CREDENTIAL_MANAGEMENT | CTAP_CMD_AUTHENTICATOR_CONFIG => (Some(1), 3),
+            CTAP_CMD_CREDENTIAL_MANAGEMENT
+            | CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE
+            | CTAP_CMD_AUTHENTICATOR_CONFIG => (Some(1), 3),
             CTAP_CMD_LARGE_BLOBS => (None, 6),
             _ => return (None, None),
         };
@@ -392,7 +394,12 @@ impl<'interrupt> CtapApp<'interrupt> {
             CTAP_CMD_GET_NEXT_ASSERTION => self.handle_get_next_assertion(),
             CTAP_CMD_CLIENT_PIN => self.handle_client_pin(payload),
             CTAP_CMD_RESET => self.handle_reset(),
-            CTAP_CMD_CREDENTIAL_MANAGEMENT => self.handle_credential_management(payload),
+            CTAP_CMD_CREDENTIAL_MANAGEMENT => {
+                self.handle_credential_management_family(ManagementFamily::Standard, payload)
+            }
+            CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE => {
+                self.handle_credential_management_family(ManagementFamily::Preview, payload)
+            }
             CTAP_CMD_SELECTION => self.handle_selection(),
             CTAP_CMD_AUTHENTICATOR_CONFIG => self.handle_authenticator_config(payload),
             CTAP_CMD_LARGE_BLOBS => self.handle_large_blobs(payload),
