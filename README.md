@@ -186,7 +186,6 @@ has not been verified. libfido2 1.14.0 retains their advertised algorithm IDs bu
 cannot create, verify or decode these credential keys for enumeration. These
 limits do not change authenticator support or the client compatibility table.
 
-
 ## Clients
 
 | Client | ES256 | ML-DSA | Notes |
