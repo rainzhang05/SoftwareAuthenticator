@@ -147,13 +147,13 @@ def hid(path):
     print("libfido2 1.14 native HID metadata, RP/credential enumeration, updates, deletion and large-blob metadata passed")
 
 
-def decoder_limit(path):
+def decoder_limit(path, algorithm=client.ML_DSA_44):
     rp = "decoder.libfido2.example"
     with client.open_device(path) as device:
         ctap = Ctap2(device)
         # A 44 public key fits libfido2 1.14's 2 KiB receive buffer, reaching
         # its unsupported COSE decoder. An 87 key fails earlier with ERR_RX.
-        credential = client.register(ctap, rp, client.ML_DSA_44, options={"rk": True})
+        credential = client.register(ctap, rp, algorithm, options={"rk": True})
         ClientPin(ctap, PinProtocolV2()).set_pin(PIN.decode())
     lib = native_library()
     dev, rks = allocation(lib.fido_dev_new), allocation(lib.fido_credman_rk_new)
@@ -178,8 +178,11 @@ def decoder_limit(path):
             4: protocol.authenticate(token, b"\x04" + cbor.encode(fields))})
         assert entry[7]["id"] == credential.credential_id and entry[8] == credential.public_key
         client.authenticate(ctap, credential)
-    print("libfido2's ML-DSA decoder limitation is separate from successful authenticator enumeration and signing")
+    print(f"libfido2 decoder limitation for {client.NAMES[algorithm]} is separate from successful authenticator enumeration and signing")
 
 
 if __name__ == "__main__":
-    (decoder_limit if len(sys.argv) > 2 and sys.argv[2] == "--decoder-limit" else hid)(sys.argv[1])
+    if len(sys.argv) > 2 and sys.argv[2] == "--decoder-limit":
+        decoder_limit(sys.argv[1], int(sys.argv[3]) if len(sys.argv) > 3 else client.ML_DSA_44)
+    else:
+        hid(sys.argv[1])

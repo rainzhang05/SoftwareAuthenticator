@@ -86,4 +86,6 @@ def test_get_info(ctap: Ctap2):
         {"type": "public-key", "alg": client.PS256},
         {"type": "public-key", "alg": client.PS384},
         {"type": "public-key", "alg": client.PS512},
+        {"type": "public-key", "alg": client.ESB256},
+        {"type": "public-key", "alg": client.ESB384},
     ]

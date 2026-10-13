@@ -189,6 +189,8 @@ enum Op {
     },
     /// A complete registration, alongside the parameter-mutating generator.
     CreateCredential {
+        /// Supported algorithm index, also encoded by explicit fixtures.
+        alg: u8,
         rp: u8,
         large_blob_key: Option<bool>,
         third_party_payment: Option<bool>,
@@ -2027,6 +2029,7 @@ impl Platform {
                 self.engine.clock().advance(millis);
             }
             Op::CreateCredential {
+                alg,
                 rp,
                 large_blob_key,
                 third_party_payment,
@@ -2040,7 +2043,12 @@ impl Platform {
                     (
                         int(4),
                         Value::Array(vec![Value::Map(vec![
-                            (text("alg"), int(-7)),
+                            (
+                                text("alg"),
+                                int(CoseAlg::ALL[usize::from(alg) % CoseAlg::ALL.len()]
+                                    .identifier()
+                                    .into()),
+                            ),
                             (text("type"), text("public-key")),
                         ])]),
                     ),
@@ -2317,6 +2325,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
         cases.push(vec![
             enroll(v2),
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: None,
                 third_party_payment: None,
@@ -2333,6 +2342,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
         ]);
         cases.push(vec![
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: Some(true),
                 third_party_payment: None,
@@ -2340,6 +2350,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
                 user: 1,
             },
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: None,
                 third_party_payment: None,
@@ -2347,6 +2358,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
                 user: 2,
             },
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: Some(true),
                 third_party_payment: None,
@@ -2354,6 +2366,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
                 user: 3,
             },
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: None,
                 third_party_payment: None,
@@ -2361,6 +2374,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
                 user: 4,
             },
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: Some(true),
                 third_party_payment: None,
@@ -2368,6 +2382,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
                 user: 5,
             },
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: Some(false),
                 third_party_payment: None,
@@ -2420,6 +2435,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     }
     cases.push(vec![
         Op::CreateCredential {
+            alg: 0,
             rp: 0,
             large_blob_key: None,
             third_party_payment: None,
@@ -2728,6 +2744,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
                 complexity: Some(enabled),
             },
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: Some(true),
                 third_party_payment: None,
@@ -2748,6 +2765,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     for requested in [None, Some(false), Some(true)] {
         cases.push(vec![
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: None,
                 third_party_payment: Some(true),
@@ -2755,6 +2773,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
                 user: 1,
             },
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: None,
                 third_party_payment: Some(false),
@@ -2782,6 +2801,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     for enabled in [false, true] {
         cases.push(vec![
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: None,
                 third_party_payment: Some(enabled),
@@ -2789,6 +2809,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
                 user: 1,
             },
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: None,
                 third_party_payment: Some(!enabled),
@@ -2812,6 +2833,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     for rk in [false, true] {
         cases.push(vec![
             Op::CreateCredential {
+                alg: 0,
                 rp: 0,
                 large_blob_key: rk.then_some(true),
                 third_party_payment: Some(true),
@@ -2840,6 +2862,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     }
     let mut capacity: Vec<_> = (0..9)
         .map(|user| Op::CreateCredential {
+            alg: 0,
             rp: 0,
             large_blob_key: None,
             third_party_payment: Some(true),
@@ -2851,6 +2874,7 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
     cases.push(capacity);
     for v2 in [false, true] {
         let create = |rp, user| Op::CreateCredential {
+            alg,
             rp,
             large_blob_key: Some(true),
             third_party_payment: Some(user == 1),
@@ -2954,6 +2978,46 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
                 cm(true, 4, 1),
                 cm(true, 7, 0),
                 cm(true, 6, 0),
+            ]);
+        }
+    }
+    for alg in [19, 20] {
+        for rk in [false, true] {
+            cases.push(vec![
+                Op::CreateCredential {
+                    alg,
+                    rp: 0,
+                    large_blob_key: rk.then_some(true),
+                    third_party_payment: None,
+                    rk,
+                    user: 1,
+                },
+                Op::AssertCredentials {
+                    large_blob_key: rk.then_some(true),
+                    third_party_payment: Some(true),
+                    discoverable: false,
+                },
+                Op::Restart,
+                Op::AssertCredentials {
+                    large_blob_key: None,
+                    third_party_payment: Some(true),
+                    discoverable: false,
+                },
+                Op::Enroll {
+                    v2: true,
+                    permissions: 10,
+                    rp: None,
+                },
+                Op::EnumerateCredentials {
+                    auth: Auth::Token,
+                    next: false,
+                },
+                Op::Reset,
+                Op::AssertCredentials {
+                    large_blob_key: None,
+                    third_party_payment: None,
+                    discoverable: false,
+                },
             ]);
         }
     }
@@ -3070,6 +3134,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 extra = 1;
             }
             Op::CreateCredential {
+                alg,
                 rp,
                 large_blob_key,
                 third_party_payment,
@@ -3077,7 +3142,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 user,
             } => {
                 variant(&mut output, 20, 31);
-                output.push(*rp);
+                output.extend_from_slice(&[*alg, *rp]);
                 option_bool(&mut output, *large_blob_key);
                 option_bool(&mut output, *third_party_payment);
                 output.extend_from_slice(&[u8::from(*rk), *user]);
@@ -3315,6 +3380,7 @@ mod tests {
             platform
                 .step(
                     Op::CreateCredential {
+                        alg: 0,
                         rp: 0,
                         large_blob_key: rk.then_some(true),
                         third_party_payment: None,

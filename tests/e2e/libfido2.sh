@@ -94,7 +94,7 @@ test_token_info() {
   # parameter sets, ESP256, ESP384, ES512, ESP512, ES256K, Ed25519 and Ed448
   # and RS384, RS512, PS256, PS384 and PS512 show up as unknown public-key
   # algorithms; RS256 is named rs256.
-  local expected='algorithms: es256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), es384 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), eddsa (public-key), unknown (public-key), unknown (public-key), rs256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key)'
+  local expected='algorithms: es256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), es384 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), eddsa (public-key), unknown (public-key), unknown (public-key), rs256 (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key), unknown (public-key)'
   grep -qxF "$expected" <<<"$info" || fail "expected '$expected'"
   grep -qE '^aaguid: 5931e805a1664eb7845a7f6aa93d9cd8$' <<<"$info" || fail "unexpected AAGUID"
   grep -qE '^pin protocols: .*\b1\b' <<<"$info" || fail "PIN/UV auth protocol 1 is not advertised"
@@ -182,6 +182,10 @@ test_credman() {
 
 run_test "libfido2 1.14 native credential management and metadata" test_credman
 run_test "libfido2 decoder limits preserve full authenticator support" test_credman --decoder-limit
+
+run_test "Brainpool advertised IDs and unsupported native types" "${E2E_PYTHON:-python3}" "$(dirname "$0")/brainpool_compatibility.py" --hid "$device"
+run_test "ESB256 native management decoder limit" "${E2E_PYTHON:-python3}" "$(dirname "$0")/libfido2_credman.py" "$device" --decoder-limit -265
+run_test "ESB384 native management decoder limit" "${E2E_PYTHON:-python3}" "$(dirname "$0")/libfido2_credman.py" "$device" --decoder-limit -267
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures libfido2 test(s) failed"

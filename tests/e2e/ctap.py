@@ -44,6 +44,8 @@ RS512 = -259
 PS256 = -37
 PS384 = -38
 PS512 = -39
+ESB256 = -265
+ESB384 = -267
 
 COSE_KTY_OKP = 1
 COSE_KTY_EC2 = 2
@@ -55,6 +57,8 @@ COSE_CRV_P521 = 3
 COSE_CRV_SECP256K1 = 8
 COSE_CRV_ED25519 = 6
 COSE_CRV_ED448 = 7
+COSE_CRV_BRAINPOOL_P256R1 = 256
+COSE_CRV_BRAINPOOL_P384R1 = 258
 
 # The AAGUID pqkey uses unless --aaguid is given.
 DEFAULT_AAGUID = bytes.fromhex("5931e805a1664eb7845a7f6aa93d9cd8")
@@ -286,6 +290,8 @@ ALGORITHMS = (
     Algorithm(PS256, "PS256", _check_rsa, _verify_rsa(hashes.SHA256(), pss=True)),
     Algorithm(PS384, "PS384", _check_rsa, _verify_rsa(hashes.SHA384(), pss=True)),
     Algorithm(PS512, "PS512", _check_rsa, _verify_rsa(hashes.SHA512(), pss=True)),
+    Algorithm(ESB256, "ESB256", _check_ec2(COSE_CRV_BRAINPOOL_P256R1, 32), _verify_ecdsa(ec.BrainpoolP256R1(), hashes.SHA256())),
+    Algorithm(ESB384, "ESB384", _check_ec2(COSE_CRV_BRAINPOOL_P384R1, 48), _verify_ecdsa(ec.BrainpoolP384R1(), hashes.SHA384())),
 )
 BY_IDENTIFIER = {algorithm.identifier: algorithm for algorithm in ALGORITHMS}
 NAMES = {algorithm.identifier: algorithm.name for algorithm in ALGORITHMS}
