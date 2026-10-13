@@ -1,6 +1,7 @@
 """Brainpool engine/OpenSSL fixtures and libfido2 1.14 public-API limits."""
 import argparse
 import ctypes as C
+import importlib.util
 import os
 from pathlib import Path
 from cryptography.exceptions import InvalidSignature
@@ -25,6 +26,10 @@ def native_types():
 
 
 def fixtures(path):
+    browser_path = Path(__file__).resolve().parent.parent / "browser" / "server.py"
+    spec = importlib.util.spec_from_file_location("brainpool_browser_fixture", browser_path)
+    browser = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(browser)
     lines = Path(path).read_text().splitlines()
     assert len(lines) == 8
     for line in lines:
@@ -34,6 +39,7 @@ def fixtures(path):
         registration, *assertions = [cbor.decode(bytes.fromhex(v)[1:]) for v in responses]
         data = client.AuthData.parse(registration[2])
         assert len(data.credential_id) == 33 and data.credential_id[0] == int(rk)
+        assert browser.credential_modality(data.credential_id) == rk
         client.check_public_key(data.public_key, alg)
         client.verify_attestation(registration, data.public_key, digest)
         assert data.extensions == {"credBlob": True, "hmac-secret": True}

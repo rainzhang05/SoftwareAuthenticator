@@ -58,6 +58,12 @@ QUEUES: dict[str, list] = {"firefox": [], "chrome": []}  # remote-control queues
 SEEN: dict[str, float] = {}  # browser family -> last poll time
 
 
+def credential_modality(identifier: bytes) -> bool | None:
+    """Discoverability from current stored/sealed ID markers."""
+    marker = identifier[0] if identifier else None
+    return {(33, 1): True, (33, 0): False, (107, 2): False}.get((len(identifier), marker))
+
+
 def b64u(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
@@ -227,9 +233,9 @@ def register_verify(body: dict) -> dict:
     checks.run(f"rc.verify_attestation ({fmt}; self attestation verified with the credential key)",
                lambda: rc.verify_attestation({1: fmt, 2: auth_data_raw, 3: att_stmt}, ad.public_key, cdh))
     rk_cp = (cred.get("clientExtensionResults") or {}).get("credProps", {}).get("rk")
-    expected_disc = {33: True, 107: False}.get(len(ad.credential_id))
-    checks.run("credential ID layout per architecture.md (33 B 0x01 = discoverable, 107 B 0x02 = sealed)",
-               lambda: _assert((len(ad.credential_id), ad.credential_id[0]) in ((33, 1), (107, 2)),
+    expected_disc = credential_modality(ad.credential_id)
+    checks.run("credential ID layout per architecture.md (33 B 0x01/0x00 = stored, 107 B 0x02 = sealed)",
+               lambda: _assert(expected_disc is not None,
                                f"{len(ad.credential_id)} bytes, marker {ad.credential_id[0]:#04x}"))
     if rk_cp is not None:
         checks.run("credProps.rk matches the credential ID kind", lambda: _assert(rk_cp == expected_disc,

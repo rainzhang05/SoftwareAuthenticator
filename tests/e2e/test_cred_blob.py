@@ -36,7 +36,7 @@ def _retrieve_inputs(ctap, protocol):
     return processor.prepare_inputs(None, None)
 
 
-@pytest.mark.parametrize("alg,rk,stored", [(client.ES256, True, True), (client.ES256, False, False), (client.RS256, False, True)])
+@pytest.mark.parametrize("alg,rk,stored", [(client.ES256, True, True), (client.ES256, False, False), (client.RS256, False, True), (client.ESB256, False, True), (client.ESB256, True, True), (client.ESB384, False, True), (client.ESB384, True, True)])
 @pytest.mark.parametrize("length", [0, 1, 32, 33])
 @pytest.mark.parametrize("protocol", PROTOCOLS)
 @pytest.mark.parametrize("uv", [False, True])
