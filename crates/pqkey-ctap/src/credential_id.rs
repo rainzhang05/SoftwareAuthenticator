@@ -47,13 +47,13 @@ pub(crate) fn is_sealed(credential_id: &[u8]) -> bool {
 /// * A discoverable credential is a stored record with a
 ///   [`CREDENTIAL_ID_LENGTH`]-byte ID, [`DISCOVERABLE_MARKER`] and 32 random
 ///   bytes.
-/// * A non-discoverable credential whose key fits and whose payment metadata
+/// * A non-discoverable credential whose algorithm and key fit and whose payment metadata
 ///   is disabled is not stored. Its ID is [`SEALED_ID_LENGTH`] bytes:
 ///   [`SEALED_MARKER`], then its algorithm, credProtect level, private key and
 ///   the random seed of its hmac-secret CredRandom values, sealed by the store
 ///   under a key that a reset replaces and bound to the relying party. It has
 ///   no signature counter of its own, and counts on the global one instead.
-/// * RSA, payment-enabled and older non-discoverable credentials are stored
+/// * RSA, Brainpool, payment-enabled and older non-discoverable credentials are stored
 ///   records whose ID is [`NON_DISCOVERABLE_MARKER`] and 32 random bytes. They
 ///   keep their own signature counters and random CredRandom values. Newly
 ///   created non-discoverable records keep no user ID or names. They take room

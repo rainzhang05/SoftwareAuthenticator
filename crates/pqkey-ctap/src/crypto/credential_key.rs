@@ -230,10 +230,10 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
 /// Sign `auth_data || client_data_hash` as `alg` signs, and return the
 /// signature in the encoding WebAuthn requires for `alg`:
 ///
-/// * **ES256**, **ESP256**, **ES384**, **ESP384**, **ES512**, **ESP512** and
-///   **ES256K**: ECDSA over the algorithm's curve with its hash, P-256 with
+/// * **ES256**, **ESP256**, **ES384**, **ESP384**, **ES512**, **ESP512**,
+///   **ES256K**, **ESB256** and **ESB384**: ECDSA over the algorithm's curve with its hash, P-256 with
 ///   SHA-256, P-384 with SHA-384, P-521 with SHA-512 or secp256k1 with
-///   SHA-256, and an RFC 6979 nonce, as an ASN.1 DER `Ecdsa-Sig-Value`
+///   SHA-256, or Brainpool P-256/P-384 with SHA-256/SHA-384, and an RFC 6979 nonce, as an ASN.1 DER `Ecdsa-Sig-Value`
 ///   (WebAuthn Level 3 §6.5.5).
 /// * **EdDSA** and **Ed25519**: pure Ed25519 (RFC 8032 §5.1), as the 64-byte
 ///   signature RFC 8032 encodes ("\[RFC8032\] describes the method of

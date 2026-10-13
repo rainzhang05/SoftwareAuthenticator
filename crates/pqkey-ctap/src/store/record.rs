@@ -67,7 +67,7 @@ pub enum PrivateKeyMaterial {
     /// A seed from which the owning record's `alg` derives the key
     /// ([`KeyKind::Seed`]): for ML-DSA, the FIPS 204 key-generation seed `ξ`,
     /// which the parameter set of `alg` expands; for ECDSA on P-384, P-521
-    /// and secp256k1, the seed the scalar is derived from; and for EdDSA, the
+    /// secp256k1 and Brainpool r1, the seed the scalar is derived from; and for EdDSA, the
     /// RFC 8032 private key itself on Ed25519 and the seed it is derived from
     /// on Ed448.
     Seed {

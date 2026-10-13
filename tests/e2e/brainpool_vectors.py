@@ -94,7 +94,7 @@ pub const VECTORS: [Vector; 4] = [''')
             for name, value in fields.items():
                 print(f'        {name}: "{value}",')
             print("    },")
-    print("];\n\n/// Decode a fixed hexadecimal test vector.\npub fn unhex(value: &str) -> Vec<u8> {\n    value.as_bytes().chunks_exact(2).map(|pair| {\n        u8::from_str_radix(core::str::from_utf8(pair).unwrap(), 16).unwrap()\n    }).collect()\n}")
+    print("];\n\n/// Decode a fixed hexadecimal test vector.\npub fn unhex(value: &str) -> Vec<u8> {\n    value.as_bytes().as_chunks::<2>().0.iter().map(|pair| {\n        u8::from_str_radix(core::str::from_utf8(pair).unwrap(), 16).unwrap()\n    }).collect()\n}")
 
 
 if __name__ == "__main__":

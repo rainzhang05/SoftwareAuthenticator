@@ -226,14 +226,13 @@ else has to change.
    `tests/residue.rs` and, for keys derived from a seed, known answers in its
    family's module. A new type of key needs a `CredentialSecretKey` variant.
    Keys kept in a new form need a `KeyKind`, a `PrivateKeyMaterial` variant
-   and a key type in `store/codec.rs`; `KeyKind::is_sealable` says whether
-   they fit a sealed credential ID. A key that does not, as RSA's primes do
+   and a key type in `store/codec.rs`; `CoseAlg::is_sealable` checks both material width and algorithm encoding.
+   Both must fit the existing sealed credential ID. A key that does not, as RSA's primes do
    not, is stored even for a non-discoverable credential.
 3. Build and run clippy, and handle every match they point to, among them
    the test verifier in `crypto/verify.rs`, which pqkey's tests and the fuzz
-   targets reach through pqkey-ctap's `test-support` feature. A check at
-   compile time says if an algorithm whose key can be sealed does not fit a
-   sealed credential ID.
+   targets reach through pqkey-ctap's `test-support` feature. Compile-time invariants and explicit eligibility tests keep the signed-byte
+   sealed algorithm field separate from the private material width.
 4. Run the tests. The table-driven ones cover the new algorithm, and the
    known-answer tests of the table, of getInfo and of the CLI say what to
    add to them. If `UNSUPPORTED_ALGORITHMS` in `fuzz/src/requests.rs` lists
@@ -434,3 +433,39 @@ failures, and separate cache outputs by compiler, architecture and sanitizer.
 
 Start and export the disposable D-Bus session before every test key, including
 auto-approve keys: WINK identification uses notifications in every presence mode.
+
+## Brainpool validation and client limits
+
+`tests/e2e/brainpool_vectors.py` regenerates the committed independent vectors
+with pinned cryptography/OpenSSL, hashlib and Python integers. The vectors cover
+two seeds per curve, private/public derivation, SHAKE output, RFC 6979 nonces,
+and signatures with the correct and wrong hashes. Existing derivation vectors
+remain regression requirements. The stack probe independently computes both
+new scalars/nonces, handles bits2octets reduction and rejected candidates, and
+retains its full 2 MiB scan; heap controls include scalars, SHAKE output and
+nonces in both byte orders and retain the all-freed-bytes-zero requirement.
+
+Run `cargo run --locked -p pqkey-ctap --example brainpool_compatibility` and pass
+stdout to `tests/e2e/brainpool_compatibility.py --fixtures PATH` in the pinned
+Python environment. It independently verifies eight registrations and sixteen
+assertions with OpenSSL, including both stored modalities, payment/blob metadata,
+DER and tampering. This offline path does not establish HID or browser support.
+Raw HID regressions use the existing Python FIDO cryptography helpers with
+Brainpool curves and cover PIN protocols, credProtect and management.
+
+The libfido2 1.14.0 compatibility tests use its existing algorithm getters and
+`fido_cred_set_type`, plus native preview management. Advertising -265/-267
+succeeds; unsupported native credential types and COSE decoders fail as expected.
+Keep ES256/ES384/EdDSA/RS256 and ML-DSA decoder compatibility gates intact;
+do not filter authenticator credentials for an older decoder or imply verified
+Brainpool browser support. Non-discoverable Brainpool credentials cost a storage
+slot even when payment is disabled.
+
+After any algorithm/fixture-layout change, regenerate every committed fuzz seed
+with `cargo run --locked --release --manifest-path fuzz/Cargo.toml --example seeds`
+twice and compare filenames/content hashes. The explicit sequence fixtures carry
+an algorithm index and check their own round trips against locked `arbitrary`.
+Keep source snapshots, exact commands/statuses, compiler and architecture
+identity, full probe logs, corpus manifests and five explicit 30-second
+sanitizer results outside the repository. Linux snapshots come from `git archive`
+extracted with `tar -xm`, with separate compiler/architecture/sanitizer caches.

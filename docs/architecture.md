@@ -187,7 +187,7 @@ suite requires `/dev/uhid`.
 - ES256 (-7), ML-DSA-44 (-48), ML-DSA-65 (-49), ML-DSA-87 (-50), ESP256 (-9),
   ES384 (-35), ESP384 (-51), ES512 (-36), ESP512 (-52), ES256K (-47), EdDSA
   (-8), Ed25519 (-19), Ed448 (-53), RS256 (-257), RS384 (-258), RS512 (-259),
-  PS256 (-37), PS384 (-38) and PS512 (-39), the RSA ones with 2048-bit keys
+  PS256 (-37), PS384 (-38), PS512 (-39), ESB256 (-265) and ESB384 (-267), the RSA ones with 2048-bit keys
   and e = 65537. The first algorithm in the relying party's list that the key
   supports wins (§6.1.2).
 - A PIN, with PIN/UV auth protocols 1 and 2 and pinUvAuthTokens. After 8
@@ -424,16 +424,16 @@ key and a seed for the hmac-secret CredRandom values. Their assertions use
 the global signature counter. Sealing and lookup accept the RP ID hash
 directly; CTAP2 hashes its RP ID before using them. Counter updates share
 one persistence path, which saves the count before signing.
-RSA non-discoverable credentials instead use
+RSA and Brainpool non-discoverable credentials instead use
 `0x00` and 32 random bytes, like older stored non-discoverable credentials.
-RSA records contain no user ID or names, and keep random CredRandom values,
+These records contain no user ID or names, and keep random CredRandom values,
 credProtect and a counter of their own. They work only through an allowList,
 are excluded by an excludeList, consume a slot, and are erased by reset.
 
 The `thirdPartyPayment` boolean is optional credential-record field 16. Older
 records default to false, and false is omitted on writes to preserve existing
 encodings. Enabled non-discoverable credentials use the same stored `0x00` IDs
-as RSA, clear user information and retain their own counters. Eligible ordinary
+as RSA and Brainpool, clear user information and retain their own counters. Eligible ordinary
 credentials keep the existing 107-byte sealed format and sealing domains;
 sealed and U2F-created credentials report false when the extension is requested.
 
@@ -540,3 +540,28 @@ that the scanner can find every secret pattern.
 
 The scripts in `scripts/` run all of them; see the
 [development notes](development-notes.md).
+
+## Brainpool credential keys
+
+ESB256 and ESB384 are ECDSA on brainpoolP256r1/SHA-256 and
+brainpoolP384r1/SHA-384 ([RFC 9864 §2.1](https://www.rfc-editor.org/rfc/rfc9864.html#section-2.1)).
+The [IANA COSE registry](https://www.iana.org/assignments/cose/) assigns EC2 crv
+256 and 258; uncompressed x/y are exactly 32 and 48 bytes. Signatures in
+WebAuthn/CTAP are ASN.1 DER. RustCrypto bp256/bp384 0.14.0 and generic ecdsa
+0.17 perform arithmetic and signing within the library's scrubbed-stack path.
+
+Both store 32-byte seeds. SHAKE256 receives the unchanged context
+`pqkey/v1/ecdsa-key/`, the exact name `brainpoolP256r1` or `brainpoolP384r1`,
+and the seed. The first 40 or 56 bytes become c; d = (c mod (n - 1)) + 1,
+using the group orders in [RFC 5639 §§3.4/3.6](https://www.rfc-editor.org/rfc/rfc5639.html).
+All existing derivation names, bytes and key domains remain unchanged.
+
+`CoseAlg::is_sealable` checks both private-material width and signed-byte
+algorithm encoding. These algorithm IDs do not fit, so both modalities are
+stored, using `0x01 || random[32]` or `0x00 || random[32]`. Non-discoverable
+Brainpool credentials consume a slot, reduce remaining capacity, clear their
+user fields, retain individual counters, and remain absent from discoverable
+management enumeration. Existing credential CBOR, encrypted envelopes and
+107-byte sealed IDs need no migration. Discoverable replacement uses the
+existing atomic membership transaction, including its capacity and publication
+failure rules.
