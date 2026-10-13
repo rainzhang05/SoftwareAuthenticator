@@ -70,6 +70,8 @@ enum EcCurve {
     P384,
     P521,
     Secp256k1,
+    BrainpoolP256r1,
+    BrainpoolP384r1,
 }
 
 /// The curves of the EdDSA algorithms.
@@ -173,6 +175,24 @@ fn expected(alg: CoseAlg) -> (i64, Expected) {
                 length: 32,
                 curve: EcCurve::Secp256k1,
                 hash: Hash::Sha256,
+            },
+        ),
+        CoseAlg::ESB256 => (
+            -265,
+            Expected::Ecdsa {
+                crv: 256,
+                length: 32,
+                curve: EcCurve::BrainpoolP256r1,
+                hash: Hash::Sha256,
+            },
+        ),
+        CoseAlg::ESB384 => (
+            -267,
+            Expected::Ecdsa {
+                crv: 258,
+                length: 48,
+                curve: EcCurve::BrainpoolP384r1,
+                hash: Hash::Sha384,
             },
         ),
         CoseAlg::EdDSA => (-8, ed25519),
@@ -421,6 +441,18 @@ fn verify_ecdsa(
             let key = p521::ecdsa::VerifyingKey::from_sec1_bytes(point)
                 .map_err(|_| malformed("x and y are not a point on P-521".into()))?;
             p521::ecdsa::Signature::from_der(signature)
+                .is_ok_and(|signature| key.verify_prehash(digest, &signature).is_ok())
+        }
+        EcCurve::BrainpoolP256r1 => {
+            let key = ecdsa::VerifyingKey::<bp256::BrainpoolP256r1>::from_sec1_bytes(point)
+                .map_err(|_| malformed("x and y are not a point on brainpoolP256r1".into()))?;
+            bp256::r1::ecdsa::Signature::from_der(signature)
+                .is_ok_and(|signature| key.verify_prehash(digest, &signature).is_ok())
+        }
+        EcCurve::BrainpoolP384r1 => {
+            let key = ecdsa::VerifyingKey::<bp384::BrainpoolP384r1>::from_sec1_bytes(point)
+                .map_err(|_| malformed("x and y are not a point on brainpoolP384r1".into()))?;
+            bp384::r1::ecdsa::Signature::from_der(signature)
                 .is_ok_and(|signature| key.verify_prehash(digest, &signature).is_ok())
         }
         // `k256` accepts only signatures whose s is in the lower half of the

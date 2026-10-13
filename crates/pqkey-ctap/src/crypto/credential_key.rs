@@ -13,7 +13,8 @@ use super::ecdsa::Curve;
 use super::eddsa::EdwardsCurve;
 use super::scrub::with_scrubbed_stack;
 use super::{
-    ecdsa_p256, ecdsa_p384, ecdsa_p521, ecdsa_secp256k1, eddsa_ed448, eddsa_ed25519, mldsa, rsa,
+    ecdsa_bp256, ecdsa_bp384, ecdsa_p256, ecdsa_p384, ecdsa_p521, ecdsa_secp256k1, eddsa_ed448,
+    eddsa_ed25519, mldsa, rsa,
 };
 
 /// A credential's signing key, named by its key type: algorithms that share
@@ -38,6 +39,10 @@ pub enum CredentialSecretKey {
     /// from, the form stored credentials use: ES256K.  Each use derives the
     /// scalar anew.
     Secp256k1(Seed),
+    /// A brainpoolP256r1 key held as a 32-byte seed: ESB256.
+    BrainpoolP256r1(Seed),
+    /// A brainpoolP384r1 key held as a 32-byte seed: ESB384.
+    BrainpoolP384r1(Seed),
     /// An EdDSA key on Ed25519 held as its 32-byte RFC 8032 private key, the
     /// seed itself: EdDSA and Ed25519.  Each use hashes it anew into the
     /// secret scalar and prefix.
@@ -61,6 +66,8 @@ impl CredentialSecretKey {
             CredentialSecretKey::MlDsa(seed)
             | CredentialSecretKey::P384(seed)
             | CredentialSecretKey::P521(seed)
+            | CredentialSecretKey::BrainpoolP256r1(seed)
+            | CredentialSecretKey::BrainpoolP384r1(seed)
             | CredentialSecretKey::Secp256k1(seed)
             | CredentialSecretKey::Ed25519(seed)
             | CredentialSecretKey::Ed448(seed) => Zeroizing::new(seed.as_bytes().to_vec()),
@@ -154,6 +161,12 @@ pub fn try_credential_secret_from_bytes(
         Scheme::Ecdsa(Curve::P384) => seed(bytes).map(CredentialSecretKey::P384),
         Scheme::Ecdsa(Curve::P521) => seed(bytes).map(CredentialSecretKey::P521),
         Scheme::Ecdsa(Curve::Secp256k1) => seed(bytes).map(CredentialSecretKey::Secp256k1),
+        Scheme::Ecdsa(Curve::BrainpoolP256r1) => {
+            seed(bytes).map(CredentialSecretKey::BrainpoolP256r1)
+        }
+        Scheme::Ecdsa(Curve::BrainpoolP384r1) => {
+            seed(bytes).map(CredentialSecretKey::BrainpoolP384r1)
+        }
         Scheme::EdDsa(EdwardsCurve::Ed25519) => seed(bytes).map(CredentialSecretKey::Ed25519),
         Scheme::EdDsa(EdwardsCurve::Ed448) => seed(bytes).map(CredentialSecretKey::Ed448),
         Scheme::MlDsa(_) => seed(bytes).map(CredentialSecretKey::MlDsa),
@@ -181,6 +194,12 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
         (CredentialSecretKey::Secp256k1(seed), Scheme::Ecdsa(Curve::Secp256k1)) => {
             ecdsa_secp256k1::cose_public_key(alg, seed)
         }
+        (CredentialSecretKey::BrainpoolP256r1(seed), Scheme::Ecdsa(Curve::BrainpoolP256r1)) => {
+            ecdsa_bp256::cose_public_key(alg, seed)
+        }
+        (CredentialSecretKey::BrainpoolP384r1(seed), Scheme::Ecdsa(Curve::BrainpoolP384r1)) => {
+            ecdsa_bp384::cose_public_key(alg, seed)
+        }
         (CredentialSecretKey::Ed25519(seed), Scheme::EdDsa(EdwardsCurve::Ed25519)) => {
             eddsa_ed25519::cose_public_key(alg, seed)
         }
@@ -196,6 +215,8 @@ pub fn try_cose_public_key(alg: CoseAlg, sk: &CredentialSecretKey) -> Result<Vec
             CredentialSecretKey::P256(_)
             | CredentialSecretKey::P384(_)
             | CredentialSecretKey::P521(_)
+            | CredentialSecretKey::BrainpoolP256r1(_)
+            | CredentialSecretKey::BrainpoolP384r1(_)
             | CredentialSecretKey::Secp256k1(_)
             | CredentialSecretKey::Ed25519(_)
             | CredentialSecretKey::Ed448(_)
@@ -246,6 +267,12 @@ pub fn try_sign_challenge(
         (CredentialSecretKey::Secp256k1(seed), Scheme::Ecdsa(Curve::Secp256k1)) => {
             ecdsa_secp256k1::sign(seed, &msg)
         }
+        (CredentialSecretKey::BrainpoolP256r1(seed), Scheme::Ecdsa(Curve::BrainpoolP256r1)) => {
+            ecdsa_bp256::sign(seed, &msg)
+        }
+        (CredentialSecretKey::BrainpoolP384r1(seed), Scheme::Ecdsa(Curve::BrainpoolP384r1)) => {
+            ecdsa_bp384::sign(seed, &msg)
+        }
         (CredentialSecretKey::Ed25519(seed), Scheme::EdDsa(EdwardsCurve::Ed25519)) => {
             eddsa_ed25519::sign(seed, &msg)
         }
@@ -263,6 +290,8 @@ pub fn try_sign_challenge(
             CredentialSecretKey::P256(_)
             | CredentialSecretKey::P384(_)
             | CredentialSecretKey::P521(_)
+            | CredentialSecretKey::BrainpoolP256r1(_)
+            | CredentialSecretKey::BrainpoolP384r1(_)
             | CredentialSecretKey::Secp256k1(_)
             | CredentialSecretKey::Ed25519(_)
             | CredentialSecretKey::Ed448(_)
@@ -370,6 +399,62 @@ mod tests {
     }
 
     #[test]
+    fn brainpool_accepts_openssl_signatures_and_rejects_malformed_inputs() {
+        use crate::brainpool_fixture::{MESSAGE, VECTORS, unhex};
+        for vector in VECTORS {
+            let key = try_credential_secret_from_bytes(vector.alg, &unhex(vector.seed)).unwrap();
+            assert!(format!("{key:?}").contains("redacted"));
+            let public = try_cose_public_key(vector.alg, &key).unwrap();
+            let signature = unhex(vector.signature);
+            assert_eq!(
+                verify_signature(vector.alg, &public, &MESSAGE, &signature),
+                Ok(())
+            );
+            // RFC 6979 is deterministic in both independent implementations.
+            assert_eq!(
+                try_sign_challenge(vector.alg, &key, &MESSAGE[..37], &MESSAGE[37..]).unwrap(),
+                signature
+            );
+            assert_eq!(
+                verify_signature(vector.alg, &public, &MESSAGE, &unhex(vector.wrong_hash)),
+                Err(VerificationError::BadSignature)
+            );
+            for malformed in [
+                vec![],
+                vec![0x30, 0],
+                signature[..signature.len() - 1].to_vec(),
+                [signature.clone(), vec![0]].concat(),
+                vec![0x30, 6, 2, 1, 0, 2, 1, 0],
+            ] {
+                assert_eq!(
+                    verify_signature(vector.alg, &public, &MESSAGE, &malformed),
+                    Err(VerificationError::BadSignature)
+                );
+            }
+            let int = |v: i64| Value::Integer(Integer::from(v));
+            for (label, value) in [
+                (1, int(1)),
+                (3, int(-7)),
+                (-1, int(1)),
+                (-3, Value::Bool(true)),
+                (-2, Value::Bytes(vec![0; unhex(vector.x).len() - 1])),
+                (-3, Value::Bytes(vec![0; unhex(vector.y).len()])),
+                (-4, Value::Bytes(vec![1; 32])),
+            ] {
+                assert!(matches!(
+                    verify_signature(
+                        vector.alg,
+                        &with_label(&public, label, value),
+                        &MESSAGE,
+                        &signature
+                    ),
+                    Err(VerificationError::MalformedKey(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn es256_credential_roundtrip() {
         let (cose_key, secret_key) = generated(CoseAlg::ES256);
         assert_eq!(secret_key.secret_bytes().len(), 32);
@@ -443,6 +528,8 @@ mod tests {
             (CoseAlg::ES512, 3, 66),
             (CoseAlg::ESP512, 3, 66),
             (CoseAlg::ES256K, 8, 32),
+            (CoseAlg::ESB256, 256, 32),
+            (CoseAlg::ESB384, 258, 48),
         ];
         let ecdsa: Vec<CoseAlg> = CoseAlg::ALL
             .into_iter()

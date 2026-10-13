@@ -9,6 +9,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Independent Brainpool known answers shared by tests and residue probes.
+#[cfg(any(test, feature = "test-support"))]
+#[path = "../tests/vectors/brainpool.rs"]
+pub mod brainpool_fixture;
 mod cbor;
 mod credential_id;
 mod crypto;

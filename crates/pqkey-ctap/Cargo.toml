@@ -28,6 +28,11 @@ p256 = { workspace = true, features = ["ecdh"] }
 p384 = { version = "0.14", features = ["ecdsa"] }
 p521 = { version = "0.14", features = ["ecdsa"] }
 k256 = { version = "0.14", features = ["ecdsa"] }
+# Brainpool r1 curves share the existing elliptic-curve/ecdsa/SHA-2 graph.
+# Their ecdsa feature supplies signatures; algorithm enables generic keys.
+bp256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "sha256"] }
+bp384 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "sha384"] }
+ecdsa = { version = "0.17", default-features = false, features = ["algorithm", "der"] }
 # EdDSA on Ed25519 (EdDSA and Ed25519).  `zeroize`, a default feature, is
 # named because the keys rely on it: it wipes the private key and its hash on
 # drop.

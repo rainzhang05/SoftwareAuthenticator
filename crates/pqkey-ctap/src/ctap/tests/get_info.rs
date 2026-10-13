@@ -82,7 +82,7 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
     let algorithms = Value::Array(
         [
             -7, -48, -49, -50, -9, -35, -51, -36, -52, -47, -8, -19, -53, -257, -258, -259, -37,
-            -38, -39,
+            -38, -39, -265, -267,
         ]
         .into_iter()
         .map(|alg: i32| {

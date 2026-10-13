@@ -15,7 +15,7 @@ use shake::{ExtendableOutput, Shake256, Update, XofReader};
 use zeroize::Zeroizing;
 
 use super::CryptoError;
-use super::alg::CoseAlg;
+use super::alg::{CoseAlg, Scheme};
 use super::cose::{CRV_P256, CRV_P384, CRV_P521, CRV_SECP256K1, try_ec2_key};
 use super::credential_key::Seed;
 
@@ -36,6 +36,10 @@ pub(crate) enum Curve {
     /// secp256k1 with SHA-256: ES256K.  Keys are kept as a seed the scalar is
     /// derived from ([`derive_scalar`]).
     Secp256k1,
+    /// brainpoolP256r1 with SHA-256: ESB256, held as a seed.
+    BrainpoolP256r1,
+    /// brainpoolP384r1 with SHA-384: ESB384, held as a seed.
+    BrainpoolP384r1,
 }
 
 impl Curve {
@@ -47,6 +51,8 @@ impl Curve {
             Curve::P384 => CRV_P384,
             Curve::P521 => CRV_P521,
             Curve::Secp256k1 => CRV_SECP256K1,
+            Curve::BrainpoolP256r1 => super::cose::CRV_BRAINPOOL_P256R1,
+            Curve::BrainpoolP384r1 => super::cose::CRV_BRAINPOOL_P384R1,
         }
     }
 }
@@ -121,6 +127,9 @@ pub(crate) fn try_cose_key<Size: ModulusSize>(
     curve: Curve,
     point: Coordinates<'_, Size>,
 ) -> Result<Vec<u8>, CryptoError> {
+    if alg.scheme() != Scheme::Ecdsa(curve) {
+        return Err(CryptoError::KeyTypeMismatch);
+    }
     match point {
         Coordinates::Uncompressed { x, y } => try_ec2_key(alg, curve.crv(), x, y),
         Coordinates::Identity | Coordinates::Compact { .. } | Coordinates::Compressed { .. } => {
@@ -260,6 +269,72 @@ mod tests {
             assert_eq!(coordinate(-2), x, "{alg:?}: x");
             assert_eq!(coordinate(-3), y, "{alg:?}: y");
         }
+    }
+
+    #[test]
+    fn brainpool_scalars_and_points_match_independent_vectors() {
+        use crate::brainpool_fixture::{VECTORS, unhex};
+        for vector in VECTORS {
+            let seed = Seed::new(unhex(vector.seed).try_into().unwrap());
+            let scalar = match vector.alg {
+                CoseAlg::ESB256 => super::super::ecdsa_bp256::signing_key(&seed)
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec(),
+                CoseAlg::ESB384 => super::super::ecdsa_bp384::signing_key(&seed)
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec(),
+                CoseAlg::ES256
+                | CoseAlg::MLDSA44
+                | CoseAlg::MLDSA65
+                | CoseAlg::MLDSA87
+                | CoseAlg::ESP256
+                | CoseAlg::ES384
+                | CoseAlg::ESP384
+                | CoseAlg::ES512
+                | CoseAlg::ESP512
+                | CoseAlg::ES256K
+                | CoseAlg::EdDSA
+                | CoseAlg::Ed25519
+                | CoseAlg::Ed448
+                | CoseAlg::RS256
+                | CoseAlg::RS384
+                | CoseAlg::RS512
+                | CoseAlg::PS256
+                | CoseAlg::PS384
+                | CoseAlg::PS512 => panic!("Brainpool fixture"),
+            };
+            assert_eq!(scalar, unhex(vector.scalar));
+            let key = try_credential_secret_from_bytes(vector.alg, seed.as_bytes()).unwrap();
+            let cose = try_cose_public_key(vector.alg, &key).unwrap();
+            let expected = try_ec2_key(
+                vector.alg,
+                vector.crv as i32,
+                &unhex(vector.x),
+                &unhex(vector.y),
+            )
+            .unwrap();
+            assert_eq!(cose, expected);
+            assert_eq!(
+                cose.len(),
+                if vector.alg == CoseAlg::ESB256 {
+                    81
+                } else {
+                    113
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn try_cose_key_rejects_algorithm_curve_mismatch() {
+        let key = SigningKey::generate_from_rng(&mut os_rng());
+        let point = key.verifying_key().to_sec1_point(false);
+        assert_eq!(
+            try_cose_key(CoseAlg::ESB256, Curve::P256, point.coordinates()),
+            Err(CryptoError::KeyTypeMismatch)
+        );
     }
 
     #[test]

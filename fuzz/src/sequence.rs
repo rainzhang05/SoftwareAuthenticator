@@ -899,11 +899,13 @@ impl Platform {
                     let Value::Map(public_key) = public_key else {
                         panic!("credential public key is a map");
                     };
-                    // An RSA key (kty 3) does not fit a sealed ID, so it is
-                    // stored.
-                    let kty = get_int(&public_key, 1);
+                    // RSA material and Brainpool algorithm IDs require storage.
+                    let algorithm = match get_int(&public_key, 3) {
+                        Some(Value::Integer(alg)) => i32::try_from(i128::from(*alg)).unwrap(),
+                        _ => panic!("public algorithm"),
+                    };
                     if extension_requested(&parameters, 6, "thirdPartyPayment")
-                        || matches!(kty, Some(Value::Integer(kty)) if i128::from(*kty) == 3)
+                        || !CoseAlg::try_from(algorithm).unwrap().is_sealable()
                     {
                         (33, 0x00)
                     } else {

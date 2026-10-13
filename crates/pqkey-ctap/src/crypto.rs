@@ -19,6 +19,8 @@ pub(crate) mod alg;
 pub(crate) mod cose;
 pub(crate) mod credential_key;
 pub(crate) mod ecdsa;
+pub(crate) mod ecdsa_bp256;
+pub(crate) mod ecdsa_bp384;
 pub(crate) mod ecdsa_p256;
 pub(crate) mod ecdsa_p384;
 pub(crate) mod ecdsa_p521;

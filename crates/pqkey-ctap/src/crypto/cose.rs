@@ -31,6 +31,11 @@ pub(crate) const CRV_P521: i32 = 3;
 /// Curve 8, secp256k1 (RFC 8812 §3.1).
 pub(crate) const CRV_SECP256K1: i32 = 8;
 
+/// Curve 256, brainpoolP256r1 (IANA COSE Elliptic Curves registry).
+pub(crate) const CRV_BRAINPOOL_P256R1: i32 = 256;
+/// Curve 258, brainpoolP384r1 (IANA COSE Elliptic Curves registry).
+pub(crate) const CRV_BRAINPOOL_P384R1: i32 = 258;
+
 /// Key type 1, OKP: an Octet Key Pair, whose public key is one byte string
 /// (RFC 9053 §7.2).
 const KTY_OKP: i32 = 1;

@@ -69,6 +69,10 @@ pub enum CoseAlg {
     PS384 = -38,
     /// RSASSA-PSS with SHA-512 and a 64-byte salt (RFC 8230 §2).
     PS512 = -39,
+    /// ECDSA with brainpoolP256r1 and SHA-256 (RFC 9864 §2.1).
+    ESB256 = -265,
+    /// ECDSA with brainpoolP384r1 and SHA-384 (RFC 9864 §2.1).
+    ESB384 = -267,
 }
 
 /// The kind of private key material a credential keeps.  Each algorithm
@@ -124,7 +128,13 @@ impl Scheme {
     const fn key_kind(self) -> KeyKind {
         match self {
             Scheme::Ecdsa(Curve::P256) => KeyKind::P256Scalar,
-            Scheme::Ecdsa(Curve::P384 | Curve::P521 | Curve::Secp256k1)
+            Scheme::Ecdsa(
+                Curve::P384
+                | Curve::P521
+                | Curve::Secp256k1
+                | Curve::BrainpoolP256r1
+                | Curve::BrainpoolP384r1,
+            )
             | Scheme::EdDsa(EdwardsCurve::Ed25519 | EdwardsCurve::Ed448)
             | Scheme::MlDsa(_) => KeyKind::Seed,
             Scheme::Rsa(_, _) => KeyKind::RsaPrimes,
@@ -143,7 +153,7 @@ struct Properties {
 impl CoseAlg {
     /// Every algorithm, in the order authenticatorGetInfo lists them (CTAP 2.3
     /// §6.4, `algorithms`).
-    pub const ALL: [CoseAlg; 19] = [
+    pub const ALL: [CoseAlg; 21] = [
         CoseAlg::ES256,
         CoseAlg::MLDSA44,
         CoseAlg::MLDSA65,
@@ -163,6 +173,8 @@ impl CoseAlg {
         CoseAlg::PS256,
         CoseAlg::PS384,
         CoseAlg::PS512,
+        CoseAlg::ESB256,
+        CoseAlg::ESB384,
     ];
 
     /// The table: what the authenticator knows about each algorithm.
@@ -239,6 +251,14 @@ impl CoseAlg {
             CoseAlg::PS384 => Properties {
                 name: "PS384",
                 scheme: Scheme::Rsa(Padding::Pss, Hash::Sha384),
+            },
+            CoseAlg::ESB256 => Properties {
+                name: "ESB256",
+                scheme: Scheme::Ecdsa(Curve::BrainpoolP256r1),
+            },
+            CoseAlg::ESB384 => Properties {
+                name: "ESB384",
+                scheme: Scheme::Ecdsa(Curve::BrainpoolP384r1),
             },
             CoseAlg::PS512 => Properties {
                 name: "PS512",
@@ -335,6 +355,8 @@ mod tests {
                 (-37, "PS256"),
                 (-38, "PS384"),
                 (-39, "PS512"),
+                (-265, "ESB256"),
+                (-267, "ESB384"),
             ]
         );
     }
@@ -371,6 +393,8 @@ mod tests {
                 Scheme::Rsa(Padding::Pss, Hash::Sha256),
                 Scheme::Rsa(Padding::Pss, Hash::Sha384),
                 Scheme::Rsa(Padding::Pss, Hash::Sha512),
+                Scheme::Ecdsa(Curve::BrainpoolP256r1),
+                Scheme::Ecdsa(Curve::BrainpoolP384r1),
             ]
         );
     }
@@ -405,6 +429,8 @@ mod tests {
                 KeyKind::RsaPrimes,
                 KeyKind::RsaPrimes,
                 KeyKind::RsaPrimes,
+                KeyKind::Seed,
+                KeyKind::Seed,
             ]
         );
     }
@@ -420,6 +446,8 @@ mod tests {
                     | CoseAlg::PS256
                     | CoseAlg::PS384
                     | CoseAlg::PS512
+                    | CoseAlg::ESB256
+                    | CoseAlg::ESB384
             );
             assert_eq!(alg.is_sealable(), expected, "{alg:?}");
         }

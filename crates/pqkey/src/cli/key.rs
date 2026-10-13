@@ -1693,6 +1693,8 @@ mod tests {
             (-37, "PS256"),
             (-38, "PS384"),
             (-39, "PS512"),
+            (-265, "ESB256"),
+            (-267, "ESB384"),
         ] {
             assert_eq!(algorithm(Some(alg)), name);
         }
