@@ -183,7 +183,8 @@ def test_pins_are_normalized_to_nfc(pqkey: Pqkey):
     assert pqkey.error("pin", stdin=f"{decomposed}\n{'e\u0301' * 2}\n") == "PIN must be at least 4 characters long"
 
 
-def test_passkeys_are_listed_and_deleted(pqkey: Pqkey):
+@pytest.mark.parametrize("algorithm", [client.ML_DSA_65, client.ESB256, client.ESB384])
+def test_passkeys_are_listed_and_deleted(pqkey: Pqkey, algorithm):
     """passkeys lists the discoverable credentials with a credential
     management token, and passkeys delete removes the one a query names."""
     pqkey.start()
@@ -192,7 +193,7 @@ def test_passkeys_are_listed_and_deleted(pqkey: Pqkey):
         ctap = Ctap2(device)
         for name in ("alice", "bob"):
             client.register(
-                ctap, "example.com", client.ML_DSA_65, user=client.user_entity(name), options={"rk": True},
+                ctap, "example.com", algorithm, user=client.user_entity(name), options={"rk": True},
                 extensions={"thirdPartyPayment": name == "alice"}
             )
 
@@ -201,8 +202,8 @@ def test_passkeys_are_listed_and_deleted(pqkey: Pqkey):
 
     listing = pqkey.passkeys()
     assert [row[:3] for row in listing] == [
-        ["example.com", "alice (Alice)", "ML-DSA-65"],
-        ["example.com", "bob (Bob)", "ML-DSA-65"],
+        ["example.com", "alice (Alice)", client.NAMES[algorithm]],
+        ["example.com", "bob (Bob)", client.NAMES[algorithm]],
     ], listing
     assert all(re.fullmatch(r"[0-9a-f]{16}", row[4]) for row in listing), listing
     assert [row[3] for row in listing] == ["enabled", "-"], listing
