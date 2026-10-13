@@ -387,7 +387,7 @@ impl CtapApp<'_> {
         };
         // Payment metadata does not fit the existing sealed ID format (§12.9
         // requires support for non-discoverable credentials too).
-        let stored = rk || third_party_payment_requested || !alg.key_kind().is_sealable();
+        let stored = rk || third_party_payment_requested || !alg.is_sealable();
         // CTAP 2.3 §12.2: sealed IDs cannot carry a blob; stored credentials
         // can keep an empty blob too. A refused blob does not fail creation.
         record.cred_blob = cred_blob_input

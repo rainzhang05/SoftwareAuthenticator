@@ -182,7 +182,7 @@ fn false_and_absent_are_no_ops_and_legacy_credentials_return_false() {
                 let record = create(&mut app, alg, rk, input, 1);
                 let enabled = input == Some(true);
                 assert_eq!(record.third_party_payment, enabled);
-                let stored_credential = rk || enabled || !alg.key_kind().is_sealable();
+                let stored_credential = rk || enabled || !alg.is_sealable();
                 assert_eq!(stored(&app).len(), usize::from(stored_credential));
                 assert_eq!(
                     record.credential_id.len(),

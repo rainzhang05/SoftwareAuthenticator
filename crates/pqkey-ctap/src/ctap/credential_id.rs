@@ -56,7 +56,7 @@ impl CtapApp<'_> {
         key: &SealableKeyMaterial,
         rp_id_hash: &[u8; 32],
     ) -> Result<Vec<u8>, u8> {
-        if record.third_party_payment {
+        if record.third_party_payment || !record.alg.is_sealable() {
             return Err(CTAP2_ERR_PROCESSING);
         }
         let alg = i8::try_from(record.alg.identifier()).map_err(|_| CTAP2_ERR_PROCESSING)?;
@@ -141,7 +141,7 @@ const _: () = {
     while i < CoseAlg::ALL.len() {
         let identifier = CoseAlg::ALL[i].identifier();
         assert!(
-            !CoseAlg::ALL[i].key_kind().is_sealable()
+            !CoseAlg::ALL[i].is_sealable()
                 || identifier >= i8::MIN as i32 && identifier <= i8::MAX as i32,
             "a COSE algorithm identifier does not fit a sealed credential ID"
         );
@@ -212,7 +212,7 @@ fn sealed_credential(
     let seed: &[u8; 32] = seed.try_into().ok()?;
     let key: &[u8; SEALED_KEY_LENGTH] = key.try_into().ok()?;
     let alg = CoseAlg::try_from(i32::from(*alg as i8)).ok()?;
-    if !alg.key_kind().is_sealable() {
+    if !alg.is_sealable() {
         return None;
     }
     let private_key = PrivateKeyMaterial::from_bytes(alg.key_kind(), key).ok()?;

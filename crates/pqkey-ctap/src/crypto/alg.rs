@@ -93,7 +93,7 @@ pub enum KeyKind {
 
 impl KeyKind {
     /// Whether this kind fits the sealed credential ID's 32-byte key field.
-    pub(crate) const fn is_sealable(self) -> bool {
+    pub(crate) const fn fits_sealed_key_field(self) -> bool {
         match self {
             Self::P256Scalar | Self::Seed => true,
             Self::RsaPrimes => false,
@@ -262,6 +262,16 @@ impl CoseAlg {
         self.properties().scheme
     }
 
+    /// Whether this algorithm fits the existing sealed credential ID: both
+    /// its private material in the 32-byte key field and its identifier in
+    /// the signed-byte algorithm field. Other algorithms must be stored even
+    /// for non-discoverable credentials.
+    pub const fn is_sealable(self) -> bool {
+        self.key_kind().fits_sealed_key_field()
+            && self.identifier() >= i8::MIN as i32
+            && self.identifier() <= i8::MAX as i32
+    }
+
     /// The kind of private key material the algorithm's credentials keep.
     pub const fn key_kind(self) -> KeyKind {
         self.scheme().key_kind()
@@ -397,6 +407,22 @@ mod tests {
                 KeyKind::RsaPrimes,
             ]
         );
+    }
+
+    #[test]
+    fn sealing_requires_both_material_and_algorithm_to_fit() {
+        for alg in CoseAlg::ALL {
+            let expected = !matches!(
+                alg,
+                CoseAlg::RS256
+                    | CoseAlg::RS384
+                    | CoseAlg::RS512
+                    | CoseAlg::PS256
+                    | CoseAlg::PS384
+                    | CoseAlg::PS512
+            );
+            assert_eq!(alg.is_sealable(), expected, "{alg:?}");
+        }
     }
 
     /// Exactly the identifiers of the table parse.  `CoseAlg` only carries

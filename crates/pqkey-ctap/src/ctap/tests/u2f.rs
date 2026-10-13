@@ -428,7 +428,7 @@ fn other_algorithms_wrong_applications_and_foreign_or_tampered_handles_are_refus
                 "{alg:?}"
             );
         }
-        if alg.key_kind().is_sealable() {
+        if alg.is_sealable() {
             let material = record.private_key.sealable().unwrap();
             record.credential_id = app
                 .seal_credential(&mut record, &material, &application())
