@@ -85,8 +85,9 @@ pub enum KeyKind {
     P256Scalar,
     /// A 32-byte seed from which the credential's algorithm derives its key:
     /// for ML-DSA, the FIPS 204 key-generation seed `ξ`; for ECDSA on P-384,
-    /// P-521, secp256k1 and Brainpool r1, the seed its scalar is derived from by FIPS 186-5
-    /// Appendix A.2.1, with SHAKE256 in place of the random bit generator;
+    /// P-521, secp256k1 and Brainpool r1, the seed its scalar is derived from
+    /// by FIPS 186-5 Appendix A.2.1, with SHAKE256 in place of the random bit
+    /// generator;
     /// for EdDSA on Ed25519, the RFC 8032 private key itself, which is 32
     /// random bytes (§5.1.5); and for EdDSA on Ed448, the seed its 57-byte
     /// RFC 8032 private key is derived from with SHAKE256.

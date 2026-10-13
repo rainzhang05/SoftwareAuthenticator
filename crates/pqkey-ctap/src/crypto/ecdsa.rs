@@ -5,8 +5,9 @@
 //! Ecdsa-Sig-Value" (WebAuthn Level 3 §6.5.5).
 //!
 //! Each curve's own types live in a module of its own,
-//! [`super::ecdsa_p256`], [`super::ecdsa_p384`], [`super::ecdsa_p521`] and
-//! [`super::ecdsa_secp256k1`]; this one holds what the curves share.
+//! [`super::ecdsa_p256`], [`super::ecdsa_p384`], [`super::ecdsa_p521`],
+//! [`super::ecdsa_secp256k1`], [`super::ecdsa_bp256`] and
+//! [`super::ecdsa_bp384`]; this one holds what the curves share.
 
 use p256::elliptic_curve::bigint::{NonZero, U640, Uint};
 use p256::elliptic_curve::sec1::{Coordinates, ModulusSize};
@@ -22,7 +23,8 @@ use super::credential_key::Seed;
 /// The curves the authenticator signs ECDSA over.  Each is used with one
 /// hash only: "SHA-256 be used only with curve P-256, SHA-384 be used only
 /// with curve P-384, and SHA-512 be used only with curve P-521" (RFC 9053
-/// §2.1), and secp256k1 with SHA-256, as ES256K (RFC 8812 §3.2).
+/// §2.1), secp256k1 with SHA-256, as ES256K (RFC 8812 §3.2), and Brainpool
+/// r1 with SHA-256 or SHA-384, as ESB256/ESB384 (RFC 9864 §2.1).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum Curve {
     /// P-256 with SHA-256: ES256 and ESP256.  Keys are kept as their scalar.
@@ -68,8 +70,8 @@ const DERIVATION_CONTEXT: &[u8] = b"pqkey/v1/ecdsa-key/";
 ///
 /// * returned_bits are the first L = ⌈(N + 64) / 8⌉ bytes of
 ///   SHAKE256("pqkey/v1/ecdsa-key/" ‖ `curve_name` ‖ `seed`), where N is the
-///   bit length of the group order n: 56 bytes for P-384, 74 for P-521 and
-///   40 for secp256k1.
+///   bit length of the group order n: 56 bytes for P-384 and brainpoolP384r1,
+///   74 for P-521, and 40 for secp256k1 and brainpoolP256r1.
 ///   The standard asks for N + 64 bits, which whole bytes round up to: P-521
 ///   takes 592 bits, 7 more than its 585, which only bring d closer still to
 ///   uniform.

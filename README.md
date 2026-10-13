@@ -14,7 +14,8 @@ client can use it, and every registration, reset and sign-in that asks for
 your presence waits for you to approve it in a desktop notification.
 
 - **Post-quantum:** ML-DSA-44, ML-DSA-65 and ML-DSA-87 credentials (FIPS 204),
-  alongside ECDSA (ES256, ESP256, ES384, ESP384, ES512, ESP512, ES256K, ESB256 and ESB384),
+  alongside ECDSA (ES256, ESP256, ES384, ESP384, ES512, ESP512, ES256K,
+  ESB256 and ESB384),
   EdDSA (EdDSA, Ed25519 and Ed448), and RSA-2048 (RS256, RS384, RS512,
   PS256, PS384 and PS512).
 - **CTAP 2.3:** PIN (protocols 1 and 2), passkeys with credential management,
@@ -176,8 +177,9 @@ and the [IANA COSE registries](https://www.iana.org/assignments/cose/) specify.
 Public keys carry both coordinates (crv 256/258; 32/48 bytes), and signatures
 are ASN.1 DER ECDSA. Both credential modalities use stored 33-byte IDs: even
 non-discoverable Brainpool credentials consume one storage slot and reduce
-remaining capacity. They keep their own counters and no user information;
-credential enumeration lists discoverable credentials only.
+remaining capacity. Both modalities keep their own counters. Non-discoverable
+records keep no user information; credential enumeration lists discoverable
+credentials only.
 
 Independent Python cryptography/OpenSSL fixtures verify Brainpool derivation,
 attestation and assertion signatures. Raw Python FIDO HID tests are provided;

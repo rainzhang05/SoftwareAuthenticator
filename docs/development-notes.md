@@ -226,13 +226,15 @@ else has to change.
    `tests/residue.rs` and, for keys derived from a seed, known answers in its
    family's module. A new type of key needs a `CredentialSecretKey` variant.
    Keys kept in a new form need a `KeyKind`, a `PrivateKeyMaterial` variant
-   and a key type in `store/codec.rs`; `CoseAlg::is_sealable` checks both material width and algorithm encoding.
-   Both must fit the existing sealed credential ID. A key that does not, as RSA's primes do
-   not, is stored even for a non-discoverable credential.
+   and a key type in `store/codec.rs`; `CoseAlg::is_sealable` checks both
+   material width and algorithm encoding. Both must fit the existing sealed
+   credential ID. A key that does not, as RSA's primes do not, is stored even
+   for a non-discoverable credential.
 3. Build and run clippy, and handle every match they point to, among them
    the test verifier in `crypto/verify.rs`, which pqkey's tests and the fuzz
-   targets reach through pqkey-ctap's `test-support` feature. Compile-time invariants and explicit eligibility tests keep the signed-byte
-   sealed algorithm field separate from the private material width.
+   targets reach through pqkey-ctap's `test-support` feature. Compile-time
+   invariants and explicit eligibility tests keep the signed-byte sealed
+   algorithm field separate from the private material width.
 4. Run the tests. The table-driven ones cover the new algorithm, and the
    known-answer tests of the table, of getInfo and of the CLI say what to
    add to them. If `UNSUPPORTED_ALGORITHMS` in `fuzz/src/requests.rs` lists

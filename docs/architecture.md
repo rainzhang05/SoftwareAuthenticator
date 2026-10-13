@@ -187,9 +187,9 @@ suite requires `/dev/uhid`.
 - ES256 (-7), ML-DSA-44 (-48), ML-DSA-65 (-49), ML-DSA-87 (-50), ESP256 (-9),
   ES384 (-35), ESP384 (-51), ES512 (-36), ESP512 (-52), ES256K (-47), EdDSA
   (-8), Ed25519 (-19), Ed448 (-53), RS256 (-257), RS384 (-258), RS512 (-259),
-  PS256 (-37), PS384 (-38), PS512 (-39), ESB256 (-265) and ESB384 (-267), the RSA ones with 2048-bit keys
-  and e = 65537. The first algorithm in the relying party's list that the key
-  supports wins (§6.1.2).
+  PS256 (-37), PS384 (-38), PS512 (-39), ESB256 (-265) and ESB384 (-267), the
+  RSA ones with 2048-bit keys and e = 65537. The first algorithm in the relying
+  party's list that the key supports wins (§6.1.2).
 - A PIN, with PIN/UV auth protocols 1 and 2 and pinUvAuthTokens. After 8
   wrong PINs the PIN is blocked, and after 3 in a row the key must be
   restarted. There is no built-in user verification.
@@ -433,9 +433,10 @@ are excluded by an excludeList, consume a slot, and are erased by reset.
 The `thirdPartyPayment` boolean is optional credential-record field 16. Older
 records default to false, and false is omitted on writes to preserve existing
 encodings. Enabled non-discoverable credentials use the same stored `0x00` IDs
-as RSA and Brainpool, clear user information and retain their own counters. Eligible ordinary
-credentials keep the existing 107-byte sealed format and sealing domains;
-sealed and U2F-created credentials report false when the extension is requested.
+as RSA and Brainpool, clear user information and retain their own counters.
+Eligible ordinary credentials keep the existing 107-byte sealed format and
+sealing domains; sealed and U2F-created credentials report false when the
+extension is requested.
 
 MakeCredential accepts true/false, persists only explicit true and returns no
 payment extension output. GetAssertion requesting true signs the selected

@@ -35,7 +35,8 @@ state_dir="$work/$name-state"
 status_file="$work/$name.status"
 diagnostics="$work/e2e-diagnostics"
 log="$diagnostics/$name.log"
-device_glob="/sys/devices/virtual/misc/uhid/0003:1209:$product_id.*"
+device_prefix="/sys/devices/virtual/misc/uhid/0003:1209:$product_id"
+device_glob="$device_prefix.*"
 
 start() {
   mkdir -p "$diagnostics"
@@ -61,7 +62,7 @@ start() {
       return 1
     fi
     if [ -z "$node" ]; then
-      for sys in "$device_glob"/hidraw/hidraw*; do
+      for sys in "$device_prefix".*/hidraw/hidraw*; do
         [ -e "$sys" ] && node="/dev/${sys##*/}"
       done
     fi
