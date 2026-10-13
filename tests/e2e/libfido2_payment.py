@@ -137,6 +137,7 @@ def hid(path):
         expected_ids = {record.credential_id for record, _, rk in records if rk}
         assert {entry[7]["id"] for entry in entries} == expected_ids
         preview = ctap.info.options.get("credentialMgmtPreview", False)
+        assert preview, "pqkey must advertise the native libfido2 preview success path"
 
     lib = library()
     dev, rk_list = allocation(lib.fido_dev_new), allocation(lib.fido_credman_rk_new)

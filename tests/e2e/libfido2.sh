@@ -64,13 +64,14 @@ test_token_info() {
   info=$(fido2-token -I "$device")
   echo "$info"
   grep -qE '^version strings: .*FIDO_2_1' <<<"$info" || fail "FIDO_2_1 is not advertised"
+  grep -qE '^version strings: .*FIDO_2_1_PRE' <<<"$info" || fail "FIDO_2_1_PRE is not advertised"
   grep -qE '^version strings: .*FIDO_2_0' <<<"$info" || fail "FIDO_2_0 is not advertised"
   grep -qE '^version strings: .*FIDO_2_3' <<<"$info" || fail "FIDO_2_3 is not advertised"
   grep -qE '^version strings: .*U2F_V2' <<<"$info" || fail "U2F_V2 is not advertised"
   # libfido2 1.14.0 tools/token.c prints false option values with a "no"
   # prefix and the getInfo members with the following exact labels.
   local option
-  for option in authnrCfg setMinPINLength noalwaysUv makeCredUvNotRqd largeBlobs; do
+  for option in authnrCfg setMinPINLength noalwaysUv makeCredUvNotRqd largeBlobs credMgmt credentialMgmtPreview; do
     grep -qE "^options: (.*, )?${option}(,|$)" <<<"$info" \
       || fail "$option is not advertised"
   done
@@ -174,6 +175,13 @@ test_payment() {
 }
 
 run_test "libfido2 1.14 payment metadata and signed-byte compatibility" test_payment
+
+test_credman() {
+  "${E2E_PYTHON:-python3}" tests/e2e/libfido2_credman.py "$device" "$@"
+}
+
+run_test "libfido2 1.14 native credential management and metadata" test_credman
+run_test "libfido2 decoder limits preserve full authenticator support" test_credman --decoder-limit
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures libfido2 test(s) failed"
