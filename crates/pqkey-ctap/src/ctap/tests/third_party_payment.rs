@@ -175,7 +175,13 @@ fn enabled_credentials_work_for_every_algorithm_and_both_modalities() {
 
 #[test]
 fn false_and_absent_are_no_ops_and_legacy_credentials_return_false() {
-    for alg in [CoseAlg::ES256, CoseAlg::MLDSA44, CoseAlg::RS256] {
+    for alg in [
+        CoseAlg::ES256,
+        CoseAlg::MLDSA44,
+        CoseAlg::RS256,
+        CoseAlg::ESB256,
+        CoseAlg::ESB384,
+    ] {
         for rk in [false, true] {
             for input in [None, Some(false), Some(true)] {
                 let mut app = test_app([0x79; 16]);
@@ -214,7 +220,13 @@ fn malformed_inputs_return_authenticator_type_errors_without_writes() {
         Value::Array(vec![]),
         canonical_map(vec![]),
     ] {
-        for alg in [CoseAlg::ES256, CoseAlg::MLDSA44, CoseAlg::RS256] {
+        for alg in [
+            CoseAlg::ES256,
+            CoseAlg::MLDSA44,
+            CoseAlg::RS256,
+            CoseAlg::ESB256,
+            CoseAlg::ESB384,
+        ] {
             let mut app = test_app([0x79; 16]);
             let payload = creation_request(alg, false, extensions(Some(input.clone())), None, 1);
             assert_eq!(
@@ -484,6 +496,10 @@ fn file_store_restart_counter_updates_and_reset_preserve_then_erase_metadata() {
     let records = [
         create(&mut app, CoseAlg::ES256, false, Some(true), 1),
         create(&mut app, CoseAlg::MLDSA44, true, Some(true), 2),
+        create(&mut app, CoseAlg::ESB256, false, None, 3),
+        create(&mut app, CoseAlg::ESB256, true, Some(true), 4),
+        create(&mut app, CoseAlg::ESB384, false, None, 5),
+        create(&mut app, CoseAlg::ESB384, true, Some(true), 6),
     ];
     for expected in 1..=3 {
         drop(app);
@@ -584,79 +600,82 @@ fn payment_disclosure_retains_rp_protection_uv_and_presence_rules() {
 
 #[test]
 fn payment_composes_with_blob_protection_prf_and_large_blob_keys() {
-    for protocol in [ClassicPinProtocol::V1, ClassicPinProtocol::V2] {
-        for rk in [false, true] {
-            let mut app = test_app([0x79; 16]);
-            let session = PlatformPinSession::establish(&mut app, protocol, 0x13);
-            let salts = [0x42; 32];
-            let mut inputs = vec![
-                (text("thirdPartyPayment"), Value::Bool(true)),
-                (text("credBlob"), Value::Bytes(vec![0x73; 32])),
-                (text("credProtect"), int(2)),
-                (text("hmac-secret"), Value::Bool(true)),
-                (
-                    text("hmac-secret-mc"),
-                    hmac_input(&session, &salts, protocol),
-                ),
-                (text("minPinLength"), Value::Bool(true)),
-                (text("pinComplexityPolicy"), Value::Bool(true)),
-            ];
-            if rk {
-                inputs.push((text("largeBlobKey"), Value::Bool(true)));
+    for alg in [CoseAlg::ES256, CoseAlg::ESB256, CoseAlg::ESB384] {
+        for protocol in [ClassicPinProtocol::V1, ClassicPinProtocol::V2] {
+            for rk in [false, true] {
+                let mut app = test_app([0x79; 16]);
+                let session = PlatformPinSession::establish(&mut app, protocol, 0x13);
+                let salts = [0x42; 32];
+                let mut inputs = vec![
+                    (text("thirdPartyPayment"), Value::Bool(true)),
+                    (text("credBlob"), Value::Bytes(vec![0x73; 32])),
+                    (text("credProtect"), int(2)),
+                    (text("hmac-secret"), Value::Bool(true)),
+                    (
+                        text("hmac-secret-mc"),
+                        hmac_input(&session, &salts, protocol),
+                    ),
+                    (text("minPinLength"), Value::Bool(true)),
+                    (text("pinComplexityPolicy"), Value::Bool(true)),
+                ];
+                if rk {
+                    inputs.push((text("largeBlobKey"), Value::Bool(true)));
+                }
+                let response = command(
+                    &mut app,
+                    CTAP_CMD_MAKE_CREDENTIAL,
+                    &creation_request(alg, rk, canonical_map(inputs), None, 1),
+                );
+                assert_eq!(response[0], CTAP2_OK);
+                let record = created_credential(&app, &response, RP);
+                assert!(record.third_party_payment);
+                assert_eq!(record.cred_blob, Some(vec![0x73; 32]));
+                let creation_outputs = extension_outputs(&response, Some(&record));
+                assert!(map_get(&creation_outputs, text("thirdPartyPayment")).is_none());
+                assert_eq!(
+                    map_get(&creation_outputs, text("credBlob")),
+                    Some(&Value::Bool(true))
+                );
+                verify_response(&response, &record, true);
+                let Value::Bytes(mc_output) =
+                    map_get(&creation_outputs, text("hmac-secret-mc")).unwrap()
+                else {
+                    panic!("PRF")
+                };
+                let mut inputs = vec![
+                    (text("thirdPartyPayment"), Value::Bool(true)),
+                    (text("credBlob"), Value::Bool(true)),
+                    (text("hmac-secret"), hmac_input(&session, &salts, protocol)),
+                ];
+                if rk {
+                    inputs.push((text("largeBlobKey"), Value::Bool(true)));
+                }
+                let request = parameter(
+                    &assertion(Some(&record), None, None),
+                    4,
+                    Some(canonical_map(inputs)),
+                );
+                let response = command(&mut app, CTAP_CMD_GET_ASSERTION, &request);
+                check_output(&response, &record, true);
+                let outputs = extension_outputs(&response, None);
+                assert_eq!(
+                    map_get(&outputs, text("credBlob")),
+                    Some(&Value::Bytes(vec![0x73; 32]))
+                );
+                let Value::Bytes(ga_output) = map_get(&outputs, text("hmac-secret")).unwrap()
+                else {
+                    panic!("PRF")
+                };
+                assert_eq!(session.decrypt(mc_output), session.decrypt(ga_output));
+                assert_eq!(
+                    member(&response, 7),
+                    record.large_blob_key.map(|k| Value::Bytes(k.to_vec()))
+                );
+                assert_eq!(
+                    &response_auth_data(&response)[37..],
+                    encode(&canonical_map(outputs))
+                );
             }
-            let response = command(
-                &mut app,
-                CTAP_CMD_MAKE_CREDENTIAL,
-                &creation_request(CoseAlg::ES256, rk, canonical_map(inputs), None, 1),
-            );
-            assert_eq!(response[0], CTAP2_OK);
-            let record = created_credential(&app, &response, RP);
-            assert!(record.third_party_payment);
-            assert_eq!(record.cred_blob, Some(vec![0x73; 32]));
-            let creation_outputs = extension_outputs(&response, Some(&record));
-            assert!(map_get(&creation_outputs, text("thirdPartyPayment")).is_none());
-            assert_eq!(
-                map_get(&creation_outputs, text("credBlob")),
-                Some(&Value::Bool(true))
-            );
-            verify_response(&response, &record, true);
-            let Value::Bytes(mc_output) =
-                map_get(&creation_outputs, text("hmac-secret-mc")).unwrap()
-            else {
-                panic!("PRF")
-            };
-            let mut inputs = vec![
-                (text("thirdPartyPayment"), Value::Bool(true)),
-                (text("credBlob"), Value::Bool(true)),
-                (text("hmac-secret"), hmac_input(&session, &salts, protocol)),
-            ];
-            if rk {
-                inputs.push((text("largeBlobKey"), Value::Bool(true)));
-            }
-            let request = parameter(
-                &assertion(Some(&record), None, None),
-                4,
-                Some(canonical_map(inputs)),
-            );
-            let response = command(&mut app, CTAP_CMD_GET_ASSERTION, &request);
-            check_output(&response, &record, true);
-            let outputs = extension_outputs(&response, None);
-            assert_eq!(
-                map_get(&outputs, text("credBlob")),
-                Some(&Value::Bytes(vec![0x73; 32]))
-            );
-            let Value::Bytes(ga_output) = map_get(&outputs, text("hmac-secret")).unwrap() else {
-                panic!("PRF")
-            };
-            assert_eq!(session.decrypt(mc_output), session.decrypt(ga_output));
-            assert_eq!(
-                member(&response, 7),
-                record.large_blob_key.map(|k| Value::Bytes(k.to_vec()))
-            );
-            assert_eq!(
-                &response_auth_data(&response)[37..],
-                encode(&canonical_map(outputs))
-            );
         }
     }
 }

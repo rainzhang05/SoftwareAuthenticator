@@ -558,6 +558,8 @@ fn non_discoverable_rsa_is_stored_hidden_counted_excluded_and_reset() {
         CoseAlg::PS256,
         CoseAlg::PS384,
         CoseAlg::PS512,
+        CoseAlg::ESB256,
+        CoseAlg::ESB384,
     ] {
         let mut app = test_app([0x76; 16]);
         use_fixed_rsa_key(&mut app);
@@ -686,6 +688,8 @@ fn full_store_refuses_non_discoverable_rsa_without_replacing_a_passkey() {
         CoseAlg::PS256,
         CoseAlg::PS384,
         CoseAlg::PS512,
+        CoseAlg::ESB256,
+        CoseAlg::ESB384,
     ] {
         assert_eq!(
             app.handle_make_credential(&rsa_request(alg, false, None)),
@@ -701,24 +705,26 @@ fn full_store_refuses_non_discoverable_rsa_without_replacing_a_passkey() {
 
 #[test]
 fn discoverable_rsa_keeps_its_user_and_is_found_without_an_allow_list() {
-    let mut app = test_app([0x79; 16]);
-    use_fixed_rsa_key(&mut app);
-    let Value::Map(mut request) =
-        from_reader(rsa_request(CoseAlg::RS256, true, None).as_slice()).expect("request")
-    else {
-        panic!("map");
-    };
-    request.retain(|(label, _)| *label != int(6));
-    let response = app
-        .handle_make_credential(&encode(&canonical_map(request)))
-        .expect("register");
-    let credential = created_credential(&app, &response, RP_ID);
-    assert_eq!(credential.credential_id.len(), 33);
-    assert_eq!(credential.credential_id[0], 1);
-    assert_eq!(credential.user_id, [1]);
-    assert_eq!(credential.user_name.as_deref(), Some("alice"));
-    assert_eq!(credential.user_display_name.as_deref(), Some("Alice"));
-    assert!(discoverable_assertion(&mut app).is_ok());
+    for alg in [CoseAlg::RS256, CoseAlg::ESB256, CoseAlg::ESB384] {
+        let mut app = test_app([0x79; 16]);
+        use_fixed_rsa_key(&mut app);
+        let Value::Map(mut request) =
+            from_reader(rsa_request(alg, true, None).as_slice()).expect("request")
+        else {
+            panic!("map");
+        };
+        request.retain(|(label, _)| *label != int(6));
+        let response = app
+            .handle_make_credential(&encode(&canonical_map(request)))
+            .expect("register");
+        let credential = created_credential(&app, &response, RP_ID);
+        assert_eq!(credential.credential_id.len(), 33);
+        assert_eq!(credential.credential_id[0], 1);
+        assert_eq!(credential.user_id, [1]);
+        assert_eq!(credential.user_name.as_deref(), Some("alice"));
+        assert_eq!(credential.user_display_name.as_deref(), Some("Alice"));
+        assert!(discoverable_assertion(&mut app).is_ok());
+    }
 }
 
 #[test]
@@ -730,6 +736,8 @@ fn rsa_randomness_failure_fails_registration_without_storing_a_record() {
         CoseAlg::PS256,
         CoseAlg::PS384,
         CoseAlg::PS512,
+        CoseAlg::ESB256,
+        CoseAlg::ESB384,
     ] {
         for rk in [false, true] {
             let mut app = test_app([0x7a; 16]);

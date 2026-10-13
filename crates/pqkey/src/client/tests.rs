@@ -293,6 +293,13 @@ fn passkeys_are_listed_with_their_algorithm() {
         })
         .collect();
     assert_eq!(listed, expected);
+    for passkey in passkeys
+        .iter()
+        .filter(|p| matches!(p.alg, CoseAlg::ESB256 | CoseAlg::ESB384))
+    {
+        key.delete(&token, &passkey.credential_id).unwrap();
+    }
+    assert_eq!(key.passkeys(&token).unwrap().len(), CoseAlg::ALL.len() - 2);
 }
 
 #[test]

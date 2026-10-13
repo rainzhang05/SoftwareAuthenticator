@@ -447,3 +447,57 @@ fn unreadable_active_records_abort_replacement_instead_of_leaving_duplicates() {
         assert_set(&path, false);
     }
 }
+
+#[test]
+fn brainpool_replacements_preserve_commit_semantics_at_every_boundary() {
+    for alg in [CoseAlg::ESB256, CoseAlg::ESB384] {
+        for migrating in [true, false] {
+            let events = trace(migrating);
+            let publication = events
+                .iter()
+                .position(|event| event == "published")
+                .unwrap();
+            for boundary in 0..events.len() {
+                let scratch = TempDir::new();
+                let path = scratch.path().join("state");
+                let mut store = setup(&path, migrating);
+                let mut new = record(b"new");
+                new.alg = alg;
+                let mut index = 0;
+                let result = fsio::with_hook(
+                    Box::new(move |_, path| {
+                        let current = index;
+                        index += 1;
+                        if current == boundary {
+                            Err(fsio::io_error(
+                                path,
+                                std::io::Error::other("Brainpool boundary failure"),
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    || store.insert_or_replace_discoverable(&new),
+                );
+                assert_eq!(
+                    result.is_ok(),
+                    boundary >= publication,
+                    "{alg:?} boundary {boundary}"
+                );
+                assert_set(&path, boundary >= publication);
+                if boundary >= publication {
+                    let loaded = FileStore::open(&path)
+                        .unwrap()
+                        .get(b"new")
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(loaded.alg, alg);
+                    assert_eq!(
+                        loaded.cose_public_key().unwrap(),
+                        new.cose_public_key().unwrap()
+                    );
+                }
+            }
+        }
+    }
+}

@@ -128,112 +128,115 @@ fn registration_extensions(input: Value) -> Value {
 /// §12.8 uses the same CredRandom and salts as §12.7, including sealed IDs.
 #[test]
 fn creation_and_assertion_prfs_match_for_each_uv_state_and_protocol() {
-    for protocol in PROTOCOLS {
-        for rk in [false, true] {
-            for uv in [false, true] {
-                for salt_count in [1, 2] {
-                    let mut app = test_app([0x65; 16]);
-                    let auth = uv.then_some(protocol);
-                    if uv {
-                        install_pin_uv_auth_token(
-                            &mut app,
-                            protocol,
-                            TOKEN,
-                            PIN_PERMISSION_MC,
-                            Some(RP),
+    for alg in [CoseAlg::ES256, CoseAlg::ESB256, CoseAlg::ESB384] {
+        for protocol in PROTOCOLS {
+            for rk in [false, true] {
+                for uv in [false, true] {
+                    for salt_count in [1, 2] {
+                        let mut app = test_app([0x65; 16]);
+                        let auth = uv.then_some(protocol);
+                        if uv {
+                            install_pin_uv_auth_token(
+                                &mut app,
+                                protocol,
+                                TOKEN,
+                                PIN_PERMISSION_MC,
+                                Some(RP),
+                            );
+                        }
+                        let session = PlatformPinSession::establish(&mut app, protocol, 0x13);
+                        let salts: Vec<u8> = (0..32 * salt_count).collect();
+                        let input = hmac_input(&session, &salts, protocol);
+                        let response = app
+                            .handle_make_credential(&creation_request(
+                                alg,
+                                rk,
+                                registration_extensions(input),
+                                auth,
+                                1,
+                            ))
+                            .unwrap();
+                        let credential = created_credential(&app, &response, RP);
+                        assert_eq!(stored(&app).len(), usize::from(rk || !alg.is_sealable()));
+                        assert_eq!(response_auth_data(&response)[32] & FLAG_UV != 0, uv);
+                        verify_response(&response, &credential, true);
+                        let outputs = extension_outputs(&response, Some(&credential));
+                        assert_eq!(
+                            map_get(&outputs, text("hmac-secret")),
+                            Some(&Value::Bool(true))
                         );
-                    }
-                    let session = PlatformPinSession::establish(&mut app, protocol, 0x13);
-                    let salts: Vec<u8> = (0..32 * salt_count).collect();
-                    let input = hmac_input(&session, &salts, protocol);
-                    let response = app
-                        .handle_make_credential(&creation_request(
-                            CoseAlg::ES256,
-                            rk,
-                            registration_extensions(input),
-                            auth,
-                            1,
-                        ))
-                        .unwrap();
-                    let credential = created_credential(&app, &response, RP);
-                    assert_eq!(stored(&app).len(), usize::from(rk));
-                    assert_eq!(response_auth_data(&response)[32] & FLAG_UV != 0, uv);
-                    verify_response(&response, &credential, true);
-                    let outputs = extension_outputs(&response, Some(&credential));
-                    assert_eq!(
-                        map_get(&outputs, text("hmac-secret")),
-                        Some(&Value::Bool(true))
-                    );
-                    let Value::Bytes(encrypted) =
-                        map_get(&outputs, text("hmac-secret-mc")).unwrap()
-                    else {
-                        panic!("encrypted output")
-                    };
-                    let created = session.decrypt(encrypted);
-                    let random = if uv {
-                        &credential.cred_random_with_uv
-                    } else {
-                        &credential.cred_random_without_uv
-                    };
-                    let expected: Vec<u8> = salts
-                        .chunks(32)
-                        .flat_map(|salt| {
-                            let mut mac = Hmac::<Sha256>::new_from_slice(random).unwrap();
-                            mac.update(salt);
-                            mac.finalize().into_bytes().to_vec()
-                        })
-                        .collect();
-                    assert_eq!(created, expected);
-                    assert_eq!(created.len(), usize::from(salt_count) * 32);
-                    if uv {
-                        install_pin_uv_auth_token(
-                            &mut app,
-                            protocol,
-                            TOKEN,
-                            PIN_PERMISSION_GA,
-                            Some(RP),
+                        let Value::Bytes(encrypted) =
+                            map_get(&outputs, text("hmac-secret-mc")).unwrap()
+                        else {
+                            panic!("encrypted output")
+                        };
+                        let created = session.decrypt(encrypted);
+                        let random = if uv {
+                            &credential.cred_random_with_uv
+                        } else {
+                            &credential.cred_random_without_uv
+                        };
+                        let expected: Vec<u8> = salts
+                            .chunks(32)
+                            .flat_map(|salt| {
+                                let mut mac = Hmac::<Sha256>::new_from_slice(random).unwrap();
+                                mac.update(salt);
+                                mac.finalize().into_bytes().to_vec()
+                            })
+                            .collect();
+                        assert_eq!(created, expected);
+                        assert_eq!(created.len(), usize::from(salt_count) * 32);
+                        if uv {
+                            install_pin_uv_auth_token(
+                                &mut app,
+                                protocol,
+                                TOKEN,
+                                PIN_PERMISSION_GA,
+                                Some(RP),
+                            );
+                        }
+                        // The extension protocol need not match the PIN token
+                        // protocol.
+                        let other = if protocol == ClassicPinProtocol::V1 {
+                            ClassicPinProtocol::V2
+                        } else {
+                            ClassicPinProtocol::V1
+                        };
+                        let session = PlatformPinSession::establish(&mut app, other, 0x14);
+                        let extension = canonical_map(vec![(
+                            text("hmac-secret"),
+                            hmac_input(&session, &salts, other),
+                        )]);
+                        let request = get_assertion_request(
+                            &HASH,
+                            RP,
+                            auth.map(|p| (p, token_pin_auth(p, &TOKEN, &HASH))),
+                            Some(extension),
                         );
+                        // Supply the sealed credential ID; discoverable enumeration
+                        // works without it.
+                        let Value::Map(mut entries) = from_reader(&request[..]).unwrap() else {
+                            panic!("request map")
+                        };
+                        entries.push((
+                            int(3),
+                            Value::Array(vec![canonical_map(vec![
+                                (text("type"), text("public-key")),
+                                (text("id"), Value::Bytes(credential.credential_id.clone())),
+                            ])]),
+                        ));
+                        let response = app
+                            .handle_get_assertion(&encode(&canonical_map(entries)))
+                            .unwrap();
+                        verify_response(&response, &credential, false);
+                        let outputs = extension_outputs(&response, None);
+                        let Value::Bytes(encrypted) =
+                            map_get(&outputs, text("hmac-secret")).unwrap()
+                        else {
+                            panic!("encrypted output")
+                        };
+                        assert_eq!(session.decrypt(encrypted), created);
                     }
-                    // The extension protocol need not match the PIN token
-                    // protocol.
-                    let other = if protocol == ClassicPinProtocol::V1 {
-                        ClassicPinProtocol::V2
-                    } else {
-                        ClassicPinProtocol::V1
-                    };
-                    let session = PlatformPinSession::establish(&mut app, other, 0x14);
-                    let extension = canonical_map(vec![(
-                        text("hmac-secret"),
-                        hmac_input(&session, &salts, other),
-                    )]);
-                    let request = get_assertion_request(
-                        &HASH,
-                        RP,
-                        auth.map(|p| (p, token_pin_auth(p, &TOKEN, &HASH))),
-                        Some(extension),
-                    );
-                    // Supply the sealed credential ID; discoverable enumeration
-                    // works without it.
-                    let Value::Map(mut entries) = from_reader(&request[..]).unwrap() else {
-                        panic!("request map")
-                    };
-                    entries.push((
-                        int(3),
-                        Value::Array(vec![canonical_map(vec![
-                            (text("type"), text("public-key")),
-                            (text("id"), Value::Bytes(credential.credential_id.clone())),
-                        ])]),
-                    ));
-                    let response = app
-                        .handle_get_assertion(&encode(&canonical_map(entries)))
-                        .unwrap();
-                    verify_response(&response, &credential, false);
-                    let outputs = extension_outputs(&response, None);
-                    let Value::Bytes(encrypted) = map_get(&outputs, text("hmac-secret")).unwrap()
-                    else {
-                        panic!("encrypted output")
-                    };
-                    assert_eq!(session.decrypt(encrypted), created);
                 }
             }
         }
@@ -514,7 +517,12 @@ fn creation_reuses_salt_authentication_decryption_and_key_errors() {
 
 #[test]
 fn omitted_protocol_defaults_to_one_and_rsa_keeps_creation_secrets() {
-    for alg in [CoseAlg::ES256, CoseAlg::RS256] {
+    for alg in [
+        CoseAlg::ES256,
+        CoseAlg::RS256,
+        CoseAlg::ESB256,
+        CoseAlg::ESB384,
+    ] {
         let mut app = test_app([0x65; 16]);
         let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V1, 0x13);
         let Value::Map(mut input) = hmac_input(&session, &[0x98; 32], ClassicPinProtocol::V1)
@@ -538,7 +546,7 @@ fn omitted_protocol_defaults_to_one_and_rsa_keeps_creation_secrets() {
             panic!("output")
         };
         assert_eq!(session.decrypt(encrypted).len(), 32);
-        assert_eq!(stored(&app).len(), usize::from(alg == CoseAlg::RS256));
+        assert_eq!(stored(&app).len(), usize::from(!alg.is_sealable()));
     }
 }
 
