@@ -1,4 +1,4 @@
-//! The ECDSA family ([`Scheme::Ecdsa`](super::alg::Scheme::Ecdsa)): ECDSA
+//! The ECDSA family ([`Scheme::Ecdsa`]): ECDSA
 //! over each [`Curve`] with the curve's hash, the signature an ASN.1 DER
 //! `Ecdsa-Sig-Value`.  "For COSEAlgorithmIdentifier -7 (ES256), and other
 //! ECDSA-based algorithms, the sig value MUST be encoded as an ASN.1 DER
