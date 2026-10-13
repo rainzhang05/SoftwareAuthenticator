@@ -417,9 +417,11 @@ RP restrictions, family switches, independent cursors and WINK/LOCK preservation
 metadata, multi-RP/credential enumeration, user updates and deletion with ES256,
 ES384, EdDSA and RS256. Raw checks cover mixed payment flags and large-blob keys;
 libfido2 1.14 exposes largeBlobKey but ignores the additional payment field.
-Its separate ML-DSA decoder check expects FIDO_ERR_RX_INVALID_CBOR while raw
-preview enumeration and credential signing still succeed. Supported credentials
-are never filtered for older decoders. Every shell run_test precedes the summary,
+Its separate ML-DSA-44 decoder check fits the library's 2 KiB receive buffer and
+expects FIDO_ERR_RX_INVALID_CBOR while raw preview enumeration and credential
+signing still succeed. An ML-DSA-87 public key exceeds that old receive buffer.
+Supported credentials are never filtered for older decoders. Every shell
+run_test precedes the summary,
 including the existing payment helper's advertised-preview success branch.
 
 Engine checks and E2E syntax/collection can run on macOS and Linux/aarch64
@@ -429,3 +431,6 @@ commands, statuses, compiler/architecture details, deterministic regeneration
 results and unavailable HID/x86_64 execution in validation evidence outside the
 repository. Use fresh git archives extracted with `tar -xm`, preserve pipeline
 failures, and separate cache outputs by compiler, architecture and sanitizer.
+
+Start and export the disposable D-Bus session before every test key, including
+auto-approve keys: WINK identification uses notifications in every presence mode.

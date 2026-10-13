@@ -96,13 +96,22 @@ jobs:
             exit 1
           fi
 
+      # Every presence mode supports WINK, so all keys must inherit this bus.
+      # No notification server runs until a test starts its fake one.
+      - name: Start a D-Bus session bus
+        run: |
+          echo "E2E_WORK=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          export E2E_WORK=$RUNNER_TEMP
+          address="unix:path=$E2E_WORK/session-bus"
+          dbus-daemon --config-file=tests/e2e/session-bus.conf --address="$address" \
+            --fork --print-pid > "$E2E_WORK/session-bus.pid"
+          echo "DBUS_SESSION_BUS_ADDRESS=$address" >> "$GITHUB_ENV"
+
       # Each virtual key is a pqkey instance of its own, told apart by its
       # product ID, one of the pid.codes test product IDs 0001 to 0004 under
       # the pid.codes vendor ID 1209; tests/e2e/daemon.sh starts and stops them.
       - name: Start the virtual security key
         run: |
-          echo "E2E_WORK=$RUNNER_TEMP" >> "$GITHUB_ENV"
-          export E2E_WORK=$RUNNER_TEMP
           node=$(tests/e2e/daemon.sh start auto-approve 0001 --presence auto-approve --allow-late-reset)
           echo "E2E_HIDRAW=$node" >> "$GITHUB_ENV"
 
@@ -113,15 +122,6 @@ jobs:
           node=$(tests/e2e/daemon.sh start certificate 0002 --presence auto-approve --allow-late-reset \
             --attestation certificate --manufacturer "pqkey E2E" --product "pqkey E2E key" --country US)
           echo "E2E_CERTIFICATE_HIDRAW=$node" >> "$GITHUB_ENV"
-
-      # A session bus of the tests' own, with no notification server on it
-      # until a test starts its fake one (tests/e2e/notifications.py).
-      - name: Start a D-Bus session bus
-        run: |
-          address="unix:path=$E2E_WORK/session-bus"
-          dbus-daemon --config-file=tests/e2e/session-bus.conf --address="$address" \
-            --fork --print-pid > "$E2E_WORK/session-bus.pid"
-          echo "DBUS_SESSION_BUS_ADDRESS=$address" >> "$GITHUB_ENV"
 
       # Asks for presence with desktop notifications on that bus. A short
       # presence timeout keeps the test of an unanswered prompt quick.

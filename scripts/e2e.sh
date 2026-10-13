@@ -61,13 +61,13 @@ if have pqkey && pqkey status 2>/dev/null | grep -q '^Key: *running'; then
 fi
 
 start_keys() {
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$E2E_WORK/session-bus"
+  dbus-daemon --config-file=tests/e2e/session-bus.conf --address="$DBUS_SESSION_BUS_ADDRESS" \
+    --fork --print-pid >"$E2E_WORK/session-bus.pid" &&
   E2E_HIDRAW=$(tests/e2e/daemon.sh start auto-approve 0001 --presence auto-approve --allow-late-reset) &&
     E2E_CERTIFICATE_HIDRAW=$(tests/e2e/daemon.sh start certificate 0002 --presence auto-approve \
       --allow-late-reset --attestation certificate --manufacturer "pqkey E2E" --product "pqkey E2E key" \
       --country US) &&
-    DBUS_SESSION_BUS_ADDRESS="unix:path=$E2E_WORK/session-bus" &&
-    dbus-daemon --config-file=tests/e2e/session-bus.conf --address="$DBUS_SESSION_BUS_ADDRESS" \
-      --fork --print-pid >"$E2E_WORK/session-bus.pid" &&
     E2E_NOTIFY_HIDRAW=$(tests/e2e/daemon.sh start notify 0003 --presence notify --presence-timeout 3 \
       --allow-late-reset) &&
     E2E_UNANSWERED_HIDRAW=$(tests/e2e/daemon.sh start unanswered 0004 --presence unanswered)
