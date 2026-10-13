@@ -79,6 +79,43 @@ pub(crate) fn start_with(
     (Daemon { shutdown, done }, client)
 }
 
+/// The real engine/worker/transport with successful silent identification.
+/// This verifies WINK independently of availability of a desktop session bus.
+pub(crate) fn start_management_transport(dir: &TempDir) -> (Daemon, Authenticator<TestLink>) {
+    let (device, peer) = crate::platform::test_support::pair();
+    let store = FileStore::open(dir.path()).unwrap();
+    let shutdown = ShutdownSignal::new();
+    let (ready_sender, ready) = mpsc::channel();
+    let (done_sender, done) = mpsc::channel();
+    let loop_shutdown = shutdown.clone();
+    thread::spawn(move || {
+        let interrupt = pqkey_ctap::ctap::InterruptFlag::new();
+        let mut app = pqkey_ctap::ctap::CtapApp::with_file_store(
+            store,
+            pqkey_ctap::ctap::presence::AutoApprove,
+            &interrupt,
+            [0; 16],
+        );
+        let waiting = crate::WaitingForUser::default();
+        crate::transport::exec_with_identifier(
+            device,
+            &mut app,
+            &waiting,
+            loop_shutdown,
+            || {
+                ready_sender.send(()).unwrap();
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        done_sender.send(()).unwrap();
+    });
+    ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    let key = Authenticator::open(TestLink(peer)).unwrap();
+    (Daemon { shutdown, done }, key)
+}
+
 pub(crate) fn discoverable(rp_id: &str, id: u8, name: &str, alg: CoseAlg) -> CredentialRecord {
     let mut credential_id = vec![0x01];
     credential_id.extend([id; 32]);

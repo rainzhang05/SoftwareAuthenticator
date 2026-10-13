@@ -149,6 +149,23 @@ impl<L: ReportLink> CtapHid<L> {
         self
     }
 
+    /// Test transport controls without adding a shipped management API.
+    #[cfg(test)]
+    pub(super) fn control_for_test(
+        &mut self,
+        command: Command,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, HidError> {
+        send_message(&mut self.link, self.channel, command, payload)?;
+        receive_message(
+            &mut self.link,
+            self.channel,
+            &self.cancel,
+            &mut |_| {},
+            |_| true,
+        )
+    }
+
     /// Send a CTAPHID_CBOR request and return the response, status byte
     /// included.  `keepalive` sees each KEEPALIVE status, so the caller can
     /// tell the user to approve; the cancel flag

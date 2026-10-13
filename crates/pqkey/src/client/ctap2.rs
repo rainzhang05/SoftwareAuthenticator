@@ -1036,4 +1036,91 @@ mod size_tests {
         too_large(key.management_next(3).unwrap_err(), 4, 3);
         assert_eq!(traffic.borrow().reports.len(), before);
     }
+    #[test]
+    fn management_cursors_survive_wink_and_lock_through_the_real_worker() {
+        use crate::client::tests::{discoverable, start_management_transport};
+        use crate::test_support::TempDir;
+        use crate::transport::ctaphid_host::Command;
+        use pqkey_ctap::store::{CredentialStore, FileStore};
+        use sha2::{Digest, Sha256};
+        for family in [0x0a, 0x41] {
+            let dir = TempDir::new("preview-controls");
+            let mut store = FileStore::open(dir.path()).unwrap();
+            for (id, rp) in [(1, "a.example"), (2, "a.example"), (3, "b.example")] {
+                store
+                    .put(&discoverable(rp, id, "User", pqkey_ctap::CoseAlg::ES256))
+                    .unwrap();
+            }
+            drop(store);
+            let (_daemon, mut key) = start_management_transport(&dir);
+            key.set_pin(b"1234").unwrap();
+            let token = key.management_token(b"1234").unwrap();
+            let begin = |sub, params: Option<Value>| {
+                let mut message = vec![sub];
+                if let Some(params) = &params {
+                    message.extend(encode(params));
+                }
+                let mut fields = vec![(int(1), int(sub.into()))];
+                fields.extend(params.map(|p| (int(2), p)));
+                fields.extend([
+                    (int(3), int(2)),
+                    (
+                        int(4),
+                        Value::Bytes(authenticate(PROTOCOL, &token.0, &message)),
+                    ),
+                ]);
+                Value::Map(fields)
+            };
+            key.call(family, Some(begin(2, None)), &mut |_| {}).unwrap();
+            key.call(
+                family,
+                Some(begin(
+                    4,
+                    Some(Value::Map(vec![(
+                        int(1),
+                        Value::Bytes(Sha256::digest(b"a.example").to_vec()),
+                    )])),
+                )),
+                &mut |_| {},
+            )
+            .unwrap();
+            assert!(
+                key.hid
+                    .control_for_test(Command::Lock, &[1])
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                key.hid
+                    .control_for_test(Command::Wink, &[])
+                    .unwrap()
+                    .is_empty()
+            );
+            let rp = key
+                .call(
+                    family,
+                    Some(Value::Map(vec![(int(1), int(3))])),
+                    &mut |_| {},
+                )
+                .unwrap();
+            assert_eq!(
+                member(&rp, 4),
+                Some(&Value::Bytes(Sha256::digest(b"b.example").to_vec()))
+            );
+            let credential = key
+                .call(
+                    family,
+                    Some(Value::Map(vec![(int(1), int(5))])),
+                    &mut |_| {},
+                )
+                .unwrap();
+            assert!(member(&credential, 7).is_some());
+            assert!(
+                key.hid
+                    .control_for_test(Command::Lock, &[0])
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
 }
