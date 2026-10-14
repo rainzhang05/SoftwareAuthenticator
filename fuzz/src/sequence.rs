@@ -2242,7 +2242,7 @@ pub fn run_traced(data: &[u8]) -> Vec<(u8, u16)> {
             break;
         }
     }
-    platform.engine.into_trace()
+    platform.engine.take_trace()
 }
 
 /// Deterministic successful and interrupted transfers supplement the random
@@ -3399,7 +3399,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
         );
     }
     assert!(input.is_empty());
-    assert_eq!(run_traced(&output), platform.engine.into_trace());
+    assert_eq!(run_traced(&output), platform.engine.take_trace());
     output
 }
 
@@ -3508,7 +3508,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let trace = platform.engine.into_trace();
+        let trace = platform.engine.take_trace();
         assert_eq!(
             trace
                 .iter()
@@ -3646,7 +3646,7 @@ mod tests {
         for op in ops {
             p.step(op, &mut u).unwrap();
         }
-        let trace = p.engine.into_trace();
+        let trace = p.engine.take_trace();
         assert_eq!(
             trace.last(),
             Some(&(CTAP_CMD_CREDENTIAL_MANAGEMENT, u16::from(CTAP2_OK))),

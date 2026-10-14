@@ -206,8 +206,8 @@ impl Engine {
     }
 
     /// The command byte and response status of every request so far.
-    pub fn into_trace(&self) -> Vec<(u8, u16)> {
-        self.trace
+    pub fn take_trace(&mut self) -> Vec<(u8, u16)> {
+        std::mem::take(&mut self.trace)
     }
 
     /// Send one CTAPHID_CBOR message, `request` being the command byte and
