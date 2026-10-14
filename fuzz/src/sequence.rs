@@ -349,7 +349,7 @@ fn permission_set(choice: u8) -> u8 {
     if choice < 0xC0 {
         SETS[usize::from(choice) % SETS.len()]
     } else {
-        choice & 0x7f
+        choice
     }
 }
 
@@ -1615,24 +1615,25 @@ impl Platform {
                     };
                     let token = session.decrypt(encrypted).expect("the token decrypts");
                     let token: [u8; 32] = token.try_into().expect("a 32-byte pinUvAuthToken");
+                    let granted_permissions = if legacy {
+                        0x03
+                    } else {
+                        permission_set(permissions) & 0x7f
+                    };
                     self.clear_client_token();
                     self.token = Some((protocol, token));
-                    if !legacy && permission_set(permissions) == 0x40 {
+                    if !legacy && granted_permissions == 0x40 {
                         self.persistent_tokens[usize::from(protocol.identifier() == 2)] =
                             Some(Zeroizing::new(token));
                     }
                     self.token_issued_at = self.engine.clock().now();
                     self.token_id = self.token_id.wrapping_add(1);
-                    self.token_permissions = if legacy {
-                        0x03
-                    } else {
-                        permission_set(permissions)
-                    };
+                    self.token_permissions = granted_permissions;
                     self.management.issue(
                         protocol,
                         token,
                         self.token_permissions,
-                        if legacy {
+                        if legacy || granted_permissions == 0x40 {
                             None
                         } else {
                             rp.map(|rp| rp_id(rp).to_owned())
@@ -3057,64 +3058,66 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
         }
     }
     for v2 in [false, true] {
-        cases.push(vec![
-            Op::CreateCredential {
-                alg: 0,
-                rp: 0,
-                large_blob_key: None,
-                third_party_payment: None,
-                rk: true,
-                user: 1,
-            },
-            Op::Enroll {
-                v2,
-                permissions: 11,
-                rp: None,
-            },
-            Op::ManageKnown {
-                preview: false,
-                auth: Auth::Token,
-                subcommand: 1,
-                rp: 0,
-                credential: 0,
-                valid_user: true,
-            },
-            Op::Advance(9),
-            Op::Restart,
-            Op::UsePersistent { v2 },
-            Op::ManageKnown {
-                preview: false,
-                auth: Auth::Token,
-                subcommand: 2,
-                rp: 0,
-                credential: 0,
-                valid_user: true,
-            },
-            Op::ManageKnown {
-                preview: false,
-                auth: Auth::Token,
-                subcommand: 4,
-                rp: 0,
-                credential: 0,
-                valid_user: true,
-            },
-            Op::ManageKnown {
-                preview: true,
-                auth: Auth::Token,
-                subcommand: 1,
-                rp: 0,
-                credential: 0,
-                valid_user: true,
-            },
-            Op::ManageKnown {
-                preview: false,
-                auth: Auth::Token,
-                subcommand: 6,
-                rp: 0,
-                credential: 0,
-                valid_user: true,
-            },
-        ]);
+        for permission_choice in [11, 0xc0] {
+            cases.push(vec![
+                Op::CreateCredential {
+                    alg: 0,
+                    rp: 0,
+                    large_blob_key: None,
+                    third_party_payment: None,
+                    rk: true,
+                    user: 1,
+                },
+                Op::Enroll {
+                    v2,
+                    permissions: permission_choice,
+                    rp: None,
+                },
+                Op::ManageKnown {
+                    preview: false,
+                    auth: Auth::Token,
+                    subcommand: 1,
+                    rp: 0,
+                    credential: 0,
+                    valid_user: true,
+                },
+                Op::Advance(9),
+                Op::Restart,
+                Op::UsePersistent { v2 },
+                Op::ManageKnown {
+                    preview: false,
+                    auth: Auth::Token,
+                    subcommand: 2,
+                    rp: 0,
+                    credential: 0,
+                    valid_user: true,
+                },
+                Op::ManageKnown {
+                    preview: false,
+                    auth: Auth::Token,
+                    subcommand: 4,
+                    rp: 0,
+                    credential: 0,
+                    valid_user: true,
+                },
+                Op::ManageKnown {
+                    preview: true,
+                    auth: Auth::Token,
+                    subcommand: 1,
+                    rp: 0,
+                    credential: 0,
+                    valid_user: true,
+                },
+                Op::ManageKnown {
+                    preview: false,
+                    auth: Auth::Token,
+                    subcommand: 6,
+                    rp: 0,
+                    credential: 0,
+                    valid_user: true,
+                },
+            ]);
+        }
     }
     cases.iter().map(|ops| encode_fixture(ops)).collect()
 }
@@ -3530,8 +3533,18 @@ mod tests {
     #[test]
     fn seeds_exercise_commits_abandoned_writes_and_stable_keys() {
         let seeds = seed_corpus();
-        assert_eq!(seeds.len(), 108);
+        assert_eq!(seeds.len(), 110);
         let traces: Vec<_> = seeds.iter().map(|seed| run_traced(seed)).collect();
+        for trace in &traces[traces.len() - 4..] {
+            assert_eq!(
+                trace
+                    .iter()
+                    .filter(|pair| **pair == (CTAP_CMD_CREDENTIAL_MANAGEMENT, u16::from(CTAP2_OK)))
+                    .count(),
+                3,
+                "persistent seeds must read metadata and enumerate after restart"
+            );
+        }
         for status in [CTAP2_OK, CTAP2_ERR_PIN_AUTH_INVALID, CTAP2_ERR_NOT_ALLOWED] {
             assert!(
                 traces.iter().any(|trace| trace
