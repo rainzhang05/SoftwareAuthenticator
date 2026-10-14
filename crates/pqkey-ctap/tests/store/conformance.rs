@@ -619,6 +619,7 @@ fn pin_state_round_trips<B: Backend>() {
         pin_code_point_length: 6,
         always_uv: true,
         pin_complexity_policy: true,
+        persistent_tokens: [None, None],
     };
     store.set_pin_state(&set).unwrap();
     assert_eq!(store.pin_state().unwrap(), Some(set.clone()));
