@@ -1,7 +1,9 @@
 //! authenticatorCredentialManagement tests.
 
 use super::support::new_app;
-use super::support::{TestApp, credential, insert, insert_owned, stored, stored_by_id};
+use super::support::{
+    TestApp, credential, insert, insert_owned, install_pin_hash, stored, stored_by_id,
+};
 use super::support::{
     TestStore, encode, es256_credential, get_pin_uv_auth_token, install_pin_uv_auth_token, int,
     pin_hash, token_pin_auth,
@@ -418,7 +420,7 @@ fn credential_id_params(credential_id: &[u8], user: Option<Value>) -> Value {
 #[test]
 fn credential_management_limits_an_rp_scoped_token_to_that_rp() {
     let mut app = new_app(TestStore::new(), [0x27; 16]);
-    app.pin_state.set_pin(pin_hash(b"1234"));
+    install_pin_hash(&mut app, pin_hash(b"1234"));
     insert_owned(&mut app, es256_credential("example.com", &[0xA1]));
     insert_owned(&mut app, es256_credential("other.example", &[0xB1]));
     let token = get_pin_uv_auth_token(
@@ -555,7 +557,7 @@ fn credential_id_of(response: &[u8]) -> Vec<u8> {
 fn app_with_cm_token(aaguid: u8) -> (TestApp, TestStore, [u8; 32]) {
     let store = TestStore::new();
     let mut app = new_app(store.clone(), [aaguid; 16]);
-    app.pin_state.set_pin(pin_hash(b"1234"));
+    install_pin_hash(&mut app, pin_hash(b"1234"));
     let token = [aaguid; 32];
     install_pin_uv_auth_token(
         &mut app,
@@ -966,7 +968,7 @@ fn malformed_descriptors_and_users_are_unexpected_types() {
     for bound in [None, Some("example.com")] {
         for (subcommand, params, expected) in &cases {
             let mut app = new_app(TestStore::new(), [0x3E; 16]);
-            app.pin_state.set_pin(pin_hash(b"1234"));
+            install_pin_hash(&mut app, pin_hash(b"1234"));
             let token = [0x3E; 32];
             install_pin_uv_auth_token(
                 &mut app,

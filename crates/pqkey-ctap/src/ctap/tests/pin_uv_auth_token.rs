@@ -4,8 +4,8 @@
 use super::support::new_app;
 use super::support::{
     FLAG_UV, TestStore, encode, es256_credential, get_assertion_request, get_pin_token,
-    get_pin_uv_auth_token, int, make_credential_request, pin_hash, response_auth_data,
-    set_pin_padded, token_pin_auth,
+    get_pin_uv_auth_token, install_pin_hash, int, make_credential_request, pin_hash,
+    response_auth_data, set_pin_padded, token_pin_auth,
 };
 use super::support::{TestApp, insert_owned, stored};
 use crate::ClassicPinProtocol;
@@ -29,7 +29,7 @@ fn app_with_clock() -> (TestApp, ManualClock) {
     let mut app = new_app(TestStore::new(), [0x80; 16]);
     let clock = ManualClock::default();
     app.pin_state.set_clock(Box::new(clock.clone()));
-    app.pin_state.set_pin(pin_hash(PIN));
+    install_pin_hash(&mut app, pin_hash(PIN));
     insert_owned(&mut app, es256_credential("example.com", &[0xF1]));
     (app, clock)
 }
@@ -351,7 +351,7 @@ fn setting_a_pin_stops_the_token() {
     // (CTAP 2.3 §6.5.5.6); set_pin is shared by setPIN and changePIN.
     let (mut app, _clock) = app_with_clock();
     let token = cm_token(&mut app, ClassicPinProtocol::V2);
-    app.pin_state.set_pin(pin_hash(b"5678"));
+    install_pin_hash(&mut app, pin_hash(b"5678"));
     assert_eq!(
         creds_metadata(&mut app, ClassicPinProtocol::V2, &token),
         Err(CTAP2_ERR_PIN_AUTH_INVALID)

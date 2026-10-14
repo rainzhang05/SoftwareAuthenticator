@@ -851,6 +851,47 @@ fn persistent_metadata(
         ],
     )
 }
+
+#[test]
+fn missing_pin_authority_before_first_persistent_grant_fails_closed() {
+    for managed in [false, true] {
+        for protocol in PROTOCOLS {
+            let scratch = TempDir::new();
+            let path = scratch.path().join("state");
+            setup(&path, managed);
+            let mut engine = app(&path);
+            let session = Session::new(&mut engine, protocol);
+            assert_eq!(session.set(&mut engine)[0], CTAP2_OK);
+            fs::remove_file(path.join(PIN_STATE_FILE)).unwrap();
+
+            assert_eq!(session.read_only(&mut engine, PIN)[0], CTAP2_ERR_PROCESSING);
+            assert!(
+                FileStore::open(&path)
+                    .unwrap()
+                    .pin_state()
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                session.read_only(&mut engine, PIN)[0],
+                CTAP2_ERR_PIN_BLOCKED
+            );
+            assert!(
+                FileStore::open(&path)
+                    .unwrap()
+                    .pin_state()
+                    .unwrap()
+                    .is_none()
+            );
+            engine.set_reset_window(None);
+            assert_eq!(engine.call(&[CTAP_CMD_RESET])[0], CTAP2_OK);
+            let recovered = Session::new(&mut engine, protocol);
+            assert_eq!(recovered.set(&mut engine)[0], CTAP2_OK);
+            assert_eq!(recovered.read_only(&mut engine, PIN)[0], CTAP2_OK);
+        }
+    }
+}
+
 #[test]
 fn persistent_grant_publication_and_retry_writes_require_confirmed_durability() {
     for managed in [false, true] {

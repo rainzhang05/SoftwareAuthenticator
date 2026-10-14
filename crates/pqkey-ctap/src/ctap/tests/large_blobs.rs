@@ -155,7 +155,7 @@ fn common_and_get_checks_follow_spec_order() {
 #[test]
 fn set_checks_follow_spec_order_and_bound_integer_arithmetic() {
     let mut app = test_app([0x81; 16]);
-    app.pin_state.set_pin(pin_hash(b"1234"));
+    install_pin_hash(&mut app, pin_hash(b"1234"));
     let cases = [
         (
             write_request(0, None, &[0; 1705], None),
@@ -515,7 +515,7 @@ fn rejected_initial_fragments_reset_counters_before_authentication() {
 fn lbw_tokens_are_granted_and_survive_user_presence() {
     for protocol in PROTOCOLS {
         let mut app = test_app([0x81; 16]);
-        app.pin_state.set_pin(pin_hash(b"1234"));
+        install_pin_hash(&mut app, pin_hash(b"1234"));
         let permissions = PIN_PERMISSION_MC | PIN_PERMISSION_LBW;
         let token = get_pin_uv_auth_token(
             &mut app,

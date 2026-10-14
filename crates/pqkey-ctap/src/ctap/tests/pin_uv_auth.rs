@@ -6,9 +6,9 @@ use super::support::new_app;
 use super::support::{
     FLAG_UV, PlatformPinSession, TestStore, client_pin, created_credential, encode,
     es256_credential, get_assertion_request, get_assertion_request_with, get_pin_retries,
-    get_pin_uv_auth_token, install_pin_uv_auth_token, int, make_credential_request,
-    make_credential_request_with, padded_pin, pin_hash, platform_authenticate, response_auth_data,
-    set_pin_encrypted, set_pin_padded, token_pin_auth,
+    get_pin_uv_auth_token, install_pin_hash, install_pin_uv_auth_token, int,
+    make_credential_request, make_credential_request_with, padded_pin, pin_hash,
+    platform_authenticate, response_auth_data, set_pin_encrypted, set_pin_padded, token_pin_auth,
 };
 use super::support::{insert_owned, stored};
 use crate::ClassicPinProtocol;
@@ -210,7 +210,7 @@ fn set_pin_verifies_pin_uv_auth_param_per_protocol() {
 fn change_pin_verifies_pin_uv_auth_param_per_protocol() {
     for (protocol, variant) in CASES {
         let mut app = new_app(TestStore::new(), [0x61; 16]);
-        app.pin_state.set_pin(pin_hash(b"1234"));
+        install_pin_hash(&mut app, pin_hash(b"1234"));
         let session = PlatformPinSession::establish(&mut app, protocol, 0x12);
         let new_pin_enc = session.encrypt(&padded_pin(b"5678"));
         let pin_hash_enc = session.encrypt(&pin_hash(b"1234"));
@@ -829,7 +829,7 @@ fn an_unusable_platform_key_agreement_key_is_an_invalid_parameter() {
 fn reset_discards_the_pin_uv_auth_token_and_the_key_agreement_key() {
     for protocol in PROTOCOLS {
         let mut app = new_app(TestStore::new(), [0x6B; 16]);
-        app.pin_state.set_pin(pin_hash(b"1234"));
+        install_pin_hash(&mut app, pin_hash(b"1234"));
         let token = get_pin_uv_auth_token(
             &mut app,
             protocol,
@@ -881,7 +881,7 @@ fn reset_discards_the_pin_uv_auth_token_and_the_key_agreement_key() {
 fn hmac_secret_can_reuse_the_key_agreement_of_a_pin_token_request() {
     for protocol in PROTOCOLS {
         let mut app = new_app(TestStore::new(), [0x6C; 16]);
-        app.pin_state.set_pin(pin_hash(b"1234"));
+        install_pin_hash(&mut app, pin_hash(b"1234"));
         let credential = es256_credential("example.com", &[0xE3]);
         let cred_random_with_uv = credential.cred_random_with_uv;
         insert_owned(&mut app, credential);

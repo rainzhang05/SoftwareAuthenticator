@@ -1,6 +1,8 @@
 //! authenticatorGetInfo tests.
 
-use super::support::{TestApp, TestStore, es256_credential, insert_owned, new_app, test_app};
+use super::support::{
+    TestApp, TestStore, es256_credential, insert_owned, install_pin_hash, new_app, test_app,
+};
 use crate::CoseAlg;
 use crate::ctap::AttestationMode;
 use crate::ctap::cbor::canonical_map;
@@ -163,7 +165,7 @@ fn get_info_response_encoding_is_canonical_with_pin_unset() {
 fn get_info_response_encoding_is_canonical_with_pin_set() {
     let aaguid = [0xAB; 16];
     let mut app = new_app(TestStore::with_max_credentials(5), aaguid);
-    app.pin_state.set_pin([0x11; 16]);
+    install_pin_hash(&mut app, [0x11; 16]);
     insert_owned(&mut app, es256_credential("example.com", &[0x01]));
 
     assert_get_info_response(&mut app, aaguid, true, 4);
@@ -200,7 +202,7 @@ fn algorithms_are_the_table_in_order() {
 fn client_pin_option_reports_whether_a_pin_is_set() {
     let mut app = test_app([0xAC; 16]);
     assert!(options(&mut app).contains(&(text("clientPin"), Value::Bool(false))));
-    app.pin_state.set_pin([0x11; 16]);
+    install_pin_hash(&mut app, [0x11; 16]);
     assert!(options(&mut app).contains(&(text("clientPin"), Value::Bool(true))));
 }
 

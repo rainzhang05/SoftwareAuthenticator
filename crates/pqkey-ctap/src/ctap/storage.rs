@@ -101,13 +101,15 @@ impl CtapApp<'_> {
         let loaded = self.store.pin_state();
         let record = match loaded {
             Ok(Some(record)) => record,
+            // A missing authority is allowed only before a PIN or token exists.
             Ok(None)
-                if self
-                    .pin_state
-                    .persistent()
-                    .persistent_tokens
-                    .iter()
-                    .all(Option::is_none) =>
+                if self.pin_state.persistent().pin_hash.is_none()
+                    && self
+                        .pin_state
+                        .persistent()
+                        .persistent_tokens
+                        .iter()
+                        .all(Option::is_none) =>
             {
                 return Ok(());
             }

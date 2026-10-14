@@ -4,8 +4,8 @@
 use super::support::{
     PlatformPinSession, TestStore, classic_encrypt, classic_pin_auth, client_pin,
     derive_classic_session, get_pin_retries, get_pin_token, get_pin_token_with,
-    get_pin_uv_auth_token, int, padded_pin, pin_hash, request_classic_key_agreement,
-    set_pin_encrypted, set_pin_padded,
+    get_pin_uv_auth_token, install_pin_hash, int, padded_pin, pin_hash,
+    request_classic_key_agreement, set_pin_encrypted, set_pin_padded,
 };
 use super::support::{TestRng, app_with_store_and_rng, new_app};
 use crate::ClassicPinProtocol;
@@ -116,7 +116,7 @@ fn check_pin(state: &mut PinState, candidate: &[u8; 16]) -> Result<(), u8> {
 fn client_pin_get_retries_includes_power_cycle_state_when_blocked() {
     let mut app = new_app(TestStore::new(), [0x31; 16]);
     let mut pin_hash = [0x11; 16];
-    app.pin_state.set_pin(pin_hash);
+    install_pin_hash(&mut app, pin_hash);
     let wrong = [0x22; 16];
     for attempt in 0..MAX_CONSECUTIVE_PIN_MISMATCHES {
         let result = check_pin(&mut app.pin_state, &wrong);
@@ -388,7 +388,7 @@ fn client_pin_token_with_permissions_sets_metadata() {
     let digest = hasher.finalize();
     let mut pin_hash = [0u8; 16];
     pin_hash.copy_from_slice(&digest[..16]);
-    app.pin_state.set_pin(pin_hash);
+    install_pin_hash(&mut app, pin_hash);
 
     let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
     let platform_secret = P256SecretKey::from_slice(&[0x33; 32]).expect("valid platform secret");
@@ -454,7 +454,7 @@ fn client_pin_get_token_legacy_succeeds_without_pin_uv_auth_param() {
     let digest = hasher.finalize();
     let mut pin_hash = [0u8; 16];
     pin_hash.copy_from_slice(&digest[..16]);
-    app.pin_state.set_pin(pin_hash);
+    install_pin_hash(&mut app, pin_hash);
 
     let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
     let platform_secret = P256SecretKey::from_slice(&[0x55; 32]).expect("valid platform secret");
@@ -518,7 +518,7 @@ fn client_pin_token_with_permissions_accepts_missing_pin_uv_auth_param() {
     let digest = hasher.finalize();
     let mut pin_hash = [0u8; 16];
     pin_hash.copy_from_slice(&digest[..16]);
-    app.pin_state.set_pin(pin_hash);
+    install_pin_hash(&mut app, pin_hash);
 
     let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
     let platform_secret = P256SecretKey::from_slice(&[0x66; 32]).expect("valid platform secret");
@@ -600,7 +600,7 @@ fn client_pin_token_with_permissions_requires_rp_id() {
     let digest = hasher.finalize();
     let mut pin_hash = [0u8; 16];
     pin_hash.copy_from_slice(&digest[..16]);
-    app.pin_state.set_pin(pin_hash);
+    install_pin_hash(&mut app, pin_hash);
 
     let auth_entries = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);
     let platform_secret = P256SecretKey::from_slice(&[0x44; 32]).expect("valid platform secret");
@@ -763,7 +763,7 @@ fn pin_subcommands_check_parameters_then_the_pin_uv_auth_protocol() {
     for subcommand in [0x03, 0x04, 0x05, 0x09] {
         let mut app = new_app(TestStore::new(), [0x41; 16]);
         if subcommand != 0x03 {
-            app.pin_state.set_pin(pin_hash(b"1234"));
+            install_pin_hash(&mut app, pin_hash(b"1234"));
         }
         assert_eq!(
             client_pin(&mut app, request_with_all_parameters(subcommand, None)),
@@ -813,7 +813,7 @@ fn set_pin_when_a_pin_is_already_set_is_pin_auth_invalid() {
     // CTAP2_ERR_PIN_AUTH_INVALID error." (CTAP 2.3 §6.5.5.5)
     for protocol in [ClassicPinProtocol::V1, ClassicPinProtocol::V2] {
         let mut app = new_app(TestStore::new(), [0x43; 16]);
-        app.pin_state.set_pin(pin_hash(b"1234"));
+        install_pin_hash(&mut app, pin_hash(b"1234"));
         let session = PlatformPinSession::establish(&mut app, protocol, 0x44);
         let new_pin_enc = session.encrypt(&padded_pin(b"5678"));
         let pin_uv_auth_param = classic_pin_auth(protocol, &session.keys, &new_pin_enc);
@@ -838,7 +838,7 @@ fn get_pin_uv_auth_token_grants_cm_scoped_to_an_rp_id() {
     // can only be used for Credential Management operations on Credentials
     // associated with that RP ID." (CTAP 2.3 §6.5.5.7)
     let mut app = new_app(TestStore::new(), [0x45; 16]);
-    app.pin_state.set_pin(pin_hash(b"1234"));
+    install_pin_hash(&mut app, pin_hash(b"1234"));
     let token = get_pin_uv_auth_token(
         &mut app,
         ClassicPinProtocol::V2,
@@ -860,7 +860,7 @@ fn get_pin_uv_auth_token_grants_lbw_and_refuses_unsupported_permissions() {
     // be is unsupported; pcmr cannot be combined with a defined permission.
     for permissions in [0x08, 0x10, 0x04 | 0x40, 0x01 | 0x02 | 0x08] {
         let mut app = new_app(TestStore::new(), [0x46; 16]);
-        app.pin_state.set_pin(pin_hash(b"1234"));
+        install_pin_hash(&mut app, pin_hash(b"1234"));
         let result = get_pin_uv_auth_token(
             &mut app,
             ClassicPinProtocol::V2,
@@ -890,7 +890,7 @@ fn get_pin_uv_auth_token_grants_lbw_and_refuses_unsupported_permissions() {
 fn get_pin_uv_auth_token_rejects_zero_permissions() {
     for permissions in [0, -1] {
         let mut app = new_app(TestStore::new(), [0x47; 16]);
-        app.pin_state.set_pin(pin_hash(b"1234"));
+        install_pin_hash(&mut app, pin_hash(b"1234"));
         let result =
             get_pin_uv_auth_token(&mut app, ClassicPinProtocol::V2, b"1234", permissions, None);
         assert_eq!(result, Err(CTAP1_ERR_INVALID_PARAMETER), "{permissions}");
@@ -909,7 +909,7 @@ fn get_pin_uv_auth_token_ignores_undefined_permissions() {
     ];
     for (requested, granted) in cases {
         let mut app = new_app(TestStore::new(), [0x48; 16]);
-        app.pin_state.set_pin(pin_hash(b"1234"));
+        install_pin_hash(&mut app, pin_hash(b"1234"));
         let token =
             get_pin_uv_auth_token(&mut app, ClassicPinProtocol::V1, b"1234", requested, None)
                 .unwrap_or_else(|err| panic!("permissions {requested:#x}: {err:#04x}"));
@@ -1027,7 +1027,7 @@ fn set_pin_refuses_a_new_pin_enc_that_does_not_decrypt() {
 fn change_pin_applies_the_same_pin_policy() {
     for protocol in PROTOCOLS {
         let mut app = new_app(TestStore::new(), [0x4D; 16]);
-        app.pin_state.set_pin(pin_hash(b"1234"));
+        install_pin_hash(&mut app, pin_hash(b"1234"));
         let session = PlatformPinSession::establish(&mut app, protocol, 0x53);
         let new_pin_enc = session.encrypt(&padded_pin("\u{e9}\u{e9}\u{e9}".as_bytes()));
         let pin_hash_enc = session.encrypt(&pin_hash(b"1234"));
@@ -1112,7 +1112,7 @@ fn one_key_agreement_serves_several_commands() {
 #[test]
 fn a_pin_mismatch_regenerates_that_protocols_key_agreement_key() {
     let mut app = new_app(TestStore::new(), [0x51; 16]);
-    app.pin_state.set_pin(pin_hash(b"1234"));
+    install_pin_hash(&mut app, pin_hash(b"1234"));
     let protocol_one = request_classic_key_agreement(&mut app, ClassicPinProtocol::V1);
     let session = PlatformPinSession::establish(&mut app, ClassicPinProtocol::V2, 0x62);
     let protocol_two = request_classic_key_agreement(&mut app, ClassicPinProtocol::V2);

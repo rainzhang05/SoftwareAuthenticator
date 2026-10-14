@@ -1068,6 +1068,13 @@ pub(super) fn created_credential(app: &TestApp, response: &[u8], rp_id: &str) ->
 /// The user verified (UV) bit of the authenticator data flags.
 pub(super) const FLAG_UV: u8 = 0x04;
 
+/// Set the fixture's PIN in both its live state and backing store.
+pub(super) fn install_pin_hash(app: &mut TestApp, hash: [u8; 16]) {
+    app.pin_state.set_pin(hash);
+    app.save_persistent_pin_state()
+        .expect("persist the fixture's PIN authority");
+}
+
 /// Give `app` an in-use pinUvAuthToken, as a successful
 /// getPinUvAuthTokenUsingPinWithPermissions over `protocol` would.  Only a PIN
 /// issues tokens, so a PIN is set first if there is none: without one the
@@ -1082,7 +1089,7 @@ pub(super) fn install_pin_uv_auth_token(
     rp_id: Option<&str>,
 ) {
     if !app.pin_state.is_set() {
-        app.pin_state.set_pin(pin_hash(b"1234"));
+        install_pin_hash(app, pin_hash(b"1234"));
     }
     app.pin_state.issue_pin_uv_auth_token(
         protocol,
