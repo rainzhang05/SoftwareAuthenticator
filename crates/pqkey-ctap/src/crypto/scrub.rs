@@ -17,8 +17,15 @@ use zeroize::Zeroize;
 /// for P-521 in a release build, and Ed25519's `r` about 1 KiB down).
 /// `zeroize` writes with volatile stores the compiler may not remove.
 pub(crate) fn with_scrubbed_stack<T>(operation: impl FnOnce() -> T) -> T {
+    struct ScrubOnExit;
+    impl Drop for ScrubOnExit {
+        fn drop(&mut self) {
+            scrub_stack();
+        }
+    }
+    let guard = ScrubOnExit;
     let result = run_below(operation);
-    scrub_stack();
+    drop(guard);
     result
 }
 

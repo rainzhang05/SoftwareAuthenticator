@@ -599,6 +599,14 @@ fn main() {
             assert_eq!(app.call(&request)[0], expected);
         }
     }
+    let dir = std::env::temp_dir().join(format!("pqkey-persistent-heap-{}", std::process::id()));
+    {
+        let (mut app, requests) = persistent::file_fixture(&dir);
+        for (request, expected) in requests {
+            assert_eq!(app.call(&request)[0], expected);
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
     scan_freed(
         "persistent authority issuance, validation, rotation and reset",
         &needles,

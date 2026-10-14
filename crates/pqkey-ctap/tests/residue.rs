@@ -814,19 +814,27 @@ fn check_mldsa(rng_failed: bool) -> Vec<String> {
 
 fn check_persistent_authority() {
     let needles = persistent::needles();
-    let (mut app, requests) = persistent::fixture();
-    for (index, (request, expected)) in requests.iter().enumerate() {
-        wipe();
-        let response = app.call(request);
-        for needle in &needles {
-            assert_eq!(
-                scan(needle),
-                0,
-                "persistent authority operation {index} left a secret in the stack"
-            );
+    let dir = std::env::temp_dir().join(format!("pqkey-persistent-stack-{}", std::process::id()));
+    for file in [false, true] {
+        let (mut app, requests) = if file {
+            persistent::file_fixture(&dir)
+        } else {
+            persistent::fixture()
+        };
+        for (index, (request, expected)) in requests.iter().enumerate() {
+            wipe();
+            let response = app.call(request);
+            for needle in &needles {
+                assert_eq!(
+                    scan(needle),
+                    0,
+                    "persistent authority operation {index} left a secret in the stack"
+                );
+            }
+            assert_eq!(response[0], *expected);
         }
-        assert_eq!(response[0], *expected);
     }
+    std::fs::remove_dir_all(dir).unwrap();
     println!(
         "persistent authority: both protocol secrets, issuance, MAC validation, PIN rotation and reset passed the full stack scan"
     );

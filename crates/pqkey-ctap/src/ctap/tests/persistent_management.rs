@@ -358,3 +358,92 @@ fn repeating_or_zero_entropy_cannot_cross_persistent_permissions_or_publish_rota
         CTAP2_OK
     );
 }
+
+#[test]
+fn exact_encrypted_lengths_and_protocol_macs_with_ignored_rp_id() {
+    for protocol in PROTOCOLS {
+        let (mut app, _) = ready();
+        let session = PlatformPinSession::establish(&mut app, protocol, 0x21);
+        let response = client_pin(
+            &mut app,
+            vec![
+                (int(1), int(protocol.identifier().into())),
+                (int(2), int(9)),
+                (int(3), session.key_agreement.clone()),
+                (int(6), Value::Bytes(session.encrypt(&pin_hash(PIN)))),
+                (int(9), int(0xc0)),
+                (int(10), Value::Bool(true)),
+            ],
+        )
+        .unwrap();
+        let fields: Value = ciborium::de::from_reader(&response[1..]).unwrap();
+        let encrypted = fields
+            .as_map()
+            .unwrap()
+            .iter()
+            .find(|(k, _)| *k == int(2))
+            .unwrap()
+            .1
+            .as_bytes()
+            .unwrap();
+        assert_eq!(
+            encrypted.len(),
+            if protocol == PROTOCOLS[0] { 32 } else { 48 }
+        );
+        let secret = Zeroizing::new(session.decrypt(encrypted));
+        assert_eq!(secret.len(), 32);
+        let mac = crate::platform::authenticate(protocol, &secret, &[1]);
+        assert_eq!(mac.len(), if protocol == PROTOCOLS[0] { 16 } else { 32 });
+        assert_eq!(
+            manage(&mut app, 0x0a, protocol, &secret, 1, None)[0],
+            CTAP2_OK
+        );
+        for length in [0, 15, 17, 31, 33] {
+            let response = app.call(
+                &[
+                    vec![0x0a],
+                    encode(&Value::Map(vec![
+                        (int(1), int(1)),
+                        (int(3), int(protocol.identifier().into())),
+                        (int(4), Value::Bytes(vec![0; length])),
+                    ])),
+                ]
+                .concat(),
+            );
+            assert_eq!(response, [CTAP2_ERR_PIN_AUTH_INVALID]);
+        }
+    }
+}
+#[test]
+fn injected_rng_panic_keeps_preceding_grant_and_publishes_no_candidate() {
+    use rand_core::{Infallible, TryCryptoRng, TryRng};
+    struct PanicRng;
+    impl TryRng for PanicRng {
+        type Error = Infallible;
+        fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+            panic!("injected RNG failure")
+        }
+        fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+            panic!("injected RNG failure")
+        }
+        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), Infallible> {
+            panic!("injected RNG failure")
+        }
+    }
+    impl TryCryptoRng for PanicRng {}
+    let (mut app, store) = ready();
+    let preceding = token(&mut app, PROTOCOLS[0]);
+    PlatformPinSession::establish(&mut app, PROTOCOLS[1], 0x21);
+    app.rng = Box::new(PanicRng);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = get_pin_uv_auth_token(&mut app, PROTOCOLS[1], PIN, 0x40, None);
+        }))
+        .is_err()
+    );
+    assert!(store.pin_state().unwrap().unwrap().persistent_tokens[1].is_none());
+    assert_eq!(
+        manage(&mut app, 0x0a, PROTOCOLS[0], preceding.as_slice(), 1, None)[0],
+        CTAP2_OK
+    );
+}

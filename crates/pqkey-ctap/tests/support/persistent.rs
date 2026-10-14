@@ -46,7 +46,17 @@ fn field(map: &Value, key: i64) -> &Value {
 }
 /// Build everything before the stack probe wipes its baseline.
 pub fn fixture() -> (Box<CtapApp<'static>>, Vec<(Vec<u8>, u8)>) {
-    let mut store = MemoryStore::new();
+    fixture_with_store(MemoryStore::new())
+}
+
+/// Exercise actual encrypted PIN-state serialization in a file store.
+pub fn file_fixture(path: &std::path::Path) -> (Box<CtapApp<'static>>, Vec<(Vec<u8>, u8)>) {
+    fixture_with_store(pqkey_ctap::store::FileStore::open(path).unwrap())
+}
+
+fn fixture_with_store(
+    mut store: impl CredentialStore + Send + 'static,
+) -> (Box<CtapApp<'static>>, Vec<(Vec<u8>, u8)>) {
     let mut state = PinStateRecord::default();
     state.pin_hash = Some(*pin_hash(b"1234"));
     state.persistent_tokens = [

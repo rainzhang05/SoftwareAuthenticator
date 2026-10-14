@@ -422,7 +422,11 @@ impl Oracle {
             if matches!(unsigned(get_int(&parameters, 2)), Some(3 | 4)) {
                 self.invalidate();
             } else {
-                self.grant = None;
+                let persistent =
+                    unsigned(get_int(&parameters, 9)).is_some_and(|mask| mask & 0x7f == 0x40);
+                if !persistent {
+                    self.grant = None;
+                }
                 self.rps = None;
                 self.credentials = None;
             }

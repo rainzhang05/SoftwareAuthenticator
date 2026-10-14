@@ -553,7 +553,6 @@ impl CtapApp<'_> {
         family: ManagementFamily,
         payload: &[u8],
     ) -> Result<Vec<u8>, u8> {
-        self.refresh_persistent_authority()?;
         // Switch before parsing: even a rejected request of the other family
         // cannot leave the preceding enumeration available for later reuse.
         if self.cred_mgmt_state.family != Some(family) {
@@ -586,8 +585,14 @@ impl CtapApp<'_> {
         // sends only the subCommand, and the enumeration's begin subcommand
         // was authenticated instead.
         let response_entries = match subcommand {
-            ENUMERATE_RPS_GET_NEXT_RP => Some(self.cm_enumerate_rps_next(family)?),
+            ENUMERATE_RPS_GET_NEXT_RP => {
+                self.refresh_persistent_authority()
+                    .map_err(|_| CTAP2_ERR_NOT_ALLOWED)?;
+                Some(self.cm_enumerate_rps_next(family)?)
+            }
             ENUMERATE_CREDENTIALS_GET_NEXT_CREDENTIAL => {
+                self.refresh_persistent_authority()
+                    .map_err(|_| CTAP2_ERR_NOT_ALLOWED)?;
                 Some(self.cm_enumerate_credentials_next(family)?)
             }
             _ => {
@@ -625,6 +630,7 @@ impl CtapApp<'_> {
                 {
                     message.extend_from_slice(raw_params);
                 }
+                self.refresh_persistent_authority()?;
                 let persistent_match = family == ManagementFamily::Standard
                     && matches!(
                         subcommand,

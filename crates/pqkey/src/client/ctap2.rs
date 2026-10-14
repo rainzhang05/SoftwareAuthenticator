@@ -511,8 +511,10 @@ impl<L: ReportLink> Authenticator<L> {
             &mut |_| {},
         )?;
         let token = shared.decrypt(bytes_of(member(&body, 2))?)?;
-        if token.len() != 32 {
-            return Err(ClientError::Malformed("management token is not 32 bytes"));
+        if token.len() != 32 && !(protocol == ClassicPinProtocol::V1 && token.len() == 16) {
+            return Err(ClientError::Malformed(
+                "management token has an invalid protocol length",
+            ));
         }
         Ok(Token(token, protocol, permission))
     }
@@ -701,6 +703,38 @@ impl<L: ReportLink> Authenticator<L> {
         self.management(token, 0x06, Some(params)).map(drop)
     }
 
+    /// Update a credential's user names using writable CM authorization.
+    /// Omitted names remove the corresponding stored value (CTAP 2.3 §6.8.6).
+    pub fn update_user_information(
+        &mut self,
+        token: &Token,
+        credential_id: &[u8],
+        user_id: &[u8],
+        name: Option<&str>,
+        display_name: Option<&str>,
+    ) -> Result<(), ClientError> {
+        let descriptor = Value::Map(vec![
+            (text("id"), Value::Bytes(credential_id.to_vec())),
+            (text("type"), text("public-key")),
+        ]);
+        let mut user = vec![(text("id"), Value::Bytes(user_id.to_vec()))];
+        if let Some(name) = name {
+            user.push((text("name"), text(name)));
+        }
+        if let Some(name) = display_name {
+            user.push((text("displayName"), text(name)));
+        }
+        self.management(
+            token,
+            7,
+            Some(Value::Map(vec![
+                (int(2), descriptor),
+                (int(3), Value::Map(user)),
+            ])),
+        )
+        .map(drop)
+    }
+
     /// authenticatorReset (§6.6), which the key confirms with its user;
     /// `keepalive` sees the key wait for them.
     pub fn reset(&mut self, keepalive: &mut dyn FnMut(u8)) -> Result<(), ClientError> {
@@ -726,6 +760,7 @@ mod size_tests {
         traffic: Rc<RefCell<Traffic>>,
         infos: VecDeque<Value>,
         management_replies: VecDeque<Value>,
+        pin_peer: Option<pqkey_ctap::ctap::CtapApp<'static>>,
         answers: VecDeque<Report>,
         pending: Vec<u8>,
         length: usize,
@@ -733,12 +768,24 @@ mod size_tests {
 
     impl RecordingLink {
         fn answer(&mut self, report: &Report, payload: &[u8]) {
-            for (sequence, chunk) in payload.chunks(57).enumerate() {
-                assert_eq!(sequence, 0, "these scripted replies fit in one report");
+            let mut offset = 0;
+            let mut sequence = 0u8;
+            while offset < payload.len() {
                 let mut answer = [0; 64];
-                answer[..5].copy_from_slice(&report[..5]);
-                answer[5..7].copy_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
-                answer[7..7 + chunk.len()].copy_from_slice(chunk);
+                answer[..4].copy_from_slice(&report[..4]);
+                let start = if offset == 0 {
+                    answer[4] = report[4];
+                    answer[5..7]
+                        .copy_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
+                    7
+                } else {
+                    answer[4] = sequence;
+                    sequence += 1;
+                    5
+                };
+                let count = (64 - start).min(payload.len() - offset);
+                answer[start..start + count].copy_from_slice(&payload[offset..offset + count]);
+                offset += count;
                 self.answers.push_back(answer);
             }
         }
@@ -771,6 +818,26 @@ mod size_tests {
                     let mut response = vec![0];
                     if self.pending == [GET_INFO] {
                         response.extend(encode(&self.infos.pop_front().expect("scripted getInfo")));
+                    } else if self.pending.first() == Some(&CLIENT_PIN) {
+                        use pqkey_ctap::{
+                            ctap::{CtapApp, InterruptFlag, presence::AutoApprove},
+                            store::{CredentialStore, MemoryStore, PinStateRecord},
+                        };
+                        static INTERRUPT: InterruptFlag = InterruptFlag::new();
+                        let app = self.pin_peer.get_or_insert_with(|| {
+                            let mut store = MemoryStore::new();
+                            let mut pin = PinStateRecord::default();
+                            pin.pin_hash = Some(*pin_hash(b"1234"));
+                            store.set_pin_state(&pin).unwrap();
+                            CtapApp::new(
+                                store,
+                                rand_core::UnwrapErr(getrandom::SysRng),
+                                AutoApprove,
+                                &INTERRUPT,
+                                [0; 16],
+                            )
+                        });
+                        response = app.call(&self.pending);
                     } else if let Some(reply) = self.management_replies.pop_front() {
                         response.extend(encode(&reply));
                     }
@@ -809,6 +876,7 @@ mod size_tests {
             traffic: traffic.clone(),
             infos: infos.into(),
             management_replies: replies.into(),
+            pin_peer: None,
             answers: VecDeque::new(),
             pending: Vec::new(),
             length: 0,
@@ -856,6 +924,25 @@ mod size_tests {
             error.to_string(),
             format!("the encoded CTAP2 request is {bytes} bytes; the limit is {limit} bytes")
         );
+    }
+
+    #[test]
+    fn listing_negotiates_persistent_permission_and_older_peer_cm_fallback() {
+        for advertised in [None, Some(false), Some(true)] {
+            let mut options = vec![(text("clientPin"), Value::Bool(true))];
+            if let Some(value) = advertised {
+                options.push((text("perCredMgmtRO"), Value::Bool(value)));
+            }
+            let info = Value::Map(vec![(int(4), Value::Map(options))]);
+            let (mut key, traffic) = key(vec![info]);
+            let token = key.listing_token(b"1234").unwrap();
+            assert_eq!(token.2, if advertised == Some(true) { 0x40 } else { 4 });
+            let requests = traffic.borrow();
+            let request: Value =
+                ciborium::de::from_reader(&requests.requests.last().unwrap()[1..]).unwrap();
+            assert_eq!(member(&request, 9), Some(&int(token.2.into())));
+            assert!(member(&request, 10).is_none());
+        }
     }
 
     #[test]
