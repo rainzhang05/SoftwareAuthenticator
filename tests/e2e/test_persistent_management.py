@@ -72,3 +72,24 @@ def test_reads_mutations_and_wink_lock_cursor_preservation(ctap, protocol):
     ClientPin(ctap, protocol).get_pin_token(PIN, ClientPin.PERMISSION.CREDENTIAL_MGMT)
     fails(CtapError.ERR.NOT_ALLOWED, lambda: manage(ctap, protocol, secret, 3))
     assert manage(ctap, protocol, secret, 1)[1] == 3
+
+@pytest.mark.parametrize("policy", [{1: 6}, {4: True}], ids=["minimum", "complexity"])
+def test_persistent_rotation_on_forced_policy_and_reset(ctap, protocol, policy):
+    from fido2 import cbor
+    import hmac
+    pin = ClientPin(ctap, protocol)
+    pin.set_pin(PIN)
+    secret = obtain(ctap, protocol, PIN)
+    writable = pin.get_pin_token(PIN, ClientPin.PERMISSION.AUTHENTICATOR_CFG)
+    message = b"\xff" * 32 + b"\x0d\x03" + cbor.encode(policy)
+    ctap.send_cbor(0x0d, {1: 3, 2: policy, 3: protocol.VERSION, 4: protocol.authenticate(writable, message)})
+    fails(CtapError.ERR.PIN_AUTH_INVALID, lambda: manage(ctap, protocol, secret, 1))
+    fails(CtapError.ERR.PIN_POLICY_VIOLATION, lambda: obtain(ctap, protocol, PIN))
+    pin.change_pin(PIN, "Ab123456")
+    replacement = obtain(ctap, protocol, "Ab123456")
+    if hmac.compare_digest(secret, replacement):
+        raise AssertionError("policy/PIN rotation reused a persistent secret")
+    assert manage(ctap, protocol, replacement, 1)[1] == 0
+    ctap.reset()
+    for revoked in (secret, replacement):
+        fails(CtapError.ERR.PIN_AUTH_INVALID, lambda: manage(ctap, protocol, revoked, 1))

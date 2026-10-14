@@ -1032,3 +1032,117 @@ fn persistent_reset_failures_reconcile_published_root_and_explicit_retry() {
         }
     }
 }
+
+#[test]
+fn credential_update_faults_clear_cursors_without_rotating_persistent_authority() {
+    for managed in [false, true] {
+        for protocol in PROTOCOLS {
+            for failing in PRE.into_iter().chain(POST) {
+                let scratch = TempDir::new();
+                let path = scratch.path().join("state");
+                let (_, _, record) = setup(&path, managed);
+                let mut store = FileStore::open(&path).unwrap();
+                let mut second = record.clone();
+                second.credential_id = vec![2; 33];
+                second.user_id = vec![3];
+                store.put(&second).unwrap();
+                second.credential_id = vec![3; 33];
+                second.rp_id = "other.example".into();
+                store.put(&second).unwrap();
+                let mut engine = app(&path);
+                let session = Session::new(&mut engine, protocol);
+                assert_eq!(session.set(&mut engine), [CTAP2_OK]);
+                let readonly = session
+                    .shared
+                    .decrypt(&bytes(field(&session.read_only(&mut engine, PIN), 2)))
+                    .unwrap();
+                let writable = session
+                    .shared
+                    .decrypt(&bytes(field(&session.token(&mut engine, PIN), 2)))
+                    .unwrap();
+                let manage = |engine: &mut CtapApp<'_>, sub: u8, params: Option<Value>| {
+                    let mut message = vec![sub];
+                    let mut fields = vec![(int(1), int(sub.into()))];
+                    if let Some(params) = params {
+                        ciborium::ser::into_writer(&params, &mut message).unwrap();
+                        fields.push((int(2), params));
+                    }
+                    fields.extend([
+                        (int(3), int(protocol.identifier())),
+                        (int(4), Value::Bytes(mac(protocol, &writable, &message))),
+                    ]);
+                    call(engine, CTAP_CMD_CREDENTIAL_MANAGEMENT, fields)
+                };
+                assert_eq!(manage(&mut engine, 2, None)[0], CTAP2_OK);
+                assert_eq!(
+                    manage(
+                        &mut engine,
+                        4,
+                        Some(Value::Map(vec![(
+                            int(1),
+                            Value::Bytes(Sha256::digest(RP.as_bytes()).to_vec())
+                        )]))
+                    )[0],
+                    CTAP2_OK
+                );
+                let params = Value::Map(vec![
+                    (
+                        int(2),
+                        Value::Map(vec![
+                            (text("id"), Value::Bytes(record.credential_id.clone())),
+                            (text("type"), text("public-key")),
+                        ]),
+                    ),
+                    (
+                        int(3),
+                        Value::Map(vec![
+                            (text("id"), Value::Bytes(record.user_id.clone())),
+                            (text("name"), text("changed")),
+                        ]),
+                    ),
+                ]);
+                let directory = if managed {
+                    path.join(MANAGED_DIR).join(RECORDS_DIR)
+                } else {
+                    path.join(CREDENTIALS_DIR)
+                };
+                let response = fsio::with_hook(
+                    Box::new(move |event, path| {
+                        if event == failing && path.starts_with(&directory) {
+                            Err(failure(path))
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    || manage(&mut engine, 7, Some(params)),
+                );
+                assert_eq!(response, [CTAP2_ERR_PROCESSING]);
+                for sub in [3, 5] {
+                    assert_eq!(
+                        call(
+                            &mut engine,
+                            CTAP_CMD_CREDENTIAL_MANAGEMENT,
+                            vec![(int(1), int(sub))]
+                        ),
+                        [CTAP2_ERR_NOT_ALLOWED]
+                    );
+                }
+                let store = FileStore::open(&path).unwrap();
+                let updated = store.get(&record.credential_id).unwrap().unwrap();
+                assert_eq!(
+                    updated.user_name.as_deref(),
+                    POST.contains(&failing).then_some("changed")
+                );
+                assert_eq!(updated.sign_count, 7);
+                assert_eq!(
+                    persistent_metadata(&mut engine, protocol, &readonly)[0],
+                    CTAP2_OK
+                );
+                assert_eq!(
+                    persistent_metadata(&mut app(&path), protocol, &readonly)[0],
+                    CTAP2_OK
+                );
+            }
+        }
+    }
+}
