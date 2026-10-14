@@ -406,26 +406,37 @@ impl CtapApp<'_> {
             Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
             None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
+        // Only pcmr needs early permission negotiation; preserve transient
+        // parameter ordering and RP scoping for every preceding permission.
+        if permissions > 0 && permissions & i128::from(PIN_PERMISSION_PCMR) != 0 {
+            let protocol = parse_required_pin_uv_auth_protocol(protocol)?;
+            let permissions = requested_pin_permissions(permissions)?;
+            return self.client_pin_get_token_common(
+                protocol,
+                key_agreement,
+                pin_hash_enc,
+                TokenGrant {
+                    origin: TokenOrigin::PermissionBearing,
+                    permissions,
+                    rp_id: None,
+                },
+                CTAP2_ERR_PIN_POLICY_VIOLATION,
+            );
+        }
+        let rp_id = match cbor::map_get(map, Value::Integer(Integer::from(10))) {
+            Some(Value::Text(rp_id)) => Some(rp_id.clone()),
+            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+            None => None,
+        };
+        let rp_scoped = i128::from(PIN_PERMISSION_MC | PIN_PERMISSION_GA);
+        if permissions > 0 && permissions & rp_scoped != 0 && rp_id.is_none() {
+            return Err(CTAP2_ERR_MISSING_PARAMETER);
+        }
         let protocol = parse_required_pin_uv_auth_protocol(protocol)?;
         if permissions <= 0 {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
         let permissions = requested_pin_permissions(permissions)?;
-        let rp_id = if permissions == PIN_PERMISSION_PCMR {
-            None
-        } else {
-            match cbor::map_get(map, Value::Integer(Integer::from(10))) {
-                Some(Value::Text(rp_id)) => Some(rp_id.clone()),
-                Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
-                None => None,
-            }
-        };
-        // The mc and ga permissions have "RP ID: Required" (CTAP 2.3 §6.5.5.7);
-        // cm's is optional and scopes the token to that RP's credentials.
-        let rp_scoped = PIN_PERMISSION_MC | PIN_PERMISSION_GA;
-        if permissions > 0 && permissions & rp_scoped != 0 && rp_id.is_none() {
-            return Err(CTAP2_ERR_MISSING_PARAMETER);
-        }
         self.client_pin_get_token_common(
             protocol,
             key_agreement,

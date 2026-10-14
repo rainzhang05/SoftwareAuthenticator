@@ -20,7 +20,7 @@ pub(crate) const PIN_PERMISSION_PCMR: u8 = 0x40;
 const DEFINED_PIN_PERMISSIONS: u8 = 0x7F;
 
 /// The permissions this authenticator can grant.  The others need a feature
-/// its authenticatorGetInfo does not advertise (bioEnroll, perCredMgmtRO);
+/// its authenticatorGetInfo does not advertise (bioEnroll);
 /// credMgmt, largeBlobs and authnrCfg are true.
 const SUPPORTED_PIN_PERMISSIONS: u8 = PIN_PERMISSION_MC
     | PIN_PERMISSION_GA

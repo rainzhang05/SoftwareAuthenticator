@@ -447,3 +447,57 @@ fn injected_rng_panic_keeps_preceding_grant_and_publishes_no_candidate() {
         CTAP2_OK
     );
 }
+
+#[test]
+fn persistent_reads_do_not_start_or_extend_transient_usage_and_reject_blob_writes() {
+    use sha2::{Digest, Sha256};
+    for protocol in PROTOCOLS {
+        let (mut app, _) = ready();
+        let clock = ManualClock::default();
+        app.set_clock(clock.clone());
+        let readonly = token(&mut app, protocol);
+        let writable =
+            Zeroizing::new(get_pin_uv_auth_token(&mut app, protocol, PIN, 4, None).unwrap());
+        let generation = app.pin_state.pin_uv_auth_token_id();
+        let repeated = token(&mut app, protocol);
+        assert!(readonly.as_slice() == repeated.as_slice());
+        assert_eq!(app.pin_state.pin_uv_auth_token_id(), generation);
+        clock.advance(Duration::from_secs(29));
+        assert_eq!(
+            manage(&mut app, 0x0a, protocol, readonly.as_slice(), 1, None)[0],
+            CTAP2_OK
+        );
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(
+            manage(&mut app, 0x0a, protocol, writable.as_slice(), 1, None),
+            [CTAP2_ERR_PIN_AUTH_INVALID]
+        );
+        let fragment = crate::store::INITIAL_LARGE_BLOB_ARRAY;
+        let mut message = vec![0xff; 32];
+        message.extend([0x0c, 0]);
+        message.extend(0u32.to_le_bytes());
+        message.extend(Sha256::digest(fragment));
+        let payload = encode(&Value::Map(vec![
+            (int(2), Value::Bytes(fragment.to_vec())),
+            (int(3), int(0)),
+            (int(4), int(fragment.len() as i64)),
+            (
+                int(5),
+                Value::Bytes(crate::platform::authenticate(
+                    protocol,
+                    readonly.as_slice(),
+                    &message,
+                )),
+            ),
+            (int(6), int(protocol.identifier().into())),
+        ]));
+        assert_eq!(
+            app.handle_large_blobs(&payload),
+            Err(CTAP2_ERR_PIN_AUTH_INVALID)
+        );
+        assert_eq!(
+            manage(&mut app, 0x0a, protocol, readonly.as_slice(), 1, None)[0],
+            CTAP2_OK
+        );
+    }
+}
