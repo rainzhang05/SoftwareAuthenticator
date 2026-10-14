@@ -74,6 +74,9 @@ use shake::{ExtendableOutput, Shake256, Update, XofReader};
 #[path = "../../pqkey-mldsa/tests/support/rng_failure.rs"]
 mod rng_failure;
 
+#[path = "support/persistent.rs"]
+mod persistent;
+
 const SCAN: usize = 2 * 1024 * 1024;
 
 /// A point's affine x and y, big-endian.
@@ -809,7 +812,28 @@ fn check_mldsa(rng_failed: bool) -> Vec<String> {
     failures
 }
 
+fn check_persistent_authority() {
+    let needles = persistent::needles();
+    let (mut app, requests) = persistent::fixture();
+    for (index, (request, expected)) in requests.iter().enumerate() {
+        wipe();
+        let response = app.call(request);
+        for needle in &needles {
+            assert_eq!(
+                scan(needle),
+                0,
+                "persistent authority operation {index} left a secret in the stack"
+            );
+        }
+        assert_eq!(response[0], *expected);
+    }
+    println!(
+        "persistent authority: both protocol secrets, issuance, MAC validation, PIN rotation and reset passed the full stack scan"
+    );
+}
+
 fn main() {
+    check_persistent_authority();
     #[cfg(target_os = "linux")]
     if rng_failure::is_child() {
         let failures = check_mldsa(true);

@@ -33,6 +33,9 @@ use rand_core::{Infallible, TryCryptoRng, TryRng};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+#[path = "../../pqkey-ctap/tests/support/persistent.rs"]
+mod persistent;
+
 struct Block {
     ptr: *mut u8,
     layout: Layout,
@@ -580,6 +583,26 @@ fn main() {
     ] {
         exercise(alg, PrivateKeyMaterial::try_generate(alg).unwrap());
     }
+    let needles: Vec<_> = persistent::needles()
+        .into_iter()
+        .map(|bytes| PrivateValue {
+            name: "persistent authority",
+            bytes: Zeroizing::new(bytes),
+        })
+        .collect();
+    for needle in &needles {
+        live_control(&needle.bytes);
+    }
+    {
+        let (mut app, requests) = persistent::fixture();
+        for (request, expected) in requests {
+            assert_eq!(app.call(&request)[0], expected);
+        }
+    }
+    scan_freed(
+        "persistent authority issuance, validation, rotation and reset",
+        &needles,
+    );
     exercise_large_blob_key_responses();
     exercise_u2f();
     // The last case's control buffers were dropped after its secret scan.

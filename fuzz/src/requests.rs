@@ -475,7 +475,9 @@ pub fn client_pin(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
     let pin_hash_enc = optional(u, |u| Ok(Value::Bytes(arbitrary_bytes(u)?)))?;
     let permissions = optional(u, |u| {
         Ok(if u.ratio(3, 4)? {
-            int(u.int_in_range(0..=0x7F)?)
+            int(*u.choose(&[
+                0, 1, 2, 4, 8, 0x10, 0x20, 0x40, 0xc0, 0x41, 0x44, 0x60, 0x80,
+            ])?)
         } else {
             Value::Integer(crate::cbor::arbitrary_integer(u)?)
         })

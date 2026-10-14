@@ -48,5 +48,5 @@ pub fn run_traced(data: &[u8]) -> Vec<(u8, u16)> {
             break;
         }
     }
-    engine.into_trace()
+    engine.take_trace()
 }

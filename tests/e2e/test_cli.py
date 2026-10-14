@@ -578,3 +578,31 @@ def test_pin_complexity_confirmation_replacement_nfc_restart_and_reset(pqkey, ex
     pqkey.ok("reset", "--yes")
     assert pqkey.config()["PIN complexity"] == "off"
     pqkey.ok("pin", stdin=f"{PIN}\n")
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_persistent_management_survives_restart_then_pin_rotation(pqkey, version):
+    from fido2.ctap2.pin import PinProtocolV1, PinProtocolV2
+    from persistent_management import obtain, manage, same
+    protocol = PinProtocolV1() if version == 1 else PinProtocolV2()
+    pqkey.start()
+    pqkey.ok("pin", stdin=f"{PIN}\n{PIN}\n")
+    with client.open_device(pqkey.status()["Device"]) as device:
+        ctap = Ctap2(device)
+        secret = obtain(ctap, protocol, PIN)
+        assert manage(ctap, protocol, secret, 1)[1] == 0
+    pqkey.ok("stop")
+    pqkey.start()
+    with client.open_device(pqkey.status()["Device"]) as device:
+        ctap = Ctap2(device)
+        assert manage(ctap, protocol, secret, 1)[1] == 0
+        same(secret, obtain(ctap, protocol, PIN))
+        ClientPin(ctap, protocol).change_pin(PIN, NEW_PIN)
+        with pytest.raises(CtapError) as error:
+            manage(ctap, protocol, secret, 1)
+        assert error.value.code == CtapError.ERR.PIN_AUTH_INVALID
+    pqkey.ok("stop")
+    pqkey.start()
+    with client.open_device(pqkey.status()["Device"]) as device:
+        with pytest.raises(CtapError) as error:
+            manage(Ctap2(device), protocol, secret, 1)
+        assert error.value.code == CtapError.ERR.PIN_AUTH_INVALID
