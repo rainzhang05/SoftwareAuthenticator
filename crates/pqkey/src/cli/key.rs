@@ -758,7 +758,17 @@ fn management_token<L: ReportLink>(
 /// `pqkey passkeys`.
 pub fn list_passkeys(state_dir: &Path) -> io::Result<()> {
     let mut key = connect(state_dir)?;
-    let token = management_token(&mut key, &mut PinReader::from_stdin())?;
+    if key.info().map_err(client_error)?.pin_set != Some(true) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "passkeys are managed with the key's PIN, and it has none; `pqkey pin` sets one",
+        ));
+    }
+    let token = acquire_pin_token(
+        &mut key,
+        &mut PinReader::from_stdin(),
+        Authenticator::listing_token,
+    )?;
     let passkeys = key.passkeys(&token).map_err(client_error)?;
     if passkeys.is_empty() {
         outln!("No passkeys are stored on the key.")?;

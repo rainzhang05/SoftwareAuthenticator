@@ -521,3 +521,59 @@ fn complexity_configuration_is_atomic_enable_only_and_survives_restart() {
     key.reset(&mut |_| {}).unwrap();
     assert_eq!(key.info().unwrap().pin_complexity_policy, Some(false));
 }
+
+#[test]
+fn persistent_listing_tokens_survive_daemon_restart_and_need_writable_deletion() {
+    use pqkey_ctap::ClassicPinProtocol;
+    for protocol in [ClassicPinProtocol::V1, ClassicPinProtocol::V2] {
+        let dir = TempDir::new("client-persistent-management");
+        let credential = discoverable("persistent.example", 1, "alice", CoseAlg::ES256);
+        FileStore::open(dir.path())
+            .unwrap()
+            .put(&credential)
+            .unwrap();
+        let (daemon, mut key) = start(&dir);
+        key.set_pin(b"1234").unwrap();
+        assert_eq!(
+            key.info().unwrap().persistent_read_only_management,
+            Some(true)
+        );
+        let token = key
+            .read_only_management_token_with_protocol(b"1234", protocol)
+            .unwrap();
+        let first = key.passkeys(&token).unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(matches!(
+            key.delete(&token, &credential.credential_id),
+            Err(ClientError::Status(0x33))
+        ));
+        let repeated = key
+            .read_only_management_token_with_protocol(b"1234", protocol)
+            .unwrap();
+        assert_eq!(key.passkeys(&repeated).unwrap(), first);
+        drop(key);
+        daemon.finish().unwrap();
+        let (daemon, mut key) = start(&dir);
+        assert_eq!(key.passkeys(&token).unwrap(), first);
+        let writable = key
+            .management_token_with_protocol(b"1234", protocol)
+            .unwrap();
+        assert_eq!(key.passkeys(&token).unwrap(), first);
+        key.delete(&writable, &credential.credential_id).unwrap();
+        assert!(key.passkeys(&token).unwrap().is_empty());
+        key.change_pin(b"1234", b"5678").unwrap();
+        assert!(matches!(
+            key.passkeys(&token),
+            Err(ClientError::Status(0x33))
+        ));
+        drop(key);
+        daemon.finish().unwrap();
+        let (daemon, mut key) = start(&dir);
+        assert!(matches!(
+            key.passkeys(&token),
+            Err(ClientError::Status(0x33))
+        ));
+        drop(key);
+        daemon.finish().unwrap();
+    }
+}

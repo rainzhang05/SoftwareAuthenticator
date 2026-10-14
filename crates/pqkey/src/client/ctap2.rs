@@ -27,6 +27,7 @@ const AUTHENTICATOR_CONFIG: u8 = 0x0D;
 const PROTOCOL: ClassicPinProtocol = ClassicPinProtocol::V2;
 /// The cm permission of a pinUvAuthToken (CTAP 2.3 §6.5.5.7).
 const PERMISSION_CM: u8 = 0x04;
+const PERMISSION_PCMR: u8 = 0x40;
 /// The acfg permission of a pinUvAuthToken (§6.11).
 const PERMISSION_ACFG: u8 = 0x20;
 
@@ -86,6 +87,8 @@ pub struct Info {
     pub max_msg_size: u64,
     /// The clientPin option: whether a PIN is set.
     pub pin_set: Option<bool>,
+    /// Persistent read-only credential management is supported.
+    pub persistent_read_only_management: Option<bool>,
     /// The authnrCfg option: configuration is supported.
     pub authenticator_config: Option<bool>,
     /// The alwaysUv option: registration and present assertions require UV.
@@ -112,6 +115,7 @@ impl Default for Info {
             versions: Vec::new(),
             max_msg_size: DEFAULT_MAX_MSG_SIZE,
             pin_set: None,
+            persistent_read_only_management: None,
             authenticator_config: None,
             always_uv: None,
             set_min_pin_length: None,
@@ -148,7 +152,7 @@ pub struct Passkey {
 }
 
 /// A pinUvAuthToken.
-pub struct Token(Zeroizing<Vec<u8>>);
+pub struct Token(Zeroizing<Vec<u8>>, ClassicPinProtocol, u8);
 
 impl std::fmt::Debug for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -331,6 +335,7 @@ impl<L: ReportLink> Authenticator<L> {
             versions,
             max_msg_size,
             pin_set: option("clientPin"),
+            persistent_read_only_management: option("perCredMgmtRO"),
             authenticator_config: option("authnrCfg"),
             always_uv: option("alwaysUv"),
             set_min_pin_length: option("setMinPINLength"),
@@ -363,8 +368,11 @@ impl<L: ReportLink> Authenticator<L> {
 
     /// getKeyAgreement, and a shared secret with the key's key agreement key,
     /// with the platform's COSE key for the next request.
-    fn shared_secret(&mut self) -> Result<(PlatformKeyAgreement, Value), ClientError> {
-        let protocol = int(PROTOCOL.identifier().into());
+    fn shared_secret(
+        &mut self,
+        selected: ClassicPinProtocol,
+    ) -> Result<(PlatformKeyAgreement, Value), ClientError> {
+        let protocol = int(selected.identifier().into());
         let body = self.call(
             CLIENT_PIN,
             Some(Value::Map(vec![(int(1), protocol), (int(2), int(2))])),
@@ -378,7 +386,7 @@ impl<L: ReportLink> Authenticator<L> {
         };
         let secret = PlatformKeyAgreement::generate_key()?;
         let shared =
-            PlatformKeyAgreement::new(PROTOCOL, &coordinate(-2)?, &coordinate(-3)?, &secret)?;
+            PlatformKeyAgreement::new(selected, &coordinate(-2)?, &coordinate(-3)?, &secret)?;
         let (x, y) = shared.public_key();
         let cose = Value::Map(vec![
             (int(1), int(2)),
@@ -398,7 +406,7 @@ impl<L: ReportLink> Authenticator<L> {
 
     /// setPIN (CTAP 2.3 §6.5.5.5): `pin` is already NFC and validated.
     pub fn set_pin(&mut self, pin: &[u8]) -> Result<(), ClientError> {
-        let (shared, key) = self.shared_secret()?;
+        let (shared, key) = self.shared_secret(PROTOCOL)?;
         let padded = padded_pin(pin).ok_or(ClientError::Status(0x37))?;
         let new_pin_enc = shared.encrypt(&padded[..], Self::iv()?)?;
         let auth = shared.authenticate(&new_pin_enc);
@@ -418,7 +426,7 @@ impl<L: ReportLink> Authenticator<L> {
 
     /// changePIN (§6.5.5.6).
     pub fn change_pin(&mut self, current: &[u8], new: &[u8]) -> Result<(), ClientError> {
-        let (shared, key) = self.shared_secret()?;
+        let (shared, key) = self.shared_secret(PROTOCOL)?;
         let padded = padded_pin(new).ok_or(ClientError::Status(0x37))?;
         let new_pin_enc = shared.encrypt(&padded[..], Self::iv()?)?;
         let pin_hash_enc = shared.encrypt(&pin_hash(current)[..], Self::iv()?)?;
@@ -443,21 +451,58 @@ impl<L: ReportLink> Authenticator<L> {
     /// getPinUvAuthTokenUsingPinWithPermissions (§6.5.5.7.2) with the cm
     /// permission and no RP ID.
     pub fn management_token(&mut self, pin: &[u8]) -> Result<Token, ClientError> {
-        self.permission_token(pin, PERMISSION_CM)
+        self.permission_token(pin, PERMISSION_CM, PROTOCOL)
     }
 
     /// A token with the acfg permission and no RP ID (§6.11).
     pub fn config_token(&mut self, pin: &[u8]) -> Result<Token, ClientError> {
-        self.permission_token(pin, PERMISSION_ACFG)
+        self.permission_token(pin, PERMISSION_ACFG, PROTOCOL)
     }
 
-    fn permission_token(&mut self, pin: &[u8], permission: u8) -> Result<Token, ClientError> {
-        let (shared, key) = self.shared_secret()?;
+    /// Obtain a persistent read-only management token using protocol two.
+    pub fn read_only_management_token(&mut self, pin: &[u8]) -> Result<Token, ClientError> {
+        self.read_only_management_token_with_protocol(pin, PROTOCOL)
+    }
+
+    /// Explicit protocol selection for persistent management; no disk cache.
+    pub fn read_only_management_token_with_protocol(
+        &mut self,
+        pin: &[u8],
+        protocol: ClassicPinProtocol,
+    ) -> Result<Token, ClientError> {
+        self.permission_token(pin, PERMISSION_PCMR, protocol)
+    }
+
+    /// Obtain writable management permission using the selected protocol.
+    pub fn management_token_with_protocol(
+        &mut self,
+        pin: &[u8],
+        protocol: ClassicPinProtocol,
+    ) -> Result<Token, ClientError> {
+        self.permission_token(pin, PERMISSION_CM, protocol)
+    }
+
+    /// Select read-only authorization from advertised capabilities.
+    pub fn listing_token(&mut self, pin: &[u8]) -> Result<Token, ClientError> {
+        if self.info()?.persistent_read_only_management == Some(true) {
+            self.read_only_management_token(pin)
+        } else {
+            self.management_token(pin)
+        }
+    }
+
+    fn permission_token(
+        &mut self,
+        pin: &[u8],
+        permission: u8,
+        protocol: ClassicPinProtocol,
+    ) -> Result<Token, ClientError> {
+        let (shared, key) = self.shared_secret(protocol)?;
         let pin_hash_enc = shared.encrypt(&pin_hash(pin)[..], Self::iv()?)?;
         let body = self.call(
             CLIENT_PIN,
             Some(Value::Map(vec![
-                (int(1), int(PROTOCOL.identifier().into())),
+                (int(1), int(protocol.identifier().into())),
                 (int(2), int(9)),
                 (int(3), key),
                 (int(6), Value::Bytes(pin_hash_enc)),
@@ -466,7 +511,10 @@ impl<L: ReportLink> Authenticator<L> {
             &mut |_| {},
         )?;
         let token = shared.decrypt(bytes_of(member(&body, 2))?)?;
-        Ok(Token(token))
+        if token.len() != 32 {
+            return Err(ClientError::Malformed("management token is not 32 bytes"));
+        }
+        Ok(Token(token, protocol, permission))
     }
 
     /// authenticatorConfig (§6.11). Encode the parameters once, then put the
@@ -491,10 +539,10 @@ impl<L: ReportLink> Authenticator<L> {
                 message.extend_from_slice(parameters);
             }
             request.push(0x03);
-            request.extend(encode(&int(PROTOCOL.identifier().into())));
+            request.extend(encode(&int(token.1.identifier().into())));
             request.push(0x04);
             request.extend(encode(&Value::Bytes(authenticate(
-                PROTOCOL, &token.0, &message,
+                token.1, &token.0, &message,
             ))));
         }
         self.call_encoded(&request, &mut |_| {}).map(drop)
@@ -544,6 +592,9 @@ impl<L: ReportLink> Authenticator<L> {
         subcommand: u8,
         parameters: Option<Value>,
     ) -> Result<Value, ClientError> {
+        if matches!(subcommand, 6 | 7) && token.2 != PERMISSION_CM {
+            return Err(ClientError::Status(0x33));
+        }
         let parameters = parameters.as_ref().map(encode);
         let mut message = vec![subcommand];
         if let Some(parameters) = &parameters {
@@ -556,10 +607,10 @@ impl<L: ReportLink> Authenticator<L> {
             request.extend(parameters);
         }
         request.push(0x03);
-        request.extend(encode(&int(PROTOCOL.identifier().into())));
+        request.extend(encode(&int(token.1.identifier().into())));
         request.push(0x04);
         request.extend(encode(&Value::Bytes(authenticate(
-            PROTOCOL, &token.0, &message,
+            token.1, &token.0, &message,
         ))));
         self.call_encoded(&request, &mut |_| {})
     }
@@ -785,7 +836,9 @@ mod size_tests {
             credential.extend(payment.map(|value| (int(12), Value::Bool(value))));
             let (mut key, _) =
                 key_with_management(vec![info(None)], vec![rp, Value::Map(credential)]);
-            let passkeys = key.passkeys(&Token(Zeroizing::new(vec![1; 32]))).unwrap();
+            let passkeys = key
+                .passkeys(&Token(Zeroizing::new(vec![1; 32]), PROTOCOL, PERMISSION_CM))
+                .unwrap();
             assert_eq!(passkeys.len(), 1);
             assert_eq!(passkeys[0].third_party_payment, payment);
             assert_eq!(passkeys[0].credential_id, [2]);
@@ -907,7 +960,7 @@ mod size_tests {
     #[test]
     fn complete_authenticated_configuration_is_checked_without_changing_its_mac_bytes() {
         let rps = vec!["x".repeat(253); 8];
-        let token = Token(Zeroizing::new(vec![0x37; 32]));
+        let token = Token(Zeroizing::new(vec![0x37; 32]), PROTOCOL, PERMISSION_CM);
         let (mut key, traffic) = key(vec![
             info(Some(1768)),
             info(Some(2050)),
@@ -980,7 +1033,7 @@ mod size_tests {
 
     #[test]
     fn complexity_configuration_covers_mac_and_complete_request_limit() {
-        let token = Token(Zeroizing::new(vec![0x37; 32]));
+        let token = Token(Zeroizing::new(vec![0x37; 32]), PROTOCOL, PERMISSION_CM);
         let (mut key, traffic) = key(vec![info(Some(45)), info(Some(44))]);
         key.set_min_pin_length(Some(&token), None, None, None, Some(true))
             .unwrap();
@@ -1016,7 +1069,7 @@ mod size_tests {
 
     #[test]
     fn credential_management_checks_the_authenticated_encoding_and_continuations() {
-        let token = Token(Zeroizing::new(vec![0x37; 32]));
+        let token = Token(Zeroizing::new(vec![0x37; 32]), PROTOCOL, PERMISSION_CM);
         let (mut key, traffic) = key(vec![info(Some(41)), info(Some(40)), info(Some(3))]);
         key.management(&token, 2, None).unwrap(); // Exactly 41 bytes, including MAC/protocol.
         let mut expected = vec![CREDENTIAL_MANAGEMENT, 0xA3, 1, 2, 3, 2, 4, 0x58, 0x20];
