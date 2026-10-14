@@ -471,3 +471,32 @@ Keep source snapshots, exact commands/statuses, compiler and architecture
 identity, full probe logs, corpus manifests and five explicit 30-second
 sanitizer results outside the repository. Linux snapshots come from `git archive`
 extracted with `tar -xm`, with separate compiler/architecture/sanitizer caches.
+
+## Persistent credential management validation
+
+`tests/e2e/persistent_management.py` builds raw ClientPIN pcmr requests with the
+selected Python FIDO protocol. The raw HID suite covers both encrypted lengths,
+MAC lengths, permission negotiation, read-only operations and WINK/LOCK;
+`test_cli.py` uses dedicated daemons for restart and PIN rotation. These require
+Linux with `/dev/uhid`; successful collection does not establish HID execution.
+libfido2 1.14.0 compatibility gates remain unchanged. Its existing management API
+continues to use writable cm; raw Python supplies the missing pcmr request.
+
+Engine and FileStore tests compare live/reopened authority at retry, grant,
+PIN/policy and reset publication checkpoints. Native transport fixtures exercise
+listing fallback, explicit protocol selection, restart and cursor controls.
+Stack probes retain the full 2 MiB scan and cover encrypted and memory stores;
+heap probes retain live controls and the requirement that freed bytes are zero.
+The scrub guard also runs on unwinding from an injected RNG panic. Token draws
+reject zero/repeated entropy before publication, preventing cross-permission
+secret collisions.
+
+Fuzz sequence fixtures retain protocol-specific client secrets across restart;
+the authorization oracle keeps transient and persistent grants separate. After
+changing layouts or generators, regenerate all committed corpora twice using
+the locked graph and compare every filename and byte. Keep exact commands,
+source identities, statuses, compiler/architecture details and full logs outside
+the repository. Use fresh git archives extracted with `tar -xm`, existing cache
+volumes, separate compiler/architecture/sanitizer outputs and five explicit
+30-second sanitizer runs. Report unavailable real HID, browser and x86_64
+execution separately from passing portable/container checks.

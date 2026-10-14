@@ -271,6 +271,43 @@ suite requires `/dev/uhid`.
   notification. It erases credentials, their large-blob keys, the large-blob
   array and the PIN, and resets configuration and signature counters.
 
+### Persistent read-only management
+
+CTAP 2.3 `perCredMgmtRO` advertises the `pcmr` permission (0x40). Each PIN
+protocol has an independent 32-byte secret and grant inside encrypted PIN
+state. Optional record keys 11 and 12 contain maps `{1: secret, 2: granted}`;
+legacy records omit them and start without persistent permission. Both fields
+are required within a present map. Secrets and copies zeroize on drop and their
+record Debug output is redacted.
+
+Only standard credential-management reads (0x0A) verify these secrets, before
+trying a transient token. A matching persistent MAC without its permission is
+rejected without transient fallback. Read-only grants do not authorize preview
+0x41, mutations, registration, assertion, configuration, large-blob writes or
+U2F, and create no cached presence or verification. RP IDs are ignored for pcmr;
+other defined permissions cannot be combined with it. Undefined bits are ignored.
+
+Persistent grants have no transient usage timer. Reissuance returns the same
+secret until PIN change, reset, or a published policy requiring forcePINChange.
+Those transitions invalidate both protocols, including complexity enablement
+for an existing PIN. Enumeration cursors bind family, mode, protocol and
+generation; their standard continuations carry no MAC. Authority changes,
+authenticated context switches, token issuance and relevant credential mutations
+clear them, while successful WINK/LOCK preserve them.
+
+Grant publication requires confirmed durability before disclosure, except for
+intentional MemoryStore volatility. A published but unconfirmed state is adopted
+immediately; it does not return a token. Retry writes also require confirmation.
+Pre-publication failures preserve preceding authority. PIN/key publication can
+commit before a later flush or reset cleanup fails: persistent reads recheck
+stored authority, and failed reset reconciles the live engine. Unreadable
+state closes grants and blocks further PIN writes until explicit reset recovers.
+
+The native client offers explicit protocol-specific read-only token acquisition.
+Listing selects pcmr from advertised capabilities and otherwise uses cm;
+delete/update require writable cm. It keeps no automatic token cache on disk.
+Optional getInfo encIdentifier and encCredStoreState remain absent.
+
 ## Credential store
 
 ```text

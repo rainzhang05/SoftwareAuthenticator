@@ -119,6 +119,13 @@ the notification that appears.
 | `pqkey reset` | Erases credentials, large blobs and PIN; resets settings |
 | `pqkey stop`, `pqkey start` | Unplugs and plugs in the key |
 
+Passkey listing uses CTAP 2.3 persistent read-only credential management when
+advertised, with ordinary credential-management authorization for older peers.
+The native client keeps its token in memory for that invocation; it adds no disk
+cache. Persistent grants survive daemon restarts and transient-token expiry.
+Changing the PIN, resetting the authenticator, or publishing a policy that
+requires a PIN change revokes them. Deletion obtains writable authorization.
+
 Configuration changes ask for the current PIN when one is set. Always-UV
 requires the PIN for registrations and sign-ins that ask for user presence.
 Without a PIN, turn always-UV off or set one with `pqkey pin` before using
