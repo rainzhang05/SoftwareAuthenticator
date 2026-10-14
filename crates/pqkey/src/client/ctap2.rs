@@ -1096,7 +1096,12 @@ mod size_tests {
         use crate::transport::ctaphid_host::Command;
         use pqkey_ctap::store::{CredentialStore, FileStore};
         use sha2::{Digest, Sha256};
-        for family in [0x0a, 0x41] {
+        for (family, permission, protocol) in [
+            (0x0a, 4, PROTOCOL),
+            (0x41, 4, PROTOCOL),
+            (0x0a, 0x40, ClassicPinProtocol::V1),
+            (0x0a, 0x40, PROTOCOL),
+        ] {
             let dir = TempDir::new("preview-controls");
             let mut store = FileStore::open(dir.path()).unwrap();
             for (id, rp) in [(1, "a.example"), (2, "a.example"), (3, "b.example")] {
@@ -1107,7 +1112,7 @@ mod size_tests {
             drop(store);
             let (daemon, mut key) = start_management_transport(&dir);
             key.set_pin(b"1234").unwrap();
-            let token = key.management_token(b"1234").unwrap();
+            let token = key.permission_token(b"1234", permission, protocol).unwrap();
             let begin = |sub, params: Option<Value>| {
                 let mut message = vec![sub];
                 if let Some(params) = &params {
@@ -1116,10 +1121,10 @@ mod size_tests {
                 let mut fields = vec![(int(1), int(sub.into()))];
                 fields.extend(params.map(|p| (int(2), p)));
                 fields.extend([
-                    (int(3), int(2)),
+                    (int(3), int(protocol.identifier().into())),
                     (
                         int(4),
-                        Value::Bytes(authenticate(PROTOCOL, &token.0, &message)),
+                        Value::Bytes(authenticate(protocol, &token.0, &message)),
                     ),
                 ]);
                 Value::Map(fields)

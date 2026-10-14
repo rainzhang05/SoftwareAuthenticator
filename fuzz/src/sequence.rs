@@ -43,7 +43,10 @@ use crate::platform::{Session, authenticate, pin_hash, protocol_value};
 use crate::requests::{self, Overrides, command};
 use arbitrary::{Arbitrary, Result, Unstructured};
 use ciborium::value::Value;
-use p256::elliptic_curve::{subtle::ConstantTimeEq, zeroize::Zeroizing};
+use p256::elliptic_curve::{
+    subtle::ConstantTimeEq,
+    zeroize::{Zeroize, Zeroizing},
+};
 use pqkey_ctap::ctap::Clock;
 use pqkey_ctap::ctap::CtapApp;
 use pqkey_ctap::ctap::constants::*;
@@ -224,6 +227,10 @@ enum Op {
         after: u8,
     },
     Restart,
+    /// Select an independently retained persistent secret, including after restart.
+    UsePersistent {
+        v2: bool,
+    },
     /// Deterministic valid parameters complement the malformed-map generator.
     ManageKnown {
         preview: bool,
@@ -277,6 +284,7 @@ struct Platform {
     /// The PIN the authenticator has, as far as the platform knows.
     pin: Option<Vec<u8>>,
     token: Option<(ClassicPinProtocol, [u8; 32])>,
+    persistent_tokens: [Option<Zeroizing<[u8; 32]>>; 2],
     credentials: Vec<Credential>,
     /// IDs implicitly overwritten or explicitly deleted, with their RP IDs.
     retired: Vec<(Vec<u8>, String)>,
@@ -298,6 +306,12 @@ struct Platform {
     token_id: u64,
     token_permissions: u8,
     management: management::Oracle,
+}
+
+impl Drop for Platform {
+    fn drop(&mut self) {
+        self.clear_client_token();
+    }
 }
 
 #[derive(Default)]
@@ -329,8 +343,8 @@ fn rp_id(choice: u8) -> &'static str {
 
 /// Mostly the permission sets a platform asks for, sometimes any.
 fn permission_set(choice: u8) -> u8 {
-    const SETS: [u8; 11] = [
-        0x04, 0x01, 0x02, 0x03, 0x05, 0x07, 0x20, 0x27, 0x10, 0x13, 0x14,
+    const SETS: [u8; 12] = [
+        0x04, 0x01, 0x02, 0x03, 0x05, 0x07, 0x20, 0x27, 0x10, 0x13, 0x14, 0x40,
     ];
     if choice < 0xC0 {
         SETS[usize::from(choice) % SETS.len()]
@@ -460,11 +474,19 @@ impl Platform {
             committed: INITIAL_LARGE_BLOB_ARRAY.to_vec(),
             pending: PendingArray::default(),
             proposed: Vec::new(),
+            persistent_tokens: [None, None],
             token_issued_at: Duration::ZERO,
             token_id: 0,
             token_permissions: 0,
             management: management::Oracle::default(),
         }
+    }
+
+    fn clear_client_token(&mut self) {
+        if let Some((_, secret)) = &mut self.token {
+            secret.zeroize();
+        }
+        self.token = None;
     }
 
     fn call(&mut self, request: &[u8]) -> Vec<u8> {
@@ -1182,7 +1204,7 @@ impl Platform {
             }
             CTAP_CMD_RESET => {
                 self.pin = None;
-                self.token = None;
+                self.clear_client_token();
                 // Keep reset-invalidated IDs available to the existing
                 // individual retired-ID probes. Failed resets never reach
                 // this branch and retain the observed counter floors.
@@ -1256,7 +1278,7 @@ impl Platform {
                         }
                     }
                     if self.force_change {
-                        self.token = None;
+                        self.clear_client_token();
                     }
                 }
                 _ => panic!("unsupported config subcommand succeeded"),
@@ -1474,7 +1496,7 @@ impl Platform {
                     );
                     self.pin = Some(pin.to_vec());
                     self.pin_qualified = self.complexity;
-                    self.token = None;
+                    self.clear_client_token();
                     self.force_change = false;
                 }
             }
@@ -1531,7 +1553,7 @@ impl Platform {
                     }
                     self.pin = Some(new.to_vec());
                     self.pin_qualified = self.complexity;
-                    self.token = None;
+                    self.clear_client_token();
                     self.force_change = false;
                 }
             }
@@ -1593,7 +1615,12 @@ impl Platform {
                     };
                     let token = session.decrypt(encrypted).expect("the token decrypts");
                     let token: [u8; 32] = token.try_into().expect("a 32-byte pinUvAuthToken");
+                    self.clear_client_token();
                     self.token = Some((protocol, token));
+                    if !legacy && permission_set(permissions) == 0x40 {
+                        self.persistent_tokens[usize::from(protocol.identifier() == 2)] =
+                            Some(Zeroizing::new(token));
+                    }
                     self.token_issued_at = self.engine.clock().now();
                     self.token_id = self.token_id.wrapping_add(1);
                     self.token_permissions = if legacy {
@@ -1933,11 +1960,19 @@ impl Platform {
                 self.management.restart();
                 self.retries = self.saved_retries;
                 self.mismatches = 0;
-                self.token = None;
+                self.clear_client_token();
                 self.pending = PendingArray::default();
                 self.assertion_rp = None;
                 self.assertion_large_blob_key = false;
                 self.assertion_third_party_payment = false;
+            }
+            Op::UsePersistent { v2 } => {
+                let value = self.persistent_tokens[usize::from(v2)]
+                    .as_ref()
+                    .map(|secret| **secret);
+                self.clear_client_token();
+                self.token = value.map(|secret| (protocol(v2), secret));
+                self.token_permissions = 0x40;
             }
             Op::Presence(selector) => self.engine.presence().select(selector),
             Op::Structured => {
@@ -3021,6 +3056,66 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
             ]);
         }
     }
+    for v2 in [false, true] {
+        cases.push(vec![
+            Op::CreateCredential {
+                alg: 0,
+                rp: 0,
+                large_blob_key: None,
+                third_party_payment: None,
+                rk: true,
+                user: 1,
+            },
+            Op::Enroll {
+                v2,
+                permissions: 11,
+                rp: None,
+            },
+            Op::ManageKnown {
+                preview: false,
+                auth: Auth::Token,
+                subcommand: 1,
+                rp: 0,
+                credential: 0,
+                valid_user: true,
+            },
+            Op::Advance(9),
+            Op::Restart,
+            Op::UsePersistent { v2 },
+            Op::ManageKnown {
+                preview: false,
+                auth: Auth::Token,
+                subcommand: 2,
+                rp: 0,
+                credential: 0,
+                valid_user: true,
+            },
+            Op::ManageKnown {
+                preview: false,
+                auth: Auth::Token,
+                subcommand: 4,
+                rp: 0,
+                credential: 0,
+                valid_user: true,
+            },
+            Op::ManageKnown {
+                preview: true,
+                auth: Auth::Token,
+                subcommand: 1,
+                rp: 0,
+                credential: 0,
+                valid_user: true,
+            },
+            Op::ManageKnown {
+                preview: false,
+                auth: Auth::Token,
+                subcommand: 6,
+                rp: 0,
+                credential: 0,
+                valid_user: true,
+            },
+        ]);
+    }
     cases.iter().map(|ops| encode_fixture(ops)).collect()
 }
 
@@ -3066,19 +3161,19 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 permissions,
                 rp: None,
             } => {
-                variant(&mut output, 6, 31);
+                variant(&mut output, 6, 32);
                 output.extend_from_slice(&[u8::from(*v2), *permissions, 0]);
                 extra = if pin_set { 17 } else { 34 };
                 pin_set = true;
             }
             Op::GetNextAssertion => variant(&mut output, 5, 31),
             Op::Presence(value) => {
-                variant(&mut output, 12, 31);
+                variant(&mut output, 12, 32);
                 output.push(*value);
             }
             Op::GetInfo => variant(&mut output, 9, 31),
             Op::Reset => {
-                variant(&mut output, 11, 31);
+                variant(&mut output, 11, 32);
                 pin_set = false;
             }
             Op::LargeBlobBegin {
@@ -3088,7 +3183,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 valid_hash,
                 fill,
             } => {
-                variant(&mut output, 15, 31);
+                variant(&mut output, 15, 32);
                 auth(&mut output, *value);
                 output.extend_from_slice(&length.to_le_bytes());
                 output.extend_from_slice(&fragment.to_le_bytes());
@@ -3100,7 +3195,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 length,
                 fragment,
             } => {
-                variant(&mut output, 16, 31);
+                variant(&mut output, 16, 32);
                 auth(&mut output, *value);
                 option_u16(&mut output, *offset);
                 option_u16(&mut output, *length);
@@ -3111,13 +3206,13 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 length,
                 extra,
             } => {
-                variant(&mut output, 17, 31);
+                variant(&mut output, 17, 32);
                 output.extend_from_slice(&offset.to_le_bytes());
                 output.extend_from_slice(&length.to_le_bytes());
                 output.push(*extra);
             }
             Op::Advance(millis) => {
-                variant(&mut output, 18, 31);
+                variant(&mut output, 18, 32);
                 output.extend_from_slice(&millis.to_le_bytes());
             }
             Op::LargeBlobWrite {
@@ -3126,7 +3221,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 fragment,
                 valid_hash,
             } => {
-                variant(&mut output, 19, 31);
+                variant(&mut output, 19, 32);
                 auth(&mut output, *value);
                 output.extend_from_slice(&length.to_le_bytes());
                 output.extend_from_slice(&fragment.to_le_bytes());
@@ -3141,7 +3236,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 rk,
                 user,
             } => {
-                variant(&mut output, 20, 31);
+                variant(&mut output, 20, 32);
                 output.extend_from_slice(&[*alg, *rp]);
                 option_bool(&mut output, *large_blob_key);
                 option_bool(&mut output, *third_party_payment);
@@ -3152,18 +3247,18 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 third_party_payment,
                 discoverable,
             } => {
-                variant(&mut output, 21, 31);
+                variant(&mut output, 21, 32);
                 option_bool(&mut output, *large_blob_key);
                 option_bool(&mut output, *third_party_payment);
                 output.push(u8::from(*discoverable));
             }
             Op::EnumerateCredentials { auth: value, next } => {
-                variant(&mut output, 22, 31);
+                variant(&mut output, 22, 32);
                 auth(&mut output, *value);
                 output.push(u8::from(*next));
             }
             Op::U2fRegister { rp } => {
-                variant(&mut output, 23, 31);
+                variant(&mut output, 23, 32);
                 output.push(*rp);
             }
             Op::U2fAuthenticate {
@@ -3172,7 +3267,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 control,
                 corrupt,
             } => {
-                variant(&mut output, 24, 31);
+                variant(&mut output, 24, 32);
                 output.extend_from_slice(&[*credential, *rp, *control, u8::from(*corrupt)]);
             }
             Op::U2fVersion => variant(&mut output, 25, 31),
@@ -3184,7 +3279,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 force_change: None,
                 complexity,
             } => {
-                variant(&mut output, 8, 31);
+                variant(&mut output, 8, 32);
                 auth(&mut output, *value);
                 output.extend_from_slice(&[*subcommand, 0, u8::from(rp_ids.is_some())]);
                 if let Some(ids) = rp_ids {
@@ -3197,7 +3292,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 option_bool(&mut output, *complexity);
             }
             Op::PinWriteFault { mode, after } => {
-                variant(&mut output, 28, 31);
+                variant(&mut output, 28, 32);
                 output.extend_from_slice(&[*mode, *after]);
             }
             Op::Restart => variant(&mut output, 29, 31),
@@ -3208,7 +3303,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 bad_auth,
                 pad_to,
             } => {
-                variant(&mut output, 0, 31);
+                variant(&mut output, 0, 32);
                 output.extend_from_slice(&[u8::from(*v2), *pin, u8::from(*bad_auth), *pad_to]);
                 extra = 17;
                 pin_set = true;
@@ -3218,7 +3313,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 right_pin,
                 new_pin,
             } => {
-                variant(&mut output, 1, 31);
+                variant(&mut output, 1, 32);
                 output.extend_from_slice(&[u8::from(*v2), u8::from(*right_pin), *new_pin]);
                 extra = 33;
             }
@@ -3229,7 +3324,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 permissions,
                 rp,
             } => {
-                variant(&mut output, 2, 31);
+                variant(&mut output, 2, 32);
                 output.extend_from_slice(&[
                     u8::from(*v2),
                     u8::from(*right_pin),
@@ -3250,7 +3345,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 credential,
                 valid_user,
             } => {
-                variant(&mut output, 30, 31);
+                variant(&mut output, 31, 32);
                 output.push(u8::from(*preview));
                 auth(&mut output, *value);
                 output.extend_from_slice(&[*subcommand, *rp, *credential, u8::from(*valid_user)]);
@@ -3260,11 +3355,15 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 auth: value,
                 subcommand,
             } => {
-                variant(&mut output, 7, 31);
+                variant(&mut output, 7, 32);
                 output.push(u8::from(*preview));
                 auth(&mut output, *value);
                 output.push(*subcommand);
                 extra = 64;
+            }
+            Op::UsePersistent { v2 } => {
+                variant(&mut output, 30, 32);
+                output.push(u8::from(*v2));
             }
             _ => panic!("operation has no fixture encoder"),
         }

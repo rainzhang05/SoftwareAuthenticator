@@ -1,8 +1,10 @@
 //! Independent model of management authorization and the two cursor grants.
 use super::*;
 
+#[derive(Clone)]
 struct Grant {
     protocol: ClassicPinProtocol,
+    persistent: bool,
     value: Zeroizing<[u8; 32]>,
     permissions: u8,
     rp: Option<String>,
@@ -14,6 +16,8 @@ struct Grant {
 }
 struct Cursor<T> {
     token: u64,
+    persistent: bool,
+    protocol: ClassicPinProtocol,
     legacy: bool,
     entries: Vec<T>,
     index: usize,
@@ -21,8 +25,10 @@ struct Cursor<T> {
 #[derive(Default)]
 pub(super) struct Oracle {
     grant: Option<Grant>,
+    persistent: [Option<Grant>; 2],
     issued: u64,
     family: Option<u8>,
+    context: Option<(bool, ClassicPinProtocol, u64)>,
     rps: Option<Cursor<String>>,
     credentials: Option<Cursor<Vec<u8>>>,
     rp_hash: Vec<u8>,
@@ -38,8 +44,9 @@ impl Oracle {
         now: Duration,
     ) {
         self.issued = self.issued.wrapping_add(1);
-        self.grant = Some(Grant {
+        let grant = Grant {
             protocol,
+            persistent: permissions == 0x40,
             value: Zeroizing::new(value),
             permissions,
             rp,
@@ -48,20 +55,42 @@ impl Oracle {
             used: false,
             issued_at: now,
             id: self.issued,
-        });
+        };
+        if grant.persistent {
+            let slot = &mut self.persistent[usize::from(protocol.identifier() == 2)];
+            if let Some(preceding) = slot.as_ref() {
+                assert!(
+                    preceding.value.as_slice() == grant.value.as_slice(),
+                    "persistent issuance rotated without an authority transition"
+                );
+            }
+            *slot = Some(grant);
+        } else {
+            self.grant = Some(grant);
+        }
+        self.rps = None;
+        self.credentials = None;
     }
     pub(super) fn invalidate(&mut self) {
         self.grant = None;
+        self.persistent = [None, None];
+        self.rps = None;
+        self.credentials = None;
     }
     pub(super) fn restart(&mut self) {
-        *self = Self::default();
+        self.grant = None;
+        self.family = None;
+        self.context = None;
+        self.rps = None;
+        self.credentials = None;
+        self.rp_hash.clear();
     }
     fn observe_time(&mut self, now: Duration) {
         if self.grant.as_ref().is_some_and(|g| {
             let elapsed = now.saturating_sub(g.issued_at);
             elapsed >= Duration::from_secs(600) || (!g.used && elapsed >= Duration::from_secs(30))
         }) {
-            self.invalidate();
+            self.grant = None;
         }
     }
     fn mac(&mut self, protocol: Option<&Value>, param: Option<&Value>, message: &[u8]) -> bool {
@@ -99,6 +128,12 @@ impl Oracle {
     }
     fn cursor_valid<T>(&self, cursor: &Option<Cursor<T>>, family: u8, rp: Option<&[u8]>) -> bool {
         cursor.as_ref().is_some_and(|c| {
+            if c.persistent {
+                return family == CTAP_CMD_CREDENTIAL_MANAGEMENT
+                    && self.persistent[usize::from(c.protocol.identifier() == 2)]
+                        .as_ref()
+                        .is_some_and(|g| g.id == c.token);
+            }
             self.grant
                 .as_ref()
                 .is_some_and(|g| c.token == g.id && c.legacy == g.legacy)
@@ -141,6 +176,25 @@ impl Oracle {
                 Some(Value::Bytes(b)) => Some(b.as_slice()),
                 _ => None,
             };
+            let mut selected_persistent = None;
+            if code == CTAP_CMD_CREDENTIAL_MANAGEMENT && matches!(sub, 1 | 2 | 4) {
+                let mut message = vec![sub as u8];
+                if sub == 4
+                    && let Some(params) = get_int(&parameters, 2)
+                {
+                    message.extend(cbor::encode(params));
+                }
+                selected_persistent = self
+                    .persistent
+                    .iter()
+                    .flatten()
+                    .find(|g| {
+                        get_int(&parameters, 3) == Some(&protocol_value(g.protocol))
+                            && get_int(&parameters, 4)
+                                == Some(&bytes(&authenticate(g.protocol, &g.value[..], &message)))
+                    })
+                    .cloned();
+            }
             if matches!(sub, 3 | 5) {
                 let valid = if sub == 3 {
                     self.cursor_valid(&self.rps, code, None)
@@ -171,7 +225,8 @@ impl Oracle {
                     message.extend(cbor::encode(value));
                 }
                 let mac = mandatory
-                    && self.mac(get_int(&parameters, 3), get_int(&parameters, 4), &message);
+                    && (selected_persistent.is_some()
+                        || self.mac(get_int(&parameters, 3), get_int(&parameters, 4), &message));
                 let mutation_rp = match get_int(params, 2) {
                     Some(Value::Map(desc)) => match get_text(desc, "id") {
                         Some(Value::Bytes(id)) => credentials
@@ -189,7 +244,7 @@ impl Oracle {
                 };
                 if success {
                     assert!(
-                        mac && self.authorized(code, target),
+                        mac && (selected_persistent.is_some() || self.authorized(code, target)),
                         "management bypassed MAC, provenance, permissions or scope"
                     );
                 }
@@ -198,7 +253,19 @@ impl Oracle {
                 return;
             }
             let body = decode_map(&response[1..]).unwrap_or_default();
-            let grant = self.grant.as_ref().expect("authorized grant");
+            let grant = if matches!(sub, 3 | 5) {
+                None
+            } else {
+                selected_persistent.as_ref().or(self.grant.as_ref())
+            };
+            if let Some(grant) = grant {
+                let context = (grant.persistent, grant.protocol, grant.id);
+                if self.context != Some(context) {
+                    self.rps = None;
+                    self.credentials = None;
+                    self.context = Some(context);
+                }
+            }
             match sub {
                 1 => assert_eq!(
                     get_int(&body, 1),
@@ -220,8 +287,10 @@ impl Oracle {
                         Some(&bytes(&Sha256::digest(entries[0].as_bytes())))
                     );
                     self.rps = Some(Cursor {
-                        token: grant.id,
-                        legacy: grant.legacy,
+                        token: grant.unwrap().id,
+                        persistent: grant.unwrap().persistent,
+                        protocol: grant.unwrap().protocol,
+                        legacy: grant.unwrap().legacy,
                         entries,
                         index: 1,
                     });
@@ -250,8 +319,10 @@ impl Oracle {
                     check_id(&body, entries.first().expect("empty enumeration succeeded"));
                     self.rp_hash = hash.to_vec();
                     self.credentials = Some(Cursor {
-                        token: grant.id,
-                        legacy: grant.legacy,
+                        token: grant.unwrap().id,
+                        persistent: grant.unwrap().persistent,
+                        protocol: grant.unwrap().protocol,
+                        legacy: grant.unwrap().legacy,
                         entries,
                         index: 1,
                     });
@@ -348,8 +419,15 @@ impl Oracle {
             && code == CTAP_CMD_CLIENT_PIN
             && matches!(unsigned(get_int(&parameters, 2)), Some(3 | 4 | 5 | 9))
         {
-            self.invalidate();
+            if matches!(unsigned(get_int(&parameters, 2)), Some(3 | 4)) {
+                self.invalidate();
+            } else {
+                self.grant = None;
+                self.rps = None;
+                self.credentials = None;
+            }
         } else if success && code == CTAP_CMD_RESET {
+            self.invalidate();
             self.restart();
         }
     }
