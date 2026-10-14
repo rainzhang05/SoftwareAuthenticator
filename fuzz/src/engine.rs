@@ -206,7 +206,7 @@ impl Engine {
     }
 
     /// The command byte and response status of every request so far.
-    pub fn into_trace(self) -> Vec<(u8, u16)> {
+    pub fn into_trace(&self) -> Vec<(u8, u16)> {
         self.trace
     }
 
