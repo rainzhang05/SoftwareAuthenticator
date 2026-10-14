@@ -164,6 +164,8 @@ const ATTESTATION_FILE: &str = "attestation";
 ///    7  force_pin_change        boolean, default false
 ///    8  pin_code_point_length   unsigned integer, 4-63, default 4
 ///    9  always_uv               boolean, default false
+///   11  protocol-one persistent token, optional map {1: secret (32 bytes), 2: grant (boolean)}
+///   12  protocol-two persistent token, optional map with the same encoding
 ///
 /// attestation record (type 3)
 ///    1  private_key             byte string, 32 bytes

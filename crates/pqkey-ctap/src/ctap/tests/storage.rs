@@ -426,6 +426,7 @@ fn only_the_pin_hash_and_retry_counter_are_persisted() {
             consecutive_failures: 0,
             pin_auth_blocked: false,
             min_pin_length_rp_ids: Vec::new(),
+            persistent_tokens: [None, None],
             ..PinStateRecord::default()
         })
     );

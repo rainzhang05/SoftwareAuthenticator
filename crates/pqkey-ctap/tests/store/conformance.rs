@@ -629,6 +629,7 @@ fn pin_state_round_trips<B: Backend>() {
         consecutive_failures: 0,
         pin_auth_blocked: false,
         min_pin_length_rp_ids: Vec::new(),
+        persistent_tokens: [None, None],
         ..PinStateRecord::default()
     };
     store.set_pin_state(&cleared).unwrap();
@@ -644,6 +645,7 @@ fn pin_state_is_independent_of_credentials<B: Backend>() {
     let state = PinStateRecord {
         pin_hash: Some(random_bytes()),
         min_pin_length_rp_ids: Vec::new(),
+        persistent_tokens: [None, None],
         ..PinStateRecord::default()
     };
     store.set_pin_state(&state).unwrap();
@@ -686,6 +688,7 @@ fn clear_removes_credentials_and_resets_pin_state<B: Backend>() {
             consecutive_failures: 2,
             pin_auth_blocked: true,
             min_pin_length_rp_ids: Vec::new(),
+            persistent_tokens: [None, None],
             ..PinStateRecord::default()
         })
         .unwrap();
@@ -733,6 +736,7 @@ fn store_is_fully_usable_after_clear<B: Backend>() {
     let state = PinStateRecord {
         pin_hash: Some(random_bytes()),
         min_pin_length_rp_ids: Vec::new(),
+        persistent_tokens: [None, None],
         ..PinStateRecord::default()
     };
     store.set_pin_state(&state).unwrap();
@@ -854,6 +858,7 @@ fn sealing_keeps_an_existing_pin_state<B: Backend>() {
         pin_hash: Some(random_bytes()),
         pin_retries: 5,
         min_pin_length_rp_ids: Vec::new(),
+        persistent_tokens: [None, None],
         ..PinStateRecord::default()
     };
     store.set_pin_state(&pin).unwrap();
@@ -1024,6 +1029,7 @@ fn replacement_preserves_policy_sealing_and_updates<B: Backend>() {
         pin_code_point_length: 8,
         always_uv: true,
         min_pin_length_rp_ids: Vec::new(),
+        persistent_tokens: [None, None],
         ..PinStateRecord::default()
     };
     let attestation = attestation_record(&[256]);

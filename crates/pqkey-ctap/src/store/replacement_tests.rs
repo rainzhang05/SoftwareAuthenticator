@@ -332,6 +332,7 @@ fn metadata_damage_fails_closed_without_modifying_policy_or_records() {
             pin_hash: Some([0x78; 16]),
             always_uv: true,
             min_pin_length_rp_ids: Vec::new(),
+            persistent_tokens: [None, None],
             ..PinStateRecord::default()
         };
         store.set_pin_state(&pin).unwrap();

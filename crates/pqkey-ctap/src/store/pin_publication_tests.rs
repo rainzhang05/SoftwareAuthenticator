@@ -669,6 +669,7 @@ fn legacy_and_corrupt_complexity_records_preserve_file_store_authority() {
             let record = PinStateRecord {
                 pin_hash: Some(*pin_hash(PIN)),
                 min_pin_length_rp_ids: Vec::new(),
+                persistent_tokens: [None, None],
                 ..PinStateRecord::default()
             };
             store.set_pin_state(&record).unwrap();

@@ -145,6 +145,7 @@ impl CtapApp<'_> {
             pin_code_point_length: persistent.pin_code_point_length,
             always_uv: persistent.always_uv,
             pin_complexity_policy: persistent.pin_complexity_policy,
+            persistent_tokens: [None, None],
             ..PinStateRecord::default()
         };
         self.store

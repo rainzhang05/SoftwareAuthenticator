@@ -379,10 +379,35 @@ impl fmt::Debug for CredentialRecord {
     }
 }
 
+/// One protocol's persistent read-only management authority (CTAP 2.3 §6.5.2.2).
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct PersistentTokenRecord {
+    /// The opaque persistent secret; never log or display it.
+    pub secret: [u8; 32],
+    /// Whether successful PIN verification granted pcmr.
+    pub granted: bool,
+}
+
+impl PartialEq for PersistentTokenRecord {
+    fn eq(&self, other: &Self) -> bool {
+        bool::from(self.secret.ct_eq(&other.secret)) && self.granted == other.granted
+    }
+}
+impl Eq for PersistentTokenRecord {}
+impl fmt::Debug for PersistentTokenRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PersistentTokenRecord")
+            .field("secret", &Redacted)
+            .field("granted", &self.granted)
+            .finish()
+    }
+}
+
 /// The persistent PIN state and user-verification settings.
 ///
 /// The PIN hash, retry budget, PIN policy and always-UV setting are replaced
-/// together in one write. Volatile PIN/UV auth tokens are not stored.
+/// together in one write, including persistent read-only management authority.
+/// Transient PIN/UV auth tokens are not stored.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PinStateRecord {
     /// `LEFT(SHA-256(PIN), 16)`, or `None` when no PIN is set.
@@ -405,6 +430,9 @@ pub struct PinStateRecord {
     pub always_uv: bool,
     /// Require an ASCII letter and digit in every new PIN until reset.
     pub pin_complexity_policy: bool,
+    /// Independent protocol-one and protocol-two persistent authorities.
+    /// Absence denotes uninitialized state with no permission.
+    pub persistent_tokens: [Option<PersistentTokenRecord>; 2],
 }
 
 impl PinStateRecord {
@@ -435,6 +463,7 @@ impl Default for PinStateRecord {
             pin_code_point_length: Self::DEFAULT_MIN_PIN_LENGTH,
             always_uv: false,
             pin_complexity_policy: false,
+            persistent_tokens: [None, None],
         }
     }
 }
@@ -457,6 +486,7 @@ impl PartialEq for PinStateRecord {
             && self.pin_code_point_length == other.pin_code_point_length
             && self.always_uv == other.always_uv
             && self.pin_complexity_policy == other.pin_complexity_policy
+            && self.persistent_tokens == other.persistent_tokens
     }
 }
 
@@ -476,6 +506,7 @@ impl fmt::Debug for PinStateRecord {
             .field("pin_code_point_length", &self.pin_code_point_length)
             .field("always_uv", &self.always_uv)
             .field("pin_complexity_policy", &self.pin_complexity_policy)
+            .field("persistent_tokens", &self.persistent_tokens)
             .finish()
     }
 }
@@ -862,6 +893,7 @@ mod tests {
         let pin = PinStateRecord {
             pin_hash: Some([secret; 16]),
             min_pin_length_rp_ids: Vec::new(),
+            persistent_tokens: [None, None],
             ..PinStateRecord::default()
         };
         let attestation = AttestationRecord {
@@ -898,6 +930,7 @@ mod tests {
         let a = PinStateRecord {
             pin_hash: Some([1; 16]),
             min_pin_length_rp_ids: Vec::new(),
+            persistent_tokens: [None, None],
             ..PinStateRecord::default()
         };
         let mut b = a.clone();

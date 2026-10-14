@@ -38,6 +38,8 @@
 //!    8  pin_code_point_length   unsigned integer, 4-63, default 4
 //!    9  always_uv               boolean, default false
 //!   10  pin_complexity_policy   boolean, default false
+//!   11  protocol-one persistent token, optional map {1: secret (32 bytes), 2: grant (boolean)}
+//!   12  protocol-two persistent token, optional map with the same encoding
 //!
 //! attestation record (record type 3)
 //!    1  private_key             byte string, 32 bytes
@@ -70,7 +72,9 @@ use core::mem;
 use ciborium::value::{Integer, Value};
 use zeroize::Zeroizing;
 
-use super::record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKeyMaterial};
+use super::record::{
+    AttestationRecord, CredentialRecord, PersistentTokenRecord, PinStateRecord, PrivateKeyMaterial,
+};
 use super::{
     Corruption, StoreError, validate_attestation, validate_credential, validate_large_blob_array,
     validate_pin_state,
@@ -207,6 +211,20 @@ pub(crate) fn encode_pin_state(state: &PinStateRecord) -> Result<Zeroizing<Vec<u
         (9, Value::Bool(state.always_uv)),
         (10, Value::Bool(state.pin_complexity_policy)),
     ]);
+    for (index, token) in state.persistent_tokens.iter().enumerate() {
+        if let Some(token) = token {
+            entries.push((
+                11 + index as u64,
+                Value::Map(vec![
+                    (
+                        Value::Integer(1.into()),
+                        Value::Bytes(token.secret.to_vec()),
+                    ),
+                    (Value::Integer(2.into()), Value::Bool(token.granted)),
+                ]),
+            ));
+        }
+    }
     encode_map(entries)
 }
 
@@ -228,6 +246,7 @@ pub(crate) fn decode_pin_state(bytes: &[u8]) -> Result<PinStateRecord, Corruptio
             .unwrap_or(PinStateRecord::DEFAULT_MIN_PIN_LENGTH),
         always_uv: fields.optional_bool(9)?.unwrap_or(false),
         pin_complexity_policy: fields.optional_bool(10)?.unwrap_or(false),
+        persistent_tokens: [fields.persistent_token(11)?, fields.persistent_token(12)?],
     };
     fields.finish()?;
     validate_pin_state(&state).map_err(|_| Corruption::Inconsistent)?;
@@ -363,6 +382,21 @@ impl Fields {
             fields.0.push((key, value));
         }
         Ok(fields)
+    }
+
+    fn persistent_token(&mut self, key: u64) -> Result<Option<PersistentTokenRecord>, Corruption> {
+        let Some(item) = self.take(key) else {
+            return Ok(None);
+        };
+        let mut encoded = Zeroizing::new(Vec::with_capacity(encoded_len_bound(&item.0)));
+        ciborium::ser::into_writer(&item.0, &mut *encoded).map_err(|_| Corruption::Encoding)?;
+        let mut fields = Fields::parse(&encoded)?;
+        let token = PersistentTokenRecord {
+            secret: fields.array(1)?,
+            granted: fields.bool(2)?,
+        };
+        fields.finish()?;
+        Ok(Some(token))
     }
 
     fn take(&mut self, key: u64) -> Option<Item> {
@@ -694,6 +728,7 @@ mod tests {
             consecutive_failures: 2,
             pin_auth_blocked: true,
             min_pin_length_rp_ids: Vec::new(),
+            persistent_tokens: [None, None],
             ..PinStateRecord::default()
         }
     }
@@ -724,6 +759,63 @@ mod tests {
             let invalid = edited(&complete, |entries| set(entries, key, Value::Null));
             assert_eq!(decode_pin_state(&invalid), Err(Corruption::Encoding));
         }
+    }
+
+    #[test]
+    fn persistent_token_encoding_migration_redaction_and_corruption() {
+        let mut record = pin_state();
+        let legacy = encode_pin_state(&record).unwrap();
+        for index in 0..2 {
+            record.persistent_tokens[index] = Some(PersistentTokenRecord {
+                secret: [0x61 + index as u8; 32],
+                granted: true,
+            });
+        }
+        let encoded = encode_pin_state(&record).unwrap();
+        assert_eq!(decode_pin_state(&encoded).unwrap(), record);
+        assert!(
+            decode_pin_state(&legacy)
+                .unwrap()
+                .persistent_tokens
+                .iter()
+                .all(Option::is_none)
+        );
+        assert!(!format!("{record:?}").contains("97, 97"));
+        for key in [11, 12] {
+            for value in [
+                Value::Null,
+                Value::Map(vec![]),
+                Value::Map(vec![
+                    (Value::Integer(1.into()), Value::Bytes(vec![1; 31])),
+                    (Value::Integer(2.into()), Value::Bool(true)),
+                ]),
+                Value::Map(vec![
+                    (Value::Integer(1.into()), Value::Bytes(vec![1; 32])),
+                    (Value::Integer(2.into()), Value::Integer(1.into())),
+                ]),
+                Value::Map(vec![
+                    (Value::Integer(1.into()), Value::Bytes(vec![1; 32])),
+                    (Value::Integer(1.into()), Value::Bytes(vec![2; 32])),
+                    (Value::Integer(2.into()), Value::Bool(true)),
+                ]),
+                Value::Map(vec![
+                    (Value::Integer(1.into()), Value::Bytes(vec![1; 32])),
+                    (Value::Integer(2.into()), Value::Bool(true)),
+                    (Value::Integer(3.into()), Value::Bool(false)),
+                ]),
+            ] {
+                assert!(
+                    decode_pin_state(&edited(&encoded, |entries| set(entries, key, value)))
+                        .is_err()
+                );
+            }
+        }
+        record.force_pin_change = true;
+        assert!(encode_pin_state(&record).is_err());
+        for token in record.persistent_tokens.iter_mut().flatten() {
+            token.granted = false;
+        }
+        assert!(encode_pin_state(&record).is_ok());
     }
 
     #[test]

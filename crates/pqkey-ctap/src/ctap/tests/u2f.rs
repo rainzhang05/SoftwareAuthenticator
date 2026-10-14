@@ -624,6 +624,7 @@ fn complexity_and_forced_pin_change_do_not_independently_block_u2f() {
                 pin_complexity_policy: true,
                 force_pin_change,
                 min_pin_length_rp_ids: Vec::new(),
+                persistent_tokens: [None, None],
                 ..PinStateRecord::default()
             })
             .unwrap();

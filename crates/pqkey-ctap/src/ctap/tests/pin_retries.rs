@@ -393,6 +393,7 @@ fn restart_clears_the_power_cycle_lockout_but_keeps_retries() {
             consecutive_failures: 0,
             pin_auth_blocked: false,
             min_pin_length_rp_ids: Vec::new(),
+            persistent_tokens: [None, None],
             ..PinStateRecord::default()
         }
     );
@@ -440,6 +441,7 @@ fn start_up_ignores_a_stored_power_cycle_lockout() {
             consecutive_failures: 3,
             pin_auth_blocked: true,
             min_pin_length_rp_ids: Vec::new(),
+            persistent_tokens: [None, None],
             ..PinStateRecord::default()
         })
         .expect("store PIN state");

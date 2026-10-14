@@ -108,7 +108,9 @@ pub use keys::{FileKeySource, KeyDomain, KeySource, RootKey};
 pub(crate) use large_blobs::validate_large_blob_array;
 pub use large_blobs::{INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY};
 pub use memory::MemoryStore;
-pub use record::{AttestationRecord, CredentialRecord, PinStateRecord, PrivateKeyMaterial};
+pub use record::{
+    AttestationRecord, CredentialRecord, PersistentTokenRecord, PinStateRecord, PrivateKeyMaterial,
+};
 
 /// The credential limit a store uses unless configured otherwise.
 pub const DEFAULT_MAX_CREDENTIALS: usize = 1000;
@@ -426,6 +428,14 @@ pub(crate) fn validate_pin_state(state: &PinStateRecord) -> Result<(), StoreErro
     {
         return Err(StoreError::InvalidRecord(
             "minimum PIN length RP ID too long",
+        ));
+    }
+    if state.persistent_tokens.iter().flatten().any(|token| {
+        token.secret.iter().all(|byte| *byte == 0)
+            || (token.granted && (state.pin_hash.is_none() || state.force_pin_change))
+    }) {
+        return Err(StoreError::InvalidRecord(
+            "invalid persistent management authority",
         ));
     }
     Ok(())

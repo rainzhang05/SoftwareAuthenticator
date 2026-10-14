@@ -282,6 +282,7 @@ fn policy() -> PinStateRecord {
         pin_code_point_length: 4,
         always_uv: true,
         pin_complexity_policy: true,
+        persistent_tokens: [None, None],
         ..PinStateRecord::default()
     }
 }
