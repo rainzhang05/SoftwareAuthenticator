@@ -831,7 +831,10 @@ fn check_persistent_authority() {
                     "persistent authority operation {index} left a secret in the stack"
                 );
             }
-            assert_eq!(response[0], *expected);
+            assert_eq!(
+                response[0], *expected,
+                "persistent probe operation {index}, file={file}"
+            );
         }
     }
     std::fs::remove_dir_all(dir).unwrap();

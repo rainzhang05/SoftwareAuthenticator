@@ -77,6 +77,8 @@ fn fixture_with_store(
         &INTERRUPT,
         [0; 16],
     ));
+    // Full debug stack scans can outlast the production reset window.
+    app.set_reset_window(None);
     let mut requests = Vec::new();
     let mut changes = Vec::new();
     for (protocol, secret) in [
