@@ -31,6 +31,7 @@ fn state_with_retries(pin_retries: u8) -> PinRetryState {
         pin_hash: Some(pin_hash(PIN)),
         pin_retries,
         min_pin_length_rp_ids: Vec::new(),
+        persistent_tokens: [None, None],
         ..PersistentPinState::default()
     })
 }

@@ -57,6 +57,7 @@ pub(super) fn load_pin_state(store: &dyn CredentialStore, rng: &mut dyn Rng) -> 
                 pin_code_point_length: record.pin_code_point_length,
                 always_uv: record.always_uv,
                 pin_complexity_policy: record.pin_complexity_policy,
+                persistent_tokens: record.persistent_tokens.clone(),
             }),
             true,
         ),
@@ -82,6 +83,7 @@ fn unreadable_pin_state(rng: &mut dyn Rng) -> PinState {
         pin_retries: 0,
         always_uv: true,
         min_pin_length_rp_ids: Vec::new(),
+        persistent_tokens: [None, None],
         ..PersistentPinState::default()
     });
     hash.zeroize();
@@ -89,6 +91,79 @@ fn unreadable_pin_state(rng: &mut dyn Rng) -> PinState {
 }
 
 impl CtapApp<'_> {
+    /// Re-read authority before persistent access or PIN verification. In particular,
+    /// a failed reset can have published a new key while leaving old ciphertext.
+    pub(super) fn refresh_persistent_authority(&mut self) -> Result<(), u8> {
+        if !self.pin_state_writable {
+            return Ok(());
+        }
+        let loaded = self.store.pin_state();
+        let record = match loaded {
+            Ok(Some(record)) => record,
+            Ok(None)
+                if self
+                    .pin_state
+                    .persistent()
+                    .persistent_tokens
+                    .iter()
+                    .all(Option::is_none) =>
+            {
+                return Ok(());
+            }
+            other => {
+                let mut closed = self.pin_state.persistent().clone();
+                closed.persistent_tokens = [None, None];
+                closed.pin_retries = 0;
+                closed.always_uv = true;
+                self.pin_state.adopt_persistent(closed);
+                self.pin_state.invalidate_pin_uv_auth_tokens();
+                self.cred_mgmt_state.clear();
+                self.pin_state_writable = false;
+                if let Err(err) = other {
+                    return Err(store_status("read persistent authority", err));
+                }
+                return Err(CTAP2_ERR_PROCESSING);
+            }
+        };
+        let current = self.pin_state.persistent();
+        let changed_pin = current.pin_hash != record.pin_hash
+            || current.min_pin_length != record.min_pin_length
+            || current.min_pin_length_rp_ids != record.min_pin_length_rp_ids
+            || current.force_pin_change != record.force_pin_change
+            || current.pin_code_point_length != record.pin_code_point_length
+            || current.always_uv != record.always_uv
+            || current.pin_complexity_policy != record.pin_complexity_policy;
+        if changed_pin || current.persistent_tokens != record.persistent_tokens {
+            let persistent = PersistentPinState {
+                pin_hash: record.pin_hash,
+                pin_retries: record.pin_retries,
+                min_pin_length: record.min_pin_length,
+                min_pin_length_rp_ids: record.min_pin_length_rp_ids.clone(),
+                force_pin_change: record.force_pin_change,
+                pin_code_point_length: record.pin_code_point_length,
+                always_uv: record.always_uv,
+                pin_complexity_policy: record.pin_complexity_policy,
+                persistent_tokens: record.persistent_tokens.clone(),
+            };
+            if changed_pin {
+                self.pin_state.invalidate_pin_uv_auth_tokens();
+            }
+            self.pin_state.adopt_persistent(persistent);
+            self.cred_mgmt_state.clear();
+        }
+        Ok(())
+    }
+
+    /// Stage all rotation randomness before publishing a new PIN/policy.
+    pub(super) fn rotate_persistent_tokens(&mut self, persistent: &mut PersistentPinState) {
+        persistent.persistent_tokens = core::array::from_fn(|_| {
+            Some(crate::store::PersistentTokenRecord {
+                secret: self.random_array::<32>(),
+                granted: false,
+            })
+        });
+    }
+
     /// Persist the next count before signing. Sealed credentials share the
     /// global counter; stored ones count individually. Neither wraps.
     pub(super) fn advance_signature_counter(
@@ -145,7 +220,7 @@ impl CtapApp<'_> {
             pin_code_point_length: persistent.pin_code_point_length,
             always_uv: persistent.always_uv,
             pin_complexity_policy: persistent.pin_complexity_policy,
-            persistent_tokens: [None, None],
+            persistent_tokens: persistent.persistent_tokens.clone(),
             ..PinStateRecord::default()
         };
         self.store

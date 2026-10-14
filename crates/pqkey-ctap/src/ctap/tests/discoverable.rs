@@ -415,6 +415,7 @@ fn credential_management_lists_only_discoverable_credentials() {
         None,
     );
 
+    app.save_persistent_pin_state().unwrap();
     let metadata = canonical_map(vec![
         (int(1), int(0x01)),
         (int(3), int(2)),

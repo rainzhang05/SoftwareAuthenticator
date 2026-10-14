@@ -9,7 +9,7 @@ use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::ctap::constants::*;
-use crate::store::PinStateRecord;
+use crate::store::{PersistentTokenRecord, PinStateRecord};
 
 /// The maximum, and initial, value of pinRetries: "Authenticators MUST allow no
 /// more than 8 retries but MAY set a lower maximum." (CTAP 2.3 §6.5.2.3)
@@ -44,6 +44,8 @@ pub struct PersistentPinState {
     pub always_uv: bool,
     /// Require an ASCII letter and digit in every new PIN until reset.
     pub pin_complexity_policy: bool,
+    /// The two independent persistent management authorities.
+    pub persistent_tokens: [Option<PersistentTokenRecord>; 2],
 }
 
 impl Default for PersistentPinState {
@@ -57,6 +59,7 @@ impl Default for PersistentPinState {
             pin_code_point_length: PinStateRecord::DEFAULT_MIN_PIN_LENGTH,
             always_uv: false,
             pin_complexity_policy: false,
+            persistent_tokens: [None, None],
         }
     }
 }
@@ -72,6 +75,7 @@ impl fmt::Debug for PersistentPinState {
             .field("pin_code_point_length", &self.pin_code_point_length)
             .field("always_uv", &self.always_uv)
             .field("pin_complexity_policy", &self.pin_complexity_policy)
+            .field("persistent_tokens", &self.persistent_tokens)
             .finish()
     }
 }
@@ -224,6 +228,7 @@ pub(crate) struct PinState {
     pin: PinRetryState,
     pub(crate) key_agreement: KeyAgreementKeys,
     token: PinUvAuthTokenState,
+    persistent_generation: u64,
     clock: Box<dyn Clock>,
 }
 
@@ -238,6 +243,7 @@ impl PinState {
             pin: PinRetryState::power_up(persistent),
             key_agreement: KeyAgreementKeys::default(),
             token: PinUvAuthTokenState::default(),
+            persistent_generation: 0,
             clock: Box::new(MonotonicClock::new()),
         }
     }
@@ -246,6 +252,7 @@ impl PinState {
     /// maximum retries, no key agreement keys and no pinUvAuthToken.  The
     /// clock is kept.
     pub(crate) fn reset(&mut self) {
+        self.persistent_generation = self.persistent_generation.wrapping_add(1);
         self.pin = PinRetryState::default();
         self.key_agreement = KeyAgreementKeys::default();
         self.token.stop_using();
@@ -267,7 +274,18 @@ impl PinState {
 
     /// Adopt saved settings without resetting retries, key agreement or timers.
     pub(crate) fn adopt_persistent(&mut self, persistent: PersistentPinState) {
+        if self.pin.persistent.persistent_tokens != persistent.persistent_tokens {
+            self.persistent_generation = self.persistent_generation.wrapping_add(1);
+        }
         self.pin.persistent = persistent;
+    }
+
+    pub(crate) fn persistent_generation(&self) -> u64 {
+        self.persistent_generation
+    }
+
+    pub(crate) fn persistent_token(&self, protocol: PinProtocol) -> Option<&PersistentTokenRecord> {
+        self.persistent().persistent_tokens[usize::from(protocol.identifier() == 2)].as_ref()
     }
 
     /// Invalidate the token for every supported PIN/UV auth protocol.

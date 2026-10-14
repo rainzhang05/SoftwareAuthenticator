@@ -13,6 +13,7 @@ pub(crate) const PIN_PERMISSION_GA: u8 = 0x02;
 pub(crate) const PIN_PERMISSION_CM: u8 = 0x04;
 pub(crate) const PIN_PERMISSION_LBW: u8 = 0x10;
 pub(crate) const PIN_PERMISSION_ACFG: u8 = 0x20;
+pub(crate) const PIN_PERMISSION_PCMR: u8 = 0x40;
 
 /// Every pinUvAuthToken permission CTAP 2.3 §6.5.5.7 defines: mc (0x01),
 /// ga (0x02), cm (0x04), be (0x08), lbw (0x10), acfg (0x20) and pcmr (0x40).
@@ -25,7 +26,8 @@ const SUPPORTED_PIN_PERMISSIONS: u8 = PIN_PERMISSION_MC
     | PIN_PERMISSION_GA
     | PIN_PERMISSION_CM
     | PIN_PERMISSION_LBW
-    | PIN_PERMISSION_ACFG;
+    | PIN_PERMISSION_ACFG
+    | PIN_PERMISSION_PCMR;
 
 /// The permissions to assign for a getPinUvAuthTokenUsingPinWithPermissions
 /// permissions parameter (already checked to be non-zero), per CTAP 2.3
@@ -35,7 +37,9 @@ const SUPPORTED_PIN_PERMISSIONS: u8 = PIN_PERMISSION_MC
 /// Undefined permissions present in the permissions parameter are ignored."
 pub(crate) fn requested_pin_permissions(permissions: i128) -> Result<u8, u8> {
     let defined = (permissions & i128::from(DEFINED_PIN_PERMISSIONS)) as u8;
-    if defined & !SUPPORTED_PIN_PERMISSIONS != 0 {
+    if (defined & PIN_PERMISSION_PCMR != 0 && defined != PIN_PERMISSION_PCMR)
+        || defined & !SUPPORTED_PIN_PERMISSIONS != 0
+    {
         return Err(CTAP2_ERR_UNAUTHORIZED_PERMISSION);
     }
     Ok(defined)

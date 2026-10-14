@@ -367,6 +367,10 @@ impl<'interrupt> CtapApp<'interrupt> {
     /// The answer is a status byte, followed by the response parameters when
     /// the status is CTAP2_OK.
     pub fn call(&mut self, request: &[u8]) -> Vec<u8> {
+        crate::crypto::scrub::with_scrubbed_stack(|| self.call_inner(request))
+    }
+
+    fn call_inner(&mut self, request: &[u8]) -> Vec<u8> {
         self.observe_large_blob_state(request.first().copied());
         // authenticatorGetNextAssertion is a stateful command: "The
         // authenticator MAY maintain state based on the assumption that each

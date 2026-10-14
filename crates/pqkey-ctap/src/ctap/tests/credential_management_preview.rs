@@ -243,7 +243,7 @@ fn modern_permission_masks_never_impersonate_a_legacy_grant() {
                 [CTAP2_ERR_PIN_AUTH_INVALID]
             );
         }
-        for permission in [8, 0x40] {
+        for permission in [8, 0x44] {
             assert_eq!(
                 get_pin_uv_auth_token(&mut app, protocol, PIN, permission, None),
                 Err(CTAP2_ERR_UNAUTHORIZED_PERMISSION)

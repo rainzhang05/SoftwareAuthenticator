@@ -611,6 +611,7 @@ impl CtapApp<'_> {
                 .store
                 .insert_or_replace_discoverable(record)
                 .map_err(|err| store_status("commit a discoverable credential", err))?;
+            self.cred_mgmt_state.clear();
             return Ok(());
         }
         if self.stored_credential(&record.credential_id)?.is_some() {

@@ -1,6 +1,8 @@
 //! The authenticatorClientPIN command and its subcommands.
 
-use super::permissions::{PIN_PERMISSION_GA, PIN_PERMISSION_MC, requested_pin_permissions};
+use super::permissions::{
+    PIN_PERMISSION_GA, PIN_PERMISSION_MC, PIN_PERMISSION_PCMR, requested_pin_permissions,
+};
 use super::protocol::{PinProtocol, decrypt, parse_required_pin_uv_auth_protocol, verify};
 use super::state::MAX_PIN_RETRIES;
 use super::token::{TokenGrant, TokenOrigin};
@@ -164,6 +166,7 @@ impl CtapApp<'_> {
         keys: &PinUvSessionKeys,
         pin_hash_enc: &[u8],
     ) -> Result<(), u8> {
+        self.refresh_persistent_authority()?;
         let attempt = self.pin_state.begin_pin_attempt()?;
         require_confirmed_retry(self.save_persistent_pin_state()?)?;
         #[cfg(test)]
@@ -236,7 +239,11 @@ impl CtapApp<'_> {
         persistent.pin_retries = MAX_PIN_RETRIES;
         persistent.pin_code_point_length = length;
         persistent.force_pin_change = false;
+        if self.pin_state.is_set() {
+            self.rotate_persistent_tokens(&mut persistent);
+        }
         self.save_pin_state(&persistent)?;
+        self.cred_mgmt_state.clear();
         self.pin_state.set_pin(*hash);
         self.pin_state.adopt_persistent(persistent);
         Ok(())
@@ -293,16 +300,38 @@ impl CtapApp<'_> {
     ) -> Result<Vec<u8>, u8> {
         // "If the pinRetries counter is 0, return CTAP2_ERR_PIN_BLOCKED error."
         self.pin_state.check_pin_attempt_allowed()?;
+        self.refresh_persistent_authority()?;
         let keys = self.decapsulate(protocol, key_agreement)?;
         self.verify_pin_hash_enc(protocol, &keys, pin_hash_enc)?;
         if self.pin_state.persistent().force_pin_change {
             return Err(force_change_error);
         }
 
-        let token = Zeroizing::new(self.random_array::<32>());
-        let encrypted = self.encrypt_for_platform(protocol, &keys, &token[..])?;
-        self.pin_state
-            .issue_pin_uv_auth_token(protocol, *token, grant);
+        let encrypted = if grant.permissions == PIN_PERMISSION_PCMR {
+            let mut persistent = self.pin_state.persistent().clone();
+            let slot = &mut persistent.persistent_tokens[usize::from(protocol.identifier() == 2)];
+            if slot.is_none() {
+                *slot = Some(crate::store::PersistentTokenRecord {
+                    secret: self.random_array::<32>(),
+                    granted: false,
+                });
+            }
+            let token = slot.as_mut().ok_or(CTAP2_ERR_PROCESSING)?;
+            let encrypted = self.encrypt_for_platform(protocol, &keys, &token.secret)?;
+            token.granted = true;
+            let durability = self.save_pin_state(&persistent)?;
+            self.pin_state.adopt_persistent(persistent);
+            self.cred_mgmt_state.clear();
+            require_confirmed_retry(durability)?;
+            encrypted
+        } else {
+            let token = Zeroizing::new(self.random_array::<32>());
+            let encrypted = self.encrypt_for_platform(protocol, &keys, &token[..])?;
+            self.pin_state
+                .issue_pin_uv_auth_token(protocol, *token, grant);
+            self.cred_mgmt_state.clear();
+            encrypted
+        };
         // "The authenticator returns the encrypted pinUvAuthToken for the
         // specified pinUvAuthProtocol" (CTAP 2.3 §6.5.5.7.1, §6.5.5.7.2), and
         // nothing else.
@@ -362,25 +391,26 @@ impl CtapApp<'_> {
             Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
             None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
-        let rp_id = match cbor::map_get(map, Value::Integer(Integer::from(10))) {
-            Some(Value::Text(rp_id)) => Some(rp_id.clone()),
-            Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
-            None => None,
-        };
-        // The mc and ga permissions have "RP ID: Required" (CTAP 2.3 §6.5.5.7);
-        // cm's is optional and scopes the token to that RP's credentials.
-        let rp_scoped = i128::from(PIN_PERMISSION_MC | PIN_PERMISSION_GA);
-        if permissions > 0 && permissions & rp_scoped != 0 && rp_id.is_none() {
-            return Err(CTAP2_ERR_MISSING_PARAMETER);
-        }
         let protocol = parse_required_pin_uv_auth_protocol(protocol)?;
-        // "If the authenticator receives a permissions parameter with value 0,
-        // return CTAP1_ERR_INVALID_PARAMETER."  permissions is an unsigned
-        // integer, so a negative value is invalid too.
         if permissions <= 0 {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }
         let permissions = requested_pin_permissions(permissions)?;
+        let rp_id = if permissions == PIN_PERMISSION_PCMR {
+            None
+        } else {
+            match cbor::map_get(map, Value::Integer(Integer::from(10))) {
+                Some(Value::Text(rp_id)) => Some(rp_id.clone()),
+                Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+                None => None,
+            }
+        };
+        // The mc and ga permissions have "RP ID: Required" (CTAP 2.3 §6.5.5.7);
+        // cm's is optional and scopes the token to that RP's credentials.
+        let rp_scoped = PIN_PERMISSION_MC | PIN_PERMISSION_GA;
+        if permissions > 0 && permissions & rp_scoped != 0 && rp_id.is_none() {
+            return Err(CTAP2_ERR_MISSING_PARAMETER);
+        }
         self.client_pin_get_token_common(
             protocol,
             key_agreement,

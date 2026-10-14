@@ -15,6 +15,7 @@ mod large_blob_key;
 mod large_blobs;
 mod make_credential;
 mod make_credential_rules;
+mod persistent_management;
 mod pin;
 mod pin_retries;
 mod pin_uv_auth;

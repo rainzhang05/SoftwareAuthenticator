@@ -16,6 +16,7 @@ const SET_MIN_PIN_LENGTH: u8 = 0x03;
 impl CtapApp<'_> {
     /// authenticatorConfig, in the order of CTAP 2.3 §6.11.
     pub(super) fn handle_authenticator_config(&mut self, payload: &[u8]) -> Result<Vec<u8>, u8> {
+        self.refresh_persistent_authority()?;
         let map = cbor::request_parameters(payload)?;
         let parameter = |key: i64| cbor::map_get(&map, Value::Integer(Integer::from(key)));
         let subcommand = match parameter(1) {
@@ -131,9 +132,13 @@ impl CtapApp<'_> {
             }
         }
         persistent.min_pin_length = minimum as u8;
+        if persistent.force_pin_change {
+            self.rotate_persistent_tokens(&mut persistent);
+        }
         self.save_pin_state(&persistent)?;
         if persistent.force_pin_change {
             self.pin_state.invalidate_pin_uv_auth_tokens();
+            self.cred_mgmt_state.clear();
         }
         self.pin_state.adopt_persistent(persistent);
         Ok(())

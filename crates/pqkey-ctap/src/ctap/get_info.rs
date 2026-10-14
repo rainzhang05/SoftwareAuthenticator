@@ -47,6 +47,7 @@ fn uint(value: u64) -> Value {
 
 impl CtapApp<'_> {
     pub(super) fn handle_get_info(&mut self) -> Result<Vec<u8>, u8> {
+        let _ = self.refresh_persistent_authority();
         let mut map = Vec::new();
 
         // FIDO_2_3 carries the obligations of CTAP 2.3 §9, all of which hold:
@@ -89,6 +90,7 @@ impl CtapApp<'_> {
             (text("rk"), Value::Bool(true)),
             (text("up"), Value::Bool(true)),
             (text("credMgmt"), Value::Bool(true)),
+            (text("perCredMgmtRO"), Value::Bool(true)),
             (text("credentialMgmtPreview"), Value::Bool(true)),
             (text("largeBlobs"), Value::Bool(true)),
             (text("pinUvAuthToken"), Value::Bool(true)),

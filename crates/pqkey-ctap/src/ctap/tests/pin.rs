@@ -857,8 +857,8 @@ fn get_pin_uv_auth_token_grants_cm_scoped_to_an_rp_id() {
 
 #[test]
 fn get_pin_uv_auth_token_grants_lbw_and_refuses_unsupported_permissions() {
-    // be and pcmr need features this authenticator does not have.
-    for permissions in [0x08, 0x10, 0x40, 0x04 | 0x40, 0x01 | 0x02 | 0x08] {
+    // be is unsupported; pcmr cannot be combined with a defined permission.
+    for permissions in [0x08, 0x10, 0x04 | 0x40, 0x01 | 0x02 | 0x08] {
         let mut app = new_app(TestStore::new(), [0x46; 16]);
         app.pin_state.set_pin(pin_hash(b"1234"));
         let result = get_pin_uv_auth_token(

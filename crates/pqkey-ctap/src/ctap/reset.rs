@@ -47,10 +47,14 @@ impl CtapApp<'_> {
         let timeout = self.presence_timeout;
         self.confirm_user_presence(PresenceRequest::new(PresenceOperation::Reset, timeout))?;
         self.cred_mgmt_state = CredentialManagementState::new();
-        let durability = self
-            .store
-            .clear()
-            .map_err(|err| store_status("reset the credential store", err))?;
+        let durability = match self.store.clear() {
+            Ok(durability) => durability,
+            Err(err) => {
+                // A rotation error does not tell us which authority is now visible.
+                let _ = self.refresh_persistent_authority();
+                return Err(store_status("reset the credential store", err));
+            }
+        };
         if durability == crate::store::CommitDurability::Unconfirmed {
             log::warn!("reset completed with published defaults and unconfirmed durability");
         }

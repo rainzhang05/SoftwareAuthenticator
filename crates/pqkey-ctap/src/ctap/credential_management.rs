@@ -4,7 +4,7 @@ use super::CtapApp;
 use super::cbor::{self, canonical_map, canonical_sort, required_bytes, required_map};
 use super::credential_id::is_discoverable;
 use super::pin::permissions::PIN_PERMISSION_CM;
-use super::pin::protocol::parse_pin_uv_auth_param;
+use super::pin::protocol::{PinProtocol, parse_pin_uv_auth_param, verify};
 use super::pin::token::TokenOrigin;
 use super::request::{self, truncate_utf8};
 use super::storage::store_status;
@@ -88,13 +88,15 @@ pub(super) enum ManagementFamily {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthorizationMode {
     CmPermission,
+    PersistentReadOnly,
     LegacyPreview,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct EnumerationAuthorization {
     family: ManagementFamily,
     token: u64,
+    protocol: PinProtocol,
     mode: AuthorizationMode,
 }
 
@@ -111,6 +113,7 @@ pub(super) struct CredentialManagementState {
     rp_index: usize,
     family: Option<ManagementFamily>,
     rp_auth: Option<EnumerationAuthorization>,
+    context: Option<EnumerationAuthorization>,
     /// The IDs of the credentials being enumerated, looked up again for each
     /// enumerateCredentialsGetNextCredential so no private key is kept.
     credential_list: Vec<Vec<u8>>,
@@ -126,11 +129,16 @@ impl CredentialManagementState {
             rp_index: 0,
             family: None,
             rp_auth: None,
+            context: None,
             credential_list: Vec::new(),
             credential_index: 0,
             credential_auth: None,
             credential_rp_hash: Vec::new(),
         }
+    }
+
+    pub(super) fn clear(&mut self) {
+        *self = Self::new();
     }
 
     fn reset_rps(&mut self) {
@@ -416,7 +424,10 @@ impl CtapApp<'_> {
 
         self.store
             .put(&credential)
-            .map_err(|err| store_status("update a credential", err))
+            .map_err(|err| store_status("update a credential", err))?;
+        self.cred_mgmt_state.reset_rps();
+        self.cred_mgmt_state.reset_credentials();
+        Ok(())
     }
 
     /// The subCommandParams members a subcommand cannot do without:
@@ -457,6 +468,15 @@ impl CtapApp<'_> {
         let Some(auth) = auth else {
             return false;
         };
+        if auth.mode == AuthorizationMode::PersistentReadOnly {
+            return family == ManagementFamily::Standard
+                && auth.family == family
+                && self.pin_state.persistent_generation() == auth.token
+                && self
+                    .pin_state
+                    .persistent_token(auth.protocol)
+                    .is_some_and(|token| token.granted);
+        }
         if auth.family != family
             || self.pin_state.pin_uv_auth_token_id() != Some(auth.token)
             || !self.pin_state.user_verified_flag()
@@ -464,6 +484,7 @@ impl CtapApp<'_> {
             return false;
         }
         match auth.mode {
+            AuthorizationMode::PersistentReadOnly => false,
             AuthorizationMode::LegacyPreview => {
                 family == ManagementFamily::Preview
                     && self.pin_state.token_origin() == Some(TokenOrigin::LegacyGetPinToken)
@@ -488,6 +509,7 @@ impl CtapApp<'_> {
         family: ManagementFamily,
         subcommand: u8,
         params: Option<&[(Value, Value)]>,
+        protocol: PinProtocol,
     ) -> Result<EnumerationAuthorization, u8> {
         let mode = if family == ManagementFamily::Preview {
             if !self.pin_state.user_verified_flag() {
@@ -512,6 +534,7 @@ impl CtapApp<'_> {
         };
         Ok(EnumerationAuthorization {
             family,
+            protocol,
             token: self
                 .pin_state
                 .pin_uv_auth_token_id()
@@ -530,6 +553,7 @@ impl CtapApp<'_> {
         family: ManagementFamily,
         payload: &[u8],
     ) -> Result<Vec<u8>, u8> {
+        self.refresh_persistent_authority()?;
         // Switch before parsing: even a rejected request of the other family
         // cannot leave the preceding enumeration available for later reuse.
         if self.cred_mgmt_state.family != Some(family) {
@@ -601,9 +625,40 @@ impl CtapApp<'_> {
                 {
                     message.extend_from_slice(raw_params);
                 }
-                self.verify_pin_uv_auth_param(protocol, &message, &pin_auth_param)?;
-
-                let auth = self.cm_authorize(family, subcommand, subcommand_params.as_deref())?;
+                let persistent_match = family == ManagementFamily::Standard
+                    && matches!(
+                        subcommand,
+                        GET_CREDS_METADATA | ENUMERATE_RPS_BEGIN | ENUMERATE_CREDENTIALS_BEGIN
+                    )
+                    && self
+                        .pin_state
+                        .persistent_token(protocol)
+                        .is_some_and(|token| {
+                            verify(protocol, &token.secret, &message, &pin_auth_param).is_ok()
+                        });
+                let auth = if persistent_match {
+                    if !self
+                        .pin_state
+                        .persistent_token(protocol)
+                        .is_some_and(|token| token.granted)
+                    {
+                        return Err(CTAP2_ERR_PIN_AUTH_INVALID);
+                    }
+                    EnumerationAuthorization {
+                        family,
+                        protocol,
+                        token: self.pin_state.persistent_generation(),
+                        mode: AuthorizationMode::PersistentReadOnly,
+                    }
+                } else {
+                    self.verify_pin_uv_auth_param(protocol, &message, &pin_auth_param)?;
+                    self.cm_authorize(family, subcommand, subcommand_params.as_deref(), protocol)?
+                };
+                if self.cred_mgmt_state.context != Some(auth) {
+                    self.cred_mgmt_state.reset_rps();
+                    self.cred_mgmt_state.reset_credentials();
+                    self.cred_mgmt_state.context = Some(auth);
+                }
 
                 let params = subcommand_params
                     .as_ref()
