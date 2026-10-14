@@ -286,20 +286,22 @@ fn published_minimum_and_forced_change_invalidate_tokens_and_apply_on_restart() 
                 );
                 let mut restarted = app(&path);
                 assert_eq!(options(&mut engine), options(&mut restarted));
-                for instance in [&mut engine, &mut restarted] {
+                for (index, instance) in [&mut engine, &mut restarted].into_iter().enumerate() {
                     let response = instance.call(&[CTAP_CMD_GET_INFO]);
-                    assert_eq!(field(&response, 12), Value::Bool(committed));
+                    assert_eq!(field(&response, 12), Value::Bool(committed && index == 0));
                     assert_eq!(field(&response, 13), int(if committed { 6 } else { 4 }));
                     let session = Session::new(instance, protocol);
                     assert_eq!(
                         session.token(instance, PIN)[0],
-                        if committed {
+                        if committed && index == 1 {
+                            CTAP2_ERR_PIN_INVALID
+                        } else if committed {
                             CTAP2_ERR_PIN_POLICY_VIOLATION
                         } else {
                             CTAP2_OK
                         }
                     );
-                    if committed {
+                    if committed && index == 0 {
                         assert_eq!(session.change(instance), [CTAP2_OK]);
                     }
                 }
@@ -817,6 +819,215 @@ fn first_pin_obeys_only_published_complexity_configuration() {
                         }]
                     );
                 }
+            }
+        }
+    }
+}
+
+impl Session {
+    fn read_only(&self, app: &mut CtapApp<'_>, pin: &[u8]) -> Vec<u8> {
+        self.command(
+            app,
+            9,
+            vec![
+                (int(6), Value::Bytes(self.encrypted(&pin_hash(pin)[..]))),
+                (int(9), int(0x40)),
+            ],
+        )
+    }
+}
+fn persistent_metadata(
+    app: &mut CtapApp<'_>,
+    protocol: ClassicPinProtocol,
+    secret: &[u8],
+) -> Vec<u8> {
+    call(
+        app,
+        CTAP_CMD_CREDENTIAL_MANAGEMENT,
+        vec![
+            (int(1), int(1)),
+            (int(3), int(protocol.identifier())),
+            (int(4), Value::Bytes(mac(protocol, secret, &[1]))),
+        ],
+    )
+}
+#[test]
+fn persistent_grant_publication_and_retry_writes_require_confirmed_durability() {
+    for managed in [false, true] {
+        for protocol in PROTOCOLS {
+            for write in 1..=3 {
+                for failing in PRE.into_iter().chain(POST) {
+                    let scratch = TempDir::new();
+                    let path = scratch.path().join("state");
+                    setup(&path, managed);
+                    let mut engine = app(&path);
+                    let session = Session::new(&mut engine, protocol);
+                    assert_eq!(session.set(&mut engine), [CTAP2_OK]);
+                    let response = fault(failing, write, || session.read_only(&mut engine, PIN));
+                    assert_eq!(
+                        response,
+                        [CTAP2_ERR_PROCESSING],
+                        "{managed} {protocol:?} {write} {failing}"
+                    );
+                    let record = FileStore::open(&path)
+                        .unwrap()
+                        .pin_state()
+                        .unwrap()
+                        .unwrap();
+                    let granted = record.persistent_tokens[usize::from(protocol.identifier() == 2)]
+                        .as_ref()
+                        .is_some_and(|t| t.granted);
+                    assert_eq!(granted, write == 3 && POST.contains(&failing));
+                    if let Some(token) =
+                        record.persistent_tokens[usize::from(protocol.identifier() == 2)].as_ref()
+                    {
+                        let mut reopened = app(&path);
+                        assert_eq!(
+                            persistent_metadata(&mut engine, protocol, &token.secret)[0],
+                            if granted {
+                                CTAP2_OK
+                            } else {
+                                CTAP2_ERR_PIN_AUTH_INVALID
+                            }
+                        );
+                        assert_eq!(
+                            persistent_metadata(&mut reopened, protocol, &token.secret)[0],
+                            if granted {
+                                CTAP2_OK
+                            } else {
+                                CTAP2_ERR_PIN_AUTH_INVALID
+                            }
+                        );
+                    }
+                    let retry = Session::new(&mut engine, protocol);
+                    assert_eq!(retry.read_only(&mut engine, PIN)[0], CTAP2_OK);
+                }
+            }
+        }
+    }
+}
+#[test]
+fn persistent_rotation_is_atomic_with_pin_and_forcing_policy_publication() {
+    for managed in [false, true] {
+        for protocol in PROTOCOLS {
+            for action in 0..3 {
+                for failing in PRE.into_iter().chain(POST) {
+                    let scratch = TempDir::new();
+                    let path = scratch.path().join("state");
+                    setup(&path, managed);
+                    let mut engine = app(&path);
+                    let session = Session::new(&mut engine, protocol);
+                    assert_eq!(session.set(&mut engine), [CTAP2_OK]);
+                    let mut secrets = Vec::new();
+                    for selected in PROTOCOLS {
+                        let selected_session = Session::new(&mut engine, selected);
+                        secrets.push(
+                            selected_session
+                                .shared
+                                .decrypt(&bytes(field(
+                                    &selected_session.read_only(&mut engine, PIN),
+                                    2,
+                                )))
+                                .unwrap(),
+                        );
+                    }
+                    let writable = session
+                        .shared
+                        .decrypt(&bytes(field(&session.token(&mut engine, PIN), 2)))
+                        .unwrap();
+                    let response = fault(failing, if action == 0 { 3 } else { 1 }, || {
+                        if action == 0 {
+                            session.change(&mut engine)
+                        } else {
+                            let params = if action == 1 {
+                                Value::Map(vec![(int(1), int(6))])
+                            } else {
+                                Value::Map(vec![(int(4), Value::Bool(true))])
+                            };
+                            configure(&mut engine, protocol, Some(&writable), 3, Some(params))
+                        }
+                    });
+                    let committed = POST.contains(&failing);
+                    assert_eq!(
+                        response,
+                        [if committed {
+                            CTAP2_OK
+                        } else {
+                            CTAP2_ERR_PROCESSING
+                        }]
+                    );
+                    let mut reopened = app(&path);
+                    for (selected, secret) in PROTOCOLS.into_iter().zip(&secrets) {
+                        for instance in [&mut engine, &mut reopened] {
+                            assert_eq!(
+                                persistent_metadata(instance, selected, secret)[0],
+                                if committed {
+                                    CTAP2_ERR_PIN_AUTH_INVALID
+                                } else {
+                                    CTAP2_OK
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+#[test]
+fn persistent_reset_failures_reconcile_published_root_and_explicit_retry() {
+    for managed in [false, true] {
+        for protocol in PROTOCOLS {
+            for failing in PRE.into_iter().chain(POST).chain(["remove", "removed"]) {
+                let scratch = TempDir::new();
+                let path = scratch.path().join("state");
+                setup(&path, managed);
+                let mut engine = app(&path);
+                let session = Session::new(&mut engine, protocol);
+                assert_eq!(session.set(&mut engine), [CTAP2_OK]);
+                let secret = session
+                    .shared
+                    .decrypt(&bytes(field(&session.read_only(&mut engine, PIN), 2)))
+                    .unwrap();
+                let response = fsio::with_hook(
+                    Box::new(move |event, path| {
+                        if event == failing {
+                            Err(failure(path))
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    || engine.call(&[CTAP_CMD_RESET]),
+                );
+                assert_eq!(response, [CTAP2_ERR_PROCESSING]);
+                let authoritative = FileStore::open(&path).unwrap().pin_state();
+                let preceding = authoritative
+                    .as_ref()
+                    .ok()
+                    .and_then(|r| r.as_ref())
+                    .is_some_and(|r| {
+                        r.persistent_tokens[usize::from(protocol.identifier() == 2)]
+                            .as_ref()
+                            .is_some_and(|t| t.granted)
+                    });
+                let mut reopened = app(&path);
+                for instance in [&mut engine, &mut reopened] {
+                    let result = persistent_metadata(instance, protocol, &secret)[0];
+                    if preceding {
+                        assert_eq!(result, CTAP2_OK);
+                    } else {
+                        assert_ne!(result, CTAP2_OK);
+                    }
+                }
+                assert_eq!(engine.call(&[CTAP_CMD_RESET]), [CTAP2_OK]);
+                assert_ne!(
+                    persistent_metadata(&mut engine, protocol, &secret)[0],
+                    CTAP2_OK
+                );
+                assert_ne!(
+                    persistent_metadata(&mut app(&path), protocol, &secret)[0],
+                    CTAP2_OK
+                );
             }
         }
     }
