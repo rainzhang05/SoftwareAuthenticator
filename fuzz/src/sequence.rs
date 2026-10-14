@@ -3530,7 +3530,7 @@ mod tests {
     #[test]
     fn seeds_exercise_commits_abandoned_writes_and_stable_keys() {
         let seeds = seed_corpus();
-        assert_eq!(seeds.len(), 106);
+        assert_eq!(seeds.len(), 108);
         let traces: Vec<_> = seeds.iter().map(|seed| run_traced(seed)).collect();
         for status in [CTAP2_OK, CTAP2_ERR_PIN_AUTH_INVALID, CTAP2_ERR_NOT_ALLOWED] {
             assert!(

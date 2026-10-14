@@ -280,6 +280,10 @@ impl PinState {
         self.pin.persistent = persistent;
     }
 
+    pub(crate) fn transient_secret_matches(&self, candidate: &[u8; 32]) -> bool {
+        self.token.secret_matches(candidate)
+    }
+
     pub(crate) fn persistent_generation(&self) -> u64 {
         self.persistent_generation
     }

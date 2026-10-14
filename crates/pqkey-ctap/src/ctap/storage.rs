@@ -15,7 +15,8 @@ use crate::store::{
 };
 
 use rand_core::Rng;
-use zeroize::Zeroize;
+use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::ctap::constants::*;
 
@@ -126,7 +127,12 @@ impl CtapApp<'_> {
             }
         };
         let current = self.pin_state.persistent();
-        let changed_pin = current.pin_hash != record.pin_hash
+        let hash_changed = match (&current.pin_hash, &record.pin_hash) {
+            (Some(a), Some(b)) => !bool::from(a.ct_eq(b)),
+            (None, None) => false,
+            _ => true,
+        };
+        let changed_pin = hash_changed
             || current.min_pin_length != record.min_pin_length
             || current.min_pin_length_rp_ids != record.min_pin_length_rp_ids
             || current.force_pin_change != record.force_pin_change
@@ -154,14 +160,48 @@ impl CtapApp<'_> {
         Ok(())
     }
 
+    /// Refuse a failed or repeating random source before publishing authority.
+    pub(super) fn fresh_token_secret(
+        &mut self,
+        forbidden: &[&[u8; 32]],
+        persistent: bool,
+    ) -> Result<Zeroizing<[u8; 32]>, u8> {
+        for _ in 0..8 {
+            let candidate = Zeroizing::new(self.random_array::<32>());
+            if candidate.iter().any(|byte| *byte != 0)
+                && !forbidden
+                    .iter()
+                    .any(|old| bool::from(old.ct_eq(&*candidate)))
+                && (!persistent || !self.pin_state.transient_secret_matches(&candidate))
+            {
+                return Ok(candidate);
+            }
+        }
+        Err(CTAP2_ERR_PROCESSING)
+    }
+
     /// Stage all rotation randomness before publishing a new PIN/policy.
-    pub(super) fn rotate_persistent_tokens(&mut self, persistent: &mut PersistentPinState) {
-        persistent.persistent_tokens = core::array::from_fn(|_| {
-            Some(crate::store::PersistentTokenRecord {
-                secret: self.random_array::<32>(),
+    pub(super) fn rotate_persistent_tokens(
+        &mut self,
+        persistent: &mut PersistentPinState,
+    ) -> Result<(), u8> {
+        let preceding = persistent.persistent_tokens.clone();
+        let mut rotated = [None, None];
+        for index in 0..2 {
+            let forbidden: Vec<_> = preceding
+                .iter()
+                .chain(rotated.iter())
+                .flatten()
+                .map(|token: &crate::store::PersistentTokenRecord| &token.secret)
+                .collect();
+            let secret = self.fresh_token_secret(&forbidden, true)?;
+            rotated[index] = Some(crate::store::PersistentTokenRecord {
+                secret: *secret,
                 granted: false,
-            })
-        });
+            });
+        }
+        persistent.persistent_tokens = rotated;
+        Ok(())
     }
 
     /// Persist the next count before signing. Sealed credentials share the

@@ -240,7 +240,7 @@ impl CtapApp<'_> {
         persistent.pin_code_point_length = length;
         persistent.force_pin_change = false;
         if self.pin_state.is_set() {
-            self.rotate_persistent_tokens(&mut persistent);
+            self.rotate_persistent_tokens(&mut persistent)?;
         }
         self.save_pin_state(&persistent)?;
         self.cred_mgmt_state.clear();
@@ -309,14 +309,23 @@ impl CtapApp<'_> {
 
         let encrypted = if grant.permissions == PIN_PERMISSION_PCMR {
             let mut persistent = self.pin_state.persistent().clone();
-            let slot = &mut persistent.persistent_tokens[usize::from(protocol.identifier() == 2)];
-            if slot.is_none() {
-                *slot = Some(crate::store::PersistentTokenRecord {
-                    secret: self.random_array::<32>(),
+            let index = usize::from(protocol.identifier() == 2);
+            if persistent.persistent_tokens[index].is_none() {
+                let forbidden: Vec<_> = persistent
+                    .persistent_tokens
+                    .iter()
+                    .flatten()
+                    .map(|token| &token.secret)
+                    .collect();
+                let secret = self.fresh_token_secret(&forbidden, true)?;
+                persistent.persistent_tokens[index] = Some(crate::store::PersistentTokenRecord {
+                    secret: *secret,
                     granted: false,
                 });
             }
-            let token = slot.as_mut().ok_or(CTAP2_ERR_PROCESSING)?;
+            let token = persistent.persistent_tokens[index]
+                .as_mut()
+                .ok_or(CTAP2_ERR_PROCESSING)?;
             let encrypted = self.encrypt_for_platform(protocol, &keys, &token.secret)?;
             token.granted = true;
             let durability = self.save_pin_state(&persistent)?;
@@ -325,7 +334,13 @@ impl CtapApp<'_> {
             require_confirmed_retry(durability)?;
             encrypted
         } else {
-            let token = Zeroizing::new(self.random_array::<32>());
+            let persistent = self.pin_state.persistent().persistent_tokens.clone();
+            let forbidden: Vec<_> = persistent
+                .iter()
+                .flatten()
+                .map(|token| &token.secret)
+                .collect();
+            let token = self.fresh_token_secret(&forbidden, false)?;
             let encrypted = self.encrypt_for_platform(protocol, &keys, &token[..])?;
             self.pin_state
                 .issue_pin_uv_auth_token(protocol, *token, grant);

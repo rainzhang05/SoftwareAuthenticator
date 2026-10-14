@@ -8,6 +8,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Instant;
+use subtle::ConstantTimeEq;
 
 #[cfg(test)]
 use zeroize::Zeroizing;
@@ -165,6 +166,12 @@ impl PinUvAuthTokenState {
             user_present: user_is_present,
             user_verified: true,
         });
+    }
+
+    pub(crate) fn secret_matches(&self, candidate: &[u8; 32]) -> bool {
+        self.in_use
+            .as_ref()
+            .is_some_and(|token| bool::from(token.value.ct_eq(candidate)))
     }
 
     /// `stopUsingPinUvAuthToken()`: "Set all of the pinUvAuthToken's state

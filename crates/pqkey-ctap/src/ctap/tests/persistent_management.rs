@@ -300,3 +300,61 @@ fn matching_persistent_mac_without_permission_and_unreadable_storage_fail_closed
         );
     }
 }
+
+#[test]
+fn repeating_or_zero_entropy_cannot_cross_persistent_permissions_or_publish_rotation() {
+    let (mut app, mut store) = ready();
+    let mut state = store.pin_state().unwrap().unwrap();
+    state.persistent_tokens[0] = Some(crate::store::PersistentTokenRecord {
+        secret: [0x61; 32],
+        granted: true,
+    });
+    store.set_pin_state(&state).unwrap();
+    app.refresh_persistent_authority().unwrap();
+    let writable =
+        Zeroizing::new(get_pin_uv_auth_token(&mut app, PROTOCOLS[0], PIN, 0x20, None).unwrap());
+    app.rng = Box::new(TestRng::Constant(0x61));
+    assert!(matches!(
+        get_pin_uv_auth_token(&mut app, PROTOCOLS[1], PIN, 0x40, None),
+        Err(CTAP2_ERR_PROCESSING)
+    ));
+    assert!(matches!(
+        get_pin_token(&mut app, PROTOCOLS[1], PIN),
+        Err(CTAP2_ERR_PROCESSING)
+    ));
+    let params = Value::Map(vec![(int(3), Value::Bool(true))]);
+    let mut message = vec![0xff; 32];
+    message.extend([0x0d, 3]);
+    message.extend(encode(&params));
+    let request = encode(&Value::Map(vec![
+        (int(1), int(3)),
+        (int(2), params),
+        (int(3), int(1)),
+        (
+            int(4),
+            Value::Bytes(crate::platform::authenticate(
+                PROTOCOLS[0],
+                writable.as_slice(),
+                &message,
+            )),
+        ),
+    ]));
+    assert_eq!(
+        app.handle_authenticator_config(&request),
+        Err(CTAP2_ERR_PROCESSING)
+    );
+    assert!(!store.pin_state().unwrap().unwrap().force_pin_change);
+    assert_eq!(
+        manage(&mut app, 0x0a, PROTOCOLS[0], &[0x61; 32], 1, None)[0],
+        CTAP2_OK
+    );
+    app.rng = Box::new(TestRng::Constant(0));
+    assert!(matches!(
+        get_pin_uv_auth_token(&mut app, PROTOCOLS[1], PIN, 0x40, None),
+        Err(CTAP2_ERR_PROCESSING)
+    ));
+    assert_eq!(
+        manage(&mut app, 0x0a, PROTOCOLS[0], &[0x61; 32], 1, None)[0],
+        CTAP2_OK
+    );
+}

@@ -133,7 +133,7 @@ impl CtapApp<'_> {
         }
         persistent.min_pin_length = minimum as u8;
         if persistent.force_pin_change {
-            self.rotate_persistent_tokens(&mut persistent);
+            self.rotate_persistent_tokens(&mut persistent)?;
         }
         self.save_pin_state(&persistent)?;
         if persistent.force_pin_change {
