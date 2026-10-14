@@ -377,6 +377,10 @@ impl CtapApp<'_> {
         let Some(id) = request::public_key_credential_id(required_map(params, 2)?)? else {
             return Err(CTAP2_ERR_NO_CREDENTIALS);
         };
+        // Per-record errors can follow publication; an attempted mutation
+        // must not retain a cursor describing the preceding credential set.
+        self.cred_mgmt_state.reset_rps();
+        self.cred_mgmt_state.reset_credentials();
         let deleted = self
             .store
             .delete(id)
@@ -422,12 +426,11 @@ impl CtapApp<'_> {
         credential.user_name = user_name;
         credential.user_display_name = user_display_name;
 
-        self.store
-            .put(&credential)
-            .map_err(|err| store_status("update a credential", err))?;
         self.cred_mgmt_state.reset_rps();
         self.cred_mgmt_state.reset_credentials();
-        Ok(())
+        self.store
+            .put(&credential)
+            .map_err(|err| store_status("update a credential", err))
     }
 
     /// The subCommandParams members a subcommand cannot do without:

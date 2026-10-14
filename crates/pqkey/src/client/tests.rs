@@ -559,6 +559,27 @@ fn persistent_listing_tokens_survive_daemon_restart_and_need_writable_deletion()
             .management_token_with_protocol(b"1234", protocol)
             .unwrap();
         assert_eq!(key.passkeys(&token).unwrap(), first);
+        assert!(matches!(
+            key.update_user_information(
+                &token,
+                &credential.credential_id,
+                &credential.user_id,
+                Some("Changed"),
+                None
+            ),
+            Err(ClientError::Status(0x33))
+        ));
+        key.update_user_information(
+            &writable,
+            &credential.credential_id,
+            &credential.user_id,
+            Some("Changed"),
+            None,
+        )
+        .unwrap();
+        let updated = key.passkeys(&token).unwrap();
+        assert_eq!(updated[0].user_name.as_deref(), Some("Changed"));
+        assert_eq!(updated[0].user_display_name, None);
         key.delete(&writable, &credential.credential_id).unwrap();
         assert!(key.passkeys(&token).unwrap().is_empty());
         key.change_pin(b"1234", b"5678").unwrap();
