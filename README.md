@@ -197,20 +197,24 @@ limits do not change authenticator support or the client compatibility table.
 
 ## Clients
 
-The browser rows below are historical manual observations, not results from the
-new [reproducible browser/UHID acceptance workflow](tests/browser/ACCEPTANCE.md).
-That workflow records exact browser versions and all preset results in each
-completed run's artifacts; no new browser/version/preset passes are claimed here.
+The browser rows below were verified over real Linux UHID on 2026-10-15 in the
+[native acceptance run](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/38818030676).
+The [acceptance guide](tests/browser/ACCEPTANCE.md) records the exact versions,
+source and preset outcomes. Earlier manual observations remain in the
+[development notes](docs/development-notes.md#clients).
 
 | Client | ES256 | ML-DSA | Notes |
 |---|:---:|:---:|---|
-| Chromium 153 | ✓ | ✓ | Needs a PIN on the key for passkeys |
-| Firefox 154 | ✓ | | Ignores algorithms it does not know |
+| Chromium 158.0.8107.0 | ✓ | ✓ | All 21 algorithms verified, including Brainpool; passkeys need a PIN |
+| Firefox 158.0 | ✓ | | 15 algorithms verified; ML-DSA, Brainpool and ES256K are client limits |
 | python-fido2 2.2.1 | ✓ | ✓ | Used by the end-to-end tests |
-| libfido2 1.16 | ✓ | | PIN, credential management and `hmac-secret` work |
+| libfido2 1.14.0 | ✓ | | PIN, credential management, U2F and `hmac-secret` verified in native HID CI |
 
-These were tested on Ubuntu 26.04. Each client's limits are listed under
-[Clients](docs/development-notes.md#clients) in the development notes.
+Browser acceptance uses Ubuntu 24.04 x86_64 with automated PIN/account prompts
+and explicit auto-approve presence. The Python/libfido2 HID suites run on x86_64
+and aarch64. Browser signatures are independently verified, including algorithms
+whose public keys must be read from the attestation object. See
+[Clients](docs/development-notes.md#clients) for outcomes and limits.
 
 Credential management also supports the backwards-compatible `0x41` command
 used by libfido2 1.14.0, including its user-update operation. It accepts legacy

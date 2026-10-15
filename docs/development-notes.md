@@ -262,6 +262,28 @@ presence-required APDUs. libfido2's forced-U2F commands register and assert
 ES256 credentials and verify both directions of protocol compatibility.
 Raw HID tests observe busy replies without the client's automatic retries.
 
+The [2026-10-15 native browser run](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/38818030676)
+verified source `83837b767bb3c6c35bf6871a8289f88aa8715e6d` on Ubuntu 24.04 x86_64,
+with Rust 1.98.1 and Python 3.14.7. Both browsers completed all R1–R35/L1–L7
+presets and the B1/B2 Brainpool probes, including mandatory PIN, discoverable,
+replacement and stored-ID controls, with no infrastructure or unexpected failures.
+
+| Exact browser | Verified presets/probes | Expected errors | Measured algorithm limits | Ceremonies |
+|---|---:|---:|---:|---:|
+| Chromium 158.0.8107.0, snapshot 1719332 | 41 | 3 | 0 | 91 |
+| Firefox 158.0 | 34 | 1 | 9 | 83 |
+
+Chromium created and asserted all 21 algorithms. Its expected errors are R14
+exclusion and R17/R19's inconsistent credProtect inputs. Firefox verified 15
+algorithms; its nine limit observations are ML-DSA in both credential modalities,
+ES256K, and the two Brainpool probes. Firefox's unknown algorithm filtering and
+missing secp256k1 curve representation are documented with pinned sources and
+correlated CTAP responses in the [acceptance guide](../tests/browser/ACCEPTANCE.md).
+Each accepted registration has independently verified companion assertions.
+Both runs observed native PIN/account actions, exited cleanly and removed their
+HID devices. Presence was explicitly automated with `auto-approve`; this does
+not establish manual physical-presence or browser/SPC payment behavior.
+
 The following are historical manual observations from 2026-09-30 on Ubuntu
 26.04.1 (aarch64, GNOME 50.1). They are not results from the new automated matrix.
 
@@ -281,8 +303,7 @@ policy and diagnostic artifacts. Presence uses the daemon's explicit
 `auto-approve` mode, so these are compatibility measurements rather than manual
 physical-presence tests.
 
-No results for the newly selected browser identities are asserted here. Only a
-completed exact-version native run can establish a preset pass. The matrix
+Only a completed exact-version native run establishes a preset pass. The matrix
 separates verified ceremonies, expected errors, measured client capabilities and
 infrastructure failures, with classic ES256/PIN/discovery and stored-ID controls.
 Independent RP verification remains mandatory when python-fido2 cannot verify

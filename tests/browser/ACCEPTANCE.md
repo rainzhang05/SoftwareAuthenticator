@@ -7,10 +7,19 @@ and Mozilla Firefox against a fresh pqkey kernel UHID device. This is the curren
 Linux release configuration, with explicit `--presence auto-approve`. It tests
 automated compatibility, **not manual physical user presence**.
 
-No execution result is checked into this repository. The historical manual
-Chromium 153 / Firefox 154 observations in the Clients documentation are not
-results for this workflow. The first native dispatch, and every subsequent run,
-must finish before its exact browser/version/preset can be called passed.
+Full execution artifacts are retained with each workflow run; compatibility
+summaries link their exact source and browser identities. The historical manual
+Chromium 153 / Firefox 154 observations are separate from these measurements.
+
+The [2026-10-15 native run](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/38818030676)
+passed both jobs at source `83837b767bb3c6c35bf6871a8289f88aa8715e6d`.
+Chromium 158.0.8107.0 completed 91 ceremonies: 41 verified presets/probes and
+three expected errors. Firefox 158.0 completed 83 ceremonies: 34 verified,
+one expected exclusion and nine measured algorithm-limit results. Both covered
+all 44 numbered presets/probes, passed every mandatory control, and removed
+their owned HID devices cleanly. See the [client results](../../docs/development-notes.md#clients)
+for algorithm and expected-error details. A different version or source requires
+its own completed run.
 
 ## Dispatch and identities
 
@@ -214,6 +223,13 @@ against the owned Xvfb desktop. Input protection stays enabled. Acknowledged UI
 actions alone never establish success; the RP response must verify. Firefox
 uses native accessibility actions; its anonymous secondary menu is checked
 against the inspected response count before selecting the expected index.
+Chromium PIN entry and submission use separate accessibility snapshots, and
+control metadata is captured before activation can destroy the control.
+Native button motion avoids `xdotool --sync`: Ubuntu's shipped 2016 version
+waits for motion even if the pointer already occupies the requested position.
+Explicit stale-tree lookup errors permit at most three recorded retries within
+the existing deadline. Device, PIN, timeout and account-count failures remain
+fatal. Expected exclusion dismissal is limited to R14's exact native screen.
 
 Cleanup closes the owned browser, stops the owned daemon and verifies device
 removal, terminates owned buses/desktop processes, and removes temporary state.
