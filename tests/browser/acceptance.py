@@ -22,7 +22,7 @@ from pathlib import Path
 
 from download import digest, install
 from results import CONTROL_IDS, GOOD, classify, initial_rows, wait_until, write_report
-from runtime import OwnedProcesses, preflight, public_log
+from runtime import OwnedProcesses, fido_devices, preflight, public_log
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -295,7 +295,12 @@ class Run:
         if result.returncode:
             self.failures.append(f'{fixture}: screenshot failed')
 
+    def check_device_isolation(self):
+        if fido_devices() != {self.node}:
+            raise RuntimeError('FIDO device inventory changed; refusing browser/PIN actions')
+
     def ceremony(self, preset, *, account=None):
+        self.check_device_isolation()
         self.processes.adopt_descendants()
         self.counter += 1
         fixture = f'{preset["id"]}/{self.counter}'
@@ -312,6 +317,7 @@ class Run:
         observed_fingerprint = None
         last_action_time = start
         while time.monotonic() < deadline:
+            self.check_device_isolation()
             self.processes.adopt_descendants()
             if self.daemon.poll() is not None or self.driver_process.poll() is not None or self.rp_process.poll() is not None:
                 raise RuntimeError('daemon, browser driver or RP exited during ceremony')

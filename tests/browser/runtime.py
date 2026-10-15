@@ -28,6 +28,18 @@ def public_log(data, secrets=()):
     return text.encode()
 
 
+def fido_devices():
+    found = set()
+    for device in Path("/sys/class/hidraw").glob("hidraw*"):
+        try:
+            report = (device / "device/report_descriptor").read_bytes()
+        except OSError as error:
+            raise UnavailableRuntime(f"cannot inspect HID descriptor {device}: {error}") from error
+        if b"\x06\xd0\xf1" in report:
+            found.add('/dev/' + device.name)
+    return found
+
+
 def preflight():
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise UnavailableRuntime("unavailable runtime: real Linux x86_64 UHID is required; macOS/Docker without UHID cannot run browser acceptance; no services or personal state changed")
@@ -38,13 +50,8 @@ def preflight():
         os.close(descriptor)
     except OSError as error:
         raise UnavailableRuntime(f"unavailable runtime: cannot open real /dev/uhid read/write ({error}); provision UHID/udev first; no services or personal state changed") from error
-    for device in Path("/sys/class/hidraw").glob("hidraw*"):
-        try:
-            report = (device / "device/report_descriptor").read_bytes()
-        except OSError as error:
-            raise UnavailableRuntime(f"cannot inspect HID descriptor {device}: {error}") from error
-        if b"\x06\xd0\xf1" in report:
-            raise UnavailableRuntime(f"another FIDO HID device exists ({device.name}); use an isolated host; the harness will not stop your authenticator")
+    if fido_devices():
+        raise UnavailableRuntime('another FIDO HID device exists; use an isolated host; the harness will not stop your authenticator')
     needed = [name for name in ("Xvfb", "openbox", "dbus-daemon", "dunst", "gdbus", "xdotool", "scrot", "udevadm", "/usr/bin/python3")
               if not shutil.which(name)]
     if needed:

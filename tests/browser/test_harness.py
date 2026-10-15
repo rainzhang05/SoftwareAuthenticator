@@ -152,11 +152,21 @@ class Harness(unittest.TestCase):
             tick[0] += seconds
         observation = {"action": None, "fingerprint": 'same', "evidence": [], "tree": []}
         first = {**observation, 'action': 'entered PIN in native dialog'}
-        with patch.object(acceptance.time, 'monotonic', side_effect=lambda: tick[0]), patch.object(acceptance.time, 'sleep', side_effect=sleep), patch.object(run, 'results', return_value=[]), patch.object(acceptance, 'peer', side_effect=[first] + [observation] * 100):
+        with patch.object(run, 'check_device_isolation'), patch.object(acceptance.time, 'monotonic', side_effect=lambda: tick[0]), patch.object(acceptance.time, 'sleep', side_effect=sleep), patch.object(run, 'results', return_value=[]), patch.object(acceptance, 'peer', side_effect=[first] + [observation] * 100):
             with self.assertRaisesRegex(TimeoutError, 'native UI did not advance'):
                 run.ceremony({'id': 'R1', 'label': 'mock', 'kind': 'reg'})
         self.assertGreaterEqual(tick[0], 10)
         self.assertLess(tick[0], acceptance.CEREMONY_SECONDS)
+
+    def test_foreign_device_blocks_browser_and_pin_actions(self):
+        run = self.make_run()
+        run.node = '/dev/owned-unit-fixture'
+        run.driver = MagicMock()
+        with patch.object(acceptance, 'fido_devices', return_value={run.node, '/dev/foreign-unit-fixture'}), patch.object(acceptance, 'peer') as peer:
+            with self.assertRaisesRegex(RuntimeError, 'inventory changed'):
+                run.ceremony({'id': 'R1', 'kind': 'reg'})
+            run.driver.execute_script.assert_not_called()
+            peer.assert_not_called()
 
     def test_sensitive_stdin_is_not_in_peer_failure(self):
         response = subprocess.CompletedProcess([], 1, stdout='private PIN here', stderr='private PIN here')
