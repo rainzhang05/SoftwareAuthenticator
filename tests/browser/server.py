@@ -2,10 +2,10 @@
 """Local WebAuthn relying party for testing pqkey in real browsers.
 
 Serves http://localhost:8080 (RP ID "localhost", a secure context) on the
-loopback interfaces only. Every registration and sign-in is verified twice:
+loopback interfaces only. Every registration and sign-in is verified with:
 
   * by python-fido2's Fido2Server (register_complete / authenticate_complete)
-    plus python-fido2's attestation verifier for the statement's format;
+    plus python-fido2's attestation verifier where the algorithm is implemented;
   * independently, with the helpers of the end-to-end suite
     (tests/e2e/ctap.py): AuthData.parse/check, check_public_key,
     verify_signature (pyca/cryptography + OpenSSL ML-DSA) and verify_attestation.

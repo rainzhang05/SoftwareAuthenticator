@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import configparser
 import hashlib
 import importlib.metadata
@@ -96,7 +97,9 @@ class Run:
                               "openssl": backend.openssl_version_text(),
                               "packages": {d.metadata['Name']: d.version for d in importlib.metadata.distributions()},
                               "desktop_packages": command(['dpkg-query', '-W', 'xvfb', 'openbox', 'python3-pyatspi',
-                                                           'at-spi2-core', 'dbus-daemon', 'xdotool', 'scrot']),
+                                                           'at-spi2-core', 'dbus-daemon', 'xdotool', 'scrot',
+                                                           'libatspi*', 'libgtk-3*', 'libnss3', 'libudev1', 'udev']),
+                              "accessibility_python": command(['/usr/bin/python3', '--version']),
                               "runner": {k: os.environ.get(k) for k in ('ImageOS', 'ImageVersion', 'GITHUB_SHA',
                                         'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_WORKFLOW', 'RUNNER_ARCH')}})
         if self.control:
@@ -352,9 +355,9 @@ class Run:
                                 raise AssertionError('mixed parameter preference differs from pinned client policy')
                         identifier = entry['credentialId']
                         record = next(c for c in self.db()['users'][preset['username']]['credentials'] if c['id'] == identifier)
-                        if preset['id'] == 'R1' and (len(__import__('base64').urlsafe_b64decode(identifier + '===')) != 107):
+                        if preset['id'] == 'R1' and len(base64.urlsafe_b64decode(identifier + '===')) != 107:
                             raise AssertionError('R1 must exercise sealed non-discoverable IDs')
-                        if preset['id'] == 'R30' and (len(__import__('base64').urlsafe_b64decode(identifier + '===')) != 33 or record['disc']):
+                        if preset['id'] == 'R30' and (len(base64.urlsafe_b64decode(identifier + '===')) != 33 or record['disc']):
                             raise AssertionError('R30 must exercise stored non-discoverable IDs')
                         for mode in (['cred:' + identifier, 'empty'] if record['disc'] else ['cred:' + identifier]):
                             followup = {"id": preset['id'] + '/' + ('discoverable' if mode == 'empty' else 'allow'),

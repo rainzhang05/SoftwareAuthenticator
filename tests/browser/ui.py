@@ -50,7 +50,8 @@ def operate(request, api):
         if len(passwords) != 1:
             raise RuntimeError("unexpected PIN setup/multiple password fields; fixture PIN is already set")
         # Focus and use XTEST keystrokes, as a person types into the native field.
-        passwords[0].queryComponent().grabFocus()
+        if not passwords[0].queryComponent().grabFocus():
+            raise RuntimeError('could not focus native PIN field')
         subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+a"], check=True, timeout=2)
         subprocess.run(["xdotool", "type", "--clearmodifiers", "--file", "-"], input=request["pin"].encode(), check=True, timeout=2)
         subprocess.run(["xdotool", "key", "Return"], check=True, timeout=2)

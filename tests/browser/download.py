@@ -47,6 +47,10 @@ def install(browser, destination):
         executable = destination / item["executable"]
         executable.chmod(executable.stat().st_mode | 0o100)
         archive.unlink()
+    if browser == 'firefox':
+        policy_dir = destination / 'firefox/distribution'
+        policy_dir.mkdir(exist_ok=True)
+        (policy_dir / 'policies.json').write_text(json.dumps({"policies": {"DisableAppUpdate": True}}))
     receipt = {"manifest_sha256": digest(Path(__file__).with_name("toolchain.json")), "browser": browser,
                "executables": {kind: digest(destination / lock[kind]["executable"]) for kind in ("browser", "driver")}}
     (destination / "verified-download.json").write_text(json.dumps(receipt, indent=2) + "\n")
