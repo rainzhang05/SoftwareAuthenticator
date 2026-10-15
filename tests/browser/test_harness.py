@@ -27,7 +27,7 @@ class Harness(unittest.TestCase):
             spawned.assert_not_called()
 
     def test_driver_output_redacts_control_tokens_before_disk(self):
-        line = b'DevTools listening on ws://127.0.0.1:1234/devtools/browser/secret-session sessionId=0123456789abcdef PIN=unit-secret http://localhost:8080'
+        line = b'DevTools listening on ws://127.0.0.1:1234/devtools/browser/secret-session sessionId=0123456789abcdef Session ID: 0123456789abcdef PIN=unit-secret http://localhost:8080'
         public = runtime.public_log(line, ('unit-secret',)).decode()
         self.assertNotIn('secret-session', public)
         self.assertNotIn('0123456789abcdef', public)

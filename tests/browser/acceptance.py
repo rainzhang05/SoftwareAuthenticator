@@ -22,7 +22,7 @@ from pathlib import Path
 
 from download import digest, install
 from results import CONTROL_IDS, GOOD, classify, initial_rows, wait_until, write_report
-from runtime import OwnedProcesses, preflight
+from runtime import OwnedProcesses, preflight, public_log
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -90,6 +90,9 @@ class Run:
 
     def write(self):
         return write_report(self.out, self.browser, self.metadata, self.rows, self.failures)
+
+    def safe_text(self, text):
+        return public_log(str(text).encode(), (self.pin,)).decode()
 
     def setup(self):
         preflight()  # before downloads, state, buses, desktop or daemon startup
@@ -225,7 +228,7 @@ class Run:
     def console(self, entry):
         # Do not dump protocol frames, log arguments or driver/session tokens.
         with self.console_file.open('a') as output:
-            output.write(json.dumps({k: getattr(entry, k, None) for k in ('level', 'text', 'timestamp')}, default=str).replace(self.pin, '<redacted>') + '\n')
+            output.write(self.safe_text(json.dumps({k: getattr(entry, k, None) for k in ('level', 'text', 'timestamp')}, default=str)) + '\n')
 
     def start_browser(self):
         from selenium import webdriver
@@ -422,7 +425,7 @@ class Run:
                     row['reason'] = 'mandatory classic/PIN/discoverable control failed'
             except Exception as error:
                 row.update(outcome='infrastructure_failure' if not isinstance(error, AssertionError) else 'unexpected_failure',
-                           reason=f'{type(error).__name__}: {error}')
+                           reason=self.safe_text(f'{type(error).__name__}: {error}'))
                 try:
                     self.screenshot(preset['id'])
                 except Exception:
@@ -495,7 +498,7 @@ class Run:
             self.failures.append(str(error))
             raise
         except Exception as error:
-            self.failures.append(f'setup/runtime: {type(error).__name__}: {error}')
+            self.failures.append(self.safe_text(f'setup/runtime: {type(error).__name__}: {error}'))
             print(self.failures[-1], file=sys.stderr)
         finally:
             self.cleanup()
