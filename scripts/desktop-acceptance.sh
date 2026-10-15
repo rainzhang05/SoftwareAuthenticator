@@ -214,6 +214,9 @@ if [ "$mode" = run ]; then
 fi
 
 failed=0
+# Cleanup commands contain only owned resource identities; trace them so a
+# partial preparation failure retains the exact failing cleanup operation.
+set -x
 # Keep a cleanup ledger and diagnostics even when the session failed before Python.
 # Diagnostic files are owned by the runner; sudo only supplies the read/process access.
 # shellcheck disable=SC2024
@@ -239,11 +242,19 @@ if systemctl cat "$unit" >/dev/null 2>&1; then sudo systemctl stop "$unit" || fa
 # Only named LightDM and Xorg text logs are retained; auth files and the user's
 # state, PIN, credentials, tokens and .Xauthority are never copied.
 if [ -d "$work/log" ]; then
-  sudo cp "$work/log/lightdm.log" "$evidence/desktop.log" 2>/dev/null || true
-  sudo cp "$work/log/x-80.log" "$evidence/xorg.log" 2>/dev/null || true
+  # Open public diagnostics as the runner; copying a 0600 root log would mask
+  # its inherited ACL and prevent artifact upload.
+  # shellcheck disable=SC2024
+  sudo cat "$work/log/lightdm.log" > "$evidence/desktop.log" 2>/dev/null || true
+  # shellcheck disable=SC2024
+  sudo cat "$work/log/x-80.log" > "$evidence/xorg.log" 2>/dev/null || true
 fi
 # shellcheck disable=SC2024
 sudo journalctl -u "$unit" --no-pager > "$evidence/desktop-journal.log" 2>&1 || true
+# Preserve startup diagnostics in the workflow log even if artifact upload fails.
+if ! sudo test -f "$owned_home/control/session-started"; then
+  tail -n 100 "$evidence/desktop.log" "$evidence/xorg.log" "$evidence/desktop-journal.log" || true
+fi
 if id "$user" >/dev/null 2>&1; then
   if loginctl show-user "$user" --property=UID --value >/dev/null 2>&1; then
     sudo loginctl terminate-user "$user" || failed=1
