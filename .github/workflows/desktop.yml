@@ -1,0 +1,100 @@
+name: Installed Linux desktop acceptance
+
+# Real active-seat permissions and real notification actions are opt-in.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installed-desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  desktop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Initialize incomplete evidence
+        run: |
+          python3 tests/e2e/desktop_results.py "$RUNNER_TEMP/pqkey-desktop-evidence" --initialize "$(git rev-parse HEAD)"
+          {
+            uname -a
+            printf 'ImageOS=%s\nImageVersion=%s\n' "$ImageOS" "$ImageVersion"
+            git rev-parse HEAD
+            git rev-parse 5dc4b7c83709a57773724e87fe4781a2f3cd0be5
+          } > "$RUNNER_TEMP/pqkey-desktop-evidence/runner.txt"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14.7"
+      - name: Prepare fresh current installation
+        id: prepare-fresh
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          DESKTOP_PYTHON="$(command -v python)" scripts/desktop-acceptance.sh prepare fresh \
+            2>&1 | tee "$RUNNER_TEMP/pqkey-desktop-evidence/fresh/prepare.log"
+      - name: Fresh install and default presence through real Dunst UI
+        timeout-minutes: 36
+        run: |
+          set -o pipefail
+          scripts/desktop-acceptance.sh run fresh 2>&1 | tee "$RUNNER_TEMP/pqkey-desktop-evidence/fresh/run.log"
+      - name: Clean owned fresh installation and desktop
+        id: cleanup-fresh
+        if: always()
+        timeout-minutes: 5
+        run: |
+          set -o pipefail
+          scripts/desktop-acceptance.sh cleanup fresh 2>&1 | tee "$RUNNER_TEMP/pqkey-desktop-evidence/fresh/cleanup.log"
+      - name: Prepare separate baseline installation
+        id: prepare-upgrade
+        if: ${{ !cancelled() && steps.cleanup-fresh.outcome == 'success' }}
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          DESKTOP_PYTHON="$(command -v python)" scripts/desktop-acceptance.sh prepare upgrade \
+            2>&1 | tee "$RUNNER_TEMP/pqkey-desktop-evidence/upgrade/prepare.log"
+      - name: Update baseline to current and verify retained credentials
+        if: ${{ !cancelled() && steps.prepare-upgrade.outcome == 'success' }}
+        timeout-minutes: 36
+        run: |
+          set -o pipefail
+          scripts/desktop-acceptance.sh run upgrade 2>&1 | tee "$RUNNER_TEMP/pqkey-desktop-evidence/upgrade/run.log"
+      - name: Clean owned upgrade installation and desktop
+        if: always()
+        timeout-minutes: 5
+        run: |
+          set -o pipefail
+          scripts/desktop-acceptance.sh cleanup upgrade 2>&1 | tee "$RUNNER_TEMP/pqkey-desktop-evidence/upgrade/cleanup.log"
+      - name: Include every workflow and cleanup failure
+        if: always()
+        env:
+          WORKFLOW_STAGE_STATUS: ${{ job.status }}
+        run: python3 tests/e2e/desktop_results.py "$RUNNER_TEMP/pqkey-desktop-evidence" --workflow-status "$WORKFLOW_STAGE_STATUS"
+      - name: Publish readable summary
+        if: always()
+        run: cat "$RUNNER_TEMP/pqkey-desktop-evidence/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain only public diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: installed-desktop-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/pqkey-desktop-evidence/*.json
+            ${{ runner.temp }}/pqkey-desktop-evidence/*.txt
+            ${{ runner.temp }}/pqkey-desktop-evidence/summary.md
+            ${{ runner.temp }}/pqkey-desktop-evidence/*/*.json
+            ${{ runner.temp }}/pqkey-desktop-evidence/*/*.jsonl
+            ${{ runner.temp }}/pqkey-desktop-evidence/*/*.log
+            ${{ runner.temp }}/pqkey-desktop-evidence/*/*.png
+            ${{ runner.temp }}/pqkey-desktop-evidence/*/*.txt
+            ${{ runner.temp }}/pqkey-desktop-evidence/*/runner-cleanup-status

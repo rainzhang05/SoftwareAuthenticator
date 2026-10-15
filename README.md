@@ -49,8 +49,8 @@ preserve an unexpired lease. Clients should release leases in cleanup handlers.
 ## Install
 
 You need Linux with systemd and the `uhid` module (Ubuntu, Debian and Fedora
-have it), and a desktop whose notifications show buttons (GNOME, KDE Plasma or
-dunst). Copy this one command:
+have it), and a desktop whose notifications show request text and support
+approval actions (GNOME, KDE Plasma or Dunst). Copy this one command:
 
 ```bash
 git clone https://github.com/rainzhang05/SoftwareAuthenticator.git && SoftwareAuthenticator/install.sh
@@ -76,7 +76,7 @@ status and instructions; the installer log is `~/.cache/pqkey/install.log`
 
 `./install.sh --yes` approves installation; you still choose and confirm the
 PIN. Without terminal input, a fresh key remains installed but setup fails
-until you run `pqkey pin`, then `pqkey setup`, in a terminal. A configured key
+until you rerun `./install.sh` in a terminal and choose its PIN. A configured key
 can be updated without PIN input unless its policy requires a PIN change.
 If your terminal's PATH excludes `/usr/local/bin`, run
 `export PATH="/usr/local/bin:$PATH"` in that terminal and rerun the installer.
@@ -99,11 +99,27 @@ credentials created after that backup will be absent.
 > Anyone who can open `/dev/uhid` can create any HID device, keyboards
 > included. The rules give it to the `plugdev` group, and the installer adds
 > you to that group if you are not in it yet (on Ubuntu you already are).
+> An ACL grants this user immediate access while the current session and user
+> service manager still have their old groups. The key's hidraw device uses
+> the active local desktop session's `uaccess` permissions.
 
 ## Usage
 
 Register pqkey on any site that supports passkeys or security keys, and approve
 the notification that appears.
+
+Dunst exposes the Approve and Deny actions in its context menu: run
+`dunstctl context`, or use your configured context-menu shortcut, then select
+the action. Denial and an unanswered request's default 30-second timeout both
+reject the request. Cancelling the client or restarting the service withdraws
+its pending prompt.
+
+The manually dispatched [installed desktop acceptance workflow](.github/workflows/desktop.yml)
+tests normal installation, default notification actions and retained passkeys
+through a baseline-to-current update. Its [guide](tests/desktop/README.md)
+separates automated real-Dunst interaction from mocked tests and the completed
+browser compatibility results. A native workflow pass is required before
+claiming installed desktop acceptance.
 
 | Command | What it does |
 |---|---|

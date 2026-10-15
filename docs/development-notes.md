@@ -317,6 +317,33 @@ outside the repository and keep them separate from actual acceptance artifacts.
 Start with `pqkey status`, which names what is missing and how to fix it, or
 `scripts/diagnose.sh` for the whole picture.
 
+**Installation exits without “pqkey is ready.”** The service may already be
+installed while a requirement remains incomplete. Keep the log at
+`~/.cache/pqkey/install.log`, fix the reported requirement and rerun
+`./install.sh` in the same desktop terminal. Setup requires an answering HID
+device, the installed service and matching notification session, a notification
+server advertising actions and message bodies, and a configured PIN with no
+outstanding change requirement. `--yes` approves installation but does not
+supply a PIN. Readiness checks do not approve future requests for you.
+
+**The installer just added me to plugdev.** Setup grants your UID a `/dev/uhid`
+ACL so the existing session and user manager can start the key immediately.
+Its hidraw node needs an active local desktop seat for `uaccess`. A plain SSH
+session, container or Xvfb display alone does not establish that permission
+path. Rerun `./install.sh` to repair permissions; inspect `getfacl /dev/uhid`
+and the device shown by `pqkey status` if it still fails.
+
+**Dunst shows a prompt but no inline buttons.** Open its actions with
+`dunstctl context` or your configured context shortcut and choose Approve or
+Deny. Dunst needs dmenu or a configured compatible menu. An unanswered request
+expires after 30 seconds. Client cancellation and service restart withdraw the
+pending prompt; a previous approval cannot authorize the next request.
+
+The [installed desktop acceptance guide](../tests/desktop/README.md) documents
+the manually dispatched native test and its artifacts. It uses automated
+interaction with real Dunst, separately from browser compatibility tests using
+explicit auto-approve presence and E2E tests using a fake notification server.
+
 **The key stops answering and `pqkey stop` hangs.** The Linux uhid queue has
 an unlocked read race, seen especially on arm64. When it hits, `dmesg` shows
 the following, with `uhid_char_read` in the call trace:
