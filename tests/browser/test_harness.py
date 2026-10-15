@@ -55,6 +55,20 @@ class Harness(unittest.TestCase):
             with self.assertRaisesRegex(runtime.UnavailableRuntime, 'cannot open real /dev/uhid'):
                 runtime.preflight()
 
+    def test_accessibility_startup_requires_both_bus_and_registry(self):
+        run = self.make_run()
+        unavailable = {'status': 1, 'stdout': ''}
+        available = {'status': 0, 'stdout': "('unix:path=/owned/a11y',)"}
+        with patch.object(acceptance, 'command', return_value=unavailable):
+            self.assertIsNone(run.accessibility_bus())
+        with patch.object(acceptance, 'command', side_effect=[available, unavailable]):
+            self.assertIsNone(run.accessibility_bus())
+        with patch.object(acceptance, 'command', side_effect=[available, {'status': 0}, unavailable]):
+            self.assertIsNone(run.accessibility_bus())
+        with patch.object(acceptance, 'command', side_effect=[available, {'status': 0}, {'status': 0}]) as execute:
+            self.assertEqual(run.accessibility_bus(), 'unix:path=/owned/a11y')
+            self.assertIn('org.freedesktop.DBus.GetNameOwner', execute.call_args.args[0])
+
     def test_cleanup_tracks_groups_and_is_idempotent_after_leader_exit(self):
         owned = runtime.OwnedProcesses()
         process = MagicMock(pid=987654321)

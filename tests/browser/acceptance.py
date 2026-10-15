@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import configparser
 import importlib.metadata
@@ -206,6 +207,8 @@ class Run:
         service.read('/usr/share/dbus-1/services/org.a11y.Bus.service')
         launcher = shlex.split(service['D-BUS Service']['Exec'])
         self.processes.start(launcher + ['--launch-immediately'], self.out / 'accessibility.log', env=self.env)
+        self.env['AT_SPI_BUS_ADDRESS'] = wait_until(self.accessibility_bus, 10)
+        self.metadata['accessibility_registry_ready'] = True
         # Fail if the native accessibility peer cannot reach this isolated desktop.
         peer('ui.py', {"pin": self.pin, "account": None}, self.env, python='/usr/bin/python3')
         self.port = free_port()
@@ -214,6 +217,29 @@ class Run:
         wait_until(lambda: self.rp_data.exists() and self.endpoint_ready(self.port), 10)
         self.start_browser()
         self.metadata['browser_started'] = True
+
+    def accessibility_bus(self):
+        # libatspi can abort if queried before its freshly launched bus and
+        # registry own their names. Probe both explicitly before importing it.
+        try:
+            response = command(['gdbus', 'call', '--session', '--dest', 'org.a11y.Bus',
+                                '--object-path', '/org/a11y/bus', '--method', 'org.a11y.Bus.GetAddress'],
+                               env=self.env, timeout=2)
+            if response['status']:
+                return None
+            address, = ast.literal_eval(response['stdout'])
+            if not isinstance(address, str) or not address.startswith('unix:'):
+                return None
+            base = ['gdbus', 'call', '--address', address, '--dest', 'org.freedesktop.DBus',
+                    '--object-path', '/org/freedesktop/DBus', '--method']
+            started = command(base + ['org.freedesktop.DBus.StartServiceByName', 'org.a11y.atspi.Registry', '0'],
+                              env=self.env, timeout=2)
+            if started['status']:
+                return None
+            owner = command(base + ['org.freedesktop.DBus.GetNameOwner', 'org.a11y.atspi.Registry'], env=self.env, timeout=2)
+            return address if owner['status'] == 0 else None
+        except (OSError, subprocess.TimeoutExpired, ValueError, SyntaxError):
+            return None
 
     @staticmethod
     def endpoint_ready(port):
