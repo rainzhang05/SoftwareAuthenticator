@@ -73,7 +73,7 @@ class UI(unittest.TestCase):
         self.assertFalse(submitted['pin_pending_submit'])
         self.assertEqual(submitted['action_kind'], 'pin-submit')
         self.assertEqual(execute.call_count, 1)
-        self.assertEqual(execute.call_args.args[0], ['xdotool', 'mousemove', '--sync', '70', '50', 'click', '1'])
+        self.assertEqual(execute.call_args.args[0], ['xdotool', 'mousemove', '70', '50', 'click', '1'])
         sleep.assert_called_once_with(1)
         self.assertEqual(submitted['native_control']['bounds'], [20, 30, 100, 40])
 

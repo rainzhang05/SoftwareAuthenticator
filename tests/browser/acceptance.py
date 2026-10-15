@@ -41,6 +41,10 @@ class RunInterrupted(BaseException):
         self.signum = signum
 
 
+class NativeUIStateChanged(RuntimeError):
+    pass
+
+
 def command(argv, *, env=None, timeout=10):
     result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env, cwd=ROOT)
     return {"command": argv, "status": result.returncode, "stdout": result.stdout.strip(),
@@ -59,6 +63,7 @@ def peer(script, request, env, *, python=sys.executable, timeout=5):
                               text=True, capture_output=True, env=env, timeout=timeout)
     if response.returncode:
         detail = ''
+        state_changed = False
         if script == 'ui.py':
             try:
                 diagnostic = json.loads(response.stdout)
@@ -67,9 +72,12 @@ def peer(script, request, env, *, python=sys.executable, timeout=5):
                     detail = '; ' + kind
                 if diagnostic.get('error') == 'NativeUIError':
                     detail += ': ' + diagnostic['reason']
+                state_changed = (response.returncode == 2 and diagnostic.get('error') == 'Error'
+                                 and diagnostic.get('retryable_tree_change') is True)
             except (ValueError, KeyError, TypeError):
                 pass
-        raise RuntimeError(f'{script} failed (status {response.returncode}); native peer/setup failure{detail}')
+        error = NativeUIStateChanged if state_changed else RuntimeError
+        raise error(f'{script} failed (status {response.returncode}); native peer/setup failure{detail}')
     return json.loads(response.stdout)
 
 
@@ -371,6 +379,7 @@ class Run:
         observed_fingerprint = None
         last_action_time = start
         pin_pending_submit = False
+        ui_tree_retries = 0
         while time.monotonic() < deadline:
             self.check_device_isolation()
             self.processes.adopt_descendants()
@@ -385,13 +394,14 @@ class Run:
                                    timed_out=timed_out, transport=transport)
                 record = {"fixtureId": fixture, "outcome": outcome, "rp": entry, "ui_evidence": ui,
                           "ui_actions": actions, "transport_events": transport, "daemon_log_offset": transport_offset}
+                record['ui_tree_retries'] = ui_tree_retries
                 if outcome not in GOOD:
                     self.screenshot(fixture)
                 return record
             try:
                 observation = peer('ui.py', {"pin": self.pin, "account": account, "opaque_account": opaque_account,
                                             "last_fingerprint": fingerprint, 'submit_pin': pin_pending_submit}, self.env, python='/usr/bin/python3')
-            except RuntimeError:
+            except RuntimeError as error:
                 # A native accessible can disappear while a fast ceremony
                 # completes. Require its matching RP result before accepting
                 # that race; otherwise the UI peer failure remains fatal.
@@ -402,6 +412,10 @@ class Run:
                         break
                     time.sleep(0.05)
                 else:
+                    if isinstance(error, NativeUIStateChanged) and ui_tree_retries < 3:
+                        ui_tree_retries += 1
+                        self.metadata.setdefault('ui_tree_retries', {})[fixture] = ui_tree_retries
+                        continue
                     raise
                 continue
             pin_pending_submit = observation.get('pin_pending_submit', False)

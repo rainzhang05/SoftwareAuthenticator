@@ -45,7 +45,9 @@ def activate(node, api, *, xtest=False):
         x, y, width, height = bounds.x, bounds.y, bounds.width, bounds.height
         if not (0 <= x < x + width <= 1280 and 0 <= y < y + height <= 960):
             raise NativeUIError('native control is outside the owned desktop')
-        subprocess.run(['xdotool', 'mousemove', '--sync', str(x + width // 2), str(y + height // 2), 'click', '1'],
+        # Ubuntu 24.04's xdotool waits forever with --sync when the pointer
+        # already occupies this position. X11 orders motion before the click.
+        subprocess.run(['xdotool', 'mousemove', str(x + width // 2), str(y + height // 2), 'click', '1'],
                        check=True, timeout=2)
         return info
     else:
@@ -160,5 +162,6 @@ if __name__ == "__main__":
     except Exception as error:
         # An exception might carry a peer's payload; publish only its type.
         print(json.dumps({"error": type(error).__name__,
-                          'reason': str(error) if isinstance(error, NativeUIError) else None}))
-        sys.exit(1)
+                          'reason': str(error) if isinstance(error, NativeUIError) else None,
+                          'retryable_tree_change': type(error).__name__ == 'Error'}))
+        sys.exit(2 if type(error).__name__ == 'Error' else 1)

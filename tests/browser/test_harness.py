@@ -192,6 +192,33 @@ class Harness(unittest.TestCase):
         filename.write_bytes(prefix + b'[INFO] CTAP2 cmd=0x04 status=0x00 sub=n/a\n[INFO] CTAP2 cmd=0x01 status=0x26 sub=n/a\nSECRET: fixture\n')
         self.assertEqual(run.transport_events(len(prefix)), [{'command': 4, 'status': 0}, {'command': 1, 'status': 38}])
 
+    def test_native_tree_retry_is_explicit_and_bounded(self):
+        run = self.make_run()
+        run.driver = MagicMock()
+        run.daemon = run.driver_process = run.rp_process = MagicMock()
+        run.daemon.poll.return_value = None
+        run.version = '158.0'
+        tick = [0.0]
+        def sleep(seconds):
+            tick[0] += seconds
+        with patch.object(run, 'check_device_isolation'), patch.object(run, 'results', return_value=[]), patch.object(acceptance.time, 'monotonic', side_effect=lambda: tick[0]), patch.object(acceptance.time, 'sleep', side_effect=sleep), patch.object(acceptance, 'peer', side_effect=acceptance.NativeUIStateChanged('stale tree')) as peer:
+            with self.assertRaisesRegex(acceptance.NativeUIStateChanged, 'stale tree'):
+                run.ceremony({'id': 'R1', 'kind': 'reg'})
+            self.assertEqual(peer.call_count, 4)
+        self.assertEqual(run.metadata['ui_tree_retries']['R1/1'], 3)
+        self.assertLess(tick[0], 3)
+
+    def test_only_the_explicit_native_tree_packet_is_retryable(self):
+        for status, kind, flag, expected in [(2, 'Error', True, acceptance.NativeUIStateChanged),
+                                             (1, 'Error', True, RuntimeError),
+                                             (2, 'NativeUIError', True, RuntimeError),
+                                             (2, 'Error', False, RuntimeError)]:
+            response = subprocess.CompletedProcess([], status, stdout=json.dumps({'error': kind, 'reason': 'fixed', 'retryable_tree_change': flag}), stderr='')
+            with patch.object(acceptance.subprocess, 'run', return_value=response):
+                with self.assertRaises(expected) as raised:
+                    acceptance.peer('ui.py', {}, {})
+                self.assertIs(type(raised.exception), expected)
+
     def test_foreign_device_blocks_browser_and_pin_actions(self):
         run = self.make_run()
         run.node = '/dev/owned-unit-fixture'
