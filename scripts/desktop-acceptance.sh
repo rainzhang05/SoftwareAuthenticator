@@ -97,9 +97,9 @@ PY_OWNER
   sudo chown -R "$user:$user" "$owned_home" "$evidence"
   # The runner owns the parent and can retain diagnostics after deleting the user.
   chmod 755 "$evidence"
-  git archive --format=tar HEAD | sudo -u "$user" tar -x -C "$owned_home/source-current"
+  git archive --format=tar HEAD | sudo -u "$user" tar -xm -C "$owned_home/source-current"
   if [ "$scenario" = upgrade ]; then
-    git archive --format=tar 5dc4b7c83709a57773724e87fe4781a2f3cd0be5 | sudo -u "$user" tar -x -C "$owned_home/source-baseline"
+    git archive --format=tar 5dc4b7c83709a57773724e87fe4781a2f3cd0be5 | sudo -u "$user" tar -xm -C "$owned_home/source-baseline"
   fi
   sudo -u "$user" "${DESKTOP_PYTHON:?}" -m venv "$owned_home/venv"
   sudo -u "$user" "$owned_home/venv/bin/python" -m pip install --require-hashes --only-binary :all: \
@@ -120,6 +120,7 @@ export PQKEY_DESKTOP_ACCEPTANCE=1
 export PQKEY_OWNER_LEDGER=$work/owner.json
 unset CARGO_HOME RUSTUP_HOME RUSTUP_TOOLCHAIN XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME
 cd $owned_home/source-current || exit 1
+printf 'started\n' > $owned_home/control/session-started
 $owned_home/venv/bin/python tests/e2e/desktop_acceptance.py --evidence $evidence --control $owned_home/control
 status=\$?
 printf '%s\n' "\$status" > $owned_home/control/exit-status
@@ -192,11 +193,16 @@ if [ "$mode" = run ]; then
     /usr/sbin/lightdm --config="$work/lightdm.conf"
   systemctl show "$unit" --property=MainPID,ExecStart,ActiveState > "$evidence/desktop-unit.txt"
   deadline=$((SECONDS + 2100))
+  startup_deadline=$((SECONDS + 120))
   while [ "$SECONDS" -lt "$deadline" ]; do
     if sudo test -f "$owned_home/control/exit-status"; then
       status=$(sudo cat "$owned_home/control/exit-status")
       [[ $status =~ ^[0-9]+$ ]] || exit 1
       exit "$status"
+    fi
+    if [ "$SECONDS" -ge "$startup_deadline" ] && ! sudo test -f "$owned_home/control/session-started"; then
+      echo 'Owned desktop login did not start the acceptance session within two minutes; see desktop diagnostics' >&2
+      exit 1
     fi
     systemctl is-active --quiet "$unit" || { echo 'Owned desktop exited; see diagnostics' >&2; exit 1; }
     sleep 2

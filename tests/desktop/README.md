@@ -2,7 +2,8 @@
 
 [Installed Linux desktop acceptance](../../.github/workflows/desktop.yml) is a
 manual `workflow_dispatch` job on a disposable Ubuntu 24.04 x86_64 runner. It has
-a 90-minute job limit and a 35-minute native deadline per scenario. It never
+a 90-minute job limit and a 35-minute native deadline per scenario. The owned
+desktop login must start its acceptance session within two minutes. It never
 runs on ordinary pushes. Push the reviewed commits, then dispatch this workflow
 on that revision; local macOS checks cannot establish a native acceptance pass.
 
