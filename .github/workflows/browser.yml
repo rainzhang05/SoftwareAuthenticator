@@ -28,6 +28,8 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_NET_RETRY: 10
       RUST_BACKTRACE: 1
+      # The repository's stable override outranks rustup's default toolchain.
+      RUSTUP_TOOLCHAIN: 1.98.1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
