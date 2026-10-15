@@ -94,9 +94,11 @@ PY_OWNER
   sudo chmod 440 "$sudoers"
   sudo visudo -cf "$sudoers"
   sudo mkdir "$owned_home/source-current" "$owned_home/source-baseline" "$owned_home/control"
-  sudo chown -R "$user:$user" "$owned_home" "$evidence"
-  # The runner owns the parent and can retain diagnostics after deleting the user.
+  sudo chown -R "$user:$user" "$owned_home"
+  # Keep the runner as evidence owner. Both actors need to write diagnostics;
+  # default ACLs also cover files the test user creates during its session.
   chmod 755 "$evidence"
+  sudo setfacl -m "u:$user:rwx,d:u:$user:rwx,d:u:$(id -un):rwx" "$evidence"
   git archive --format=tar HEAD | sudo -u "$user" tar -xm -C "$owned_home/source-current"
   if [ "$scenario" = upgrade ]; then
     git archive --format=tar 5dc4b7c83709a57773724e87fe4781a2f3cd0be5 | sudo -u "$user" tar -xm -C "$owned_home/source-baseline"
@@ -243,7 +245,9 @@ fi
 # shellcheck disable=SC2024
 sudo journalctl -u "$unit" --no-pager > "$evidence/desktop-journal.log" 2>&1 || true
 if id "$user" >/dev/null 2>&1; then
-  sudo loginctl terminate-user "$user" || failed=1
+  if loginctl show-user "$user" --property=UID --value >/dev/null 2>&1; then
+    sudo loginctl terminate-user "$user" || failed=1
+  fi
   # logind closes the session asynchronously; wait before removing its account.
   for _attempt in $(seq 1 40); do
     if ! pgrep -u "$uid" >/dev/null; then break; fi
