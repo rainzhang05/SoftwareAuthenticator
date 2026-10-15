@@ -22,7 +22,8 @@ def public_log(data, secrets=()):
     """Redact control endpoints/session tokens before process output hits disk."""
     text = data.decode('utf-8', errors='replace')
     text = re.sub(r'wss?://[^\s"<>]+', '[automation endpoint redacted]', text)
-    text = re.sub(r'(?i)(session(?:[_ ]?id)?["\s:=]+)[0-9a-f-]{16,}', r'\1[redacted]', text)
+    text = re.sub(r"(?i)(session(?:[_ ]?id)?[\"'\s:=]+)[0-9a-f-]{16,}", r'\1[redacted]', text)
+    text = re.sub(r'(?i)(/session/)[0-9a-f-]{16,}', r'\1[redacted]', text)
     for secret in secrets:
         text = text.replace(secret, '[redacted]')
     return text.encode()
