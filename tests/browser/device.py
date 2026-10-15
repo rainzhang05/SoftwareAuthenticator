@@ -31,6 +31,7 @@ def operate(request):
         entries = manager.enumerate_creds(rp.rc.sha256(b"localhost"))
         result = CredentialManagement.RESULT
         return [{"id": rp.b64u(entry[result.CREDENTIAL_ID]["id"]),
+                 "cred_protect": entry.get(0x0A, 1),
                  "user": {"name": entry[result.USER].get("name"),
                           "id": rp.b64u(entry[result.USER]["id"])}} for entry in entries]
 

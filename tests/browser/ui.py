@@ -7,6 +7,7 @@ Only named browser prompts and the expected account may be operated.
 """
 import json
 import hashlib
+import re
 import subprocess
 import sys
 
@@ -54,7 +55,17 @@ def operate(request, api):
             raise RuntimeError('could not focus native PIN field')
         subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+a"], check=True, timeout=2)
         subprocess.run(["xdotool", "type", "--clearmodifiers", "--file", "-"], input=request["pin"].encode(), check=True, timeout=2)
-        subprocess.run(["xdotool", "key", "Return"], check=True, timeout=2)
+        # Chromium's PIN dialog does not submit on Return. Its named native
+        # button is available before typing, even though editable values are
+        # deliberately excluded from the public accessibility fingerprint.
+        next_buttons = [n for dialog in dialogs for n in nodes(dialog)
+                        if visible(n, api) and n.getRoleName() in ("push button", "button")
+                        and n.name.strip() == "Next"]
+        if next_buttons:
+            if not next_buttons[0].queryAction().doAction(0):
+                raise RuntimeError('could not submit native PIN dialog')
+        else:
+            subprocess.run(["xdotool", "key", "Return"], check=True, timeout=2)
         result["action"] = "entered PIN in native dialog"
         result["action_kind"] = "pin"
         return result
@@ -62,7 +73,10 @@ def operate(request, api):
     account = request.get("account")
     # Match full account labels, never a substring of another user's name.
     candidates = [n for n in buttons if account and n.name.strip().splitlines()
-                  and all(line.strip() == account for line in n.name.strip().splitlines())]
+                  and all(re.fullmatch(re.escape(account) + r'(?: \(\d+\))?', line.strip())
+                          for line in n.name.strip().splitlines())]
+    if not candidates and request.get('opaque_account'):
+        candidates = [n for n in buttons if n.name.strip() == request['opaque_account']]
     action_kind = 'account'
     if not candidates:
         action_kind = 'transport'
@@ -73,7 +87,8 @@ def operate(request, api):
         candidates = [n for n in buttons if n.name.strip().lower() in ("continue", "next", "allow", "ok")]
     if not candidates and account:
         action_kind = 'account-menu'
-        candidates = [n for n in buttons if n.name.strip().lower() in ('more actions', 'more options', 'show more options')]
+        candidates = [n for n in buttons if n.name.strip().lower() in ('more actions', 'more options', 'show more options')
+                      or n.name.strip().endswith(' More Options')]
     if "unsupported-key" in result["evidence"]:
         action_kind = 'dismiss-incompatibility'
         candidates = [n for n in buttons if n.name.strip().lower() == "cancel"]

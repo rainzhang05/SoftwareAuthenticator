@@ -158,6 +158,26 @@ class Harness(unittest.TestCase):
         self.assertGreaterEqual(tick[0], 10)
         self.assertLess(tick[0], acceptance.CEREMONY_SECONDS)
 
+    def test_completed_matching_rp_result_wins_a_disappearing_accessible_race(self):
+        run = self.make_run()
+        run.driver = MagicMock()
+        run.daemon = run.driver_process = run.rp_process = MagicMock()
+        run.daemon.poll.return_value = None
+        run.version = '158.0'
+        result = {'fixtureId': 'R1/1', 'outcome': 'PASS'}
+        with patch.object(run, 'check_device_isolation'), patch.object(run, 'results', side_effect=[[], [result], [result]]), patch.object(acceptance, 'peer', side_effect=RuntimeError('accessible disappeared')):
+            self.assertEqual(run.ceremony({'id': 'R1', 'kind': 'reg'})['outcome'], 'verified_success')
+        with patch.object(run, 'check_device_isolation'), patch.object(run, 'results', return_value=[result]), patch.object(acceptance, 'peer', side_effect=RuntimeError('peer failed')):
+            with self.assertRaisesRegex(RuntimeError, 'peer failed'):
+                run.ceremony({'id': 'R1', 'kind': 'reg'})
+
+    def test_transport_evidence_contains_only_commands_after_its_offset(self):
+        run = self.make_run()
+        filename = run.out / 'daemon.log'
+        prefix = b'[INFO] CTAP2 cmd=0x01 status=0x00 sub=n/a\n'
+        filename.write_bytes(prefix + b'[INFO] CTAP2 cmd=0x04 status=0x00 sub=n/a\n[INFO] CTAP2 cmd=0x01 status=0x26 sub=n/a\nSECRET: fixture\n')
+        self.assertEqual(run.transport_events(len(prefix)), [{'command': 4, 'status': 0}, {'command': 1, 'status': 38}])
+
     def test_foreign_device_blocks_browser_and_pin_actions(self):
         run = self.make_run()
         run.node = '/dev/owned-unit-fixture'

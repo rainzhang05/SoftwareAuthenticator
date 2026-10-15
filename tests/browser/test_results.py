@@ -20,12 +20,24 @@ class Results(unittest.TestCase):
         self.assertEqual(classify(error, "R1", "chromium", "158.0"), "unexpected_failure")
         self.assertEqual(classify({**error, "stage": "verification"}, "R14", "chromium", "158.0"), "infrastructure_failure")
         self.assertEqual(classify({"outcome": "PASS"}, "R14", "chromium", "158.0"), "unexpected_failure")
-        error = {"outcome": "NotAllowedError", "stage": "webauthn", "request": {"algs": [-48]}}
+        error = {"outcome": "NotAllowedError", "stage": "webauthn", "request": {"algs": [-48]}, 'elapsed_ms': 500}
         self.assertEqual(classify(error, "R3", "firefox", "158.0"), "unexpected_failure")
-        self.assertEqual(classify(error, "R3", "firefox", "158.0", ["unsupported-key"]), "unsupported_browser_capability")
-        self.assertEqual(classify(error, "R3", "firefox", "159.0", ["unsupported-key"]), "unexpected_failure")
-        self.assertEqual(classify(error, "R3", "firefox", "158.0", ["unsupported-key"], timed_out=True), "infrastructure_failure")
+        transport = [{'command': 4, 'status': 0}, {'command': 1, 'status': 0x26}]
+        self.assertEqual(classify(error, "R3", "firefox", "158.0", transport=transport), "unsupported_browser_capability")
+        self.assertEqual(classify(error, "R3", "firefox", "159.0", transport=transport), "unexpected_failure")
+        self.assertEqual(classify(error, "R3", "firefox", "158.0", transport=transport, timed_out=True), "infrastructure_failure")
+        for invalid in ([], [{'command': 1, 'status': 0}], transport + [{'command': 6, 'status': 0x31}], transport * 2):
+            self.assertEqual(classify(error, "R3", "firefox", "158.0", transport=invalid), 'unexpected_failure')
+        self.assertEqual(classify({**error, 'elapsed_ms': 25000}, 'R3', 'firefox', '158.0', transport=transport), 'unexpected_failure')
         self.assertEqual(classify({"outcome": "FAIL"}, "R3", "firefox", "158.0"), "unexpected_failure")
+
+    def test_chromium_policy_rejections_require_exact_preset_and_parameters(self):
+        message = 'Requested protection policy is inconsistent or incongruent with other requested parameters.'
+        entry = {'outcome': 'NotSupportedError', 'stage': 'webauthn', 'error': {'message': message},
+                 'request': {'credProtect': 'userVerificationRequired', 'userVerification': 'preferred'}}
+        self.assertEqual(classify(entry, 'R19', 'chromium', '158.0'), 'expected_webauthn_error')
+        self.assertEqual(classify(entry, 'R18', 'chromium', '158.0'), 'unexpected_failure')
+        self.assertEqual(classify({**entry, 'request': {**entry['request'], 'userVerification': 'required'}}, 'R19', 'chromium', '158.0'), 'unexpected_failure')
 
     def test_waits_have_a_real_deadline_and_propagate_peer_failures(self):
         tick = [0]

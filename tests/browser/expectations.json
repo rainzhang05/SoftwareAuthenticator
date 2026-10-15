@@ -1,23 +1,48 @@
 {
-  "notes": "Conservative source-based candidates, not passed results. A real native incompatibility screen and healthy controls are required. All other browser errors fail pending review of the captured evidence.",
+  "notes": "Exact-version rules reviewed against native run 38698509912 and primary browser sources. Rejections require correlated real CTAP command/status evidence and healthy controls. Generic browser errors and timeouts remain failures.",
   "rejection_rules": [
-    {
-      "browser": "chromium",
-      "version_prefix": "158.",
-      "algorithms": [-35, -51, -36, -52, -47, -53, -265, -267],
-      "errors": ["NotAllowedError", "NotSupportedError"],
-      "ui_evidence": "unsupported-key",
-      "source": "https://chromium.googlesource.com/chromium/src/+/087fe41c36241e05f1faa80503f534a454b7e911/device/fido/public_key.cc",
-      "rationale": "The EC2 and OKP key parsers only accept P-256 and Ed25519 respectively; retain the pinned browser revision in toolchain.json. Never infer rejection from timeout."
-    },
     {
       "browser": "firefox",
       "version_prefix": "158.",
       "algorithms": [-48, -49, -50, -265, -267],
-      "errors": ["NotAllowedError", "NotSupportedError"],
-      "ui_evidence": "unsupported-key",
+      "errors": ["NotAllowedError"],
+      "make_credential_status": 38,
+      "max_elapsed_ms": 3000,
+      "source": "https://hg.mozilla.org/releases/mozilla-release/file/FIREFOX_158_0_RELEASE/dom/webauthn/authrs_bridge/src/lib.rs",
+      "additional_source": "https://hg.mozilla.org/releases/mozilla-release/file/FIREFOX_158_0_RELEASE/third_party/rust/authenticator/src/crypto/mod.rs",
+      "rationale": "The make_credential bridge filters unsupported PublicKeyCredentialParameters identifiers. With only these unknown IDs, the real key receives no supported algorithm and responds CTAP2_ERR_UNSUPPORTED_ALGORITHM (0x26). Require that exact response, successful surrounding commands and a prompt non-timeout browser error."
+    },
+    {
+      "browser": "firefox",
+      "version_prefix": "158.",
+      "algorithms": [-47],
+      "errors": ["NotAllowedError"],
+      "make_credential_status": 0,
+      "max_elapsed_ms": 3000,
       "source": "https://hg.mozilla.org/releases/mozilla-release/file/FIREFOX_158_0_RELEASE/third_party/rust/authenticator/src/crypto/mod.rs",
-      "rationale": "Unknown COSE identifiers cannot be represented by this release's authenticator client. An unqualified NotAllowedError is still a failure."
+      "rationale": "ES256K is offered and makeCredential succeeds, but Curve::try_from cannot represent secp256k1 (COSE curve 8), so Firefox rejects the response. Require the real successful makeCredential response, no other CTAP errors and prompt browser rejection."
+    }
+  ],
+  "expected_error_rules": [
+    {
+      "browser": "chromium",
+      "version_prefix": "158.",
+      "preset": "R17",
+      "error": "NotSupportedError",
+      "message": "Requested protection policy is inconsistent or incongruent with other requested parameters.",
+      "request": {"credProtect": "userVerificationOptional", "enforceCredProtect": true},
+      "source": "https://chromium.googlesource.com/chromium/src/+/087fe41c36241e05f1faa80503f534a454b7e911/content/browser/webauth/authenticator_common_impl.cc",
+      "rationale": "Chromium rejects enforcing the optional/default credProtect level."
+    },
+    {
+      "browser": "chromium",
+      "version_prefix": "158.",
+      "preset": "R19",
+      "error": "NotSupportedError",
+      "message": "Requested protection policy is inconsistent or incongruent with other requested parameters.",
+      "request": {"credProtect": "userVerificationRequired", "userVerification": "preferred"},
+      "source": "https://chromium.googlesource.com/chromium/src/+/087fe41c36241e05f1faa80503f534a454b7e911/content/browser/webauth/authenticator_common_impl.cc",
+      "rationale": "Chromium requires userVerification=required when credProtect requires UV; the original R19 preset offers preferred."
     }
   ],
   "extension_sources": {

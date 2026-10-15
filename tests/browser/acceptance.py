@@ -9,6 +9,7 @@ import importlib.metadata
 import json
 import os
 import platform
+import re
 import select
 import secrets
 import shlex
@@ -307,12 +308,20 @@ class Run:
         if fido_devices() != {self.node}:
             raise RuntimeError('FIDO device inventory changed; refusing browser/PIN actions')
 
-    def ceremony(self, preset, *, account=None):
+    def transport_events(self, offset=0):
+        path = self.out / 'daemon.log'
+        data = path.read_bytes()[offset:] if path.exists() else b''
+        return [{'command': int(command, 16), 'status': int(status, 16)}
+                for command, status in re.findall(rb'CTAP2 cmd=(0x[0-9a-f]+) status=(0x[0-9a-f]+)', data)]
+
+    def ceremony(self, preset, *, account=None, opaque_account=None):
         self.check_device_isolation()
         self.processes.adopt_descendants()
         self.counter += 1
         fixture = f'{preset["id"]}/{self.counter}'
         config = {**preset, 'fixtureId': fixture, 'timeout': 25000}
+        daemon_log = self.out / 'daemon.log'
+        transport_offset = daemon_log.stat().st_size if daemon_log.exists() else 0
         self.driver.execute_script('window.pqkeyLastResult = null; window.pqkeyLoadForm(arguments[0])', config)
         button = 'btnReg' if preset['kind'] == 'reg' else 'btnLogin'
         self.driver.find_element('id', button).click()
@@ -333,12 +342,24 @@ class Run:
             if entry is not None:
                 # A browser's own ceremony timeout is an infrastructure failure too.
                 timed_out = entry.get('outcome') not in ('PASS', 'FAIL') and time.monotonic() - start >= 24
-                outcome = classify(entry, preset['id'].split('/')[0], self.browser, self.version, ui, timed_out=timed_out)
-                record = {"fixtureId": fixture, "outcome": outcome, "rp": entry, "ui_evidence": ui, "ui_actions": actions}
+                transport = self.transport_events(transport_offset)
+                outcome = classify(entry, preset['id'].split('/')[0], self.browser, self.version, ui,
+                                   timed_out=timed_out, transport=transport)
+                record = {"fixtureId": fixture, "outcome": outcome, "rp": entry, "ui_evidence": ui,
+                          "ui_actions": actions, "transport_events": transport, "daemon_log_offset": transport_offset}
                 if outcome not in GOOD:
                     self.screenshot(fixture)
                 return record
-            observation = peer('ui.py', {"pin": self.pin, "account": account, "last_fingerprint": fingerprint}, self.env, python='/usr/bin/python3')
+            try:
+                observation = peer('ui.py', {"pin": self.pin, "account": account, "opaque_account": opaque_account,
+                                            "last_fingerprint": fingerprint}, self.env, python='/usr/bin/python3')
+            except RuntimeError:
+                # A native accessible can disappear while a fast ceremony
+                # completes. Require its matching RP result before accepting
+                # that race; otherwise the UI peer failure remains fatal.
+                if any(e.get('fixtureId') == fixture for e in self.results()):
+                    continue
+                raise
             ui.extend(tag for tag in observation['evidence'] if tag not in ui)
             action = observation['action']
             if action:
@@ -388,7 +409,22 @@ class Run:
             row['attempted'] = True
             row.pop('reason', None)
             try:
-                first = self.ceremony(preset, account='alice' if preset['id'] == 'L2' else preset['username'])
+                account = 'alice' if preset['id'] == 'L2' else preset['username']
+                opaque_account = None
+                if self.browser == 'firefox' and preset['id'] == 'L2':
+                    # With UV discouraged the key intentionally omits account
+                    # names. Firefox labels these ordered CTAP responses by
+                    # index. Bind the selected index to read-only enumeration
+                    # and require its exact credential in the RP verifier.
+                    eligible = [c for c in self.device('enumerate') if c['cred_protect'] == 1]
+                    selected = next((i for i, c in enumerate(eligible) if c['user']['name'] == account), None)
+                    if selected is None:
+                        raise AssertionError('expected unverified discoverable account is unavailable')
+                    preset = {**preset, 'expectedCredential': eligible[selected]['id']}
+                    opaque_account = f'Unknown account ({selected})'
+                    row['opaque_account_selection'] = {'index': selected, 'credential': eligible[selected]['id'],
+                                                       'enumeration': eligible}
+                first = self.ceremony(preset, account=account, opaque_account=opaque_account)
                 row['ceremonies'].append(first)
                 row['outcome'] = first['outcome']
                 if first['outcome'] != 'verified_success':
@@ -410,7 +446,7 @@ class Run:
                             followup = {"id": preset['id'] + '/' + ('discoverable' if mode == 'empty' else 'allow'),
                                         "kind": 'login', "label": 'verified companion ' + preset['id'],
                                         "username": preset['username'], "allow": mode,
-                                        "uv": 'required' if preset.get('uv') == 'required' or preset['id'] == 'R19' else 'discouraged',
+                                        "uv": 'required' if mode == 'empty' or preset.get('uv') == 'required' or preset['id'] == 'R19' else 'discouraged',
                                         "expectedCredential": identifier}
                             verified = self.ceremony(followup, account=preset['username'])
                             row['ceremonies'].append(verified)
@@ -448,6 +484,7 @@ class Run:
                     pass
             finally:
                 self.write()
+                print(f'{self.browser} {row["preset"]}: {row["outcome"]}', flush=True)
             if row['outcome'] not in GOOD:
                 # Abort/dismiss only this browser request, preserve daemon and fixtures.
                 try:

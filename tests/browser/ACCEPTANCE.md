@@ -2,7 +2,7 @@
 
 The manually dispatched [Browser UHID acceptance workflow](../../.github/workflows/browser.yml)
 creates two independent native Ubuntu 24.04 x86_64 jobs. It builds the checked-out
-source with `cargo build -p pqkey --locked --release`, then runs upstream Chromium
+source with Rust 1.98.1 and `cargo build -p pqkey --locked --release`, then runs upstream Chromium
 and Mozilla Firefox against a fresh pqkey kernel UHID device. This is the current
 Linux release configuration, with explicit `--presence auto-approve`. It tests
 automated compatibility, **not manual physical user presence**.
@@ -112,6 +112,9 @@ Registrations run **R1 through R35**, with verified companion sign-ins immediate
 after each successful creation: an exact-ID allow list, plus an empty allow list
 and explicit expected account/credential for discoverable credentials. A created
 credential without its verified companion assertions fails the preset.
+Discoverable companion assertions require UV so account names are available and
+credProtect does not hide the credential. The numbered presets retain their
+original UV settings.
 
 - R2 uses Alice's existing RP user handle. Its assertions happen before R13
   replaces it. Read-only native credential enumeration after R2 and R13 confirms
@@ -134,7 +137,14 @@ credential without its verified companion assertions fails the preset.
 **L1 through L7** run after all numbered registrations, with the original kit
 allow-list behavior. L1/L3 keep Alice's accumulated list, including replaced
 RP-side IDs: lists are not shortened to evade existing client/request limits.
-L2 selects Alice via discovery. PRF sign-ins are repeated; the existing verifier
+L2 selects Alice via discovery. Firefox omits account names when UV is discouraged;
+its native menu then labels responses as `Unknown account (index)`. For this case,
+read-only enumeration binds the index to the key's ordered, credProtect-eligible
+credentials, and the RP verifier requires the exact selected credential. No
+credential is injected and no assertion is performed through that inspection
+client. The pinned Firefox prompt helper preserves the CTAP response order:
+[`WebAuthnPromptHelper.sys.mjs`](https://hg.mozilla.org/releases/mozilla-release/file/FIREFOX_158_0_RELEASE/toolkit/modules/WebAuthnPromptHelper.sys.mjs).
+PRF sign-ins are repeated; the existing verifier
 checks repeatability and salt separation, including A/B together. Comparisons
 are grouped by the **signed effective UV flag**, not by requested UV wording.
 B1/B2 follow the numbered presets and have companion assertions if creation
@@ -153,8 +163,8 @@ that from a completed real ceremony. Pending/unexecuted records never pass.
 | Outcome | Meaning |
 |---|---|
 | `verified_success` | Browser response passed mandatory independent verification and required companion assertions. |
-| `expected_webauthn_error` | Exact expected error, preset and WebAuthn stage matched (R14). |
-| `unsupported_browser_capability` | A sourced, version-scoped incompatibility screen/error matched, or a requested extension/attestation output was measurably absent from an otherwise verified ceremony. |
+| `expected_webauthn_error` | Exact expected error, preset and WebAuthn stage matched (R14 exclusion or Chromium's two inconsistent credProtect inputs). |
+| `unsupported_browser_capability` | A sourced, version-scoped rejection matched independently observed protocol evidence, or a requested extension/attestation output was measurably absent from an otherwise verified ceremony. |
 | `unexpected_failure` | Verification, requested behavior or an unrecognized browser error failed; needs triage and is not automatically an authenticator defect. |
 | `infrastructure_failure` | Device/access, dependency, process, driver, RP setup, native UI or bounded-wait failure prevented a valid measurement. |
 
@@ -162,11 +172,18 @@ Unsupported observations require successful mandatory classic controls:
 R1, R2, R12, R13, R15, R30 and L1–L3. A complete run must also observe native PIN
 entry and account selection. Generic `NotAllowedError`, a cancellation or timeout
 alone never establishes unsupported capability. [`expectations.json`](expectations.json)
-is intentionally conservative: source-based rejection candidates require an
-observed native incompatibility screen. An unknown algorithm rejected without
-sufficient diagnostic evidence fails pending review; no first-run errors are
-silently accepted. Expand rules only from primary browser sources and the
-captured behavior of the exact pinned version, then dispatch again.
+records rules reviewed against native run `38698509912` and the pinned browser
+sources. Firefox's unknown-algorithm rule requires the real key's `0x26`
+makeCredential response after browser parameter filtering. Its secp256k1 rule
+requires successful makeCredential followed by prompt browser rejection: that
+browser's COSE curve parser cannot represent curve 8. Both require exactly one
+creation response, successful surrounding CTAP commands, an exact algorithm set
+and a non-timeout error within three seconds. Only public command/status metadata
+is correlated from the daemon log; request payloads and tokens are not collected.
+Chromium's R17/R19 rules require its exact inconsistent-policy error and matching
+request parameters before any makeCredential command. Unexplained failures still
+fail. Expand rules only from primary browser sources and captured behavior of the
+exact pinned version, then dispatch again.
 
 The RP checks origin, challenge, RP hash, credential selection, ID modality,
 required UV, flags, signatures, counters and relevant extension relationships.

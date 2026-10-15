@@ -56,6 +56,28 @@ class UI(unittest.TestCase):
         bob.action.doAction.assert_called_once()
         bobby.action.doAction.assert_not_called()
 
+    def test_chromium_pin_uses_the_native_next_button(self):
+        next_button = Node('Next', 'push button')
+        dialog = Node('PIN required', 'dialog', Node('PIN', 'password text'), next_button)
+        with patch.object(ui.subprocess, 'run') as execute:
+            result = ui.operate({'pin': 'unit-secret'}, api(dialog))
+        self.assertEqual(result['action_kind'], 'pin')
+        next_button.action.doAction.assert_called_once_with(0)
+        self.assertEqual(execute.call_count, 2)
+
+    def test_firefox_account_access_keys_and_opaque_selection(self):
+        bob, bobby = Node('bob (1)', 'menu item'), Node('bobby (0)', 'menu item')
+        self.assertEqual(ui.operate({'account': 'bob'}, api(bobby, bob))['action_kind'], 'account')
+        bob.action.doAction.assert_called_once()
+        bobby.action.doAction.assert_not_called()
+        unknown = Node('Unknown account (2)', 'menu item')
+        ui.operate({'account': 'alice'}, api(unknown))
+        unknown.action.doAction.assert_not_called()
+        self.assertEqual(ui.operate({'account': 'alice', 'opaque_account': 'Unknown account (2)'}, api(unknown))['action_kind'], 'account')
+        unknown.action.doAction.assert_called_once()
+        more = Node('Unknown account (0) More Options', 'push button')
+        self.assertEqual(ui.operate({'account': 'bob'}, api(more))['action_kind'], 'account-menu')
+
     def test_duplicate_screen_does_not_repeat_input(self):
         password = Node('PIN', 'password text')
         with patch.object(ui.subprocess, 'run') as execute:

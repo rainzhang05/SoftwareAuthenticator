@@ -22,8 +22,8 @@ def wait_until(probe, seconds, *, clock=time.monotonic, sleep=time.sleep):
         sleep(min(0.1, remaining))
 
 
-def classify(entry, preset, browser, version, ui=(), *, timed_out=False):
-    """Unsupported needs an explicit native incompatibility screen AND source rule.
+def classify(entry, preset, browser, version, ui=(), *, timed_out=False, transport=()):
+    """Unsupported needs independently observed evidence AND a pinned source rule.
 
     A DOMException name, a cancellation or a timeout is never sufficient.
     Rules are deliberately conservative until a native run supplies more evidence.
@@ -38,14 +38,30 @@ def classify(entry, preset, browser, version, ui=(), *, timed_out=False):
         return "infrastructure_failure"
     if preset == "R14" and entry.get("outcome") == "InvalidStateError":
         return "expected_webauthn_error"
-    rules = json.loads((HERE / "expectations.json").read_text())["rejection_rules"]
+    policy = json.loads((HERE / "expectations.json").read_text())
+    for rule in policy.get('expected_error_rules', []):
+        if (browser == rule['browser'] and version.startswith(rule['version_prefix'])
+                and preset == rule['preset'] and entry.get('outcome') == rule['error']
+                and entry.get('error', {}).get('message') == rule['message']
+                and not any(event['command'] == 1 for event in transport)
+                and all((entry.get('request') or {}).get(k) == v for k, v in rule['request'].items())):
+            return 'expected_webauthn_error'
+    rules = policy['rejection_rules']
     algs = (entry.get("request") or {}).get("algs", [])
     for rule in rules:
         if (browser == rule["browser"] and version.startswith(rule["version_prefix"])
                 and algs and set(algs) <= set(rule["algorithms"])
                 and entry.get("outcome") in rule["errors"]
-                and rule["ui_evidence"] in ui):
-            return "unsupported_browser_capability"
+                and 0 <= entry.get('elapsed_ms', -1) <= rule.get('max_elapsed_ms', float('inf'))):
+            if rule.get('ui_evidence') in ui:
+                return "unsupported_browser_capability"
+            # One real makeCredential response, with every other command
+            # successful, distinguishes the sourced parser/filter limits from
+            # generic cancellation, PIN failure, missing device or timeout.
+            creations = [event for event in transport if event['command'] == 1]
+            if (len(creations) == 1 and creations[0]['status'] == rule.get('make_credential_status')
+                    and all(event['status'] == 0 for event in transport if event['command'] != 1)):
+                return "unsupported_browser_capability"
     return "unexpected_failure"
 
 
