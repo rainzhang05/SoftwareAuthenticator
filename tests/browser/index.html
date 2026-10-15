@@ -103,60 +103,17 @@
   </section>
 </div>
 </main>
-<script>
+<script type="module">
 const $ = (id) => document.getElementById(id);
 $('ua').textContent = navigator.userAgent;
 // The names of the algorithms, as in ALGORITHMS in tests/e2e/ctap.py.
 const NAMES = {'-7':'ES256','-48':'ML-DSA-44','-49':'ML-DSA-65','-50':'ML-DSA-87','-9':'ESP256','-35':'ES384','-51':'ESP384','-36':'ES512','-52':'ESP512','-47':'ES256K','-8':'EdDSA','-19':'Ed25519','-53':'Ed448','-257':'RS256','-258':'RS384','-259':'RS512','-37':'PS256','-38':'PS384','-39':'PS512','-265':'ESB256','-267':'ESB384'};
 
-const PRESETS = [
-  // registrations
-  {id:'R1', kind:'reg', label:'ES256 non-discoverable, UV discouraged', username:'alice', algs:'-7', rk:'discouraged', uv:'discouraged'},
-  {id:'R2', kind:'reg', label:'ES256 discoverable, UV discouraged', username:'alice', algs:'-7', rk:'required', uv:'discouraged'},
-  {id:'R3', kind:'reg', label:'ML-DSA-44 alone, non-discoverable', username:'alice', algs:'-48', rk:'discouraged'},
-  {id:'R4', kind:'reg', label:'ML-DSA-65 alone, non-discoverable', username:'alice', algs:'-49', rk:'discouraged'},
-  {id:'R5', kind:'reg', label:'ML-DSA-87 alone, non-discoverable', username:'alice', algs:'-50', rk:'discouraged'},
-  {id:'R6', kind:'reg', label:'ML-DSA-44 alone, discoverable', username:'mldsa44', algs:'-48', rk:'required'},
-  {id:'R7', kind:'reg', label:'ML-DSA-65 alone, discoverable', username:'mldsa65', algs:'-49', rk:'required'},
-  {id:'R8', kind:'reg', label:'ML-DSA-87 alone, discoverable (largest sign-in)', username:'mldsa87', algs:'-50', rk:'required'},
-  {id:'R9', kind:'reg', label:'Mixed [ML-DSA-44, ES256]: which does the key pick?', username:'mixed', algs:'-48,-7', rk:'discouraged'},
-  {id:'R10', kind:'reg', label:'Mixed [ES256, ML-DSA-87]', username:'mixed', algs:'-7,-50', rk:'discouraged'},
-  {id:'R11', kind:'reg', label:'Mixed [-50,-49,-48,-7]', username:'mixed', algs:'-50,-49,-48,-7', rk:'discouraged'},
-  {id:'R12', kind:'reg', label:'Second user bob, ES256 discoverable', username:'bob', algs:'-7', rk:'required'},
-  {id:'R13', kind:'reg', label:'Re-register alice discoverable (should replace old)', username:'alice', algs:'-7', rk:'required'},
-  {id:'R14', kind:'reg', label:'excludeCredentials = alice\'s creds (expect InvalidStateError)', username:'alice', algs:'-7', rk:'discouraged', exclude:true},
-  {id:'R15', kind:'reg', label:'ES256 discoverable, UV required (PIN)', username:'carol', algs:'-7', rk:'required', uv:'required'},
-  {id:'R16', kind:'reg', label:'PRF enabled at registration, discoverable', username:'prfuser', algs:'-7', rk:'required', prf:true},
-  {id:'R17', kind:'reg', label:'credProtect 1 (UVOptional), enforce', username:'cp1', algs:'-7', rk:'required', credProtect:'userVerificationOptional', enforce:true},
-  {id:'R18', kind:'reg', label:'credProtect 2 (WithCredentialIDList), enforce', username:'cp2', algs:'-7', rk:'required', credProtect:'userVerificationOptionalWithCredentialIDList', enforce:true},
-  {id:'R19', kind:'reg', label:'credProtect 3 (UVRequired), enforce', username:'cp3', algs:'-7', rk:'required', credProtect:'userVerificationRequired', enforce:true},
-  {id:'R20', kind:'reg', label:'attestation "direct", ES256 non-discoverable', username:'att', algs:'-7', rk:'discouraged', att:'direct'},
-  {id:'R21', kind:'reg', label:'ESP256 alone, non-discoverable', username:'alice', algs:'-9', rk:'discouraged'},
-  {id:'R22', kind:'reg', label:'ES384 alone, non-discoverable', username:'alice', algs:'-35', rk:'discouraged'},
-  {id:'R23', kind:'reg', label:'ESP384 alone, non-discoverable', username:'alice', algs:'-51', rk:'discouraged'},
-  {id:'R24', kind:'reg', label:'ES512 alone, non-discoverable', username:'alice', algs:'-36', rk:'discouraged'},
-  {id:'R25', kind:'reg', label:'ESP512 alone, non-discoverable', username:'alice', algs:'-52', rk:'discouraged'},
-  {id:'R26', kind:'reg', label:'ES256K alone, non-discoverable', username:'alice', algs:'-47', rk:'discouraged'},
-  {id:'R27', kind:'reg', label:'EdDSA alone, non-discoverable', username:'alice', algs:'-8', rk:'discouraged'},
-  {id:'R28', kind:'reg', label:'Ed25519 alone, non-discoverable', username:'alice', algs:'-19', rk:'discouraged'},
-  {id:'R29', kind:'reg', label:'Ed448 alone, non-discoverable', username:'alice', algs:'-53', rk:'discouraged'},
-  {id:'R30', kind:'reg', label:'RS256 alone, non-discoverable', username:'alice', algs:'-257', rk:'discouraged'},
-  {id:'R31', kind:'reg', label:'RS384 alone, non-discoverable', username:'alice', algs:'-258', rk:'discouraged'},
-  {id:'R32', kind:'reg', label:'RS512 alone, non-discoverable', username:'alice', algs:'-259', rk:'discouraged'},
-  {id:'R33', kind:'reg', label:'PS256 alone, non-discoverable', username:'alice', algs:'-37', rk:'discouraged'},
-  {id:'R34', kind:'reg', label:'PS384 alone, non-discoverable', username:'alice', algs:'-38', rk:'discouraged'},
-  {id:'R35', kind:'reg', label:'PS512 alone, non-discoverable', username:'alice', algs:'-39', rk:'discouraged'},
-  // sign-ins
-  {id:'L1', kind:'login', label:'alice: allowCredentials = all hers, UV discouraged', username:'alice', allow:'user', uv:'discouraged'},
-  {id:'L2', kind:'login', label:'Discoverable: empty allowCredentials (account picker)', username:'', allow:'empty', uv:'discouraged'},
-  {id:'L3', kind:'login', label:'alice, UV required', username:'alice', allow:'user', uv:'required'},
-  {id:'L4', kind:'login', label:'PRF salt A, UV discouraged', username:'prfuser', allow:'user', uv:'discouraged', prfSalt1:'A'},
-  {id:'L5', kind:'login', label:'PRF salt B, UV discouraged', username:'prfuser', allow:'user', uv:'discouraged', prfSalt1:'B'},
-  {id:'L6', kind:'login', label:'PRF salts A + B, UV discouraged', username:'prfuser', allow:'user', uv:'discouraged', prfSalt1:'A', prfSalt2:'B'},
-  {id:'L7', kind:'login', label:'PRF salt A, UV required', username:'prfuser', allow:'user', uv:'required', prfSalt1:'A'},
-];
+const PRESETS = await (await fetch("/presets.json")).json();
 
+let fixtureId = null;
 function setForm(p) {
+  fixtureId = p.fixtureId || p.id || null;
   $('label').value = `${p.id} ${p.label}`;
   $('username').value = p.username ?? 'alice';
   $('algs').value = p.algs ?? '-7';
@@ -177,7 +134,7 @@ function setForm(p) {
 function readForm() {
   const hints = $('hints').value.split(',').map(s => s.trim()).filter(Boolean);
   return {
-    label: $('label').value, username: $('username').value,
+    fixtureId, label: $('label').value, username: $('username').value,
     algs: $('algs').value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
     residentKey: $('rk').value, userVerification: $('uv').value, attestation: $('att').value,
     attachment: $('attach').value, hints, timeout: $('timeout').value,
@@ -241,6 +198,7 @@ function busy(on, text) {
   $('btnAbort').disabled = !on; $('btnReg').disabled = on; $('btnLogin').disabled = on;
 }
 function show(res) {
+  window.pqkeyLastResult = res;
   const cls = res.outcome === 'PASS' ? 'PASS' : res.outcome === 'FAIL' ? 'FAIL' : 'ERR';
   $('result').innerHTML = `<span class="${cls}">${res.outcome}</span>  ${escapeHtml(res.label || '')}\n${escapeHtml(res.summary || '')}\n\n` + escapeHtml(JSON.stringify(res.checks || res, null, 1));
   refresh();
@@ -251,13 +209,16 @@ async function ceremony(kind, cfg) {
   const t0 = performance.now();
   busy(true, `${kind}: waiting for the key…`);
   let opt;
+  let stage = "options";
   try {
     opt = await post(kind === 'reg' ? '/api/register/options' : '/api/login/options', cfg);
+    stage = 'webauthn';
     const cred = kind === 'reg'
       ? await navigator.credentials.create({publicKey: decodeCreation(opt.publicKey), signal: abortCtl.signal})
       : await navigator.credentials.get({publicKey: decodeRequest(opt.publicKey), signal: abortCtl.signal});
     const elapsed = Math.round(performance.now() - t0);
     busy(true, `${kind}: verifying…`);
+    stage = 'verification';
     const res = await post(kind === 'reg' ? '/api/register/verify' : '/api/login/verify',
                            {ceremonyId: opt.ceremonyId, credential: credToJSON(cred), ua: navigator.userAgent, elapsed_ms: elapsed});
     show(res);
@@ -265,7 +226,7 @@ async function ceremony(kind, cfg) {
     const elapsed = Math.round(performance.now() - t0);
     try {
       show(await post('/api/client-error', {ceremonyId: opt && opt.ceremonyId, kind: kind === 'reg' ? 'register' : 'login',
-           label: cfg.label, name: e.name, message: e.message, elapsed_ms: elapsed, ua: navigator.userAgent}));
+           label: cfg.label, fixtureId: cfg.fixtureId, stage, name: e.name, message: e.message, elapsed_ms: elapsed, ua: navigator.userAgent}));
     } catch (e2) { $('result').textContent = `${e.name}: ${e.message}\n(server: ${e2})`; }
   } finally { busy(false, 'idle'); }
 }
@@ -296,6 +257,7 @@ async function refresh() {
 
 for (const p of PRESETS) {
   const b = document.createElement('button');
+  b.dataset.preset = p.id;
   b.innerHTML = `<b>${p.id}</b> ${escapeHtml(p.label)}`;
   b.onclick = () => { setForm(p); ceremony(p.kind, readForm()); };
   $('presets').appendChild(b);
@@ -326,6 +288,10 @@ async function poll() {
     else if (item.kind) { await ceremony(item.kind, {...readForm(), ...item.cfg}); }
   } finally { running = false; }
 }
+// Test-only form loading still requires a real button click to start WebAuthn.
+window.pqkeyLoadForm = setForm;
+window.pqkeyPresets = PRESETS;
+window.pqkeyReady = true;
 setInterval(poll, 1000);
 </script>
 </body>

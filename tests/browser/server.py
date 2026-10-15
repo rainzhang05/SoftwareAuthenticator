@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E40
 import ctap as rc  # noqa: E402  (tests/e2e/ctap.py)
 from fido2 import cbor  # noqa: E402
 from fido2.attestation import Attestation  # noqa: E402
+from fido2.cose import CoseKey, UnsupportedKey  # noqa: E402
 from fido2.server import Fido2Server  # noqa: E402
 from fido2.webauthn import (  # noqa: E402
     AttestedCredentialData,
@@ -100,6 +101,43 @@ def jsonable(v):
     if isinstance(v, (list, tuple)):
         return [jsonable(x) for x in v]
     return v
+
+
+def public_extensions(extensions):
+    """PRF results are secrets, unlike the signed public ceremony bytes."""
+    result = json.loads(json.dumps(extensions or {}))
+    prf = result.get("prf", {})
+    if "results" in prf:
+        prf["results"] = {k: {"sha256": hashlib.sha256(unb64u(v)).hexdigest(),
+                              "bytes": len(unb64u(v))} for k, v in prf["results"].items()}
+    return result
+
+
+def evidence(p, body, ad=None, alg=None):
+    credential = json.loads(json.dumps(body["credential"]))
+    credential["clientExtensionResults"] = public_extensions(credential.get("clientExtensionResults"))
+    return {"ceremonyId": body["ceremonyId"], "fixtureId": p["req"].get("fixtureId"),
+            "options": p["options"], "credential": credential,
+            "selectedAlgorithm": alg, "flags": ad.flags if ad else None,
+            "signCount": ad.sign_count if ad else None,
+            "credentialId": credential["rawId"]}
+
+
+def check_client_data(p, cred, kind):
+    data = json.loads(unb64u(cred["response"]["clientDataJSON"]))
+    _assert(cred["type"] == "public-key" and cred["id"] == cred["rawId"], "credential type/id")
+    _assert(data["type"] == "webauthn." + kind, "ceremony type")
+    _assert(data["challenge"] == p["options"]["challenge"], "challenge")
+    _assert(data["origin"] == f"http://localhost:{PORT}", "origin")
+    _assert(not data.get("crossOrigin", False), "crossOrigin")
+
+
+def library_check(checks, name, alg, fn):
+    if CoseKey.for_alg(alg) is UnsupportedKey:
+        checks.note(name, {"status": "unsupported_library_algorithm", "algorithm": alg,
+                          "library": "python-fido2", "independent_verifier_required": True})
+    else:
+        checks.run(name, fn)
 
 
 class Checks:
@@ -182,6 +220,7 @@ def register_verify(body: dict) -> dict:
         p = PENDING.pop(body["ceremonyId"])
     req, cred = p["req"], body["credential"]
     checks = Checks()
+    checks.run("independent clientData/type/id binding", lambda: check_client_data(p, cred, "create"))
     server = Fido2Server(PublicKeyCredentialRpEntity(id=RP_ID, name="pqkey local test RP"))
     resp = {"id": cred["id"], "rawId": cred["rawId"], "type": cred["type"],
             "response": {"clientDataJSON": cred["response"]["clientDataJSON"],
@@ -199,6 +238,7 @@ def register_verify(body: dict) -> dict:
     cdh = rc.sha256(client_data_json)
     ad = rc.AuthData.parse(auth_data_raw)
     alg = ad.public_key.get(3) if ad.public_key else None
+    checks.run("rawId matches attested credential ID", lambda: _assert(cred["rawId"] == b64u(ad.credential_id)))
     checks.note("clientData", {k: client_data.get(k) for k in ("type", "origin", "crossOrigin")})
     checks.note("attestation format", fmt)
     checks.note("attStmt keys", sorted(att_stmt))
@@ -208,7 +248,7 @@ def register_verify(body: dict) -> dict:
     checks.note("credential ID", {"len": len(ad.credential_id), "marker": f"{ad.credential_id[0]:#04x}",
                                   "b64u": b64u(ad.credential_id)})
     checks.note("authenticator extension outputs", jsonable(ad.extensions))
-    checks.note("client extension results", cred.get("clientExtensionResults"))
+    checks.note("client extension results", public_extensions(cred.get("clientExtensionResults")))
     checks.note("transports / attachment", {"transports": cred.get("transports"),
                                             "authenticatorAttachment": cred.get("authenticatorAttachment")})
     checks.note("public key algorithm", f"{alg} ({rc.NAMES.get(alg, '?')})")
@@ -228,12 +268,14 @@ def register_verify(body: dict) -> dict:
     checks.run("ED flag iff authenticator extension outputs present",
                lambda: _assert(bool(ad.flags & rc.FLAG_ED) == bool(ad.extensions)))
     if fmt != "none":
-        checks.run(f"python-fido2 {fmt} attestation verify",
+        library_check(checks, f"python-fido2 {fmt} attestation verify", att_stmt.get("alg"),
                    lambda: str(Attestation.for_type(fmt)().verify(att_stmt, AuthenticatorData(auth_data_raw), cdh).attestation_type))
     checks.run(f"rc.verify_attestation ({fmt}; self attestation verified with the credential key)",
                lambda: rc.verify_attestation({1: fmt, 2: auth_data_raw, 3: att_stmt}, ad.public_key, cdh))
     rk_cp = (cred.get("clientExtensionResults") or {}).get("credProps", {}).get("rk")
     expected_disc = credential_modality(ad.credential_id)
+    if req.get("residentKey") == "required":
+        checks.run("required discoverable credential", lambda: _assert(expected_disc is True))
     checks.run("credential ID layout per architecture.md (33 B 0x01/0x00 = stored, 107 B 0x02 = sealed)",
                lambda: _assert(expected_disc is not None,
                                f"{len(ad.credential_id)} bytes, marker {ad.credential_id[0]:#04x}"))
@@ -265,7 +307,8 @@ def register_verify(body: dict) -> dict:
              "request": {k: req.get(k) for k in ("username", "algs", "residentKey", "userVerification", "attestation",
                                                  "credProps", "prf", "credProtect", "enforceCredProtect",
                                                  "excludeExisting", "hints", "attachment")},
-             "outcome": outcome, "summary": summary, "checks": checks.items}
+             "outcome": outcome, "summary": summary, "checks": checks.items,
+             **evidence(p, body, ad, alg)}
     log_result(entry)
     return entry
 
@@ -309,7 +352,13 @@ def login_verify(body: dict) -> dict:
         db = load_db()
     req, cred = p["req"], body["credential"]
     checks = Checks()
+    checks.run("independent clientData/type/id binding", lambda: check_client_data(p, cred, "get"))
     cred_id = cred["rawId"]
+    allow = p["options"].get("allowCredentials", [])
+    checks.run("credential belongs to issued allow list (when nonempty)",
+               lambda: _assert(not allow or cred_id in [c["id"] for c in allow]))
+    if req.get("expectedCredential"):
+        checks.run("selected expected fixture credential", lambda: _assert(cred_id == req["expectedCredential"]))
     owner, stored = None, None
     for name, u in db["users"].items():
         for c in u["credentials"]:
@@ -318,7 +367,7 @@ def login_verify(body: dict) -> dict:
     checks.run("credential is registered at this RP", lambda: _assert(stored is not None, f"unknown id {cred_id[:16]}…"))
     if stored is None:
         entry = {"kind": "login", "label": req.get("label"), "outcome": "FAIL", "summary": "unknown credential",
-                 "checks": checks.items, "ua": body.get("ua")}
+                 "checks": checks.items, "ua": body.get("ua"), **evidence(p, body)}
         log_result(entry)
         return entry
     resp = {"id": cred["id"], "rawId": cred["rawId"], "type": cred["type"],
@@ -328,7 +377,7 @@ def login_verify(body: dict) -> dict:
     if cred["response"].get("userHandle"):
         resp["response"]["userHandle"] = cred["response"]["userHandle"]
     if stored.get("acd"):
-        checks.run("python-fido2 Fido2Server.authenticate_complete (type, origin, challenge, rpIdHash, UP, signature)",
+        library_check(checks, "python-fido2 Fido2Server.authenticate_complete (type, origin, challenge, rpIdHash, UP, signature)", stored["alg"],
                    lambda: server_auth(p["state"], stored, resp) and None)
     client_data_json = unb64u(cred["response"]["clientDataJSON"])
     auth_data_raw = unb64u(cred["response"]["authenticatorData"])
@@ -343,7 +392,7 @@ def login_verify(body: dict) -> dict:
     checks.note("signature length", len(sig))
     checks.note("userHandle", cred["response"].get("userHandle"))
     checks.note("authenticator extension outputs", jsonable(ad.extensions))
-    checks.note("client extension results", cred.get("clientExtensionResults"))
+    checks.note("client extension results", public_extensions(cred.get("clientExtensionResults")))
     checks.run(f"rc.verify_signature over authData||SHA-256(clientDataJSON) ({rc.NAMES.get(alg)})",
                lambda: rc.verify_signature(cose, auth_data_raw + rc.sha256(client_data_json), sig))
     checks.run("rpIdHash == SHA-256('localhost')", lambda: _assert(ad.rp_id_hash == rc.sha256(RP_ID.encode())))
@@ -354,8 +403,7 @@ def login_verify(body: dict) -> dict:
                         uv_required and _assert(ad.flags & rc.FLAG_UV, "UV")) and None)
     checks.run("ED flag iff authenticator extension outputs present",
                lambda: _assert(bool(ad.flags & rc.FLAG_ED) == bool(ad.extensions)))
-    # A discoverable credential has a counter of its own; non-discoverable
-    # ones share the key's global counter. Either only grows (architecture.md).
+    # Stored credentials have their own counter; sealed IDs share a counter.
     checks.run("signCount increased since this credential's last sign-in",
                lambda: _assert(ad.sign_count > (stored.get("signCount") or 0),
                                f"{ad.sign_count} <= {stored.get('signCount')}"))
@@ -378,7 +426,9 @@ def login_verify(body: dict) -> dict:
                     db2["prf"][key] = prf[slot]
                     save_db(db2)
             others = {k: v for k, v in db2["prf"].items() if k.startswith(cred_id + "|") and k != key}
-            checks.note(f"PRF {slot} (salt {salt!r}, UV={uv})", {"output": prf[slot], "previous": prev})
+            checks.run(f"PRF {slot}: 32-byte result", lambda v=prf[slot]: _assert(len(unb64u(v)) == 32))
+            checks.note(f"PRF {slot} (salt {salt!r}, UV={uv})",
+                        {"sha256": hashlib.sha256(unb64u(prf[slot])).hexdigest(), "repeated": prev is not None})
             if prev is not None:
                 checks.run(f"PRF {slot}: same salt+UV gives the same output as before",
                            lambda prev=prev, v=prf[slot]: _assert(prev == v, "different"))
@@ -397,7 +447,8 @@ def login_verify(body: dict) -> dict:
               f"signCount={ad.sign_count} ext={jsonable(ad.extensions)}"
     entry = {"kind": "login", "label": req.get("label"), "ua": body.get("ua"), "elapsed_ms": body.get("elapsed_ms"),
              "request": {k: req.get(k) for k in ("username", "allow", "userVerification", "prfSalt1", "prfSalt2", "hints")},
-             "outcome": outcome, "summary": summary, "checks": checks.items}
+             "outcome": outcome, "summary": summary, "checks": checks.items,
+             **evidence(p, body, ad, alg)}
     log_result(entry)
     return entry
 
@@ -431,6 +482,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             return self._send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
+        if self.path == "/presets.json":
+            return self._send(200, (HERE / "presets.json").read_bytes())
         if self.path == "/api/db":
             with LOCK:
                 db = load_db()
@@ -473,7 +526,10 @@ def client_error(body: dict) -> dict:
     entry = {"kind": body.get("kind", "?") + "-error", "label": body.get("label"), "ua": body.get("ua"),
              "elapsed_ms": body.get("elapsed_ms"), "outcome": body.get("name"),
              "summary": f"{body.get('name')}: {body.get('message')} after {body.get('elapsed_ms')} ms",
-             "request": (p or {}).get("req")}
+             "request": (p or {}).get("req"), "ceremonyId": body.get("ceremonyId"),
+             "fixtureId": (p or {}).get("req", {}).get("fixtureId", body.get("fixtureId")),
+             "options": (p or {}).get("options"), "stage": body.get("stage"),
+             "error": {"name": body.get("name"), "message": body.get("message")}}
     log_result(entry)
     return entry
 

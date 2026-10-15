@@ -1,0 +1,28 @@
+{
+  "notes": "Conservative source-based candidates, not passed results. A real native incompatibility screen and healthy controls are required. All other browser errors fail pending review of the captured evidence.",
+  "rejection_rules": [
+    {
+      "browser": "chromium",
+      "version_prefix": "158.",
+      "algorithms": [-35, -51, -36, -52, -47, -53, -265, -267],
+      "errors": ["NotAllowedError", "NotSupportedError"],
+      "ui_evidence": "unsupported-key",
+      "source": "https://chromium.googlesource.com/chromium/src/+/refs/heads/main/device/fido/public_key.cc",
+      "rationale": "The EC2 and OKP key parsers only accept P-256 and Ed25519 respectively; retain the pinned browser revision in toolchain.json. Never infer rejection from timeout."
+    },
+    {
+      "browser": "firefox",
+      "version_prefix": "158.",
+      "algorithms": [-48, -49, -50, -265, -267],
+      "errors": ["NotAllowedError", "NotSupportedError"],
+      "ui_evidence": "unsupported-key",
+      "source": "https://hg.mozilla.org/releases/mozilla-release/file/FIREFOX_158_0_RELEASE/dom/webauthn/authenticator/src/crypto/mod.rs",
+      "rationale": "Unknown COSE identifiers cannot be represented by this release's authenticator client. An unqualified NotAllowedError is still a failure."
+    }
+  ],
+  "extension_sources": {
+    "prf": "https://www.w3.org/TR/webauthn-3/#prf-extension",
+    "credProtect": "https://www.w3.org/TR/webauthn-3/#sctn-extensions",
+    "attestation": "https://www.w3.org/TR/webauthn-3/#sctn-attestation"
+  }
+}
