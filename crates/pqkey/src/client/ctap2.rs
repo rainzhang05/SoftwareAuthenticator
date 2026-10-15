@@ -379,6 +379,18 @@ impl<L: ReportLink> Authenticator<L> {
             &mut |_| {},
         )?;
         let key = member(&body, 1).ok_or(ClientError::Malformed("no keyAgreement"))?;
+        if !matches!(key, Value::Map(_)) {
+            return Err(ClientError::Malformed("keyAgreement is not a COSE map"));
+        }
+        for (label, expected, error) in [
+            (1, 2, "keyAgreement kty is not integer EC2 (2)"),
+            (3, -25, "keyAgreement alg is not integer -25"),
+            (-1, 1, "keyAgreement crv is not integer P-256 (1)"),
+        ] {
+            if member(key, label) != Some(&int(expected)) {
+                return Err(ClientError::Malformed(error));
+            }
+        }
         let coordinate = |label| -> Result<[u8; 32], ClientError> {
             bytes_of(member(key, label))?
                 .try_into()
@@ -761,6 +773,8 @@ mod size_tests {
         infos: VecDeque<Value>,
         management_replies: VecDeque<Value>,
         pin_peer: Option<pqkey_ctap::ctap::CtapApp<'static>>,
+        key_agreement_edits: Vec<(i64, Option<Value>)>,
+        key_agreement_override: Option<Value>,
         answers: VecDeque<Report>,
         pending: Vec<u8>,
         length: usize,
@@ -838,6 +852,31 @@ mod size_tests {
                             )
                         });
                         response = app.call(&self.pending);
+                        let request: Value = ciborium::de::from_reader(&self.pending[1..]).unwrap();
+                        if member(&request, 2) == Some(&int(2)) {
+                            assert_eq!(response[0], 0);
+                            let mut body: Value =
+                                ciborium::de::from_reader(&response[1..]).unwrap();
+                            let Value::Map(fields) = &mut body else {
+                                panic!("response map")
+                            };
+                            let (_, key) = fields.iter_mut().find(|(k, _)| *k == int(1)).unwrap();
+                            if let Some(replacement) = &self.key_agreement_override {
+                                *key = replacement.clone();
+                            } else {
+                                let Value::Map(entries) = key else {
+                                    panic!("COSE map")
+                                };
+                                for (label, replacement) in &self.key_agreement_edits {
+                                    entries.retain(|(k, _)| *k != int(*label));
+                                    entries.extend(
+                                        replacement.clone().map(|value| (int(*label), value)),
+                                    );
+                                }
+                                entries.sort_by_key(|(key, _)| encode(key));
+                            }
+                            response = [vec![0], encode(&body)].concat();
+                        }
                     } else if let Some(reply) = self.management_replies.pop_front() {
                         response.extend(encode(&reply));
                     }
@@ -871,17 +910,159 @@ mod size_tests {
         infos: Vec<Value>,
         replies: Vec<Value>,
     ) -> (Authenticator<RecordingLink>, Rc<RefCell<Traffic>>) {
+        key_with_script(infos, replies, vec![], None)
+    }
+
+    fn key_with_edits(
+        infos: Vec<Value>,
+        edits: Vec<(i64, Option<Value>)>,
+        replacement: Option<Value>,
+    ) -> (Authenticator<RecordingLink>, Rc<RefCell<Traffic>>) {
+        key_with_script(infos, vec![], edits, replacement)
+    }
+
+    fn key_with_script(
+        infos: Vec<Value>,
+        replies: Vec<Value>,
+        edits: Vec<(i64, Option<Value>)>,
+        replacement: Option<Value>,
+    ) -> (Authenticator<RecordingLink>, Rc<RefCell<Traffic>>) {
         let traffic = Rc::new(RefCell::new(Traffic::default()));
         let link = RecordingLink {
             traffic: traffic.clone(),
             infos: infos.into(),
             management_replies: replies.into(),
             pin_peer: None,
+            key_agreement_edits: edits,
+            key_agreement_override: replacement,
             answers: VecDeque::new(),
             pending: Vec::new(),
             length: 0,
         };
         (Authenticator::open(link).unwrap(), traffic)
+    }
+
+    #[test]
+    fn malformed_key_agreement_responses_never_emit_authenticated_followups() {
+        let mut cases = Vec::new();
+        for (label, wrong) in [(1, 1), (3, -26), (-1, 2), (-2, 0), (-3, 0)] {
+            let mut values = vec![
+                None,
+                Some(Value::Bool(true)),
+                Some(text("unexpected")),
+                Some(int(wrong)),
+            ];
+            if label < -1 {
+                values.extend([31, 33].map(|length| Some(Value::Bytes(vec![0; length]))));
+            } else if label == 3 {
+                values.extend([-7, 0, -257, i64::MAX].map(|alg| Some(int(alg))));
+            }
+            cases.extend(
+                values
+                    .into_iter()
+                    .map(|value| (vec![(label, value)], None, false)),
+            );
+        }
+        cases.push((
+            vec![
+                (-2, Some(Value::Bytes(vec![0; 32]))),
+                (-3, Some(Value::Bytes(vec![0; 32]))),
+            ],
+            None,
+            true,
+        ));
+        cases.push((vec![], Some(Value::Null), false));
+        for protocol in [ClassicPinProtocol::V1, ClassicPinProtocol::V2] {
+            for (edits, replacement, off_curve) in &cases {
+                for operation in 0..8 {
+                    // Existing set/change/config/listing APIs use protocol two.
+                    if protocol == ClassicPinProtocol::V1 && operation >= 3 {
+                        continue;
+                    }
+                    let discovery = Value::Map(vec![(
+                        int(4),
+                        Value::Map(vec![(text("perCredMgmtRO"), Value::Bool(true))]),
+                    )]);
+                    let (mut key, traffic) =
+                        key_with_edits(vec![discovery], edits.clone(), replacement.clone());
+                    let result = match operation {
+                        0 => key.shared_secret(protocol).map(drop),
+                        1 => key
+                            .management_token_with_protocol(b"1234", protocol)
+                            .and_then(|token| key.passkeys(&token).map(drop)),
+                        2 => key
+                            .read_only_management_token_with_protocol(b"1234", protocol)
+                            .and_then(|token| key.passkeys(&token).map(drop)),
+                        3 => key.set_pin(b"5678"),
+                        4 => key.change_pin(b"1234", b"5678"),
+                        5 => key
+                            .config_token(b"1234")
+                            .and_then(|token| key.toggle_always_uv(Some(&token))),
+                        6 => key
+                            .listing_token(b"1234")
+                            .and_then(|token| key.passkeys(&token).map(drop)),
+                        _ => key.management_token(b"1234").map(drop),
+                    };
+                    if *off_curve {
+                        assert!(matches!(
+                            result,
+                            Err(ClientError::Crypto(CryptoError::InvalidPublicKey))
+                        ));
+                    } else {
+                        assert!(
+                            matches!(result, Err(ClientError::Malformed(_))),
+                            "{protocol:?} operation {operation}: {result:?}"
+                        );
+                    }
+                    let traffic = traffic.borrow();
+                    assert_eq!(
+                        traffic.requests,
+                        [
+                            vec![GET_INFO],
+                            [
+                                vec![CLIENT_PIN],
+                                encode(&Value::Map(vec![
+                                    (int(1), int(protocol.identifier().into())),
+                                    (int(2), int(2))
+                                ]))
+                            ]
+                            .concat()
+                        ]
+                    );
+                    // INIT, discovery and getKeyAgreement: no partial follow-up report.
+                    assert_eq!(traffic.reports.len(), 3);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn standard_key_agreement_and_unknown_labels_complete_both_token_protocols() {
+        for protocol in [ClassicPinProtocol::V1, ClassicPinProtocol::V2] {
+            for extra in [false, true] {
+                for permission in [PERMISSION_CM, PERMISSION_PCMR] {
+                    let edits = if extra {
+                        vec![
+                            (2, Some(Value::Bytes(vec![1]))),
+                            (99, Some(Value::Bool(false))),
+                        ]
+                    } else {
+                        vec![]
+                    };
+                    let (mut key, traffic) = key_with_edits(vec![info(None)], edits, None);
+                    let token = key.permission_token(b"1234", permission, protocol).unwrap();
+                    assert_eq!(token.0.len(), 32);
+                    assert_eq!(token.1, protocol);
+                    assert_eq!(token.2, permission);
+                    let traffic = traffic.borrow();
+                    assert_eq!(traffic.requests.len(), 3);
+                    let request: Value =
+                        ciborium::de::from_reader(&traffic.requests[2][1..]).unwrap();
+                    assert_eq!(member(&request, 2), Some(&int(9)));
+                    assert_eq!(member(member(&request, 3).unwrap(), 3), Some(&int(-25)));
+                }
+            }
+        }
     }
 
     #[test]
