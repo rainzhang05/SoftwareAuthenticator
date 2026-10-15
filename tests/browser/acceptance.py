@@ -72,7 +72,14 @@ class Run:
         self.metadata = {"system": platform.platform(), "architecture": platform.machine(),
                          "python": sys.version, "source": command(['git', 'rev-parse', 'HEAD']),
                          "dirty": command(['git', 'status', '--porcelain']),
-                         "acceptance_executed": False}
+                         "acceptance_executed": False, "initialized_only": False}
+        previous_matrix = self.out / 'matrix.json'
+        if previous_matrix.exists():
+            previous = json.loads(previous_matrix.read_text())['metadata']
+            if not previous.get('initialized_only') or previous.get('source', {}).get('stdout') != self.metadata['source']['stdout']:
+                raise ValueError(f'prior evidence exists in {self.out}; choose a fresh artifact directory')
+        elif any(self.out.iterdir()):
+            raise ValueError(f'nonempty artifact directory {self.out}; choose a fresh directory')
         self.failures = []
         self.processes = OwnedProcesses()
         self.driver = None
@@ -536,6 +543,7 @@ def main():
         run = Run(browser, artifacts.resolve(), args.binaries.resolve() if args.binaries else None,
                   args.control / browser if args.control else None)
         if args.initialize:
+            run.metadata['initialized_only'] = True
             run.failures.append('Acceptance not started; inspect workflow setup logs')
             run.write()
         else:

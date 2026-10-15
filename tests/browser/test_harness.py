@@ -185,6 +185,16 @@ class Harness(unittest.TestCase):
         self.assertNotIn(run.pin, public)
         self.assertNotIn('PRIVATE', public)
 
+    def test_prior_evidence_is_never_silently_overwritten(self):
+        run = self.make_run()
+        run.write()
+        with self.assertRaisesRegex(ValueError, 'prior evidence exists'):
+            acceptance.Run(run.browser, run.out.parent, None)
+        run.metadata['initialized_only'] = True
+        run.write()
+        initialized = acceptance.Run(run.browser, run.out.parent, None)
+        self.assertFalse(initialized.metadata['initialized_only'])
+
 
 if __name__ == '__main__':
     unittest.main()
