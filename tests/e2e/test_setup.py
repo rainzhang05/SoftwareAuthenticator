@@ -3,75 +3,22 @@
 Explicitly opt in: this installs /usr/local/bin/pqkey and a user service.
 Ordinary E2E runs skip it to protect a developer's personal installation.
 """
-import errno
 import os
 from pathlib import Path
-import pty
-import re
-import select
-import subprocess
-import time
 
 import pytest
 from fido2.ctap2 import ClientPin, Config, Ctap2, PinProtocolV2
 
 import ctap as client
 from notifications import FakeNotificationServer
+from setup_support import BINARY, node, run
 
 pytestmark = pytest.mark.skipif(os.environ.get("PQKEY_INSTALLER_E2E") != "1",
                                 reason="requires opt-in disposable installer E2E host")
 ROOT = Path(__file__).resolve().parents[2]
-BINARY = "/usr/local/bin/pqkey"
 PIN = "86420000"
 NEW_PIN = "97530000"
 RP = "setup.e2e.example"
-
-
-def run(command, env, responses=()):
-    """Run actual commands; a PTY preserves the final hidden PIN interaction."""
-    if not responses:
-        result = subprocess.run(command, env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
-        return result.returncode, result.stdout.decode()
-    master, slave = pty.openpty()
-    process = subprocess.Popen(command, env=env, stdin=slave, stdout=slave, stderr=slave,
-                               start_new_session=True)
-    os.close(slave)
-    output = b""
-    pending = list(responses)
-    deadline = time.monotonic() + 120
-    try:
-        while time.monotonic() < deadline:
-            if select.select([master], [], [], 0.1)[0]:
-                try:
-                    chunk = os.read(master, 8192)
-                except OSError as error:
-                    if error.errno == errno.EIO:
-                        break
-                    raise
-                if not chunk:
-                    break
-                output += chunk
-                if pending and pending[0][0].encode() in output:
-                    _, answer = pending.pop(0)
-                    os.write(master, (answer + "\n").encode())
-            elif process.poll() is not None:
-                break
-        if process.poll() is None:
-            process.kill()
-        status = process.wait(timeout=5)
-        assert not pending, output.decode(errors="replace")
-        return status, output.decode(errors="replace")
-    finally:
-        os.close(master)
-
-
-def node(env):
-    status, output = run([BINARY, "status"], env)
-    assert status == 0, output
-    found = re.search(r"^Device:\s+(/dev/hidraw\d+)$", output, re.MULTILINE)
-    assert found, output
-    return found[1]
 
 
 def test_install_setup_rerun_update_and_pin_policy_over_real_hid(tmp_path):

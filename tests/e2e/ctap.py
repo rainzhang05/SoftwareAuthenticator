@@ -13,6 +13,7 @@ import hashlib
 import os
 import select
 import struct
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -76,17 +77,27 @@ READ_TIMEOUT_S = 15.0
 class _TimeoutConnection(LinuxCtapHidConnection):
     """python-fido2's hidraw connection, with a timeout on every read."""
 
+    def __init__(self, descriptor, timeout=None):
+        super().__init__(descriptor)
+        self.deadline = None if timeout is None else time.monotonic() + timeout
+
     def read_packet(self) -> bytes:
-        ready, _, _ = select.select([self.handle], [], [], READ_TIMEOUT_S)
+        wait = READ_TIMEOUT_S
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("CTAPHID operation deadline exceeded")
+            wait = min(wait, remaining)
+        ready, _, _ = select.select([self.handle], [], [], wait)
         if not ready:
             raise TimeoutError(f"no CTAPHID packet within {READ_TIMEOUT_S}s")
         return super().read_packet()
 
 
-def open_device(path: str) -> CtapHidDevice:
+def open_device(path: str, *, timeout: float | None = None) -> CtapHidDevice:
     """Open the hidraw node and allocate a CTAPHID channel (CTAPHID_INIT)."""
     descriptor = get_descriptor(path)
-    return CtapHidDevice(descriptor, _TimeoutConnection(descriptor))
+    return CtapHidDevice(descriptor, _TimeoutConnection(descriptor, timeout))
 
 
 def sha256(data: bytes) -> bytes:
@@ -408,7 +419,8 @@ class Credential:
 
 
 def register(
-    ctap: Ctap2, rp_id: str, alg: int, *, uv: bool = False, client_data_hash: bytes | None = None, **kwargs
+    ctap: Ctap2, rp_id: str, alg: int, *, uv: bool = False, client_data_hash: bytes | None = None,
+    evidence: Callable[[Mapping[str, Any]], None] | None = None, **kwargs
 ) -> Credential:
     """makeCredential, with every check that applies to any registration."""
     client_data_hash = client_data_hash or os.urandom(32)
@@ -420,6 +432,11 @@ def register(
     assert auth_data.credential_id, "empty credential ID"
     check_public_key(auth_data.public_key, alg)
     verify_attestation(response, auth_data.public_key, client_data_hash)
+    if evidence:
+        from fido2 import cbor
+        evidence({"kind": "registration", "rp_id": rp_id, "client_data_hash": client_data_hash.hex(),
+                  "response_cbor": cbor.encode({k: response[k] for k in (1, 2, 3)}).hex(),
+                  "counter": auth_data.sign_count, "verified": True})
     return Credential(
         rp_id, alg, auth_data.credential_id, auth_data.public_key, auth_data,
         response.get(5),
@@ -433,6 +450,7 @@ def authenticate(
     *,
     uv: bool = False,
     client_data_hash: bytes | None = None,
+    evidence: Callable[[Mapping[str, Any]], None] | None = None,
     **kwargs,
 ) -> tuple[Mapping[int, Any], AuthData]:
     """getAssertion for one credential, with its signature verified."""
@@ -449,6 +467,12 @@ def authenticate(
         pass
     else:
         raise AssertionError("the signature also verifies over a different client data hash")
+    if evidence:
+        from fido2 import cbor
+        evidence({"kind": "assertion", "rp_id": credential.rp_id,
+                  "client_data_hash": client_data_hash.hex(),
+                  "response_cbor": cbor.encode({k: response[k] for k in (1, 2, 3)}).hex(),
+                  "counter": auth_data.sign_count, "verified": True})
     return response, auth_data
 
 

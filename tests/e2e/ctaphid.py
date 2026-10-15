@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import select
 import struct
+import time
 from dataclasses import dataclass
 
 PACKET_SIZE = 64
@@ -74,10 +75,19 @@ class RawHid:
         for packet in self.init_packets(cid, cmd, payload):
             self.write_packet(packet)
 
-    def receive(self) -> Message:
+    def receive(self, *, timeout: float | None = None) -> Message:
         """Read one complete message, skipping keepalives."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        def read():
+            wait = READ_TIMEOUT_S
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("CTAPHID operation deadline exceeded")
+                wait = min(wait, remaining)
+            return self.read_packet(wait)
         while True:
-            packet = self.read_packet()
+            packet = read()
             cid, cmd, length = struct.unpack(">IBH", packet[:7])
             if not cmd & 0x80:
                 raise UnexpectedPacket(f"continuation packet {packet.hex()} without an initialization packet")
@@ -85,7 +95,7 @@ class RawHid:
             payload = packet[7 : 7 + length]
             seq = 0
             while len(payload) < length:
-                packet = self.read_packet()
+                packet = read()
                 next_cid, next_seq = struct.unpack(">IB", packet[:5])
                 if next_cid != cid or next_seq != seq:
                     raise UnexpectedPacket(f"expected continuation {seq} on {cid:#010x}, got {packet.hex()}")
