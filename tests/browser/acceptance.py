@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import base64
 import configparser
-import hashlib
 import importlib.metadata
 import json
 import os
@@ -35,7 +34,7 @@ SUPPLEMENTAL = [{"id": f"B{i}", "kind": "reg", "label": f"Brainpool {alg} non-di
 
 
 def command(argv, *, env=None, timeout=10):
-    result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env, cwd=ROOT)
     return {"command": argv, "status": result.returncode, "stdout": result.stdout.strip(),
             "stderr": result.stderr.strip()}
 
@@ -74,6 +73,7 @@ class Run:
         self.daemon = None
         self.work = None
         self.pin = secrets.token_hex(6)  # never persisted in artifacts or argv
+        self.processes.redactions = (self.pin,)
         self.console_file = self.out / 'browser-console.jsonl'
         self.console_file.touch()
         self.version = ''
@@ -239,6 +239,14 @@ class Run:
         self.driver.set_page_load_timeout(10)
         self.driver.set_script_timeout(5)
         self.version = self.driver.capabilities['browserVersion']
+        browser_pid = self.driver.capabilities.get('goog:processID', self.driver.capabilities.get('moz:processID'))
+        roots = []
+        if isinstance(browser_pid, int):
+            arguments = Path(f'/proc/{browser_pid}/cmdline').read_bytes()
+            if str(self.profile).encode() not in arguments:
+                raise RuntimeError('driver browser PID does not belong to the disposable profile')
+            roots.append(browser_pid)
+        self.processes.adopt_descendants(roots, owner=self.driver_process.pid)
         if not self.version.startswith(self.lock['version_prefix']):
             raise RuntimeError('browser version differs from locked expectation range')
         # Keep public capabilities only; BiDi URLs/session identifiers are not artifacts.
@@ -267,6 +275,7 @@ class Run:
             self.failures.append(f'{fixture}: screenshot failed')
 
     def ceremony(self, preset, *, account=None):
+        self.processes.adopt_descendants()
         self.counter += 1
         fixture = f'{preset["id"]}/{self.counter}'
         config = {**preset, 'fixtureId': fixture, 'timeout': 25000}
@@ -282,6 +291,7 @@ class Run:
         observed_fingerprint = None
         last_action_time = start
         while time.monotonic() < deadline:
+            self.processes.adopt_descendants()
             if self.daemon.poll() is not None or self.driver_process.poll() is not None or self.rp_process.poll() is not None:
                 raise RuntimeError('daemon, browser driver or RP exited during ceremony')
             entry = next((e for e in reversed(self.results()) if e.get('fixtureId') == fixture), None)
@@ -425,8 +435,13 @@ class Run:
             self.driver = None
         if hasattr(self, 'driver_process'):
             self.processes.stop(self.driver_process)
+            self.processes.stop_descendants(self.driver_process.pid)
 
     def cleanup(self):
+        try:
+            self.processes.adopt_descendants()
+        except (OSError, RuntimeError):
+            self.failures.append('could not snapshot owned descendants for cleanup')
         try:
             self.close_browser()
         except Exception as error:

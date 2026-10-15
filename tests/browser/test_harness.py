@@ -1,9 +1,11 @@
 """Mocked harness peers only. Never included in acceptance artifacts."""
 import json
 import signal
+import sys
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +25,30 @@ class Harness(unittest.TestCase):
                 runtime.preflight()
             opened.assert_not_called()
             spawned.assert_not_called()
+
+    def test_driver_output_redacts_control_tokens_before_disk(self):
+        line = b'DevTools listening on ws://127.0.0.1:1234/devtools/browser/secret-session sessionId=0123456789abcdef PIN=unit-secret http://localhost:8080'
+        public = runtime.public_log(line, ('unit-secret',)).decode()
+        self.assertNotIn('secret-session', public)
+        self.assertNotIn('0123456789abcdef', public)
+        self.assertNotIn('unit-secret', public)
+        self.assertIn('http://localhost:8080', public)
+
+    def test_owned_process_logging_and_shutdown_on_a_real_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            owned = runtime.OwnedProcesses()
+            owned.redactions = ('test-redaction',)
+            filename = Path(directory) / 'owned.log'
+            process = owned.start([sys.executable, '-u', '-c',
+                                   "import time; print('test-redaction ws://127.0.0.1:1234/private'); time.sleep(60)"], filename)
+            try:
+                acceptance.wait_until(lambda: filename.exists() and filename.stat().st_size > 0, 3)
+            finally:
+                failures = owned.cleanup()
+            self.assertEqual(failures, [])
+            self.assertIsNotNone(process.poll())
+            self.assertNotIn('test-redaction', filename.read_text())
+            self.assertNotIn('/private', filename.read_text())
 
     def test_missing_uhid_is_not_a_skipped_browser_capability(self):
         with patch.object(runtime.platform, 'system', return_value='Linux'), patch.object(runtime.platform, 'machine', return_value='x86_64'), patch.object(runtime.Path, 'stat', side_effect=FileNotFoundError('no UHID')):
@@ -56,6 +82,30 @@ class Harness(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'identity changed'):
                     runtime.fallback_cleanup(directory)
                 kill.assert_not_called()
+
+    def test_separate_browser_groups_are_tracked_by_ancestry_only(self):
+        owned = runtime.OwnedProcesses()
+        owned.children = [SimpleNamespace(pid=10, _pqkey_identity='100', _pqkey_stopped=False)]
+        files = []
+        for pid, parent, start in [(10, 1, '100'), (20, 10, '200'), (30, 20, '300'), (40, 1, '400')]:
+            fields = ['R', str(parent), str(pid), str(pid)] + ['0'] * 15 + [start]
+            text = f'{pid} (fixture) ' + ' '.join(fields)
+            files.append(SimpleNamespace(parent=SimpleNamespace(name=str(pid)), read_text=lambda text=text: text))
+        with patch.object(runtime.Path, 'glob', return_value=files):
+            owned.adopt_descendants()
+        self.assertEqual(set(owned.descendants), {20, 30})
+        self.assertTrue(all(not r['group'] and r['root'] == 10 for r in owned.descendants.values()))
+        with patch.object(runtime, 'terminate_records') as terminate:
+            owned.stop_descendants(10)
+            self.assertEqual({r['pid'] for r in terminate.call_args.args[0]}, {20, 30})
+
+    def test_adopted_browser_is_never_signaled_as_an_unrelated_group(self):
+        fields = ['R', '1', '99', '99'] + ['0'] * 15 + ['200']
+        record = {'pid': 20, 'start': '200', 'group': False, 'stopped': False, 'root': 10}
+        with patch.object(runtime.Path, 'exists', return_value=True), patch.object(runtime.Path, 'read_text', return_value='20 (fixture) ' + ' '.join(fields)), patch.object(runtime.os, 'kill') as kill, patch.object(runtime.os, 'killpg') as kill_group, patch.object(runtime.time, 'sleep'):
+            runtime.terminate_records([record])
+        kill_group.assert_not_called()
+        self.assertEqual([call.args for call in kill.call_args_list], [(20, signal.SIGTERM), (20, signal.SIGKILL)])
 
     def test_partial_setup_cleanup_copies_only_public_evidence(self):
         run = self.make_run()

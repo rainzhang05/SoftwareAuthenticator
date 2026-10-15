@@ -4,16 +4,28 @@ from __future__ import annotations
 import os
 import json
 import platform
+import re
 import shutil
 import signal
 import stat
 import subprocess
 import time
+import threading
 from pathlib import Path
 
 
 class UnavailableRuntime(RuntimeError):
     pass
+
+
+def public_log(data, secrets=()):
+    """Redact control endpoints/session tokens before process output hits disk."""
+    text = data.decode('utf-8', errors='replace')
+    text = re.sub(r'wss?://[^\s"<>]+', '[automation endpoint redacted]', text)
+    text = re.sub(r'(?i)(session(?:_?id)?["\s:=]+)[0-9a-f-]{16,}', r'\1[redacted]', text)
+    for secret in secrets:
+        text = text.replace(secret, '[redacted]')
+    return text.encode()
 
 
 def preflight():
@@ -45,19 +57,64 @@ class OwnedProcesses:
     def __init__(self):
         self.children = []
         self.ledger = None
+        self.descendants = {}
+        self.redactions = ()
+        self.drains = []
+
+    def adopt_descendants(self, roots=(), owner=None):
+        """Track only proven descendants (or a browser PID from our local driver).
+
+        Chromium/Firefox can move renderers into separate process groups. Never
+        infer ownership from a browser name or signal their unrelated group.
+        """
+        table = {}
+        for filename in Path('/proc').glob('[0-9]*/stat'):
+            try:
+                fields = filename.read_text().rsplit(')', 1)[1].split()
+                table[int(filename.parent.name)] = (int(fields[1]), fields[19])
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+        spawned = {p.pid for p in self.children}
+        owned = {pid: pid for pid in spawned}
+        for process in self.children:
+            if process.pid in table and process._pqkey_identity is not None and table[process.pid][1] != process._pqkey_identity:
+                raise RuntimeError('owned process PID was reused')
+        for pid, record in self.descendants.items():
+            if pid in table and table[pid][1] != record['start']:
+                raise RuntimeError('owned descendant PID was reused')
+            owned[pid] = record['root']
+        for pid in roots:
+            owned[pid] = owner or pid
+        while True:
+            additions = {pid: owned[parent] for pid, (parent, _) in table.items() if parent in owned and pid not in owned}
+            if not additions:
+                break
+            owned.update(additions)
+        for pid in set(owned) - spawned:
+            if pid in table and pid not in self.descendants:
+                self.descendants[pid] = {"pid": pid, "start": table[pid][1], "stopped": False,
+                                         "group": False, "root": owned[pid]}
+        self.checkpoint()
+
+    def stop_descendants(self, root):
+        records = [record for record in self.descendants.values() if record['root'] == root]
+        terminate_records(records)
+        for record in records:
+            record['stopped'] = True
+        self.checkpoint()
 
     def checkpoint(self):
         if self.ledger:
             temporary = self.ledger.with_suffix('.tmp')
             temporary.write_text(json.dumps([{"pid": p.pid, "start": p._pqkey_identity,
-                                              "stopped": p._pqkey_stopped} for p in self.children]))
+                                              "stopped": p._pqkey_stopped, "group": True} for p in self.children]
+                                            + list(self.descendants.values())))
             temporary.chmod(0o600)
             temporary.replace(self.ledger)
 
     def start(self, argv, log, *, env=None, **kwargs):
-        with open(log, "ab") as output:
-            process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
-                                       env=env, start_new_session=True, **kwargs)
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   env=env, start_new_session=True, **kwargs)
         self.children.append(process)
         process._pqkey_stopped = False
         identity = Path(f"/proc/{process.pid}/stat")
@@ -66,6 +123,14 @@ class OwnedProcesses:
         except FileNotFoundError:
             process._pqkey_identity = None
         self.checkpoint()
+        def drain():
+            with open(log, 'ab', buffering=0) as output:
+                for line in iter(process.stdout.readline, b''):
+                    output.write(public_log(line, self.redactions))
+            process.stdout.close()
+        thread = threading.Thread(target=drain, daemon=True)
+        thread.start()
+        self.drains.append(thread)
         return process
 
     @staticmethod
@@ -105,15 +170,22 @@ class OwnedProcesses:
                 self.checkpoint()
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                 failures.append(f"owned process cleanup: {type(error).__name__}")
+        try:
+            terminate_records(list(self.descendants.values()))
+            for record in self.descendants.values():
+                record['stopped'] = True
+            self.checkpoint()
+        except (OSError, RuntimeError) as error:
+            failures.append(f"owned browser descendants cleanup: {type(error).__name__}")
+        for thread in self.drains:
+            thread.join(timeout=2)
+            if thread.is_alive():
+                failures.append('owned process log did not close after cleanup')
         return failures
 
 
-def fallback_cleanup(control):
-    """Workflow cancellation fallback: only recorded, identity-checked groups."""
-    ledger = Path(control) / 'processes.json'
-    if not ledger.exists():
-        return
-    records = json.loads(ledger.read_text())
+def terminate_records(records):
+    active = []
     for record in records:
         if record['stopped']:
             continue
@@ -123,22 +195,36 @@ def fallback_cleanup(control):
         identity = Path(f'/proc/{pid}/stat')
         if identity.exists():
             fields = identity.read_text().rsplit(')', 1)[1].split()
-            if fields[19] != record['start'] or int(fields[2]) != pid or int(fields[3]) != pid:
+            if fields[19] != record['start'] or (record.get('group', True) and (int(fields[2]) != pid or int(fields[3]) != pid)):
                 raise RuntimeError('PID/session identity changed; refusing fallback cleanup')
+        elif not record.get('group', True):
+            continue
+        active.append(record)
         try:
-            os.killpg(pid, signal.SIGTERM)
+            (os.killpg if record.get('group', True) else os.kill)(pid, signal.SIGTERM)
         except ProcessLookupError:
             continue
-    time.sleep(0.5)
-    for record in records:
+    if active:
+        time.sleep(0.5)
+    for record in active:
         if not record['stopped']:
             identity = Path(f'/proc/{record["pid"]}/stat')
             if identity.exists() and identity.read_text().rsplit(')', 1)[1].split()[19] != record['start']:
                 raise RuntimeError('PID changed during fallback cleanup')
+            if not identity.exists() and not record.get('group', True):
+                continue
             try:
-                os.killpg(record['pid'], signal.SIGKILL)
+                (os.killpg if record.get('group', True) else os.kill)(record['pid'], signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def fallback_cleanup(control):
+    """Workflow cancellation fallback: only recorded, identity-checked processes."""
+    ledger = Path(control) / 'processes.json'
+    if not ledger.exists():
+        return
+    terminate_records(json.loads(ledger.read_text()))
     # State is restricted to a harness-created subdirectory of this private control.
     for directory in Path(control).glob('pqkey-browser-*'):
         if directory.is_dir() and not directory.is_symlink():
