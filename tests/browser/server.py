@@ -463,6 +463,29 @@ def _assert(cond, msg="assertion failed"):
         raise AssertionError(msg)
 
 
+def verify_safely(fn, body):
+    """Retain malformed public responses as verifier failures, not client errors."""
+    with LOCK:
+        pending = PENDING.get(body.get("ceremonyId"))
+    try:
+        return fn(body)
+    except Exception as error:  # noqa: BLE001
+        if pending is None:
+            raise
+        with LOCK:
+            PENDING.pop(body.get("ceremonyId"), None)
+        entry = {"kind": pending["kind"], "label": pending["req"].get("label"),
+                 "fixtureId": pending["req"].get("fixtureId"), "ceremonyId": body["ceremonyId"],
+                 "outcome": "FAIL", "summary": "RP verifier could not parse/validate public response",
+                 "checks": [{"check": "RP verification boundary", "ok": False, "error": type(error).__name__}],
+                 "options": pending["options"], "request": pending["req"]}
+        credential = json.loads(json.dumps(body.get("credential", {})))
+        credential["clientExtensionResults"] = public_extensions(credential.get("clientExtensionResults"))
+        entry["credential"] = credential
+        log_result(entry)
+        return entry
+
+
 # --------------------------------------------------------------------- HTTP
 
 
@@ -514,7 +537,7 @@ class Handler(BaseHTTPRequestHandler):
             fn = routes.get(self.path)
             if fn is None:
                 return self._send(404, {"error": "not found"})
-            self._send(200, fn(body))
+            self._send(200, verify_safely(fn, body) if self.path.endswith("/verify") else fn(body))
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             self._send(500, {"error": f"{type(e).__name__}: {e}"})

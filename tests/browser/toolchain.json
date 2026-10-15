@@ -1,0 +1,33 @@
+{
+  "platform": "linux-x86_64",
+  "chromium": {
+    "version_prefix": "158.",
+    "revision": "1719332",
+    "source_sha": "087fe41c36241e05f1faa80503f534a454b7e911",
+    "provenance": "https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/1719332/REVISIONS",
+    "browser": {
+      "url": "https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/1719332/chrome-linux.zip?generation=1792040553704404",
+      "sha256": "0e3bc918933a7dd7c6ec2cf17d5eefbe58c751c398c070e10dc49282908a3007",
+      "executable": "chrome-linux/chrome"
+    },
+    "driver": {
+      "url": "https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/1719332/chromedriver_linux64.zip?generation=1792040560024562",
+      "sha256": "410be10b3efe9fc42e40a175c9396eda98df0c0f9cb47ed2d85fbff6e29cb15e",
+      "executable": "chromedriver_linux64/chromedriver"
+    }
+  },
+  "firefox": {
+    "version_prefix": "158.",
+    "provenance": "https://archive.mozilla.org/pub/firefox/releases/158.0/SHA256SUMS",
+    "browser": {
+      "url": "https://archive.mozilla.org/pub/firefox/releases/158.0/linux-x86_64/en-US/firefox-158.0.tar.xz",
+      "sha256": "9549b054ec4cf85f50f6a19d8c6fb79580312e71ebc4ec2cb217ec9af09dc12a",
+      "executable": "firefox/firefox"
+    },
+    "driver": {
+      "url": "https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-linux64.tar.gz",
+      "sha256": "e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e",
+      "executable": "geckodriver"
+    }
+  }
+}

@@ -1,0 +1,2 @@
+# Browser harness only; the existing RP/verifier lock remains separate.
+selenium==4.51.0

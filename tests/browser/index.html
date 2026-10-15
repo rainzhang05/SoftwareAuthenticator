@@ -112,8 +112,10 @@ const NAMES = {'-7':'ES256','-48':'ML-DSA-44','-49':'ML-DSA-65','-50':'ML-DSA-87
 const PRESETS = await (await fetch("/presets.json")).json();
 
 let fixtureId = null;
+let expectedCredential = null;
 function setForm(p) {
   fixtureId = p.fixtureId || p.id || null;
+  expectedCredential = p.expectedCredential || null;
   $('label').value = `${p.id} ${p.label}`;
   $('username').value = p.username ?? 'alice';
   $('algs').value = p.algs ?? '-7';
@@ -129,12 +131,16 @@ function setForm(p) {
   $('credProtect').value = p.credProtect ?? '';
   $('enforce').checked = !!p.enforce;
   $('exclude').checked = !!p.exclude;
+  if (p.allow?.startsWith('cred:') && !Array.from($('allow').options).some(o => o.value === p.allow)) {
+    $('allow').add(new Option('fixture credential', p.allow));
+  }
   $('allow').value = p.allow ?? 'user';
+  $('timeout').value = p.timeout ?? 60000;
 }
 function readForm() {
   const hints = $('hints').value.split(',').map(s => s.trim()).filter(Boolean);
   return {
-    fixtureId, label: $('label').value, username: $('username').value,
+    fixtureId, expectedCredential, label: $('label').value, username: $('username').value,
     algs: $('algs').value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
     residentKey: $('rk').value, userVerification: $('uv').value, attestation: $('att').value,
     attachment: $('attach').value, hints, timeout: $('timeout').value,

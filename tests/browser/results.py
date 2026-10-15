@@ -58,6 +58,7 @@ def initial_rows(presets):
 def write_report(directory, browser, metadata, rows, failures):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
+    rows = json.loads(json.dumps(rows))  # provisional reporting must not destroy observations
     controls = all(any(r["preset"] == key and r["outcome"] == "verified_success" for r in rows)
                    for key in CONTROL_IDS)
     # Unsupported observations are invalid without all mandatory controls.
@@ -72,7 +73,10 @@ def write_report(directory, browser, metadata, rows, failures):
               "failures": failures, "results": rows}
     (directory / "matrix.json").write_text(json.dumps(report, indent=2) + "\n")
     lines = [f"# {browser}: {'PASS' if ok else 'FAIL / incomplete'}", "",
-             report["presence"], "", "| Preset | Attempted | Outcome | Detail |", "|---|---|---|---|"]
+             report["presence"], "", f"Source: {metadata.get('source', {}).get('stdout', 'unrecorded')}",
+             f"Browser: {metadata.get('browser_version', 'not started')}; host: {metadata.get('system', 'unrecorded')}",
+             "Exact identities, verifier checks and limitations are in matrix.json and rp-verifier.jsonl.", "",
+             "| Preset | Attempted | Outcome | Detail |", "|---|---|---|---|"]
     for row in rows:
         detail = str(row.get("reason", "")).replace("|", "/").replace("\n", " ")
         lines.append(f"| {row['preset']} | {row['attempted']} | {row['outcome']} | {detail} |")

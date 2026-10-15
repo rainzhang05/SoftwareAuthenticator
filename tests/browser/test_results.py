@@ -41,7 +41,9 @@ class Results(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             rows = [{"preset": "R3", "attempted": True, "outcome": "unsupported_browser_capability"}]
             self.assertFalse(write_report(directory, "firefox", {}, rows, []))
-            self.assertEqual(rows[0]["outcome"], "infrastructure_failure")
+            report = json.loads((Path(directory) / "matrix.json").read_text())
+            self.assertEqual(report["results"][0]["outcome"], "infrastructure_failure")
+            self.assertEqual(rows[0]["outcome"], "unsupported_browser_capability")
             rows = [{"preset": key, "attempted": True, "outcome": "verified_success"} for key in CONTROL_IDS]
             self.assertFalse(write_report(directory, "firefox", {}, rows, ["cleanup failed"]))
             self.assertTrue(write_report(directory, "firefox", {}, rows, []))

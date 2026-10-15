@@ -101,6 +101,14 @@ class RP(unittest.TestCase):
         for length, marker, want in [(33, 0, False), (33, 1, True), (107, 2, False), (33, 2, None), (0, 0, None)]:
             self.assertIs(rp.credential_modality(bytes([marker]) * length), want)
 
+    def test_malformed_response_is_a_correlated_verification_failure(self):
+        opts = rp.register_options({'username': 'alice', 'fixtureId': 'malformed-fixture'})
+        result = rp.verify_safely(rp.register_verify, {'ceremonyId': opts['ceremonyId'], 'credential': {}})
+        self.assertEqual(result['outcome'], 'FAIL')
+        self.assertEqual(result['fixtureId'], 'malformed-fixture')
+        self.assertEqual(result['ceremonyId'], opts['ceremonyId'])
+        self.assertNotIn(opts['ceremonyId'], rp.PENDING)
+
     def test_prf_secrets_are_absent_from_public_evidence(self):
         self.register()
         secret = rp.b64u(b"s" * 32)
