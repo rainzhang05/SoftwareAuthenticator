@@ -62,8 +62,11 @@ def peer(script, request, env, *, python=sys.executable, timeout=5):
         if script == 'ui.py':
             try:
                 diagnostic = json.loads(response.stdout)
+                kind = diagnostic.get('error', '')
+                if isinstance(kind, str) and re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]{0,79}', kind):
+                    detail = '; ' + kind
                 if diagnostic.get('error') == 'NativeUIError':
-                    detail = '; ' + diagnostic['reason']
+                    detail += ': ' + diagnostic['reason']
             except (ValueError, KeyError, TypeError):
                 pass
         raise RuntimeError(f'{script} failed (status {response.returncode}); native peer/setup failure{detail}')
@@ -367,6 +370,7 @@ class Run:
         fingerprint = None
         observed_fingerprint = None
         last_action_time = start
+        pin_pending_submit = False
         while time.monotonic() < deadline:
             self.check_device_isolation()
             self.processes.adopt_descendants()
@@ -386,14 +390,21 @@ class Run:
                 return record
             try:
                 observation = peer('ui.py', {"pin": self.pin, "account": account, "opaque_account": opaque_account,
-                                            "last_fingerprint": fingerprint}, self.env, python='/usr/bin/python3')
+                                            "last_fingerprint": fingerprint, 'submit_pin': pin_pending_submit}, self.env, python='/usr/bin/python3')
             except RuntimeError:
                 # A native accessible can disappear while a fast ceremony
                 # completes. Require its matching RP result before accepting
                 # that race; otherwise the UI peer failure remains fatal.
-                if any(e.get('fixtureId') == fixture for e in self.results()):
-                    continue
-                raise
+                completion_deadline = min(deadline, time.monotonic() + 0.5)
+                while time.monotonic() < completion_deadline:
+                    if any(e.get('fixtureId') == fixture for e in self.results()):
+                        self.metadata['completed_ui_races'] = self.metadata.get('completed_ui_races', 0) + 1
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise
+                continue
+            pin_pending_submit = observation.get('pin_pending_submit', False)
             ui.extend(tag for tag in observation['evidence'] if tag not in ui)
             action = observation['action']
             if action:

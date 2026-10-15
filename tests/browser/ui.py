@@ -40,18 +40,20 @@ def activate(node, api, *, xtest=False):
         # don't disable the browser's input protection or repeat PIN entry.
         time.sleep(1)
         bounds = node.queryComponent().getExtents(api.DESKTOP_COORDS)
+        info = {'method': 'XTEST', 'role': node.getRoleName(), 'name': node.name,
+                'bounds': [bounds.x, bounds.y, bounds.width, bounds.height], 'cooldown_seconds': 1}
         x, y, width, height = bounds.x, bounds.y, bounds.width, bounds.height
         if not (0 <= x < x + width <= 1280 and 0 <= y < y + height <= 960):
             raise NativeUIError('native control is outside the owned desktop')
         subprocess.run(['xdotool', 'mousemove', '--sync', str(x + width // 2), str(y + height // 2), 'click', '1'],
                        check=True, timeout=2)
-        return {'method': 'XTEST', 'role': node.getRoleName(), 'name': node.name,
-                'bounds': [x, y, width, height], 'cooldown_seconds': 1}
+        return info
     else:
+        info = {'method': 'AT-SPI', 'role': node.getRoleName(), 'name': node.name}
         action = node.queryAction()
         if not action.nActions or not action.doAction(0):
             raise NativeUIError('native prompt accessibility action failed')
-        return {'method': 'AT-SPI', 'role': node.getRoleName(), 'name': node.name}
+        return info
 
 
 def operate(request, api):
@@ -62,16 +64,27 @@ def operate(request, api):
     # Never inspect or emit editable/password values.
     safe = [{"role": n.getRoleName(), "name": n.name[:400]} for n in items
             if n.getRoleName() not in ("password text", "text", "entry")]
-    result = {"action": None, "action_kind": None, "evidence": [], "tree": safe}
+    result = {"action": None, "action_kind": None, "evidence": [], "tree": safe, 'pin_pending_submit': False}
     result["fingerprint"] = hashlib.sha256(json.dumps(safe, sort_keys=True).encode()).hexdigest()
     text = " ".join(n.name for n in items if n.getRoleName() not in ("password text", "text", "entry")).lower()
     incompatible = ("this security key can't be used", "this security key cannot be used",
                     "your device can't be used with this site", "no supported algorithms")
     if any(label in text for label in incompatible):
         result["evidence"].append("unsupported-key")
-    if request.get("last_fingerprint") == result["fingerprint"]:
+    if request.get("last_fingerprint") == result["fingerprint"] and not request.get('submit_pin'):
         return result
     passwords = [n for n in items if n.getRoleName() == "password text"]
+    if chromium and request.get('submit_pin'):
+        if len(passwords) != 1:
+            raise NativeUIError('native PIN form changed before submission')
+        next_buttons = [n for dialog in dialogs for n in nodes(dialog)
+                        if visible(n, api) and n.getRoleName() in ('push button', 'button') and n.name == 'Next']
+        if len(next_buttons) != 1:
+            raise NativeUIError('native PIN submit button is not unique')
+        result['native_control'] = activate(next_buttons[0], api, xtest=True)
+        result['action'] = 'submitted PIN through native Next button'
+        result['action_kind'] = 'pin-submit'
+        return result
     if passwords:
         if any(label in text for label in ('incorrect pin', 'device has been locked', 'temporarily blocked')):
             raise NativeUIError('fixture PIN was rejected')
@@ -82,16 +95,10 @@ def operate(request, api):
             raise NativeUIError('could not focus native PIN field')
         subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+a"], check=True, timeout=2)
         subprocess.run(["xdotool", "type", "--clearmodifiers", "--file", "-"], input=request["pin"].encode(), check=True, timeout=2)
-        # Chromium's PIN dialog does not submit on Return. Its named native
-        # button is available before typing, even though editable values are
-        # deliberately excluded from the public accessibility fingerprint.
-        next_buttons = [n for dialog in dialogs for n in nodes(dialog)
-                        if visible(n, api) and n.getRoleName() in ("push button", "button")
-                        and n.name.strip() == "Next"]
-        if next_buttons:
-            # State caches in a one-shot AT-SPI client may still describe the
-            # empty field. Let normal native input settle before submission.
-            result['native_control'] = activate(next_buttons[0], api, xtest=chromium)
+        if chromium:
+            # Typing replaces Chromium accessibles. Submit in the next peer
+            # invocation, whose registry/state cache describes the filled form.
+            result['pin_pending_submit'] = True
         else:
             subprocess.run(["xdotool", "key", "Return"], check=True, timeout=2)
         result["action"] = "entered PIN in native dialog"
@@ -141,7 +148,7 @@ def operate(request, api):
     if candidates:
         node = candidates[0]
         result['native_control'] = activate(node, api, xtest=chromium)
-        result["action"] = "native " + node.name
+        result["action"] = "native " + result['native_control']['name']
         result["action_kind"] = action_kind
     return result
 

@@ -57,17 +57,25 @@ class UI(unittest.TestCase):
         bob.action.doAction.assert_called_once()
         bobby.action.doAction.assert_not_called()
 
-    def test_chromium_pin_uses_the_native_next_button(self):
+    def test_chromium_pin_entry_and_submission_use_fresh_snapshots(self):
         next_button = Node('Next', 'push button')
         dialog = Node('PIN required', 'dialog', Node('PIN', 'password text'), next_button)
         with patch.object(ui.subprocess, 'run') as execute, patch.object(ui.time, 'sleep') as sleep:
             result = ui.operate({'pin': 'unit-secret'}, api(dialog, browser='Chromium'))
         self.assertEqual(result['action_kind'], 'pin')
+        self.assertTrue(result['pin_pending_submit'])
+        self.assertEqual(execute.call_count, 2)
+        sleep.assert_not_called()
         next_button.action.doAction.assert_not_called()
-        self.assertEqual(execute.call_count, 3)
+        with patch.object(ui.subprocess, 'run') as execute, patch.object(ui.time, 'sleep') as sleep:
+            submitted = ui.operate({'pin': 'unit-secret', 'submit_pin': True, 'last_fingerprint': result['fingerprint']},
+                                   api(dialog, browser='Chromium'))
+        self.assertFalse(submitted['pin_pending_submit'])
+        self.assertEqual(submitted['action_kind'], 'pin-submit')
+        self.assertEqual(execute.call_count, 1)
         self.assertEqual(execute.call_args.args[0], ['xdotool', 'mousemove', '--sync', '70', '50', 'click', '1'])
         sleep.assert_called_once_with(1)
-        self.assertEqual(result['native_control']['bounds'], [20, 30, 100, 40])
+        self.assertEqual(submitted['native_control']['bounds'], [20, 30, 100, 40])
 
     def test_chromium_waits_for_the_pin_field_and_uses_native_button_bounds(self):
         button = Node('Next', 'push button')
@@ -111,6 +119,26 @@ class UI(unittest.TestCase):
             again = ui.operate({'pin': 'unit-secret', 'last_fingerprint': first['fingerprint']}, api(password))
         self.assertIsNone(again['action'])
         self.assertEqual(execute.call_count, 3)
+
+    def test_native_account_can_disappear_during_its_action(self):
+        class ClosingNode(Node):
+            dead = False
+
+            @property
+            def name(self):
+                if self.dead:
+                    raise LookupError('accessible disappeared')
+                return self.saved_name
+
+            @name.setter
+            def name(self, value):
+                self.saved_name = value
+
+        account = ClosingNode('alice', 'push button')
+        account.action.doAction.side_effect = lambda _: setattr(account, 'dead', True) or True
+        result = ui.operate({'account': 'alice'}, api(account))
+        self.assertEqual(result['action'], 'native alice')
+        self.assertTrue(account.dead)
 
     def test_incompatibility_requires_specific_visible_text(self):
         cancel = Node('Cancel', 'push button')
