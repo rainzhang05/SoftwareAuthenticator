@@ -1,0 +1,135 @@
+name: Browser UHID acceptance
+
+# Expensive native browser compatibility evidence is deliberately opt-in.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-uhid-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  browser:
+    name: ${{ matrix.browser }} over real Linux UHID
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox]
+    env:
+      BROWSER: ${{ matrix.browser }}
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+      CARGO_NET_RETRY: 10
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Initialize incomplete evidence before setup
+        run: |
+          python3 tests/browser/acceptance.py "$BROWSER" --initialize --artifacts "$RUNNER_TEMP/browser-evidence"
+      - name: Install native desktop and HID dependencies
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          {
+            sudo apt-get update
+            sudo apt-get install -y dbus-daemon dbus-user-session udev locales \
+              xvfb openbox at-spi2-core python3-pyatspi xdotool scrot fonts-liberation \
+              libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 \
+              libgbm1 libgtk-3-0t64 libnss3 libnspr4 libx11-xcb1 libxcomposite1 \
+              libxdamage1 libxfixes3 libxrandr2 libxkbcommon0 libdbus-glib-1-2
+            sudo locale-gen en_US.UTF-8
+          } 2>&1 | tee "$RUNNER_TEMP/browser-evidence/$BROWSER/setup.log"
+      - name: Provision only this disposable runner's test HID access
+        run: |
+          set -o pipefail
+          {
+            test "$(uname -m)" = x86_64
+            rule="/etc/udev/rules.d/99-pqkey-browser-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.rules"
+            test ! -e "$rule"
+            user=$(id -un)
+            sudo tee "$rule" >/dev/null <<EOF
+          KERNEL=="uhid", SUBSYSTEM=="misc", OWNER="$user", MODE="0600"
+          SUBSYSTEM=="hidraw", DEVPATH=="/devices/virtual/misc/uhid/0003:1209:0006.*", OWNER="$user", MODE="0600"
+          EOF
+            sudo udevadm control --reload-rules
+            if ! sudo modprobe uhid; then
+              sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+              sudo modprobe uhid
+            fi
+            sudo udevadm trigger --action=change --name-match=uhid --settle
+            ls -l /dev/uhid
+            test -r /dev/uhid && test -w /dev/uhid
+          } 2>&1 | tee "$RUNNER_TEMP/browser-evidence/$BROWSER/uhid-setup.log"
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14.7"
+      - name: Prepare locked Python environment
+        run: |
+          python -m venv "$RUNNER_TEMP/browser-venv"
+          "$RUNNER_TEMP/browser-venv/bin/python" -m pip install --require-hashes --only-binary :all: \
+            -r tests/e2e/requirements.txt -r tests/browser/requirements.txt
+      - name: Build the current Linux release
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          cargo build -p pqkey --locked --release 2>&1 | tee "$RUNNER_TEMP/browser-evidence/$BROWSER/build.log"
+      - name: Download exact browser and driver identities
+        timeout-minutes: 8
+        run: |
+          "$RUNNER_TEMP/browser-venv/bin/python" tests/browser/download.py "$BROWSER" "$RUNNER_TEMP/browser-binaries"
+          # Upstream Chromium snapshots use a setuid sandbox on hosts whose
+          # AppArmor policy denies unprivileged user namespaces. Keep the sandbox.
+          if [ "$BROWSER" = chromium ]; then
+            sudo chown root:root "$RUNNER_TEMP/browser-binaries/chrome-linux/chrome_sandbox"
+            sudo chmod 4755 "$RUNNER_TEMP/browser-binaries/chrome-linux/chrome_sandbox"
+          fi
+      - name: Real browser WebAuthn presets and verified companion assertions
+        timeout-minutes: 45
+        env:
+          BROWSER_PYTHON: ${{ runner.temp }}/browser-venv/bin/python
+          CHROME_DEVEL_SANDBOX: ${{ runner.temp }}/browser-binaries/chrome-linux/chrome_sandbox
+        run: |
+          scripts/browser-acceptance.sh "$BROWSER" --artifacts "$RUNNER_TEMP/browser-evidence" \
+            --binaries "$RUNNER_TEMP/browser-binaries" --control "$RUNNER_TEMP/browser-control"
+      - name: Fallback cleanup of identity-checked owned resources
+        if: always()
+        run: |
+          failed=0
+          python3 tests/browser/runtime.py "$RUNNER_TEMP/browser-control/$BROWSER" || failed=1
+          if [ "$failed" = 0 ]; then
+            rm -rf -- "${RUNNER_TEMP:?}/browser-control" "${RUNNER_TEMP:?}/browser-binaries" "${RUNNER_TEMP:?}/browser-venv"
+          fi
+          rule="/etc/udev/rules.d/99-pqkey-browser-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.rules"
+          if [ -f "$rule" ]; then
+            sudo rm -- "$rule" || failed=1
+            sudo udevadm control --reload-rules || failed=1
+          fi
+          exit "$failed"
+      - name: Publish readable compatibility summary
+        if: always()
+        run: cat "$RUNNER_TEMP/browser-evidence/$BROWSER/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Always retain public diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: browser-uhid-${{ matrix.browser }}-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/browser-evidence/${{ matrix.browser }}/*.json
+            ${{ runner.temp }}/browser-evidence/${{ matrix.browser }}/*.jsonl
+            ${{ runner.temp }}/browser-evidence/${{ matrix.browser }}/*.log
+            ${{ runner.temp }}/browser-evidence/${{ matrix.browser }}/*.png
+            ${{ runner.temp }}/browser-evidence/${{ matrix.browser }}/summary.md
