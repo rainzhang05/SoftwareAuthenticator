@@ -13,4 +13,5 @@ pub mod rng;
 pub mod sequence;
 pub mod structured;
 
+mod key_agreement;
 mod storage;

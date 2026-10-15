@@ -39,6 +39,12 @@ impl Session {
         let Value::Map(key) = get_int(&entries, 1)? else {
             return None;
         };
+        if get_int(key, 1) != Some(&int(2))
+            || get_int(key, 3) != Some(&int(-25))
+            || get_int(key, -1) != Some(&int(1))
+        {
+            return None;
+        }
         let coordinate = |label| match get_int(key, label) {
             Some(Value::Bytes(value)) => <[u8; 32]>::try_from(value.as_slice()).ok(),
             _ => None,

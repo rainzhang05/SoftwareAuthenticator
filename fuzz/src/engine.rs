@@ -189,6 +189,14 @@ impl Engine {
         self.store.pin_state().unwrap()
     }
 
+    pub(crate) fn credentials(&self) -> Vec<pqkey_ctap::store::CredentialRecord> {
+        self.store.list().unwrap()
+    }
+
+    pub(crate) fn signature_counter(&self) -> u32 {
+        self.store.signature_counter().unwrap()
+    }
+
     /// Reconstruct only the engine, keeping the harness's published storage.
     pub(crate) fn restart(&mut self) {
         let trace = std::mem::take(&mut self.trace);

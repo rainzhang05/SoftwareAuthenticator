@@ -179,6 +179,23 @@ fn descriptor_list(u: &mut Unstructured<'_>, known: &[Vec<u8>]) -> Result<Value>
 
 /// The platform's key agreement COSE key, well formed or not.
 pub fn cose_key(u: &mut Unstructured<'_>) -> Result<Value> {
+    // Valid points ensure metadata mutations reach decapsulation, rather than
+    // invariably failing curve membership. Other cases retain arbitrary maps.
+    if u.ratio(1, 2)? {
+        let secret = [u.int_in_range(1u8..=0x7f)?; 32];
+        let (x, y) =
+            pqkey_ctap::platform::PlatformKeyAgreement::public_coordinates(&secret).unwrap();
+        let key = Value::Map(vec![
+            (int(1), int(2)),
+            (int(3), int(-25)),
+            (int(-1), int(1)),
+            (int(-2), bytes(&x)),
+            (int(-3), bytes(&y)),
+        ]);
+        let case = u.int_in_range(0..=crate::key_agreement::CASE_COUNT - 1)?;
+        return Ok(crate::key_agreement::mutate(key, case).0);
+    }
+
     let coordinate = |u: &mut Unstructured<'_>| {
         let mut value = [0u8; 32];
         u.fill_buffer(&mut value)?;

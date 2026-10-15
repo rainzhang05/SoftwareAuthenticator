@@ -577,6 +577,63 @@ fn ctap_request(dir: &Path) {
         }
         command(0x0A, &map(entries))
     };
+    // Required metadata mutations keep a valid point and complete outer fields.
+    for protocol in [1, 2] {
+        for case in 0..31 {
+            let mut key = platform_key();
+            // Reuse the stateful mutation cases through serialized sequence fixtures;
+            // raw requests separately cover each required label and coordinate.
+            let Value::Map(entries) = &mut key else {
+                unreachable!()
+            };
+            let (label, value) = if case < 12 {
+                let label = [1, 3, -1][case / 4];
+                let value = match case % 4 {
+                    0 => None,
+                    1 => Some(Value::Bool(true)),
+                    2 => Some(text("unexpected")),
+                    _ => Some(int(0)),
+                };
+                (label, value)
+            } else if case < 24 {
+                let label = [-2, -3][(case - 12) / 6];
+                let value = match (case - 12) % 6 {
+                    0 => None,
+                    1 => Some(Value::Bool(true)),
+                    2 => Some(text("unexpected")),
+                    3 => Some(int(0)),
+                    4 => Some(bytes(&[0; 31])),
+                    _ => Some(bytes(&[0; 33])),
+                };
+                (label, value)
+            } else if case == 24 {
+                for (label, value) in entries.iter_mut() {
+                    if *label == int(-2) || *label == int(-3) {
+                        *value = bytes(&[0; 32]);
+                    }
+                }
+                (3, Some(int(-25)))
+            } else if case == 25 {
+                entries.push((int(2), bytes(&[1])));
+                entries.push((int(99), Value::Bool(false)));
+                (3, Some(int(-25)))
+            } else {
+                (3, Some(int([-25, -7, -26, -257, i64::MAX][case - 26])))
+            };
+            entries.retain(|(key, _)| *key != int(label));
+            entries.extend(value.map(|value| (int(label), value)));
+            seeds.push(command(
+                0x06,
+                &map(vec![
+                    (int(1), int(protocol)),
+                    (int(2), int(3)),
+                    (int(3), key),
+                    (int(4), bytes(&vec![0; if protocol == 1 { 16 } else { 32 }])),
+                    (int(5), bytes(&vec![0; if protocol == 1 { 64 } else { 80 }])),
+                ]),
+            ));
+        }
+    }
     seeds.push(credential_management(1, None));
     seeds.push(credential_management(2, None));
     seeds.push(credential_management(3, None));

@@ -190,6 +190,20 @@ suite requires `/dev/uhid`.
   PS256 (-37), PS384 (-38), PS512 (-39), ESB256 (-265) and ESB384 (-267), the
   RSA ones with 2048-bit keys and e = 65537. The first algorithm in the relying
   party's list that the key supports wins (§6.1.2).
+- Classic PIN key agreement validates received COSE metadata before ECDH:
+  integer `kty=2` (EC2), integer `crv=1` (P-256) and integer `alg=-25`.
+  The engine also accepts integer `alg=-7` from platform peers for the OpenSSH
+  compatibility case documented by
+  [OpenSK e7dbb5c](https://github.com/google/OpenSK/blob/e7dbb5c0f80d676489fbf90a27414583987e1658/libraries/opensk/src/ctap/data_formats.rs)
+  and [issue 90](https://github.com/google/OpenSK/issues/90). This is a bounded
+  input exception; generated responses and the native response reader require
+  `-25`. Missing, non-integer and other algorithm values fail. Unknown labels,
+  including extra `kid`, remain tolerated; coordinates must be 32 bytes and
+  form an uncompressed on-curve P-256 point. Both protocol KDFs and framing are
+  unchanged. Engine decapsulation errors retain `INVALID_PARAMETER`; malformed
+  native response metadata produces `ClientError::Malformed` before any
+  authenticated follow-up. Command-specific preconditions and earlier presence
+  or stateful-command invalidation retain their existing precedence.
 - A PIN, with PIN/UV auth protocols 1 and 2 and pinUvAuthTokens. After 8
   wrong PINs the PIN is blocked, and after 3 in a row the key must be
   restarted. There is no built-in user verification.

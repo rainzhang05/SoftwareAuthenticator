@@ -57,6 +57,7 @@ use pqkey_ctap::{ClassicPinProtocol, CoseAlg};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
+mod key_agreement;
 mod management;
 
 const MAX_STEPS: usize = 24;
@@ -239,6 +240,14 @@ enum Op {
         rp: u8,
         credential: u8,
         valid_user: bool,
+    },
+    /// Controlled exchanges against a separate stateful engine keep metadata
+    /// rejection distinct from unrelated malformed-input/error precedence.
+    KeyAgreement {
+        v2: bool,
+        consumer: u8,
+        case: u8,
+        wrong_pin: bool,
     },
 }
 
@@ -1444,6 +1453,16 @@ impl Platform {
             Op::U2fRaw => {
                 let request: Vec<u8> = u.arbitrary()?;
                 self.call_u2f(&request);
+            }
+            Op::KeyAgreement {
+                v2,
+                consumer,
+                case,
+                wrong_pin,
+            } => {
+                self.engine
+                    .trace
+                    .extend(key_agreement::probe(v2, consumer, case, wrong_pin));
             }
             Op::SetPin {
                 v2,
@@ -3119,6 +3138,20 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
             ]);
         }
     }
+    for v2 in [false, true] {
+        for consumer in 0..7 {
+            for case in 0..crate::key_agreement::CASE_COUNT {
+                for wrong_pin in [false, true] {
+                    cases.push(vec![Op::KeyAgreement {
+                        v2,
+                        consumer,
+                        case,
+                        wrong_pin,
+                    }]);
+                }
+            }
+        }
+    }
     cases.iter().map(|ops| encode_fixture(ops)).collect()
 }
 
@@ -3164,19 +3197,19 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 permissions,
                 rp: None,
             } => {
-                variant(&mut output, 6, 32);
+                variant(&mut output, 6, 33);
                 output.extend_from_slice(&[u8::from(*v2), *permissions, 0]);
                 extra = if pin_set { 17 } else { 34 };
                 pin_set = true;
             }
-            Op::GetNextAssertion => variant(&mut output, 5, 31),
+            Op::GetNextAssertion => variant(&mut output, 5, 33),
             Op::Presence(value) => {
-                variant(&mut output, 12, 32);
+                variant(&mut output, 12, 33);
                 output.push(*value);
             }
-            Op::GetInfo => variant(&mut output, 9, 31),
+            Op::GetInfo => variant(&mut output, 9, 33),
             Op::Reset => {
-                variant(&mut output, 11, 32);
+                variant(&mut output, 11, 33);
                 pin_set = false;
             }
             Op::LargeBlobBegin {
@@ -3186,7 +3219,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 valid_hash,
                 fill,
             } => {
-                variant(&mut output, 15, 32);
+                variant(&mut output, 15, 33);
                 auth(&mut output, *value);
                 output.extend_from_slice(&length.to_le_bytes());
                 output.extend_from_slice(&fragment.to_le_bytes());
@@ -3198,7 +3231,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 length,
                 fragment,
             } => {
-                variant(&mut output, 16, 32);
+                variant(&mut output, 16, 33);
                 auth(&mut output, *value);
                 option_u16(&mut output, *offset);
                 option_u16(&mut output, *length);
@@ -3209,13 +3242,13 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 length,
                 extra,
             } => {
-                variant(&mut output, 17, 32);
+                variant(&mut output, 17, 33);
                 output.extend_from_slice(&offset.to_le_bytes());
                 output.extend_from_slice(&length.to_le_bytes());
                 output.push(*extra);
             }
             Op::Advance(millis) => {
-                variant(&mut output, 18, 32);
+                variant(&mut output, 18, 33);
                 output.extend_from_slice(&millis.to_le_bytes());
             }
             Op::LargeBlobWrite {
@@ -3224,7 +3257,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 fragment,
                 valid_hash,
             } => {
-                variant(&mut output, 19, 32);
+                variant(&mut output, 19, 33);
                 auth(&mut output, *value);
                 output.extend_from_slice(&length.to_le_bytes());
                 output.extend_from_slice(&fragment.to_le_bytes());
@@ -3239,7 +3272,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 rk,
                 user,
             } => {
-                variant(&mut output, 20, 32);
+                variant(&mut output, 20, 33);
                 output.extend_from_slice(&[*alg, *rp]);
                 option_bool(&mut output, *large_blob_key);
                 option_bool(&mut output, *third_party_payment);
@@ -3250,18 +3283,18 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 third_party_payment,
                 discoverable,
             } => {
-                variant(&mut output, 21, 32);
+                variant(&mut output, 21, 33);
                 option_bool(&mut output, *large_blob_key);
                 option_bool(&mut output, *third_party_payment);
                 output.push(u8::from(*discoverable));
             }
             Op::EnumerateCredentials { auth: value, next } => {
-                variant(&mut output, 22, 32);
+                variant(&mut output, 22, 33);
                 auth(&mut output, *value);
                 output.push(u8::from(*next));
             }
             Op::U2fRegister { rp } => {
-                variant(&mut output, 23, 32);
+                variant(&mut output, 23, 33);
                 output.push(*rp);
             }
             Op::U2fAuthenticate {
@@ -3270,10 +3303,10 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 control,
                 corrupt,
             } => {
-                variant(&mut output, 24, 32);
+                variant(&mut output, 24, 33);
                 output.extend_from_slice(&[*credential, *rp, *control, u8::from(*corrupt)]);
             }
-            Op::U2fVersion => variant(&mut output, 25, 31),
+            Op::U2fVersion => variant(&mut output, 25, 33),
             Op::AuthenticatorConfig {
                 auth: value,
                 subcommand,
@@ -3282,7 +3315,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 force_change: None,
                 complexity,
             } => {
-                variant(&mut output, 8, 32);
+                variant(&mut output, 8, 33);
                 auth(&mut output, *value);
                 output.extend_from_slice(&[*subcommand, 0, u8::from(rp_ids.is_some())]);
                 if let Some(ids) = rp_ids {
@@ -3295,18 +3328,18 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 option_bool(&mut output, *complexity);
             }
             Op::PinWriteFault { mode, after } => {
-                variant(&mut output, 28, 32);
+                variant(&mut output, 28, 33);
                 output.extend_from_slice(&[*mode, *after]);
             }
-            Op::Restart => variant(&mut output, 29, 31),
-            Op::GetPinRetries => variant(&mut output, 10, 31),
+            Op::Restart => variant(&mut output, 29, 33),
+            Op::GetPinRetries => variant(&mut output, 10, 33),
             Op::SetPin {
                 v2,
                 pin,
                 bad_auth,
                 pad_to,
             } => {
-                variant(&mut output, 0, 32);
+                variant(&mut output, 0, 33);
                 output.extend_from_slice(&[u8::from(*v2), *pin, u8::from(*bad_auth), *pad_to]);
                 extra = 17;
                 pin_set = true;
@@ -3316,7 +3349,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 right_pin,
                 new_pin,
             } => {
-                variant(&mut output, 1, 32);
+                variant(&mut output, 1, 33);
                 output.extend_from_slice(&[u8::from(*v2), u8::from(*right_pin), *new_pin]);
                 extra = 33;
             }
@@ -3327,7 +3360,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 permissions,
                 rp,
             } => {
-                variant(&mut output, 2, 32);
+                variant(&mut output, 2, 33);
                 output.extend_from_slice(&[
                     u8::from(*v2),
                     u8::from(*right_pin),
@@ -3348,7 +3381,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 credential,
                 valid_user,
             } => {
-                variant(&mut output, 31, 32);
+                variant(&mut output, 31, 33);
                 output.push(u8::from(*preview));
                 auth(&mut output, *value);
                 output.extend_from_slice(&[*subcommand, *rp, *credential, u8::from(*valid_user)]);
@@ -3358,15 +3391,24 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 auth: value,
                 subcommand,
             } => {
-                variant(&mut output, 7, 32);
+                variant(&mut output, 7, 33);
                 output.push(u8::from(*preview));
                 auth(&mut output, *value);
                 output.push(*subcommand);
                 extra = 64;
             }
             Op::UsePersistent { v2 } => {
-                variant(&mut output, 30, 32);
+                variant(&mut output, 30, 33);
                 output.push(u8::from(*v2));
+            }
+            Op::KeyAgreement {
+                v2,
+                consumer,
+                case,
+                wrong_pin,
+            } => {
+                variant(&mut output, 32, 33);
+                output.extend_from_slice(&[u8::from(*v2), *consumer, *case, u8::from(*wrong_pin)]);
             }
             _ => panic!("operation has no fixture encoder"),
         }
@@ -3533,9 +3575,13 @@ mod tests {
     #[test]
     fn seeds_exercise_commits_abandoned_writes_and_stable_keys() {
         let seeds = seed_corpus();
-        assert_eq!(seeds.len(), 110);
+        assert_eq!(
+            seeds.len(),
+            110 + 2 * 7 * usize::from(crate::key_agreement::CASE_COUNT) * 2
+        );
         let traces: Vec<_> = seeds.iter().map(|seed| run_traced(seed)).collect();
-        for trace in &traces[traces.len() - 4..] {
+        let original_end = traces.len() - 2 * 7 * usize::from(crate::key_agreement::CASE_COUNT) * 2;
+        for trace in &traces[original_end - 4..original_end] {
             assert_eq!(
                 trace
                     .iter()

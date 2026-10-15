@@ -500,3 +500,28 @@ the repository. Use fresh git archives extracted with `tar -xm`, existing cache
 volumes, separate compiler/architecture/sanitizer outputs and five explicit
 30-second sanitizer runs. Report unavailable real HID, browser and x86_64
 execution separately from passing portable/container checks.
+
+
+## Classic key-agreement metadata validation
+
+Engine regressions cover all seven shared-parser consumers under both PIN
+protocols, with otherwise valid points, ciphertexts and MACs. Metadata rejection
+prevents later PIN decryption/comparison, retry writes and credential publication;
+FileStore checks compare reopened authority. HMAC extension processing follows
+existing presence collection and token consumption, and rejected commands retain
+stateful-command invalidation. The native recording link mutates only public
+getKeyAgreement metadata and records all requests/reports to prove that malformed
+responses cause no authenticated follow-up, including partial reports.
+
+The stateful fuzz target uses controlled exchanges on a separate engine so its
+metadata oracle does not invent a global error ordering for arbitrary requests.
+Its cases include the engine-only integer `-7` exception and unknown labels;
+standard response parsing still requires `-25`. Every explicit fixture round-trips
+against locked `arbitrary`. Regenerate all corpora twice using the locked release
+seed generator and compare filenames and bytes before committing them.
+
+`tests/e2e/test_key_agreement.py` sends raw Python FIDO requests through the real
+HID fixture. Syntax/collection, recording links, callback fixtures and published
+python-fido2 bridge workflows do not establish HID execution. Retain external
+source/command/status evidence and report unavailable HID or architecture runs
+separately; keep the existing libfido2 1.14.0 compatibility gates intact.
