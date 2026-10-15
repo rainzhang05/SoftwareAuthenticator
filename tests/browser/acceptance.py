@@ -128,6 +128,7 @@ class Run:
         self.browser_binary = self.binaries / self.lock['browser']['executable']
         self.driver_binary = self.binaries / self.lock['driver']['executable']
         self.metadata['toolchain'] = self.lock
+        self.metadata['expectations'] = json.loads((HERE / 'expectations.json').read_text())
         receipt = json.loads((self.binaries / 'verified-download.json').read_text())
         if receipt['browser'] != self.browser or receipt['manifest_sha256'] != digest(HERE / 'toolchain.json'):
             raise RuntimeError('browser download receipt does not match the committed lock')
@@ -383,6 +384,8 @@ class Run:
                 first = self.ceremony(preset, account='alice' if preset['id'] == 'L2' else preset['username'])
                 row['ceremonies'].append(first)
                 row['outcome'] = first['outcome']
+                if first['outcome'] != 'verified_success':
+                    row['reason'] = first.get('rp', {}).get('summary', first.get('reason', 'ceremony did not verify'))
                 if first.get('rp', {}).get('outcome') == 'PASS':
                     entry = first['rp']
                     if preset['kind'] == 'reg':
@@ -428,7 +431,7 @@ class Run:
                         if repeated['outcome'] != 'verified_success':
                             row['outcome'] = 'unexpected_failure'
                 if preset['id'] in CONTROL_IDS and row['outcome'] != 'verified_success':
-                    row['reason'] = 'mandatory classic/PIN/discoverable control failed'
+                    row['reason'] = 'mandatory classic/PIN/discoverable control failed: ' + row.get('reason', '')
             except Exception as error:
                 row.update(outcome='infrastructure_failure' if not isinstance(error, AssertionError) else 'unexpected_failure',
                            reason=self.safe_text(f'{type(error).__name__}: {error}'))
