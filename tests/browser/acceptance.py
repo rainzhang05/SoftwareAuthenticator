@@ -103,7 +103,7 @@ class Run:
                               "openssl": backend.openssl_version_text(),
                               "packages": {d.metadata['Name']: d.version for d in importlib.metadata.distributions()},
                               "desktop_packages": command(['dpkg-query', '-W', 'xvfb', 'openbox', 'python3-pyatspi',
-                                                           'at-spi2-core', 'dbus-daemon', 'xdotool', 'scrot',
+                                                           'at-spi2-core', 'dbus-daemon', 'dunst', 'libglib2.0-bin', 'xdotool', 'scrot',
                                                            'libatspi*', 'libgtk-3*', 'libnss3', 'libudev1', 'udev']),
                               "accessibility_python": command(['/usr/bin/python3', '--version']),
                               "runner": {k: os.environ.get(k) for k in ('ImageOS', 'ImageVersion', 'GITHUB_SHA',
@@ -178,6 +178,18 @@ class Run:
         wm_config = self.state / 'openbox.xml'
         wm_config.write_text('<openbox_config xmlns="http://openbox.org/3.4/rc"><focus><focusNew>yes</focusNew></focus></openbox_config>')
         self.processes.start(['openbox', '--sm-disable', '--config-file', str(wm_config)], self.out / 'desktop.log', env=self.env)
+        # WINK needs a real notification service even in auto-approve mode.
+        # Run Dunst on only the daemon's private bus, never a mocked notifier.
+        notification_config = self.state / 'dunstrc'
+        notification_config.write_text('[global]\ntimeout = 2\nnotification_limit = 1\n')
+        notification_env = {**self.env, 'DBUS_SESSION_BUS_ADDRESS': daemon_env['DBUS_SESSION_BUS_ADDRESS']}
+        self.processes.start(['dunst', '-conf', str(notification_config)], self.out / 'notifications.log', env=notification_env)
+        def notification_ready():
+            response = command(['gdbus', 'call', '--session', '--dest', 'org.freedesktop.Notifications',
+                                '--object-path', '/org/freedesktop/Notifications',
+                                '--method', 'org.freedesktop.Notifications.GetServerInformation'], env=notification_env, timeout=2)
+            return response if response['status'] == 0 else None
+        self.metadata['notification_server'] = wait_until(notification_ready, 10)
         service = configparser.ConfigParser()
         service.read('/usr/share/dbus-1/services/org.a11y.Bus.service')
         launcher = shlex.split(service['D-BUS Service']['Exec'])

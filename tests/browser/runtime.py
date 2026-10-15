@@ -45,7 +45,7 @@ def preflight():
             raise UnavailableRuntime(f"cannot inspect HID descriptor {device}: {error}") from error
         if b"\x06\xd0\xf1" in report:
             raise UnavailableRuntime(f"another FIDO HID device exists ({device.name}); use an isolated host; the harness will not stop your authenticator")
-    needed = [name for name in ("Xvfb", "openbox", "dbus-daemon", "xdotool", "scrot", "udevadm", "/usr/bin/python3")
+    needed = [name for name in ("Xvfb", "openbox", "dbus-daemon", "dunst", "gdbus", "xdotool", "scrot", "udevadm", "/usr/bin/python3")
               if not shutil.which(name)]
     if needed:
         raise UnavailableRuntime("missing browser runtime tools: " + ", ".join(needed))
