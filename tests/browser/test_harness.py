@@ -120,6 +120,17 @@ class Harness(unittest.TestCase):
         self.assertTrue((run.out / 'rp-verifier.jsonl').exists())
         self.assertFalse((run.out / 'db.json').exists())
 
+    def test_cancellation_runs_cleanup_and_does_not_continue_the_matrix(self):
+        run = self.make_run()
+        with patch.object(run, 'setup', side_effect=acceptance.RunInterrupted(signal.SIGTERM)), patch.object(run, 'cleanup') as cleanup, patch.object(run, 'run_presets') as presets:
+            with self.assertRaises(acceptance.RunInterrupted):
+                run.execute()
+            cleanup.assert_called_once()
+            presets.assert_not_called()
+        report = json.loads((run.out / 'matrix.json').read_text())
+        self.assertFalse(report['acceptance_passed'])
+        self.assertIn('interrupted by signal', report['failures'][0])
+
     def test_failure_does_not_stop_remaining_presets_or_turn_into_skip(self):
         run = self.make_run()
         run.driver = MagicMock()

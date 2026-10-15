@@ -33,6 +33,12 @@ SUPPLEMENTAL = [{"id": f"B{i}", "kind": "reg", "label": f"Brainpool {alg} non-di
                 for i, alg in enumerate((-265, -267), 1)]
 
 
+class RunInterrupted(BaseException):
+    def __init__(self, signum):
+        super().__init__(f'interrupted by signal {signum}')
+        self.signum = signum
+
+
 def command(argv, *, env=None, timeout=10):
     result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env, cwd=ROOT)
     return {"command": argv, "status": result.returncode, "stdout": result.stdout.strip(),
@@ -473,6 +479,9 @@ class Run:
             self.run_presets()
             if not {'pin', 'account'} <= set(self.metadata.get('native_prompt_actions', [])):
                 self.failures.append('mandatory native PIN/account prompt automation was not observed')
+        except RunInterrupted as error:
+            self.failures.append(str(error))
+            raise
         except Exception as error:
             self.failures.append(f'setup/runtime: {type(error).__name__}: {error}')
             print(self.failures[-1], file=sys.stderr)
@@ -494,7 +503,7 @@ def main():
     if args.browser == 'all' and args.binaries:
         parser.error('--binaries requires one browser')
     def interrupted(signum, _frame):
-        raise RuntimeError(f'interrupted by signal {signum}')
+        raise RunInterrupted(signum)
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     artifacts = args.artifacts or Path(tempfile.mkdtemp(prefix='pqkey-browser-evidence-'))
@@ -506,7 +515,10 @@ def main():
             run.failures.append('Acceptance not started; inspect workflow setup logs')
             run.write()
         else:
-            passed = run.execute() and passed
+            try:
+                passed = run.execute() and passed
+            except RunInterrupted as error:
+                return 128 + error.signum
     return 0 if passed else 1
 
 
