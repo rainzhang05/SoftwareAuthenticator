@@ -262,7 +262,8 @@ presence-required APDUs. libfido2's forced-U2F commands register and assert
 ES256 credentials and verify both directions of protocol compatibility.
 Raw HID tests observe busy replies without the client's automatic retries.
 
-These were tested on 2026-09-30 on Ubuntu 26.04.1 (aarch64, GNOME 50.1).
+The following are historical manual observations from 2026-09-30 on Ubuntu
+26.04.1 (aarch64, GNOME 50.1). They are not results from the new automated matrix.
 
 | Client | ES256 | ML-DSA | Notes |
 |---|:---:|:---:|---|
@@ -270,6 +271,25 @@ These were tested on 2026-09-30 on Ubuntu 26.04.1 (aarch64, GNOME 50.1).
 | Firefox 154 (snap) | ✓ | | Drops algorithms it does not know: an ML-DSA-only request fails with `NotAllowedError`. Without a PIN, its account chooser shows "Unknown account". |
 | python-fido2 2.2.1 | ✓ | ✓ | Used by the end-to-end tests. |
 | libfido2 1.16 | ✓ | | Has no ML-DSA type, so `fido2-token -L -k` cannot list ML-DSA passkeys; `pqkey passkeys` can. PIN, credential management and `hmac-secret` work. |
+
+The manually dispatched [browser/UHID workflow](../.github/workflows/browser.yml)
+builds the current Linux release and exercises the existing RP's R1–R35 and
+L1–L7 presets in isolated upstream Chromium and Mozilla Firefox jobs on native
+Linux x86_64. See the [acceptance guide](../tests/browser/ACCEPTANCE.md) for pinned
+downloads, local entry points, fixture order, native prompt automation, result
+policy and diagnostic artifacts. Presence uses the daemon's explicit
+`auto-approve` mode, so these are compatibility measurements rather than manual
+physical-presence tests.
+
+No results for the newly selected browser identities are asserted here. Only a
+completed exact-version native run can establish a preset pass. The matrix
+separates verified ceremonies, expected errors, measured client capabilities and
+infrastructure failures, with classic ES256/PIN/discovery and stored-ID controls.
+Independent RP verification remains mandatory when python-fido2 cannot verify
+an algorithm; such secondary-library limits are explicit in the evidence.
+macOS/Docker without UHID can run harness/RP regressions and collection, but that
+does not execute the browser/HID path. Retain command/status/version records
+outside the repository and keep them separate from actual acceptance artifacts.
 
 ## Troubleshooting
 

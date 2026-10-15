@@ -197,6 +197,11 @@ limits do not change authenticator support or the client compatibility table.
 
 ## Clients
 
+The browser rows below are historical manual observations, not results from the
+new [reproducible browser/UHID acceptance workflow](tests/browser/ACCEPTANCE.md).
+That workflow records exact browser versions and all preset results in each
+completed run's artifacts; no new browser/version/preset passes are claimed here.
+
 | Client | ES256 | ML-DSA | Notes |
 |---|:---:|:---:|---|
 | Chromium 153 | ✓ | ✓ | Needs a PIN on the key for passkeys |
