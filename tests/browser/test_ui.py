@@ -140,6 +140,31 @@ class UI(unittest.TestCase):
         self.assertEqual(result['action'], 'native alice')
         self.assertTrue(account.dead)
 
+    def test_chromium_account_label_requires_exact_name_and_usb_transport(self):
+        alice, similar, other = (Node(name, 'push button') for name in
+                                  ('alice\nUSB security key', 'alice2\nUSB security key', 'alice\nOther device'))
+        tree = api(Node('Choose a passkey', 'dialog', similar, other, alice), browser='Chromium')
+        with patch.object(ui.subprocess, 'run') as execute, patch.object(ui.time, 'sleep'):
+            result = ui.operate({'account': 'alice'}, tree)
+        self.assertEqual(result['action_kind'], 'account')
+        self.assertEqual(result['native_control']['name'], 'alice\nUSB security key')
+        self.assertEqual(execute.call_count, 1)
+        with patch.object(ui.subprocess, 'run') as execute:
+            result = ui.operate({'account': 'ali'}, tree)
+            self.assertIsNone(result['action'])
+            execute.assert_not_called()
+
+    def test_exclusion_dismissal_is_limited_to_the_exact_expected_screen(self):
+        close = Node('Close', 'push button')
+        tree = api(Node('Try a different device', 'dialog',
+                        Node("You already registered this device. You don't have to register it again.", 'static'), close), browser='Chromium')
+        with patch.object(ui.subprocess, 'run') as execute, patch.object(ui.time, 'sleep'):
+            self.assertIsNone(ui.operate({}, tree)['action'])
+            execute.assert_not_called()
+            result = ui.operate({'expected_exclusion': True}, tree)
+        self.assertEqual(result['action_kind'], 'dismiss-exclusion')
+        self.assertIn('credential-excluded', result['evidence'])
+
     def test_incompatibility_requires_specific_visible_text(self):
         cancel = Node('Cancel', 'push button')
         result = ui.operate({}, api(Node('Something went wrong', 'label'), cancel))

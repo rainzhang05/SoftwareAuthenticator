@@ -115,6 +115,8 @@ def operate(request, api):
     candidates = [n for n in buttons if account and n.name.strip().splitlines()
                   and all(re.fullmatch(re.escape(account) + r'(?: \(\d+\))?', line.strip())
                           for line in n.name.strip().splitlines())]
+    if not candidates and chromium and any(n.name == 'Choose a passkey' for n in dialogs):
+        candidates = [n for n in buttons if account and n.name.strip().splitlines() == [account, 'USB security key']]
     opaque = request.get('opaque_account')
     if not candidates and opaque is not None:
         index, count = opaque['index'], opaque['count']
@@ -147,6 +149,12 @@ def operate(request, api):
     if "unsupported-key" in result["evidence"]:
         action_kind = 'dismiss-incompatibility'
         candidates = [n for n in buttons if n.name.strip().lower() == "cancel"]
+    if (chromium and request.get('expected_exclusion')
+            and any(n.name == 'Try a different device' for n in dialogs)
+            and "you already registered this device. you don't have to register it again." in text):
+        result['evidence'].append('credential-excluded')
+        action_kind = 'dismiss-exclusion'
+        candidates = [n for n in buttons if n.name == 'Close']
     if candidates:
         node = candidates[0]
         result['native_control'] = activate(node, api, xtest=chromium)

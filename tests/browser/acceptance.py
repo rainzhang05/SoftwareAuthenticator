@@ -400,7 +400,8 @@ class Run:
                 return record
             try:
                 observation = peer('ui.py', {"pin": self.pin, "account": account, "opaque_account": opaque_account,
-                                            "last_fingerprint": fingerprint, 'submit_pin': pin_pending_submit}, self.env, python='/usr/bin/python3')
+                                            "last_fingerprint": fingerprint, 'submit_pin': pin_pending_submit,
+                                            'expected_exclusion': preset['id'] == 'R14'}, self.env, python='/usr/bin/python3')
             except RuntimeError as error:
                 # A native accessible can disappear while a fast ceremony
                 # completes. Require its matching RP result before accepting
