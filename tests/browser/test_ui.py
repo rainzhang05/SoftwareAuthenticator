@@ -60,12 +60,14 @@ class UI(unittest.TestCase):
     def test_chromium_pin_uses_the_native_next_button(self):
         next_button = Node('Next', 'push button')
         dialog = Node('PIN required', 'dialog', Node('PIN', 'password text'), next_button)
-        with patch.object(ui.subprocess, 'run') as execute:
+        with patch.object(ui.subprocess, 'run') as execute, patch.object(ui.time, 'sleep') as sleep:
             result = ui.operate({'pin': 'unit-secret'}, api(dialog, browser='Chromium'))
         self.assertEqual(result['action_kind'], 'pin')
         next_button.action.doAction.assert_not_called()
         self.assertEqual(execute.call_count, 3)
         self.assertEqual(execute.call_args.args[0], ['xdotool', 'mousemove', '--sync', '70', '50', 'click', '1'])
+        sleep.assert_called_once_with(1)
+        self.assertEqual(result['native_control']['bounds'], [20, 30, 100, 40])
 
     def test_chromium_waits_for_the_pin_field_and_uses_native_button_bounds(self):
         button = Node('Next', 'push button')
@@ -73,11 +75,11 @@ class UI(unittest.TestCase):
         self.assertIsNone(result['action'])
         button.action.doAction.assert_not_called()
         account = Node('alice', 'push button')
-        with patch.object(ui.subprocess, 'run') as execute:
+        with patch.object(ui.subprocess, 'run') as execute, patch.object(ui.time, 'sleep'):
             self.assertEqual(ui.operate({'account': 'alice'}, api(account, browser='Chromium'))['action_kind'], 'account')
         self.assertEqual(execute.call_args.args[0][-2:], ['click', '1'])
         account.queryComponent = lambda: SimpleNamespace(getExtents=lambda _: SimpleNamespace(x=-1, y=0, width=20, height=20))
-        with patch.object(ui.subprocess, 'run') as execute:
+        with patch.object(ui.subprocess, 'run') as execute, patch.object(ui.time, 'sleep'):
             with self.assertRaisesRegex(RuntimeError, 'outside the owned desktop'):
                 ui.operate({'account': 'alice'}, api(account, browser='Chromium'))
             execute.assert_not_called()

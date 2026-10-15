@@ -207,9 +207,11 @@ Process output is filtered before writing logs: private automation WebSocket
 endpoints, driver session tokens and the fixture PIN are redacted. Public RP
 origins, credential identifiers and signed ceremony bytes remain available.
 
-Pinned Chromium's native dialogs acknowledge AT-SPI button actions without
-advancing. Its buttons therefore use XTEST clicks at the named control's
-accessibility-provided bounds, checked against the owned Xvfb desktop. Firefox
+Pinned Chromium [re-arms input protection on WebAuthn sheet transitions](https://chromium.googlesource.com/chromium/src/+/087fe41c36241e05f1faa80503f534a454b7e911/chrome/browser/ui/views/webauthn/authenticator_request_dialog_view.cc)
+and rejects early button/key events. Native button input waits one second before
+an XTEST click at the named control's accessibility-provided bounds, checked
+against the owned Xvfb desktop. Input protection stays enabled. Acknowledged UI
+actions alone never establish success; the RP response must verify. Firefox
 uses native accessibility actions; its anonymous secondary menu is checked
 against the inspected response count before selecting the expected index.
 

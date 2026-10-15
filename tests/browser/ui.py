@@ -13,6 +13,10 @@ import sys
 import time
 
 
+class NativeUIError(RuntimeError):
+    """Only fixed harness diagnostics, never native text or editable values."""
+
+
 def nodes(root, limit=3000):
     pending = [root]
     for _ in range(limit):
@@ -21,7 +25,7 @@ def nodes(root, limit=3000):
         node = pending.pop()
         yield node
         pending.extend(reversed(list(node)))
-    raise RuntimeError("accessibility tree exceeds bounded traversal")
+    raise NativeUIError("accessibility tree exceeds bounded traversal")
 
 
 def visible(node, api):
@@ -31,19 +35,23 @@ def visible(node, api):
 
 def activate(node, api, *, xtest=False):
     if xtest:
-        # Chromium's Views buttons acknowledge AT-SPI doAction without
-        # activating these dialogs. Click the named native control at its
-        # accessibility-provided bounds on our private 1280x960 Xvfb desktop.
+        # The pinned WebAuthn dialog explicitly rejects early button and key
+        # events after sheet transitions. Respect its normal input cooldown;
+        # don't disable the browser's input protection or repeat PIN entry.
+        time.sleep(1)
         bounds = node.queryComponent().getExtents(api.DESKTOP_COORDS)
         x, y, width, height = bounds.x, bounds.y, bounds.width, bounds.height
         if not (0 <= x < x + width <= 1280 and 0 <= y < y + height <= 960):
-            raise RuntimeError('native control is outside the owned desktop')
+            raise NativeUIError('native control is outside the owned desktop')
         subprocess.run(['xdotool', 'mousemove', '--sync', str(x + width // 2), str(y + height // 2), 'click', '1'],
                        check=True, timeout=2)
+        return {'method': 'XTEST', 'role': node.getRoleName(), 'name': node.name,
+                'bounds': [x, y, width, height], 'cooldown_seconds': 1}
     else:
         action = node.queryAction()
         if not action.nActions or not action.doAction(0):
-            raise RuntimeError('native prompt accessibility action failed')
+            raise NativeUIError('native prompt accessibility action failed')
+        return {'method': 'AT-SPI', 'role': node.getRoleName(), 'name': node.name}
 
 
 def operate(request, api):
@@ -66,12 +74,12 @@ def operate(request, api):
     passwords = [n for n in items if n.getRoleName() == "password text"]
     if passwords:
         if any(label in text for label in ('incorrect pin', 'device has been locked', 'temporarily blocked')):
-            raise RuntimeError('fixture PIN was rejected')
+            raise NativeUIError('fixture PIN was rejected')
         if len(passwords) != 1:
-            raise RuntimeError("unexpected PIN setup/multiple password fields; fixture PIN is already set")
+            raise NativeUIError("unexpected PIN setup/multiple password fields; fixture PIN is already set")
         # Focus and use XTEST keystrokes, as a person types into the native field.
         if not passwords[0].queryComponent().grabFocus():
-            raise RuntimeError('could not focus native PIN field')
+            raise NativeUIError('could not focus native PIN field')
         subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+a"], check=True, timeout=2)
         subprocess.run(["xdotool", "type", "--clearmodifiers", "--file", "-"], input=request["pin"].encode(), check=True, timeout=2)
         # Chromium's PIN dialog does not submit on Return. Its named native
@@ -81,13 +89,9 @@ def operate(request, api):
                         if visible(n, api) and n.getRoleName() in ("push button", "button")
                         and n.name.strip() == "Next"]
         if next_buttons:
-            sensitive = getattr(api, 'STATE_SENSITIVE', None)
-            deadline = time.monotonic() + 1
-            while sensitive is not None and not next_buttons[0].getState().contains(sensitive):
-                if time.monotonic() >= deadline:
-                    raise RuntimeError('native PIN submit control did not become enabled')
-                time.sleep(0.05)
-            activate(next_buttons[0], api, xtest=chromium)
+            # State caches in a one-shot AT-SPI client may still describe the
+            # empty field. Let normal native input settle before submission.
+            result['native_control'] = activate(next_buttons[0], api, xtest=chromium)
         else:
             subprocess.run(["xdotool", "key", "Return"], check=True, timeout=2)
         result["action"] = "entered PIN in native dialog"
@@ -106,7 +110,7 @@ def operate(request, api):
     if not candidates and opaque is not None:
         index, count = opaque['index'], opaque['count']
         if not isinstance(index, int) or not isinstance(count, int) or not 0 <= index < count:
-            raise RuntimeError('invalid inspected account index')
+            raise NativeUIError('invalid inspected account index')
         if index == 0:
             candidates = [n for n in buttons if n.name.strip() == 'Unknown account (0)']
         else:
@@ -117,7 +121,7 @@ def operate(request, api):
                 # Firefox omits the first response from this secondary menu.
                 # Its access-key suffix is visual, not in AT-SPI item names.
                 if len(options) != count - 1:
-                    raise RuntimeError('anonymous account menu differs from inspected credential count')
+                    raise NativeUIError('anonymous account menu differs from inspected credential count')
                 candidates = [options[index - 1]]
     action_kind = 'account'
     if not candidates:
@@ -136,7 +140,7 @@ def operate(request, api):
         candidates = [n for n in buttons if n.name.strip().lower() == "cancel"]
     if candidates:
         node = candidates[0]
-        activate(node, api, xtest=chromium)
+        result['native_control'] = activate(node, api, xtest=chromium)
         result["action"] = "native " + node.name
         result["action_kind"] = action_kind
     return result
@@ -148,5 +152,6 @@ if __name__ == "__main__":
         print(json.dumps(operate(json.load(sys.stdin), pyatspi)))
     except Exception as error:
         # An exception might carry a peer's payload; publish only its type.
-        print(json.dumps({"error": type(error).__name__}))
+        print(json.dumps({"error": type(error).__name__,
+                          'reason': str(error) if isinstance(error, NativeUIError) else None}))
         sys.exit(1)

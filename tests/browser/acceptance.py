@@ -58,7 +58,15 @@ def peer(script, request, env, *, python=sys.executable, timeout=5):
     response = subprocess.run([python, str(HERE / script)], input=json.dumps(request),
                               text=True, capture_output=True, env=env, timeout=timeout)
     if response.returncode:
-        raise RuntimeError(f'{script} failed (status {response.returncode}); native peer/setup failure')
+        detail = ''
+        if script == 'ui.py':
+            try:
+                diagnostic = json.loads(response.stdout)
+                if diagnostic.get('error') == 'NativeUIError':
+                    detail = '; ' + diagnostic['reason']
+            except (ValueError, KeyError, TypeError):
+                pass
+        raise RuntimeError(f'{script} failed (status {response.returncode}); native peer/setup failure{detail}')
     return json.loads(response.stdout)
 
 
