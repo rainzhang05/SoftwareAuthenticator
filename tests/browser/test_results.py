@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from results import CONTROL_IDS, classify, initial_rows, wait_until, write_report
+from results import CONTROL_IDS, classify, finalize_workflow, initial_rows, wait_until, write_report
 
 
 class Results(unittest.TestCase):
@@ -47,6 +47,10 @@ class Results(unittest.TestCase):
             rows = [{"preset": key, "attempted": True, "outcome": "verified_success"} for key in CONTROL_IDS]
             self.assertFalse(write_report(directory, "firefox", {}, rows, ["cleanup failed"]))
             self.assertTrue(write_report(directory, "firefox", {}, rows, []))
+            self.assertFalse(finalize_workflow(directory, 'failure'))
+            final = json.loads((Path(directory) / 'matrix.json').read_text())
+            self.assertEqual(final['metadata']['workflow_stage_status'], 'failure')
+            self.assertTrue(all(row['outcome'] == 'verified_success' for row in final['results']))
 
 
 if __name__ == "__main__":

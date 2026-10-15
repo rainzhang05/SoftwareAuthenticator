@@ -83,3 +83,22 @@ def write_report(directory, browser, metadata, rows, failures):
     lines.extend(["", *[f"- {str(f).replace(chr(10), ' ')}" for f in failures]])
     (directory / "summary.md").write_text("\n".join(lines) + "\n")
     return ok
+
+
+def finalize_workflow(directory, status):
+    """Include failures outside the Python runner, especially fallback cleanup."""
+    directory = Path(directory)
+    report = json.loads((directory / 'matrix.json').read_text())
+    report['metadata']['workflow_stage_status'] = status
+    if status != 'success':
+        report['failures'].append(f'workflow setup/acceptance/cleanup status: {status}; inspect workflow and cleanup logs')
+    return write_report(directory, report['browser'], report['metadata'], report['results'], report['failures'])
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Finalize acceptance evidence after workflow cleanup')
+    parser.add_argument('directory', type=Path)
+    parser.add_argument('--workflow-status', required=True, choices=('success', 'failure', 'cancelled', 'skipped'))
+    args = parser.parse_args()
+    finalize_workflow(args.directory, args.workflow_status)

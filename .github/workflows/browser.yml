@@ -107,7 +107,8 @@ jobs:
         if: always()
         run: |
           failed=0
-          python3 tests/browser/runtime.py "$RUNNER_TEMP/browser-control/$BROWSER" || failed=1
+          python3 tests/browser/runtime.py "$RUNNER_TEMP/browser-control/$BROWSER" \
+            > "$RUNNER_TEMP/browser-evidence/$BROWSER/cleanup.log" 2>&1 || failed=1
           if [ "$failed" = 0 ]; then
             rm -rf -- "${RUNNER_TEMP:?}/browser-control" "${RUNNER_TEMP:?}/browser-binaries" "${RUNNER_TEMP:?}/browser-venv"
           fi
@@ -117,6 +118,13 @@ jobs:
             sudo udevadm control --reload-rules || failed=1
           fi
           exit "$failed"
+      - name: Include workflow setup and cleanup failures in the matrix
+        if: always()
+        env:
+          WORKFLOW_STAGE_STATUS: ${{ job.status }}
+        run: |
+          python3 tests/browser/results.py "$RUNNER_TEMP/browser-evidence/$BROWSER" \
+            --workflow-status "$WORKFLOW_STAGE_STATUS"
       - name: Publish readable compatibility summary
         if: always()
         run: cat "$RUNNER_TEMP/browser-evidence/$BROWSER/summary.md" >> "$GITHUB_STEP_SUMMARY"
