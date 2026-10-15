@@ -207,6 +207,12 @@ Process output is filtered before writing logs: private automation WebSocket
 endpoints, driver session tokens and the fixture PIN are redacted. Public RP
 origins, credential identifiers and signed ceremony bytes remain available.
 
+Pinned Chromium's native dialogs acknowledge AT-SPI button actions without
+advancing. Its buttons therefore use XTEST clicks at the named control's
+accessibility-provided bounds, checked against the owned Xvfb desktop. Firefox
+uses native accessibility actions; its anonymous secondary menu is checked
+against the inspected response count before selecting the expected index.
+
 Cleanup closes the owned browser, stops the owned daemon and verifies device
 removal, terminates owned buses/desktop processes, and removes temporary state.
 An identity-checked private process ledger supports the workflow's cancellation

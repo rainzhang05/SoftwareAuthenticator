@@ -10,6 +10,7 @@ import hashlib
 import re
 import subprocess
 import sys
+import time
 
 
 def nodes(root, limit=3000):
@@ -28,9 +29,27 @@ def visible(node, api):
     return state.contains(api.STATE_SHOWING) and state.contains(api.STATE_VISIBLE)
 
 
+def activate(node, api, *, xtest=False):
+    if xtest:
+        # Chromium's Views buttons acknowledge AT-SPI doAction without
+        # activating these dialogs. Click the named native control at its
+        # accessibility-provided bounds on our private 1280x960 Xvfb desktop.
+        bounds = node.queryComponent().getExtents(api.DESKTOP_COORDS)
+        x, y, width, height = bounds.x, bounds.y, bounds.width, bounds.height
+        if not (0 <= x < x + width <= 1280 and 0 <= y < y + height <= 960):
+            raise RuntimeError('native control is outside the owned desktop')
+        subprocess.run(['xdotool', 'mousemove', '--sync', str(x + width // 2), str(y + height // 2), 'click', '1'],
+                       check=True, timeout=2)
+    else:
+        action = node.queryAction()
+        if not action.nActions or not action.doAction(0):
+            raise RuntimeError('native prompt accessibility action failed')
+
+
 def operate(request, api):
     desktop = api.Registry.getDesktop(0)
     items = [n for app in desktop for n in nodes(app) if visible(n, api)]
+    chromium = any(n.getRoleName() == 'application' and n.name == 'Chromium' for n in items)
     dialogs = [n for n in items if n.getRoleName() in ("dialog", "alert", "alert dialog")]
     # Never inspect or emit editable/password values.
     safe = [{"role": n.getRoleName(), "name": n.name[:400]} for n in items
@@ -62,12 +81,20 @@ def operate(request, api):
                         if visible(n, api) and n.getRoleName() in ("push button", "button")
                         and n.name.strip() == "Next"]
         if next_buttons:
-            if not next_buttons[0].queryAction().doAction(0):
-                raise RuntimeError('could not submit native PIN dialog')
+            sensitive = getattr(api, 'STATE_SENSITIVE', None)
+            deadline = time.monotonic() + 1
+            while sensitive is not None and not next_buttons[0].getState().contains(sensitive):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('native PIN submit control did not become enabled')
+                time.sleep(0.05)
+            activate(next_buttons[0], api, xtest=chromium)
         else:
             subprocess.run(["xdotool", "key", "Return"], check=True, timeout=2)
         result["action"] = "entered PIN in native dialog"
         result["action_kind"] = "pin"
+        return result
+    if any(n.name == 'PIN required' for n in dialogs):
+        # Wait for the password accessible rather than clicking an empty form.
         return result
     buttons = [n for n in items if n.getRoleName() in ("push button", "button", "menu item", "list item", "radio button")]
     account = request.get("account")
@@ -75,8 +102,23 @@ def operate(request, api):
     candidates = [n for n in buttons if account and n.name.strip().splitlines()
                   and all(re.fullmatch(re.escape(account) + r'(?: \(\d+\))?', line.strip())
                           for line in n.name.strip().splitlines())]
-    if not candidates and request.get('opaque_account'):
-        candidates = [n for n in buttons if n.name.strip() == request['opaque_account']]
+    opaque = request.get('opaque_account')
+    if not candidates and opaque is not None:
+        index, count = opaque['index'], opaque['count']
+        if not isinstance(index, int) or not isinstance(count, int) or not 0 <= index < count:
+            raise RuntimeError('invalid inspected account index')
+        if index == 0:
+            candidates = [n for n in buttons if n.name.strip() == 'Unknown account (0)']
+        else:
+            menus = [n for n in items if n.getRoleName() == 'menu' and n.name == 'More actions']
+            if menus:
+                options = [n for menu in menus for n in nodes(menu)
+                           if visible(n, api) and n.getRoleName() == 'menu item' and n.name == 'Unknown account']
+                # Firefox omits the first response from this secondary menu.
+                # Its access-key suffix is visual, not in AT-SPI item names.
+                if len(options) != count - 1:
+                    raise RuntimeError('anonymous account menu differs from inspected credential count')
+                candidates = [options[index - 1]]
     action_kind = 'account'
     if not candidates:
         action_kind = 'transport'
@@ -94,11 +136,7 @@ def operate(request, api):
         candidates = [n for n in buttons if n.name.strip().lower() == "cancel"]
     if candidates:
         node = candidates[0]
-        action = node.queryAction()
-        if not action.nActions:
-            raise RuntimeError("native prompt control has no accessibility action")
-        if not action.doAction(0):
-            raise RuntimeError("native prompt action failed")
+        activate(node, api, xtest=chromium)
         result["action"] = "native " + node.name
         result["action_kind"] = action_kind
     return result

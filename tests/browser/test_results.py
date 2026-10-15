@@ -34,7 +34,7 @@ class Results(unittest.TestCase):
     def test_chromium_policy_rejections_require_exact_preset_and_parameters(self):
         message = 'Requested protection policy is inconsistent or incongruent with other requested parameters.'
         entry = {'outcome': 'NotSupportedError', 'stage': 'webauthn', 'error': {'message': message},
-                 'request': {'credProtect': 'userVerificationRequired', 'userVerification': 'preferred'}}
+                 'request': {'credProtect': 'userVerificationRequired', 'userVerification': 'discouraged'}}
         self.assertEqual(classify(entry, 'R19', 'chromium', '158.0'), 'expected_webauthn_error')
         self.assertEqual(classify(entry, 'R18', 'chromium', '158.0'), 'unexpected_failure')
         self.assertEqual(classify({**entry, 'request': {**entry['request'], 'userVerification': 'required'}}, 'R19', 'chromium', '158.0'), 'unexpected_failure')

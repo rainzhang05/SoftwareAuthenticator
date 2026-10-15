@@ -40,9 +40,9 @@
       "preset": "R19",
       "error": "NotSupportedError",
       "message": "Requested protection policy is inconsistent or incongruent with other requested parameters.",
-      "request": {"credProtect": "userVerificationRequired", "userVerification": "preferred"},
+      "request": {"credProtect": "userVerificationRequired", "userVerification": "discouraged"},
       "source": "https://chromium.googlesource.com/chromium/src/+/087fe41c36241e05f1faa80503f534a454b7e911/content/browser/webauth/authenticator_common_impl.cc",
-      "rationale": "Chromium requires userVerification=required when credProtect requires UV; the original R19 preset offers preferred."
+      "rationale": "Chromium requires userVerification=required when credProtect requires UV; the original R19 preset offers discouraged."
     }
   ],
   "extension_sources": {

@@ -23,15 +23,16 @@ class Node:
         return self.role
 
     def queryComponent(self):
-        return SimpleNamespace(grabFocus=lambda: self.focus)
+        return SimpleNamespace(grabFocus=lambda: self.focus,
+                               getExtents=lambda _: SimpleNamespace(x=20, y=30, width=100, height=40))
 
     def queryAction(self):
         return self.action
 
 
-def api(*items):
-    return SimpleNamespace(STATE_SHOWING=1, STATE_VISIBLE=2,
-                           Registry=SimpleNamespace(getDesktop=lambda _: [Node('test browser', 'application', *items)]))
+def api(*items, browser='test browser'):
+    return SimpleNamespace(STATE_SHOWING=1, STATE_VISIBLE=2, DESKTOP_COORDS=0,
+                           Registry=SimpleNamespace(getDesktop=lambda _: [Node(browser, 'application', *items)]))
 
 
 class UI(unittest.TestCase):
@@ -60,21 +61,44 @@ class UI(unittest.TestCase):
         next_button = Node('Next', 'push button')
         dialog = Node('PIN required', 'dialog', Node('PIN', 'password text'), next_button)
         with patch.object(ui.subprocess, 'run') as execute:
-            result = ui.operate({'pin': 'unit-secret'}, api(dialog))
+            result = ui.operate({'pin': 'unit-secret'}, api(dialog, browser='Chromium'))
         self.assertEqual(result['action_kind'], 'pin')
-        next_button.action.doAction.assert_called_once_with(0)
-        self.assertEqual(execute.call_count, 2)
+        next_button.action.doAction.assert_not_called()
+        self.assertEqual(execute.call_count, 3)
+        self.assertEqual(execute.call_args.args[0], ['xdotool', 'mousemove', '--sync', '70', '50', 'click', '1'])
+
+    def test_chromium_waits_for_the_pin_field_and_uses_native_button_bounds(self):
+        button = Node('Next', 'push button')
+        result = ui.operate({'pin': 'unit-secret'}, api(Node('PIN required', 'dialog', button), browser='Chromium'))
+        self.assertIsNone(result['action'])
+        button.action.doAction.assert_not_called()
+        account = Node('alice', 'push button')
+        with patch.object(ui.subprocess, 'run') as execute:
+            self.assertEqual(ui.operate({'account': 'alice'}, api(account, browser='Chromium'))['action_kind'], 'account')
+        self.assertEqual(execute.call_args.args[0][-2:], ['click', '1'])
+        account.queryComponent = lambda: SimpleNamespace(getExtents=lambda _: SimpleNamespace(x=-1, y=0, width=20, height=20))
+        with patch.object(ui.subprocess, 'run') as execute:
+            with self.assertRaisesRegex(RuntimeError, 'outside the owned desktop'):
+                ui.operate({'account': 'alice'}, api(account, browser='Chromium'))
+            execute.assert_not_called()
 
     def test_firefox_account_access_keys_and_opaque_selection(self):
         bob, bobby = Node('bob (1)', 'menu item'), Node('bobby (0)', 'menu item')
         self.assertEqual(ui.operate({'account': 'bob'}, api(bobby, bob))['action_kind'], 'account')
         bob.action.doAction.assert_called_once()
         bobby.action.doAction.assert_not_called()
-        unknown = Node('Unknown account (2)', 'menu item')
+        unknown = Node('Unknown account (0)', 'push button')
         ui.operate({'account': 'alice'}, api(unknown))
         unknown.action.doAction.assert_not_called()
-        self.assertEqual(ui.operate({'account': 'alice', 'opaque_account': 'Unknown account (2)'}, api(unknown))['action_kind'], 'account')
+        self.assertEqual(ui.operate({'account': 'alice', 'opaque_account': {'index': 0, 'count': 3}}, api(unknown))['action_kind'], 'account')
         unknown.action.doAction.assert_called_once()
+        choices = [Node('Unknown account', 'menu item') for _ in range(4)]
+        menu = Node('More actions', 'menu', *choices)
+        self.assertEqual(ui.operate({'account': 'alice', 'opaque_account': {'index': 3, 'count': 5}}, api(menu))['action_kind'], 'account')
+        choices[2].action.doAction.assert_called_once()
+        self.assertTrue(all(not item.action.doAction.called for i, item in enumerate(choices) if i != 2))
+        with self.assertRaisesRegex(RuntimeError, 'differs from inspected'):
+            ui.operate({'account': 'alice', 'opaque_account': {'index': 3, 'count': 6}}, api(menu))
         more = Node('Unknown account (0) More Options', 'push button')
         self.assertEqual(ui.operate({'account': 'bob'}, api(more))['action_kind'], 'account-menu')
 

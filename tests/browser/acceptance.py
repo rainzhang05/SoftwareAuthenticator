@@ -421,7 +421,7 @@ class Run:
                     if selected is None:
                         raise AssertionError('expected unverified discoverable account is unavailable')
                     preset = {**preset, 'expectedCredential': eligible[selected]['id']}
-                    opaque_account = f'Unknown account ({selected})'
+                    opaque_account = {'index': selected, 'count': len(eligible)}
                     row['opaque_account_selection'] = {'index': selected, 'credential': eligible[selected]['id'],
                                                        'enumeration': eligible}
                 first = self.ceremony(preset, account=account, opaque_account=opaque_account)
