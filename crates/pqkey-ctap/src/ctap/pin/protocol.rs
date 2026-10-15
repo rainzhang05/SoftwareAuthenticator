@@ -199,8 +199,13 @@ impl KeyAgreementKey {
         platform_key: &[(Value, Value)],
     ) -> Result<PinUvSessionKeys, u8> {
         // "Parse peerCoseKey as specified for getPublicKey" (§6.5.6): an EC2
-        // key (kty 2) on P-256 (crv 1).  Its alg, -25 in getPublicKey, names
-        // no algorithm that is actually used, so it is not checked.
+        // key (kty 2) on P-256 (crv 1), with integer alg -25. Also accept
+        // integer -7 for the OpenSSH platform-key compatibility case documented
+        // by OpenSK e7dbb5c0f80d676489fbf90a27414583987e1658 in
+        // libraries/opensk/src/ctap/data_formats.rs (google/OpenSK#90):
+        // https://github.com/google/OpenSK/issues/90
+        // This exception applies only to received platform keys; getPublicKey
+        // still emits -25. Missing, non-integer and other algorithms fail.
         let label = |label: i64| {
             platform_key
                 .iter()
@@ -209,6 +214,7 @@ impl KeyAgreementKey {
         };
         if label(1) != Some(&Value::Integer(Integer::from(2)))
             || label(-1) != Some(&Value::Integer(Integer::from(1)))
+            || !matches!(label(3), Some(Value::Integer(alg)) if matches!(i128::from(*alg), -25 | -7))
         {
             return Err(CTAP1_ERR_INVALID_PARAMETER);
         }

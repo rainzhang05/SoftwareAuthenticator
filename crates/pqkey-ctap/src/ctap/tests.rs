@@ -11,6 +11,7 @@ mod get_assertion;
 mod get_assertion_rules;
 mod get_info;
 mod hmac_secret_mc;
+mod key_agreement;
 mod large_blob_key;
 mod large_blobs;
 mod make_credential;
