@@ -159,7 +159,17 @@ class Acceptance:
         if change_pin:
             answers = (('Current PIN:', self.pin), ('New PIN:', self.new_pin), ('Confirm new PIN:', self.new_pin))
         started = time.monotonic()
-        status, output = run([str(path), '--yes'], self.env, answers, timeout=1200)
+        try:
+            status, output = run([str(path), '--yes'], self.env, answers, timeout=1200)
+        except Exception:
+            # A failed hidden dialogue withholds PTY output. The installer's log
+            # contains output only; retain it only after checking both PINs.
+            log = Path.home() / '.cache/pqkey/install.log'
+            if log.exists():
+                raw = log.read_bytes()
+                if not any(value.encode() in raw for value in self.private):
+                    (self.out / f'{name}.log').write_bytes(public_log(raw, self.private))
+            raise
         raw = output.encode()
         log = Path.home() / '.cache/pqkey/install.log'
         if log.exists():
@@ -376,6 +386,21 @@ class Acceptance:
         assert self.plugdev not in self.groups_before and str(self.plugdev) not in self.manager_before['groups']
         assert not os.access('/dev/uhid', os.R_OK | os.W_OK), 'UHID pre-granted to test user'
         self.metadata.update(session=self.session, manager_before=self.manager_before, groups_before=self.groups_before)
+        self.metadata['session_paths'] = {
+            key: self.env.get(key) for key in ('HOME', 'XDG_RUNTIME_DIR', 'TMPDIR', 'XDG_CONFIG_HOME',
+                                              'XDG_DATA_HOME', 'XDG_CACHE_HOME')}
+        paths = [Path.home(), Path('/run/user') / str(os.getuid())]
+        paths.extend(Path(value) for value in self.metadata['session_paths'].values() if value)
+        self.metadata['path_access'] = []
+        for path in dict.fromkeys(paths):
+            try:
+                info = path.stat()
+                self.metadata['path_access'].append({'path': str(path), 'uid': info.st_uid,
+                                                     'mode': oct(stat.S_IMODE(info.st_mode)),
+                                                     'write': os.access(path, os.W_OK),
+                                                     'search': os.access(path, os.X_OK)})
+            except OSError as error:
+                self.metadata['path_access'].append({'path': str(path), 'errno': error.errno})
         self.authorized = True
         self.metadata['native_executed'] = True
         self.metadata['packages'] = self.command(['dpkg-query', '-W', 'dunst', 'lightdm', 'systemd', 'udev', 'acl',
