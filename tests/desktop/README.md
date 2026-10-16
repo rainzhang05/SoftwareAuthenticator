@@ -73,7 +73,10 @@ credentials are excluded. Only allow-listed public files are uploaded, for 14
 days; download artifacts outside the repository for longer retention.
 
 An immutable runner-owned ledger names the account/UID/home and revisions before
-provisioning. Python teardown and `always()` workflow fallback remove only owned
+provisioning. Shared control and public evidence live in a runner-owned,
+run-specific directory under `/var/tmp`, accessible to the fresh desktop user
+without access to the runner's private home. Python teardown and `always()`
+workflow fallback remove only owned
 service/device/process/session/account resources, installed rules and temporary
 state. Cleanup failures fail the workflow and retain the ownership ledger for a
 safe retry. Runner disposal remains the final boundary after abrupt host loss.

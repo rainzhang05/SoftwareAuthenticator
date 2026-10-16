@@ -17,6 +17,8 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+    env:
+      PQKEY_DESKTOP_ROOT: /var/tmp/pqkey-desktop-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -24,13 +26,15 @@ jobs:
           persist-credentials: false
       - name: Initialize incomplete evidence
         run: |
-          python3 tests/e2e/desktop_results.py "$RUNNER_TEMP/pqkey-desktop-evidence" --initialize "$(git rev-parse HEAD)"
+          test ! -e "$PQKEY_DESKTOP_ROOT" && test ! -L "$PQKEY_DESKTOP_ROOT"
+          mkdir -m 755 "$PQKEY_DESKTOP_ROOT"
+          python3 tests/e2e/desktop_results.py "$PQKEY_DESKTOP_ROOT/evidence" --initialize "$(git rev-parse HEAD)"
           {
             uname -a
             printf 'ImageOS=%s\nImageVersion=%s\n' "$ImageOS" "$ImageVersion"
             git rev-parse HEAD
             git rev-parse 5dc4b7c83709a57773724e87fe4781a2f3cd0be5
-          } > "$RUNNER_TEMP/pqkey-desktop-evidence/runner.txt"
+          } > "$PQKEY_DESKTOP_ROOT/evidence/runner.txt"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14.7"
@@ -40,19 +44,19 @@ jobs:
         run: |
           set -o pipefail
           DESKTOP_PYTHON="$(command -v python)" scripts/desktop-acceptance.sh prepare fresh \
-            2>&1 | tee "$RUNNER_TEMP/pqkey-desktop-evidence/fresh/prepare.log"
+            2>&1 | tee "$PQKEY_DESKTOP_ROOT/evidence/fresh/prepare.log"
       - name: Fresh install and default presence through real Dunst UI
         timeout-minutes: 36
         run: |
           set -o pipefail
-          scripts/desktop-acceptance.sh run fresh 2>&1 | tee "$RUNNER_TEMP/pqkey-desktop-evidence/fresh/run.log"
+          scripts/desktop-acceptance.sh run fresh 2>&1 | tee "$PQKEY_DESKTOP_ROOT/evidence/fresh/run.log"
       - name: Clean owned fresh installation and desktop
         id: cleanup-fresh
         if: always()
         timeout-minutes: 5
         run: |
           set -o pipefail
-          scripts/desktop-acceptance.sh cleanup fresh 2>&1 | tee "$RUNNER_TEMP/pqkey-desktop-evidence/fresh/cleanup.log"
+          scripts/desktop-acceptance.sh cleanup fresh 2>&1 | tee "$PQKEY_DESKTOP_ROOT/evidence/fresh/cleanup.log"
       - name: Prepare separate baseline installation
         id: prepare-upgrade
         if: ${{ !cancelled() && steps.cleanup-fresh.outcome == 'success' }}
@@ -60,27 +64,27 @@ jobs:
         run: |
           set -o pipefail
           DESKTOP_PYTHON="$(command -v python)" scripts/desktop-acceptance.sh prepare upgrade \
-            2>&1 | tee "$RUNNER_TEMP/pqkey-desktop-evidence/upgrade/prepare.log"
+            2>&1 | tee "$PQKEY_DESKTOP_ROOT/evidence/upgrade/prepare.log"
       - name: Update baseline to current and verify retained credentials
         if: ${{ !cancelled() && steps.prepare-upgrade.outcome == 'success' }}
         timeout-minutes: 36
         run: |
           set -o pipefail
-          scripts/desktop-acceptance.sh run upgrade 2>&1 | tee "$RUNNER_TEMP/pqkey-desktop-evidence/upgrade/run.log"
+          scripts/desktop-acceptance.sh run upgrade 2>&1 | tee "$PQKEY_DESKTOP_ROOT/evidence/upgrade/run.log"
       - name: Clean owned upgrade installation and desktop
         if: always()
         timeout-minutes: 5
         run: |
           set -o pipefail
-          scripts/desktop-acceptance.sh cleanup upgrade 2>&1 | tee "$RUNNER_TEMP/pqkey-desktop-evidence/upgrade/cleanup.log"
+          scripts/desktop-acceptance.sh cleanup upgrade 2>&1 | tee "$PQKEY_DESKTOP_ROOT/evidence/upgrade/cleanup.log"
       - name: Include every workflow and cleanup failure
         if: always()
         env:
           WORKFLOW_STAGE_STATUS: ${{ job.status }}
-        run: python3 tests/e2e/desktop_results.py "$RUNNER_TEMP/pqkey-desktop-evidence" --workflow-status "$WORKFLOW_STAGE_STATUS"
+        run: python3 tests/e2e/desktop_results.py "$PQKEY_DESKTOP_ROOT/evidence" --workflow-status "$WORKFLOW_STAGE_STATUS"
       - name: Publish readable summary
         if: always()
-        run: cat "$RUNNER_TEMP/pqkey-desktop-evidence/summary.md" >> "$GITHUB_STEP_SUMMARY"
+        run: cat "$PQKEY_DESKTOP_ROOT/evidence/summary.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain only public diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -89,12 +93,12 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           path: |
-            ${{ runner.temp }}/pqkey-desktop-evidence/*.json
-            ${{ runner.temp }}/pqkey-desktop-evidence/*.txt
-            ${{ runner.temp }}/pqkey-desktop-evidence/summary.md
-            ${{ runner.temp }}/pqkey-desktop-evidence/*/*.json
-            ${{ runner.temp }}/pqkey-desktop-evidence/*/*.jsonl
-            ${{ runner.temp }}/pqkey-desktop-evidence/*/*.log
-            ${{ runner.temp }}/pqkey-desktop-evidence/*/*.png
-            ${{ runner.temp }}/pqkey-desktop-evidence/*/*.txt
-            ${{ runner.temp }}/pqkey-desktop-evidence/*/runner-cleanup-status
+            ${{ env.PQKEY_DESKTOP_ROOT }}/evidence/*.json
+            ${{ env.PQKEY_DESKTOP_ROOT }}/evidence/*.txt
+            ${{ env.PQKEY_DESKTOP_ROOT }}/evidence/summary.md
+            ${{ env.PQKEY_DESKTOP_ROOT }}/evidence/*/*.json
+            ${{ env.PQKEY_DESKTOP_ROOT }}/evidence/*/*.jsonl
+            ${{ env.PQKEY_DESKTOP_ROOT }}/evidence/*/*.log
+            ${{ env.PQKEY_DESKTOP_ROOT }}/evidence/*/*.png
+            ${{ env.PQKEY_DESKTOP_ROOT }}/evidence/*/*.txt
+            ${{ env.PQKEY_DESKTOP_ROOT }}/evidence/*/runner-cleanup-status

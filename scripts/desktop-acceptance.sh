@@ -14,8 +14,12 @@ if [ "$(uname -s)" != Linux ] || [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNE
   exit 2
 fi
 [[ ${GITHUB_RUN_ID:-} =~ ^[0-9]+$ && ${GITHUB_RUN_ATTEMPT:-} =~ ^[0-9]+$ ]] || exit 2
-work=${RUNNER_TEMP:?}/pqkey-desktop-control-$scenario
-evidence=$RUNNER_TEMP/pqkey-desktop-evidence/$scenario
+run_root=/var/tmp/pqkey-desktop-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+[ "${PQKEY_DESKTOP_ROOT:-$run_root}" = "$run_root" ] || exit 2
+test -d "$run_root" && test ! -L "$run_root" && test -O "$run_root"
+[ "$(stat -c %a "$run_root")" = 755 ] || exit 2
+work=$run_root/control-$scenario
+evidence=$run_root/evidence/$scenario
 user=pqd${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}${suffix}
 owned_home=/home/$user
 unit=pqkey-desktop-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$scenario.service
@@ -105,7 +109,7 @@ PY_OWNER
   fi
   sudo -u "$user" "${DESKTOP_PYTHON:?}" -m venv "$owned_home/venv"
   sudo -u "$user" "$owned_home/venv/bin/python" -m pip install --require-hashes --only-binary :all: \
-    -r tests/e2e/requirements.txt
+    -r "$owned_home/source-current/tests/e2e/requirements.txt"
   # A real login creates the user manager BEFORE setup changes plugdev membership.
   # It stays alive through every rerun; the test checks its PID and group vector.
   mkdir "$work/sessions"
@@ -123,7 +127,7 @@ export PQKEY_OWNER_LEDGER=$work/owner.json
 unset CARGO_HOME RUSTUP_HOME RUSTUP_TOOLCHAIN XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME
 cd $owned_home/source-current || exit 1
 printf 'started\n' > $owned_home/control/session-started
-$owned_home/venv/bin/python tests/e2e/desktop_acceptance.py --evidence $evidence --control $owned_home/control
+$owned_home/venv/bin/python tests/e2e/desktop_acceptance.py --evidence $evidence --control $owned_home/control > $evidence/session-controller.log 2>&1
 status=\$?
 printf '%s\n' "\$status" > $owned_home/control/exit-status
 # Keep this login/seat intact until the workflow's owned-resource cleanup.
@@ -234,7 +238,7 @@ if id "$user" >/dev/null 2>&1; then
     journalctl --user -u pqkey.service --no-pager > "$evidence/service-journal.log" 2>&1 || true
   if [ -d "$owned_home/control" ]; then
     # shellcheck disable=SC2024
-    sudo -u "$user" /usr/bin/python3 tests/browser/runtime.py "$owned_home/control" \
+    sudo -u "$user" /usr/bin/python3 "$owned_home/source-current/tests/browser/runtime.py" "$owned_home/control" \
       > "$evidence/process-cleanup.log" 2>&1 || failed=1
   fi
 fi
