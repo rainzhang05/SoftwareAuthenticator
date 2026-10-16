@@ -10,7 +10,9 @@ on that revision; local macOS checks cannot establish a native acceptance pass.
 The workflow creates two distinct ordinary users and active local LightDM/Xorg
 sessions. It uses the shipped udev rule and installer ACL, with no test HID
 permission rule. The login and user manager start before plugdev membership is
-changed and must keep their identities and group vectors. A private session bus
+changed and must keep their identities and group vectors. The authenticated
+user's existing logind runtime directory is checked for the correct path, owner
+and private mode before use. A private notification bus
 runs real Dunst, whose bus-owner PID and capabilities are checked. The installed
 service retains its default presence command and 30-second timeout. The daemon's
 non-dumpable protection stays enabled; sudo reads only its public executable and

@@ -126,6 +126,14 @@ export PQKEY_DESKTOP_ACCEPTANCE=1
 export PQKEY_OWNER_LEDGER=$work/owner.json
 unset CARGO_HOME RUSTUP_HOME RUSTUP_TOOLCHAIN XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME
 cd $owned_home/source-current || exit 1
+# The hosted image's Xsession can restore the runner's runtime directory.
+# Use this authenticated user's actual logind runtime; never create or chmod it.
+runtime=\$(loginctl show-user $uid --property=RuntimePath --value) || exit 1
+[ "\$runtime" = /run/user/$uid ] || exit 1
+[ "\$(stat -c %u:%a "\$runtime")" = $uid:700 ] || exit 1
+test -w "\$runtime" && test -x "\$runtime" || exit 1
+printf 'inherited=%s\\nlogind=%s\\n' "\${XDG_RUNTIME_DIR:-}" "\$runtime" > $evidence/session-runtime.txt
+export XDG_RUNTIME_DIR=\$runtime
 printf 'started\n' > $owned_home/control/session-started
 $owned_home/venv/bin/python tests/e2e/desktop_acceptance.py --evidence $evidence --control $owned_home/control > $evidence/session-controller.log 2>&1
 status=\$?
