@@ -7,14 +7,42 @@ desktop login must start its acceptance session within two minutes. It never
 runs on ordinary pushes. Push the reviewed commits, then dispatch this workflow
 on that revision; local macOS checks cannot establish a native acceptance pass.
 
+## Recorded native result
+
+[Run 38828959894](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/38828959894)
+passed on 2026-10-15 with source
+`6326d0c558edd9410057bccb9bab4dc99c09a4c5`: all 34 fresh-install cases and all
+15 baseline-update cases, including both Python and runner cleanup layers.
+The runner used Ubuntu 24.04 x86_64, kernel `6.17.0-1022-azure`, Dunst
+`1.9.2-1build2`, suckless-tools `47-1`, LightDM `1.30.0-0ubuntu14`, systemd
+`255.4-1ubuntu8.18`, Python 3.14.7, python-fido2 2.2.1 and cryptography 50.0.1
+with OpenSSL 4.0.2.
+
+Offline replay of the exported public evidence independently reverified six
+registrations and 17 assertions, including UP/UV, RP binding, signatures,
+consecutive retained-credential counters and signed minimum-PIN-length
+disclosure. Fresh-install counters reached 13; baseline-update counters reached
+4. Both user managers retained their original PID, start identity and groups;
+the installed daemon used its default command throughout. Real Dunst/dmenu
+actions were automated with xdotool, without auto-approve presence.
+
+The immutable baseline was `5dc4b7c83709a57773724e87fe4781a2f3cd0be5`.
+Its production Rust, manifests, lockfiles and installer match the accepted
+source. The update scenario observed equal executable hashes and replacement
+inodes/PIDs while preserving the same credential, PIN and policy. This records
+the installer transition actually tested; it does not measure a credential
+format migration between different production implementations.
+
+## Native environment
+
 The workflow creates two distinct ordinary users and active local LightDM/Xorg
 sessions. It uses the shipped udev rule and installer ACL, with no test HID
 permission rule. The login and user manager start before plugdev membership is
 changed and must keep their identities and group vectors. The authenticated
 user's existing logind runtime directory is checked for the correct path, owner
-and private mode before use. A private notification bus
-runs real Dunst, whose bus-owner PID and capabilities are checked. The installed
-service retains its default presence command and 30-second timeout. The daemon's
+and private mode before use. A private notification bus runs real Dunst, whose
+bus-owner PID and capabilities are checked. The installed service retains its
+default presence command and 30-second timeout. The daemon's
 non-dumpable protection stays enabled; sudo reads only its public executable and
 command identity.
 
@@ -78,9 +106,9 @@ An immutable runner-owned ledger names the account/UID/home and revisions before
 provisioning. Shared control and public evidence live in a runner-owned,
 run-specific directory under `/var/tmp`, accessible to the fresh desktop user
 without access to the runner's private home. Python teardown and `always()`
-workflow fallback remove only owned
-service/device/process/session/account resources, installed rules and temporary
-state. Cleanup failures fail the workflow and retain the ownership ledger for a
+workflow fallback remove only owned service/device/process/session/account
+resources, installed rules and temporary state. Cleanup failures fail the
+workflow and retain the ownership ledger for a
 safe retry. Runner disposal remains the final boundary after abrupt host loss.
 
 ## Offline checks

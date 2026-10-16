@@ -343,6 +343,13 @@ The [installed desktop acceptance guide](../tests/desktop/README.md) documents
 the manually dispatched native test and its artifacts. It uses automated
 interaction with real Dunst, separately from browser compatibility tests using
 explicit auto-approve presence and E2E tests using a fake notification server.
+On 2026-10-15, [native run 38828959894](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/38828959894)
+passed all 34 fresh-install and 15 baseline-update cases on Ubuntu 24.04 x86_64
+with Dunst 1.9.2, including default-presence failures/recovery, retained
+credentials/PIN/policy and both cleanup layers. Its public signatures and
+consecutive counters were independently replayed; the guide records source and
+runtime identities. This establishes the tested automated desktop interaction,
+not physical human presence or untested desktop environments.
 
 **The key stops answering and `pqkey stop` hangs.** The Linux uhid queue has
 an unlocked read race, seen especially on arm64. When it hits, `dmesg` shows

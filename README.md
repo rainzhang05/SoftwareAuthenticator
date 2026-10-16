@@ -114,12 +114,13 @@ the action. Denial and an unanswered request's default 30-second timeout both
 reject the request. Cancelling the client or restarting the service withdraws
 its pending prompt.
 
-The manually dispatched [installed desktop acceptance workflow](.github/workflows/desktop.yml)
-tests normal installation, default notification actions and retained passkeys
-through a baseline-to-current update. Its [guide](tests/desktop/README.md)
-separates automated real-Dunst interaction from mocked tests and the completed
-browser compatibility results. A native workflow pass is required before
-claiming installed desktop acceptance.
+Fresh installation and a baseline-to-current update passed the
+[native installed desktop acceptance run](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/38828959894)
+on Ubuntu 24.04 x86_64 on 2026-10-15. All 49 checks passed, including default
+Dunst approval/denial, timeouts, cancellation, restart recovery and retained
+passkeys, PIN and policy. The [guide](tests/desktop/README.md) records the exact
+source and environment. Actions were automated in real Dunst/dmenu; this does
+not establish physical human presence.
 
 | Command | What it does |
 |---|---|
@@ -206,9 +207,10 @@ credentials only.
 
 Independent Python cryptography/OpenSSL fixtures verify Brainpool derivation,
 attestation and assertion signatures. Raw Python FIDO HID tests are provided;
-actual HID execution requires Linux with `/dev/uhid`. Brainpool browser support
-has not been verified. libfido2 1.14.0 retains their advertised algorithm IDs but
-cannot create, verify or decode these credential keys for enumeration. These
+actual HID execution requires Linux with `/dev/uhid`. Chromium 158.0.8107.0
+verified both Brainpool algorithms; Firefox 158.0 reported client limits.
+libfido2 1.14.0 retains their advertised algorithm IDs but cannot create, verify
+or decode these credential keys for enumeration. These
 limits do not change authenticator support or the client compatibility table.
 
 ## Clients
