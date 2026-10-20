@@ -31,7 +31,7 @@ shake = { workspace = true, features = ["zeroize"] }
 [dev-dependencies]
 # The residue test recomputes ρ′ and K = SHAKE256(ξ || k || ℓ) independently.
 shake.workspace = true
-# The known-answer tests need the `hazmat` interfaces.
+# The known-answer, residue and unit tests need the `hazmat` interfaces.
 pqkey-mldsa = { workspace = true, features = ["hazmat"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
@@ -49,10 +49,12 @@ default = ["mldsa44", "mldsa65", "mldsa87"]
 mldsa44 = []
 mldsa65 = []
 mldsa87 = []
-# FIPS 204's internal interfaces with caller-chosen randomness,
-# `try_keypair_from_seed` (ML-DSA.KeyGen_internal) and `try_sign_deterministic`
-# (ML-DSA.Sign_internal with a given rnd), for known-answer tests.  FIPS 204
-# §6: "Other than for testing purposes, the interfaces for key generation and
-# signature generation specified in this section should not be made available
-# to applications".
+# For known-answer tests only: FIPS 204's internal interfaces with
+# caller-chosen randomness, `try_keypair_from_seed` (ML-DSA.KeyGen_internal)
+# and `try_sign_deterministic` (ML-DSA.Sign_internal with a given rnd), and
+# the expanded secret key encoding that NIST's vectors carry (`SecretKey`,
+# `try_keypair`, `try_public_key`, `try_sign`, `try_sign_with_context`); keys
+# are otherwise kept as seeds.  FIPS 204 §6: "Other than for testing purposes,
+# the interfaces for key generation and signature generation specified in
+# this section should not be made available to applications".
 hazmat = []
