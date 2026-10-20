@@ -546,6 +546,17 @@ pub(super) fn credential(
     }
 }
 
+/// Let `app` create RSA credentials with the fixture key instead of
+/// generating primes, which is slow; other keys are generated as usual.
+pub(super) fn use_fixed_rsa_key(app: &mut TestApp) {
+    app.set_key_generator(|alg| match alg.key_kind() {
+        crate::KeyKind::RsaPrimes => Ok(PrivateKeyMaterial::RsaPrimes {
+            primes: crate::rsa_fixture::PRIMES,
+        }),
+        crate::KeyKind::P256Scalar | crate::KeyKind::Seed => PrivateKeyMaterial::try_generate(alg),
+    });
+}
+
 pub(super) fn request_classic_key_agreement(
     app: &mut TestApp,
     protocol: ClassicPinProtocol,

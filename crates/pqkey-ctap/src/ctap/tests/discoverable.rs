@@ -5,7 +5,7 @@
 use super::support::{
     NEVER_INTERRUPTED, TestApp, TestStore, app_with_store, created_credential, encode,
     es256_credential, get_assertion_request, install_pin_uv_auth_token, int, response_auth_data,
-    test_app, token_pin_auth,
+    test_app, token_pin_auth, use_fixed_rsa_key,
 };
 use crate::ctap::CtapApp;
 use crate::ctap::cbor::canonical_map;
@@ -539,15 +539,6 @@ fn rsa_request(alg: CoseAlg, discoverable: bool, exclude: Option<&[u8]>) -> Vec<
         ));
     }
     encode(&canonical_map(entries))
-}
-
-fn use_fixed_rsa_key(app: &mut TestApp) {
-    app.set_key_generator(|alg| match alg.key_kind() {
-        crate::KeyKind::RsaPrimes => Ok(PrivateKeyMaterial::RsaPrimes {
-            primes: crate::rsa_fixture::PRIMES,
-        }),
-        crate::KeyKind::P256Scalar | crate::KeyKind::Seed => PrivateKeyMaterial::try_generate(alg),
-    });
 }
 
 #[test]
