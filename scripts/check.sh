@@ -48,6 +48,8 @@ if ! $quick; then
 
   if cargo hack --version >/dev/null 2>&1; then
     step "Every feature combination" cargo hack check --workspace --locked --all-targets --feature-powerset
+    step "Lints of pqkey-mldsa's library in every feature combination" \
+      cargo hack clippy -p pqkey-mldsa --lib --feature-powerset --locked -- -D warnings
   else
     skipped "Every feature combination: needs \`cargo install cargo-hack\`"
   fi

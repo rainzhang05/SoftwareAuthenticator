@@ -191,13 +191,18 @@ jobs:
       # Every feature combination of every crate, not just "all on". pqkey-mldsa
       # dispatches per parameter set behind cfg(feature), so a build with one set
       # compiled out is exactly where a silent break would otherwise hide until a
-      # downstream user tried it.
+      # downstream user tried it. Its dev-dependency on itself turns on its
+      # default features and `hazmat` in every --all-targets build, so its
+      # library is also linted on its own in every combination, with warnings
+      # denied: that is where code that is dead without `hazmat` shows up.
       - name: Install cargo-hack
         uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
           tool: cargo-hack
       - name: Check every feature combination
         run: cargo hack check --workspace --locked --all-targets --feature-powerset
+      - name: Lint pqkey-mldsa's library in every feature combination
+        run: cargo hack clippy -p pqkey-mldsa --lib --feature-powerset --locked -- -D warnings
 
       # Dependencies whose code a future rustc will reject outright (none at the
       # moment). Surfaced in the job summary so that day arrives as a known
