@@ -23,8 +23,6 @@ ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "ra
 # The operating system RNG: key-generation seeds and the hedged-signing `rnd`.
 getrandom.workspace = true
 zeroize = { workspace = true, features = ["zeroize_derive"] }
-# Optional: without it `sign()`'s empty-Vec failure path is completely silent.
-log = { workspace = true, optional = true }
 # SHAKE128/256, which ml-dsa hashes the seed and every intermediate value with.
 # ml-dsa's own `zeroize` feature does not reach it; enabling it here (feature
 # unification) wipes the sponge states that held ξ, ρ′, K and μ on drop.
@@ -47,13 +45,10 @@ harness = false
 
 [features]
 # Enable specific ML-DSA parameter sets.  All three are enabled by default.
-# `log` is also on by default so that signing failures are not silent; build
-# with `default-features = false` to drop it.
-default = ["mldsa44", "mldsa65", "mldsa87", "log"]
+default = ["mldsa44", "mldsa65", "mldsa87"]
 mldsa44 = []
 mldsa65 = []
 mldsa87 = []
-log = ["dep:log"]
 # FIPS 204's internal interfaces with caller-chosen randomness,
 # `try_keypair_from_seed` (ML-DSA.KeyGen_internal) and `try_sign_deterministic`
 # (ML-DSA.Sign_internal with a given rnd), for known-answer tests.  FIPS 204

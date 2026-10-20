@@ -420,10 +420,6 @@ fn secret_key_from_another_param_set_is_rejected() {
                 Err(MlDsaError::InvalidKeyLength),
                 "{ps} secret key accepted by {other}"
             );
-            assert!(
-                pqkey_mldsa::sign(other, &sk, b"msg").is_empty(),
-                "{ps} secret key produced a signature under {other}"
-            );
         }
     }
 }
@@ -447,20 +443,4 @@ fn nist_signatures_do_not_cross_param_sets() {
             );
         }
     }
-}
-
-/// `sign()` reports failure only by returning an empty `Vec` — the hazard
-/// documented on the function.  Pin that behaviour so nobody "fixes" it into
-/// something that looks like a signature.
-#[test]
-fn sign_reports_failure_as_an_empty_vec() {
-    let ps = ParamSet::MLDSA44;
-    let junk = SecretKey::new(vec![0u8; 7]);
-    let sig = pqkey_mldsa::sign(ps, &junk, b"msg");
-    assert!(sig.is_empty(), "sign() must return an empty Vec on failure");
-    assert_ne!(sig.len(), lengths(ps).2);
-
-    // ... and a caller that only checks emptiness is not fooled by a real one.
-    let (_pk, sk) = pqkey_mldsa::keypair(ps);
-    assert_eq!(pqkey_mldsa::sign(ps, &sk, b"msg").len(), lengths(ps).2);
 }

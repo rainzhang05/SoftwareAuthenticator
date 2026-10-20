@@ -13,9 +13,8 @@
 # matching entry in .cargo/audit.toml.
 
 [graph]
-# Check the dependency graph with every feature enabled. pqkey-mldsa's `log`
-# and mldsa44/65/87 features are optional, and an advisory hiding behind an
-# off-by-default feature is still an advisory.
+# Check the dependency graph with every feature enabled: an advisory hiding
+# behind an off-by-default feature is still an advisory.
 all-features = true
 # Deliberately NOT restricted with `targets = [...]`: filtering the graph by
 # target would hide advisories in platform-specific dependencies.
