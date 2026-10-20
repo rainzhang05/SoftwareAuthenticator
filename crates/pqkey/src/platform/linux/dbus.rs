@@ -133,13 +133,8 @@ impl NotificationServer for SessionBus {
         // Names this bus, so a recorded prompt is only ever withdrawn from the
         // server instance that showed it.
         let bus_id = bus.get_id().ok().map(|id| id.to_string());
-        let rule = MatchRule::builder()
-            .msg_type(Type::Signal)
-            .sender(owner.as_str())
-            .and_then(|rule| rule.path(NOTIFICATIONS_PATH))
-            .and_then(|rule| rule.interface(NOTIFICATIONS_INTERFACE))
-            .map(|rule| rule.build())
-            .map_err(|err| ConnectError::Failed(err.to_string()))?;
+        let rule =
+            signal_rule(owner.as_str()).map_err(|err| ConnectError::Failed(err.to_string()))?;
         let signals = MessageIterator::for_match_rule(rule, &connection, Some(64))
             .map_err(|err| ConnectError::Failed(err.to_string()))?
             .into_inner();
@@ -306,6 +301,19 @@ fn connect_bus(
     async_io::block_on(future::or(connect, expire)).map(Connection::from)
 }
 
+/// The notification server's signals, from `owner` only.
+///
+/// `owner` must be the unique name that owns org.freedesktop.Notifications:
+/// a rule naming the well-known name matches a signal from any sender.
+fn signal_rule(owner: &str) -> zbus::Result<MatchRule<'_>> {
+    Ok(MatchRule::builder()
+        .msg_type(Type::Signal)
+        .sender(owner)?
+        .path(NOTIFICATIONS_PATH)?
+        .interface(NOTIFICATIONS_INTERFACE)?
+        .build())
+}
+
 /// The event an ActionInvoked or NotificationClosed signal reports.
 fn parse_signal(message: &Message) -> Option<NotificationEvent> {
     let header = message.header();
@@ -425,6 +433,21 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn signals_match_only_the_notification_server_unique_name() {
+        let rule = signal_rule(":1.7").unwrap();
+        let action = |sender: &str| {
+            Message::signal(NOTIFICATIONS_PATH, NOTIFICATIONS_INTERFACE, "ActionInvoked")
+                .unwrap()
+                .sender(sender)
+                .unwrap()
+                .build(&(7u32, APPROVE_ACTION))
+                .unwrap()
+        };
+        assert!(rule.matches(&action(":1.7")).unwrap());
+        assert!(!rule.matches(&action(":1.8")).unwrap());
     }
 
     #[test]
