@@ -57,7 +57,9 @@
 //! out-of-range integers, wrong lengths, an unknown `alg`, and an unknown
 //! private key type are [`Corruption::Encoding`].  A record that decodes but
 //! breaks an invariant checked on writes (such as `alg` disagreeing with the
-//! private key type) is [`Corruption::Inconsistent`].
+//! private key type) is [`Corruption::Inconsistent`], with one exception: RSA
+//! primes need only have the shape of a key, and are not reconstructed into
+//! one (see [`validate_decoded_credential`]).
 //!
 //! Every intermediate CBOR value that held record contents is overwritten
 //! before it is freed.  (While decoding, `ciborium` also copies byte and text
@@ -76,8 +78,8 @@ use super::record::{
     AttestationRecord, CredentialRecord, PersistentTokenRecord, PinStateRecord, PrivateKeyMaterial,
 };
 use super::{
-    Corruption, StoreError, validate_attestation, validate_credential, validate_large_blob_array,
-    validate_pin_state,
+    Corruption, StoreError, validate_attestation, validate_decoded_credential,
+    validate_large_blob_array, validate_pin_state,
 };
 use crate::{CoseAlg, KeyKind};
 
@@ -176,7 +178,7 @@ pub(crate) fn decode_credential(bytes: &[u8]) -> Result<CredentialRecord, Corrup
         third_party_payment: fields.optional_bool(16)?.unwrap_or(false),
     };
     fields.finish()?;
-    validate_credential(&record).map_err(|_| Corruption::Inconsistent)?;
+    validate_decoded_credential(&record).map_err(|_| Corruption::Inconsistent)?;
     Ok(record)
 }
 
@@ -512,6 +514,7 @@ impl Fields {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::validate_credential;
 
     fn unhex(hex: &str) -> Vec<u8> {
         (0..hex.len())
@@ -1279,6 +1282,44 @@ mod tests {
             );
         }
 
+        // RSA primes without the shape of a key: an even prime, one without
+        // its top bit, two equal ones, and a product short of 2048 bits.
+        let rsa = |edit: fn(&mut [u8; 256])| {
+            let mut primes = crate::rsa_fixture::PRIMES;
+            edit(&mut primes);
+            let mut record = credential();
+            record.alg = CoseAlg::RS256;
+            record.private_key = PrivateKeyMaterial::RsaPrimes { primes };
+            encode_credential(&record, 1).unwrap()
+        };
+        for (name, encoding) in [
+            ("even RSA prime", rsa(|primes| primes[127] &= 0xfe)),
+            (
+                "RSA prime without its top bit",
+                rsa(|primes| primes[128] &= 0x7f),
+            ),
+            (
+                "equal RSA primes",
+                rsa(|primes| primes.copy_within(..128, 128)),
+            ),
+            (
+                "RSA product below 2048 bits",
+                rsa(|primes| {
+                    *primes = [0; 256];
+                    primes[0] = 0x80;
+                    primes[127] = 3;
+                    primes[128] = 0x80;
+                    primes[255] = 5;
+                }),
+            ),
+        ] {
+            assert_eq!(
+                decode_credential(&encoding).err(),
+                Some(Corruption::Inconsistent),
+                "{name}"
+            );
+        }
+
         let attestation = encode_attestation(&attestation()).unwrap();
         for (name, encoding) in [
             (
@@ -1302,6 +1343,26 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// RSA primes are only checked for the shape of a key when decoded: two
+    /// distinct, odd 1024-bit numbers with a 2048-bit product decode even if
+    /// they form no key, which the full validation of every write rejects.
+    #[test]
+    fn rsa_primes_are_checked_for_shape_only_when_decoded() {
+        let mut record = credential();
+        record.alg = CoseAlg::RS256;
+        // 65537 divides p-1, so no private exponent exists.
+        let mut primes = [0xff; 256];
+        primes[125] = 0xfe;
+        record.private_key = PrivateKeyMaterial::RsaPrimes { primes };
+        let encoded = encode_credential(&record, record.created_at).unwrap();
+        let decoded = decode_credential(&encoded).expect("the primes have the shape of a key");
+        assert_eq!(decoded, record);
+        assert!(matches!(
+            validate_credential(&decoded),
+            Err(StoreError::InvalidRecord(_))
+        ));
     }
 
     #[test]

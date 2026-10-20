@@ -309,7 +309,9 @@ pub enum Corruption {
     Encoding,
     /// The record is well formed but violates an invariant, for example its
     /// `alg` disagrees with its key material or its credential ID does not
-    /// belong to the file it was read from.
+    /// belong to the file it was read from.  RSA primes need only have the
+    /// shape of a key to be read: primes that form none are found when a key
+    /// is reconstructed from them.
     Inconsistent,
 }
 
@@ -441,12 +443,33 @@ pub(crate) fn validate_pin_state(state: &PinStateRecord) -> Result<(), StoreErro
     Ok(())
 }
 
-/// Check the invariants every stored credential satisfies.
+/// Check the invariants every stored credential satisfies, as every write
+/// does: in full, so RSA primes must reconstruct into a key.
+pub(crate) fn validate_credential(record: &CredentialRecord) -> Result<(), StoreError> {
+    check_credential(record, true)
+}
+
+/// Check a credential read back from storage: everything
+/// [`validate_credential`] checks, except that RSA primes need only the shape
+/// of a key ([`crate::crypto::rsa::primes`]) and are not reconstructed.
+///
+/// Reconstruction computes d and the CRT values, which every listing, and so
+/// every getInfo, would repeat for each stored RSA credential.  Records are
+/// authenticated (XChaCha20-Poly1305) and every authentic record passed
+/// [`validate_credential`] when it was written, so primes of the right shape
+/// that form no key take the store's key to forge.  Signing and public-key
+/// derivation reconstruct the key all the same, and fail cleanly, with
+/// CTAP2_ERR_PROCESSING, if it cannot be.
+pub(crate) fn validate_decoded_credential(record: &CredentialRecord) -> Result<(), StoreError> {
+    check_credential(record, false)
+}
+
+/// [`validate_credential`], reconstructing RSA keys only if `rebuild_rsa_key`.
 #[deny(
     clippy::wildcard_enum_match_arm,
     clippy::match_wildcard_for_single_variants
 )]
-pub(crate) fn validate_credential(record: &CredentialRecord) -> Result<(), StoreError> {
+fn check_credential(record: &CredentialRecord, rebuild_rsa_key: bool) -> Result<(), StoreError> {
     if record.credential_id.is_empty() {
         return Err(StoreError::InvalidRecord("credential ID is empty"));
     }
@@ -474,10 +497,23 @@ pub(crate) fn validate_credential(record: &CredentialRecord) -> Result<(), Store
             }
         }
         PrivateKeyMaterial::RsaPrimes { primes } => {
-            crate::crypto::scrub::with_scrubbed_stack(|| crate::crypto::rsa::signing_key(primes))
-                .map_err(|_| {
-                StoreError::InvalidRecord("the private key is not valid RSA-2048 material")
-            })?;
+            let valid = if rebuild_rsa_key {
+                crate::crypto::scrub::with_scrubbed_stack(|| {
+                    crate::crypto::rsa::signing_key(primes)
+                })
+                .is_ok()
+            } else {
+                // The shape checks only multiply p and q, on the caller's
+                // stack: the engine scrubs it after every request, and
+                // decoding already leaves the key bytes in ciborium's
+                // scratch buffer.
+                crate::crypto::rsa::primes(primes).is_ok()
+            };
+            if !valid {
+                return Err(StoreError::InvalidRecord(
+                    "the private key is not valid RSA-2048 material",
+                ));
+            }
         }
         // Every 32 bytes are a seed.
         PrivateKeyMaterial::Seed { .. } => {}

@@ -48,7 +48,7 @@ use crate::{
 /// bytes that each use hashes into the secret scalar (§5.1.5).  One on Ed448
 /// is a 32-byte seed from which each use derives its 57-byte private key with
 /// SHAKE256. RSA keeps its two 1024-bit primes, 256 bytes in total.
-/// Each read reconstructs n, d and the CRT values, with e = 65537.
+/// Each use reconstructs n, d and the CRT values, with e = 65537.
 ///
 /// The public key is never stored: [`CredentialRecord::cose_public_key`]
 /// derives it from this material, so a record cannot carry a public key that
@@ -291,7 +291,8 @@ impl CredentialRecord {
     /// Returns [`CryptoError::KeyTypeMismatch`] when `alg` and the key material
     /// disagree, and [`CryptoError::InvalidKey`] for an out-of-range P-256
     /// scalar or malformed RSA primes. Records loaded from a store have
-    /// already been checked for both.
+    /// already been checked for both, except for RSA primes that have the
+    /// shape of a key but form none, which only reconstruction finds.
     pub fn keypair(&self) -> Result<(CredentialSecretKey, Vec<u8>), CryptoError> {
         let secret = self.secret_key()?;
         let public_key = try_cose_public_key(self.alg, &secret)?;
