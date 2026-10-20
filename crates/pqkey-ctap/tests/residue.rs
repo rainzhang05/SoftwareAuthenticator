@@ -38,6 +38,19 @@
 //! dq and qinv in both byte orders. This checks stack copies only; rsa's
 //! heap arithmetic and its incomplete CRT cleanup are outside this scan.
 //!
+//! For U2F it registers a credential through `CtapApp::call_u2f` on a file
+//! store, opens the key handle it returns with a second store on the same
+//! directory to learn the P-256 scalar `d` sealed into it, and checks that
+//! `d`·G is the public key the registration returned.  It then authenticates
+//! with the handle and scans for `d`.  It also looks for the `d` of a second
+//! registration: a key generated inside `call_u2f` never leaves it, unlike a
+//! key returned to the caller (below), so the call's own scrub must cover its
+//! whole way.  That `d` is known only from the handle, and opening the handle
+//! would run over the very stack it is looked for in, so the dead stack is
+//! copied aside first, into a buffer allocated beforehand.  A pattern a dead
+//! frame left must be found, as given and reversed, in the stack and in such a
+//! copy, and the control value must not.
+//!
 //! It does not look for a newly generated private key: a key returned by
 //! value can leave copies in the frames it passes through on its way to the
 //! caller, because Rust moves are copies.  That is a limit of the language
@@ -65,7 +78,10 @@ use pqkey_ctap::CryptoError;
 mod rsa_fixture;
 use p256::elliptic_curve::sec1::ToSec1Point;
 use pqkey_ctap::{
-    CoseAlg, try_cose_public_key, try_credential_secret_from_bytes, try_sign_challenge,
+    CoseAlg,
+    ctap::{CtapApp, InterruptFlag, presence::AutoApprove},
+    store::{CredentialStore, FileStore},
+    try_cose_public_key, try_credential_secret_from_bytes, try_sign_challenge,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use shake::{ExtendableOutput, Shake256, Update, XofReader};
@@ -317,6 +333,42 @@ fn scan(needle: &[u8]) -> usize {
     }
     core::hint::black_box(&buffer);
     hits
+}
+
+/// Copy the dead stack [`scan`] reads into `copy`, allocated beforehand:
+/// allocating it would itself run over that stack.
+#[inline(never)]
+fn capture(copy: &mut [u8; SCAN]) {
+    let buffer: MaybeUninit<[u8; SCAN]> = MaybeUninit::uninit();
+    let start = buffer.as_ptr().cast::<u8>();
+    for (offset, byte) in copy.iter_mut().enumerate() {
+        // SAFETY: every byte read is inside `buffer`, which this frame owns;
+        // as in `scan`, they hold whatever earlier calls left there, and are
+        // only copied.
+        *byte = unsafe { core::ptr::read_volatile(start.add(offset)) };
+    }
+    core::hint::black_box(&buffer);
+}
+
+/// Leave `pattern`, and `pattern` reversed, in a frame that then dies, a few
+/// KiB below the caller and so past the scanner's own locals: where [`scan`]
+/// and [`capture`] must find them.
+#[inline(never)]
+fn plant(pattern: &[u8]) {
+    let mut frame = [0u8; 4096];
+    frame[1024..1024 + pattern.len()].copy_from_slice(pattern);
+    for (byte, source) in frame[2048..].iter_mut().zip(pattern.iter().rev()) {
+        *byte = *source;
+    }
+    core::hint::black_box(&mut frame);
+}
+
+/// How many times `needle` occurs in `haystack`.
+fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
 }
 
 fn digest<D: Digest>(message: &[u8]) -> Vec<u8> {
@@ -843,6 +895,166 @@ fn check_persistent_authority() {
     );
 }
 
+/// Bound into every sealed credential ID, followed by the SHA-256 hash of the
+/// relying party ID, which U2F's application parameter is: the context
+/// `sealed_associated_data` in pqkey-ctap's `ctap/credential_id.rs` binds.
+const SEALED_ID_CONTEXT: &[u8] = b"pqkey/v2/sealed-credential-id";
+
+static U2F_INTERRUPT: InterruptFlag = InterruptFlag::new();
+
+/// A U2F command APDU (CTAP 2.3 §10) with an extended Lc and no Le.
+fn u2f_apdu(ins: u8, p1: u8, data: &[u8]) -> Vec<u8> {
+    let length = u16::try_from(data.len()).expect("an extended Lc");
+    [&[0, ins, p1, 0, 0][..], &length.to_be_bytes(), data].concat()
+}
+
+/// The data of a successful U2F response, without its status word.
+fn u2f_data(response: &[u8]) -> &[u8] {
+    let (data, status) = response.split_at(response.len() - 2);
+    assert_eq!(status, [0x90, 0x00], "U2F status word");
+    data
+}
+
+/// The public key and key handle of a U2F registration response: 0x05, the
+/// uncompressed public key, the handle's length L, the handle of L bytes, the
+/// attestation certificate and the signature.
+fn registration(response: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let data = u2f_data(response);
+    assert_eq!(data[0], 0x05, "a registration's reserved byte");
+    let public = data[1..66].to_vec();
+    assert_eq!(public[0], 0x04, "an uncompressed point");
+    let length = usize::from(data[66]);
+    (public, data[67..67 + length].to_vec())
+}
+
+/// The P-256 scalar sealed into the key handle `handle` of a credential for
+/// `application`, opened by `store`.  A sealed credential is its algorithm
+/// as an i8, its credProtect level, its key and its CredRandom seed.
+fn sealed_scalar(store: &FileStore, handle: &[u8], application: &[u8; 32]) -> Vec<u8> {
+    assert_eq!(handle[0], 0x02, "a sealed credential ID");
+    let plaintext = store
+        .open_credential_id(&handle[1..], &[SEALED_ID_CONTEXT, application].concat())
+        .expect("the store opens credential IDs")
+        .expect("a key handle the engine's store sealed");
+    assert_eq!(plaintext.len(), 66, "a sealed credential");
+    assert_eq!(
+        plaintext[..2],
+        [CoseAlg::ES256.identifier() as i8 as u8, 1],
+        "an ES256 credential at credProtect level 1"
+    );
+    plaintext[2..34].to_vec()
+}
+
+/// Print `found`, each needle's hits as given and reversed after the U2F
+/// operation `phase`, and return a line for each needle found.
+fn report_u2f(phase: &str, found: Vec<(&str, usize, usize)>) -> Vec<String> {
+    let report: Vec<String> = found
+        .iter()
+        .map(|(name, hits, reversed)| format!("{name} {hits}x/{reversed}x"))
+        .collect();
+    println!("U2F {phase}: {} (as given/reversed)", report.join(", "));
+    found
+        .into_iter()
+        .filter(|(_, hits, reversed)| hits + reversed > 0)
+        .map(|(name, hits, reversed)| format!("U2F {phase}: {name} {hits}x/{reversed}x"))
+        .collect()
+}
+
+/// The P-256 scalar sealed into a U2F key handle, looked for in the stack
+/// the engine left after authenticating with the handle, and after the
+/// registration that made it: what each found.
+fn check_u2f() -> Vec<String> {
+    let dir = std::env::temp_dir().join(format!("pqkey-u2f-stack-{}", std::process::id()));
+    let mut app = CtapApp::with_file_store(
+        FileStore::open(&dir).expect("store"),
+        AutoApprove,
+        &U2F_INTERRUPT,
+        [0; 16],
+    );
+    // A second store on the same directory and root keys opens the key
+    // handles the engine's store seals.
+    let store = FileStore::open(&dir).expect("second store");
+    let application: [u8; 32] = Sha256::digest(b"u2f.example").into();
+    let challenge = [0x46; 32];
+    let register = u2f_apdu(1, 0, &[challenge, application].concat());
+    let control = Sha256::digest(b"never computed by the signer").to_vec();
+    let mut copy: Box<[u8; SCAN]> = vec![0; SCAN]
+        .into_boxed_slice()
+        .try_into()
+        .expect("SCAN bytes");
+
+    // What a dead frame leaves must be visible to both the scan and a copy.
+    let planted = Sha256::digest(b"left behind by a dead frame").to_vec();
+    let planted_reversed: Vec<u8> = planted.iter().rev().copied().collect();
+    wipe();
+    plant(&planted);
+    let scanned = (scan(&planted), scan(&planted_reversed));
+    capture(&mut copy);
+    let copied = (
+        occurrences(&copy[..], &planted),
+        occurrences(&copy[..], &planted_reversed),
+    );
+    println!(
+        "U2F: planted pattern {}x/{}x in the stack, {}x/{}x in its copy (as given/reversed)",
+        scanned.0, scanned.1, copied.0, copied.1
+    );
+    assert!(
+        scanned.0 > 0 && scanned.1 > 0 && copied.0 > 0 && copied.1 > 0,
+        "the stack probe does not see what a dead frame left"
+    );
+
+    let (public, handle) = registration(&app.call_u2f(&register));
+    let d = sealed_scalar(&store, &handle, &application);
+    assert_eq!(
+        (ECDSA_CASES[0].multiply)(&d),
+        coordinates(&public),
+        "U2F: d·G is not the registered public key"
+    );
+    let length = u8::try_from(handle.len()).expect("a key handle's length");
+    let authenticate = u2f_apdu(
+        2,
+        3,
+        &[&challenge[..], &application, &[length], &handle].concat(),
+    );
+    let needles: Vec<(&str, Vec<u8>, Vec<u8>)> = [("d", d), ("control", control.clone())]
+        .into_iter()
+        .map(|(name, bytes)| (name, bytes.iter().rev().copied().collect(), bytes))
+        .collect();
+    wipe();
+    let response = app.call_u2f(&authenticate);
+    let found = needles
+        .iter()
+        .map(|(name, reversed, bytes)| (*name, scan(bytes), scan(reversed)))
+        .collect();
+    let mut failures = report_u2f("authenticate", found);
+    assert_eq!(u2f_data(&response)[0], 1, "U2F: user presence");
+
+    wipe();
+    let response = app.call_u2f(&register);
+    capture(&mut copy);
+    let (public, handle) = registration(&response);
+    let d = sealed_scalar(&store, &handle, &application);
+    assert_eq!(
+        (ECDSA_CASES[0].multiply)(&d),
+        coordinates(&public),
+        "U2F: d·G is not the registered public key"
+    );
+    let found = [("d", d), ("control", control)]
+        .into_iter()
+        .map(|(name, bytes)| {
+            let reversed: Vec<u8> = bytes.iter().rev().copied().collect();
+            (
+                name,
+                occurrences(&copy[..], &bytes),
+                occurrences(&copy[..], &reversed),
+            )
+        })
+        .collect();
+    failures.extend(report_u2f("register", found));
+    std::fs::remove_dir_all(dir).unwrap();
+    failures
+}
+
 fn main() {
     check_persistent_authority();
     #[cfg(target_os = "linux")]
@@ -897,6 +1109,8 @@ fn main() {
             &[0x42; 32],
         ));
     }
+    // And through the engine, for the credential key itself.
+    failures.extend(check_u2f());
     for case in &ECDSA_CASES[4..] {
         failures.extend(check_brainpool_failures(case));
     }

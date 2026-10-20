@@ -69,7 +69,9 @@ wrapper consumers still depend on each owned secret's explicit drop cleanup.
 U2F residue cases cover registration certificates and signatures,
 authentication with and without presence, and the provisioned attestation
 key. Stack checks independently reconstruct the nonces of U2F signing
-bases; heap checks retain released blocks for all three attestation modes.
+bases, and look for the P-256 scalar sealed into a key handle after
+`call_u2f` registers it and authenticates with it on a file store; heap
+checks retain released blocks for all three attestation modes.
 The packet fuzz target includes U2F APDUs, repeats, approval, denial and
 abandonment. Structured and sequence targets mix both protocols; the
 sequence model verifies U2F signatures, credential eligibility, application
