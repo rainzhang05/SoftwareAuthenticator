@@ -24,8 +24,8 @@
 
 use pqkey_mldsa::{
     MlDsaError, ParamSet, PublicKey, SEED_LEN, SecretKey, try_keypair, try_keypair_from_seed,
-    try_lengths, try_public_key, try_sign, try_sign_deterministic, try_sign_with_context, verify,
-    verify_with_context,
+    try_lengths, try_public_key, try_public_key_from_seed, try_sign, try_sign_deterministic,
+    try_sign_from_seed, try_sign_with_context, verify, verify_with_context,
 };
 
 const KEYGEN_KAT: &str = include_str!("vectors/mldsa_keygen.kat");
@@ -186,6 +186,14 @@ fn keygen_known_answer() {
             expected_pk,
             "{label}: public key derived from the secret key mismatch"
         );
+        // So must the seed entry point, which never decodes a secret key.
+        assert_eq!(
+            try_public_key_from_seed(ps, &seed)
+                .expect("derive pk")
+                .as_bytes(),
+            expected_pk,
+            "{label}: public key derived from the seed mismatch"
+        );
     }
 }
 
@@ -321,17 +329,19 @@ fn sigver_known_answer() {
 }
 
 /// The production (hedged) signing path must interoperate with NIST-generated
-/// keys: sign with `try_sign`, verify with the vector's own public key.
+/// keys: sign with `try_sign_from_seed` from a keyGen vector's seed, verify
+/// with the vector's own public key.  `siggen_known_answer` covers hedged
+/// signing with the sigGen vectors' expanded keys.
 #[test]
 fn production_path_interoperates_with_nist_keys() {
-    for case in parse(SIGGEN_KAT) {
+    for case in parse(KEYGEN_KAT) {
         let label = case.label();
         let ps = case.param_set();
-        let sk = SecretKey::new(case.bytes("sk"));
+        let seed = case.seed("seed");
         let pk = PublicKey::new(case.bytes("pk"));
 
         let message = b"authenticatorData || clientDataHash";
-        let sig = try_sign(ps, &sk, message).unwrap_or_else(|e| panic!("{label}: {e}"));
+        let sig = try_sign_from_seed(ps, &seed, message).unwrap_or_else(|e| panic!("{label}: {e}"));
         let (_pk_len, _sk_len, sig_len) = try_lengths(ps).expect("lengths");
         assert_eq!(sig.len(), sig_len, "{label}: signature length");
         assert!(verify(ps, &pk, message, &sig), "{label}: hedged signature");
