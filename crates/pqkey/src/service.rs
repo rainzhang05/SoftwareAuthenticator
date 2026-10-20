@@ -878,6 +878,96 @@ mod tests {
         shut_down(&host, &shutdown, result);
     }
 
+    /// ML-DSA-87 goes deepest into the stack of the worker the app runs on
+    /// (`CTAP_WORKER_STACK` in the transport): each operation zeroes 1 MiB
+    /// below the engine's frames, and its frames are largest in a debug build,
+    /// the one `cargo test` makes. Registration expands a key, derives its
+    /// public key and signs its own attestation; an assertion opens the key
+    /// from a sealed credential ID, or from the store for a discoverable
+    /// credential, and signs again. Each must succeed with a signature that
+    /// verifies, and the loop must still shut down cleanly.
+    #[test]
+    fn ml_dsa_87_requests_fit_the_ctap_worker_stack() {
+        let dir = TempDir::new("worker-stack");
+        let data = app_data(&dir);
+        let shutdown = ShutdownSignal::new();
+        let loop_shutdown = shutdown.clone();
+        let (mut host, result) = start(move |device, on_ready| {
+            serve_ctap_with_presence(
+                device,
+                data,
+                AutoApprove,
+                crate::test_support::clock,
+                loop_shutdown,
+                on_ready,
+            )
+        });
+        let cid = host.init();
+        let alg = CoseAlg::MLDSA87;
+
+        for resident in [false, true] {
+            let client_data_hash = [0x33; 32];
+            let registration = ctap(
+                &mut host,
+                cid,
+                CTAP_MAKE_CREDENTIAL,
+                vec![
+                    (int(1), Value::Bytes(client_data_hash.to_vec())),
+                    (int(2), Value::Map(vec![(text("id"), text("example.com"))])),
+                    (
+                        int(3),
+                        Value::Map(vec![(text("id"), Value::Bytes(vec![0x42; 64]))]),
+                    ),
+                    (
+                        int(4),
+                        Value::Array(vec![Value::Map(vec![
+                            (text("alg"), int(i64::from(alg.identifier()))),
+                            (text("type"), text("public-key")),
+                        ])]),
+                    ),
+                    (
+                        int(7),
+                        Value::Map(vec![(text("rk"), Value::Bool(resident))]),
+                    ),
+                ],
+            );
+            assert_eq!(get(&registration, int(1)), text("packed"));
+            let auth_data = bytes(get(&registration, int(2)));
+            let statement = get(&registration, int(3));
+            assert_eq!(get(&statement, text("alg")), int(-50));
+            let id_length = usize::from(u16::from_be_bytes([auth_data[53], auth_data[54]]));
+            let credential_id = auth_data[55..55 + id_length].to_vec();
+            let public_key: Value = ciborium::from_reader(&auth_data[55 + id_length..]).unwrap();
+            let signature = bytes(get(&statement, text("sig")));
+            assert_signed(alg, &public_key, &auth_data, &client_data_hash, &signature);
+
+            let client_data_hash = [0x44; 32];
+            let assertion = ctap(
+                &mut host,
+                cid,
+                CTAP_GET_ASSERTION,
+                vec![
+                    (int(1), text("example.com")),
+                    (int(2), Value::Bytes(client_data_hash.to_vec())),
+                    (
+                        int(3),
+                        Value::Array(vec![Value::Map(vec![
+                            (text("id"), Value::Bytes(credential_id.clone())),
+                            (text("type"), text("public-key")),
+                        ])]),
+                    ),
+                ],
+            );
+            let credential = get(&assertion, int(1));
+            assert_eq!(bytes(get(&credential, text("id"))), credential_id);
+            let auth_data = bytes(get(&assertion, int(2)));
+            let signature = bytes(get(&assertion, int(3)));
+            assert_signed(alg, &public_key, &auth_data, &client_data_hash, &signature);
+        }
+
+        shut_down(&host, &shutdown, result);
+    }
+
     #[test]
     fn transport_commands_preserve_engine_assertion_continuations() {
         let dir = TempDir::new("transport-continuations");
