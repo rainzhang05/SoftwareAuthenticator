@@ -23,8 +23,8 @@
 #![cfg(all(feature = "mldsa44", feature = "mldsa65", feature = "mldsa87"))]
 
 use pqkey_mldsa::{
-    MlDsaError, ParamSet, PublicKey, SEED_LEN, SecretKey, lengths, try_keypair_from_seed,
-    try_public_key, try_sign, try_sign_deterministic, try_sign_with_context, verify,
+    MlDsaError, ParamSet, PublicKey, SEED_LEN, SecretKey, try_keypair, try_keypair_from_seed,
+    try_lengths, try_public_key, try_sign, try_sign_deterministic, try_sign_with_context, verify,
     verify_with_context,
 };
 
@@ -332,7 +332,8 @@ fn production_path_interoperates_with_nist_keys() {
 
         let message = b"authenticatorData || clientDataHash";
         let sig = try_sign(ps, &sk, message).unwrap_or_else(|e| panic!("{label}: {e}"));
-        assert_eq!(sig.len(), lengths(ps).2, "{label}: signature length");
+        let (_pk_len, _sk_len, sig_len) = try_lengths(ps).expect("lengths");
+        assert_eq!(sig.len(), sig_len, "{label}: signature length");
         assert!(verify(ps, &pk, message, &sig), "{label}: hedged signature");
     }
 }
@@ -353,7 +354,7 @@ fn signature_does_not_verify_under_another_param_set() {
     let keys: Vec<(ParamSet, PublicKey, Vec<u8>)> = ParamSet::ALL
         .into_iter()
         .map(|ps| {
-            let (pk, sk) = pqkey_mldsa::keypair(ps);
+            let (pk, sk) = try_keypair(ps).expect("keygen");
             let sig = try_sign(ps, &sk, message).expect("sign");
             (ps, pk, sig)
         })
@@ -379,12 +380,12 @@ fn signature_does_not_verify_under_another_param_set() {
 fn public_key_from_another_param_set_is_rejected() {
     let message = b"cross-parameter-set confusion";
     for ps in ParamSet::ALL {
-        let (pk, sk) = pqkey_mldsa::keypair(ps);
+        let (pk, sk) = try_keypair(ps).expect("keygen");
         let sig = try_sign(ps, &sk, message).expect("sign");
         assert!(verify(ps, &pk, message, &sig), "{ps} sanity check");
 
         for other in other_param_sets(ps) {
-            let (other_pk_len, _sk_len, other_sig_len) = lengths(other);
+            let (other_pk_len, _sk_len, other_sig_len) = try_lengths(other).expect("lengths");
 
             // As-is: different parameter sets have different key and
             // signature lengths, so this is refused outright.
@@ -413,7 +414,7 @@ fn public_key_from_another_param_set_is_rejected() {
 #[test]
 fn secret_key_from_another_param_set_is_rejected() {
     for ps in ParamSet::ALL {
-        let (_pk, sk) = pqkey_mldsa::keypair(ps);
+        let (_pk, sk) = try_keypair(ps).expect("keygen");
         for other in other_param_sets(ps) {
             assert_eq!(
                 try_sign(other, &sk, b"msg"),

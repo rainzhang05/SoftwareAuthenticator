@@ -67,8 +67,7 @@
 //! * `mldsa44`, `mldsa65`, `mldsa87` — compile in the matching parameter set.
 //!   All three are on by default.  Calls for a parameter set that was compiled
 //!   out return [`MlDsaError::InvalidParameterSet`] (or `false` from
-//!   [`verify`]); only the legacy panicking helpers [`lengths`] and [`keypair`]
-//!   panic in that case.
+//!   [`verify`]).
 //! * `hazmat` (off by default) — FIPS 204's internal interfaces with
 //!   caller-chosen randomness, `try_keypair_from_seed` (`ML-DSA.KeyGen_internal`
 //!   with a given `ξ`) and `try_sign_deterministic` (a given `rnd`), for
@@ -419,22 +418,6 @@ pub fn try_lengths(ps: ParamSet) -> Result<(usize, usize, usize), MlDsaError> {
     )
 }
 
-/// Return the (public-key, secret-key, signature) byte lengths for a
-/// parameter set.  Useful for storage / buffer sizing.
-///
-/// # Panics
-///
-/// Panics if the parameter-set feature is not enabled.  With this crate's
-/// default features all three are enabled and this cannot happen; use
-/// [`try_lengths`] if you build with a reduced feature set.
-#[must_use]
-pub fn lengths(ps: ParamSet) -> (usize, usize, usize) {
-    match try_lengths(ps) {
-        Ok(lengths) => lengths,
-        Err(_) => panic!("cargo feature for {ps} is not enabled"),
-    }
-}
-
 /// Generate an ML-DSA keypair.
 ///
 /// Returns [`MlDsaError::InvalidParameterSet`] if the parameter-set feature is
@@ -449,18 +432,6 @@ pub fn try_keypair(ps: ParamSet) -> Result<(PublicKey, SecretKey), MlDsaError> {
         .and_then(|()| keypair_from_seed(ps, &seed));
     seed.zeroize();
     result
-}
-
-/// Generate an ML-DSA keypair, panicking on failure.  Kept for API
-/// compatibility with the previous liboqs-based wrapper.
-///
-/// # Panics
-///
-/// Panics if the parameter-set feature is not enabled or if key generation
-/// fails.  Prefer [`try_keypair`].
-#[must_use]
-pub fn keypair(ps: ParamSet) -> (PublicKey, SecretKey) {
-    try_keypair(ps).expect("ML-DSA keypair generation failed")
 }
 
 /// Deterministically derive a keypair from the 32-byte FIPS 204 seed `ξ`
@@ -816,8 +787,8 @@ mod tests {
     }
 
     fn roundtrip(ps: ParamSet) {
-        let (pk, sk) = keypair(ps);
-        let (pk_len, sk_len, _sig_len) = lengths(ps);
+        let (pk, sk) = try_keypair(ps).expect("keygen");
+        let (pk_len, sk_len, _sig_len) = try_lengths(ps).expect("lengths");
         assert_eq!(pk.0.len(), pk_len, "public key length");
         assert_eq!(sk.0.len(), sk_len, "secret key length");
 
@@ -864,14 +835,14 @@ mod tests {
     #[test]
     #[cfg(feature = "mldsa44")]
     fn rejects_wrong_length_signature() {
-        let (pk, _sk) = keypair(ParamSet::MLDSA44);
+        let (pk, _sk) = try_keypair(ParamSet::MLDSA44).expect("keygen");
         assert!(!verify(ParamSet::MLDSA44, &pk, b"hello", &[0u8; 16]));
     }
 
     #[test]
     #[cfg(feature = "mldsa44")]
     fn rejects_wrong_length_pubkey() {
-        let (_pk, sk) = keypair(ParamSet::MLDSA44);
+        let (_pk, sk) = try_keypair(ParamSet::MLDSA44).expect("keygen");
         let sig = try_sign(ParamSet::MLDSA44, &sk, b"hello").expect("sign");
         let pk = PublicKey(vec![0u8; 32]);
         assert!(!verify(ParamSet::MLDSA44, &pk, b"hello", &sig));
@@ -896,7 +867,6 @@ mod tests {
         for (ps, want) in expected {
             if ps.is_enabled() {
                 assert_eq!(try_lengths(ps), Ok(want), "{ps}");
-                assert_eq!(lengths(ps), want, "{ps}");
             } else {
                 assert_eq!(
                     try_lengths(ps),
@@ -943,7 +913,7 @@ mod tests {
     #[test]
     fn try_paths_never_panic_on_bad_input() {
         for ps in enabled() {
-            let (_pk_len, sk_len, _sig_len) = lengths(ps);
+            let (_pk_len, sk_len, _sig_len) = try_lengths(ps).expect("lengths");
             for bogus_len in [0usize, 1, 31, sk_len - 1, sk_len + 1] {
                 let sk = SecretKey(vec![0x5a; bogus_len]);
                 assert_eq!(
@@ -968,7 +938,7 @@ mod tests {
     #[cfg(feature = "mldsa44")]
     fn over_long_context_is_rejected() {
         let ps = ParamSet::MLDSA44;
-        let (pk, sk) = keypair(ps);
+        let (pk, sk) = try_keypair(ps).expect("keygen");
         let ctx_max = vec![0xAA; MAX_CONTEXT_LEN];
         let sig = try_sign_with_context(ps, &sk, b"msg", &ctx_max).expect("255-byte ctx is legal");
         assert!(verify_with_context(ps, &pk, b"msg", &sig, &ctx_max));
@@ -987,7 +957,7 @@ mod tests {
     #[cfg(feature = "mldsa65")]
     fn context_is_bound_into_the_signature() {
         let ps = ParamSet::MLDSA65;
-        let (pk, sk) = keypair(ps);
+        let (pk, sk) = try_keypair(ps).expect("keygen");
         let sig = try_sign_with_context(ps, &sk, b"msg", b"ctx-a").expect("sign");
         assert!(verify_with_context(ps, &pk, b"msg", &sig, b"ctx-a"));
         assert!(!verify_with_context(ps, &pk, b"msg", &sig, b"ctx-b"));
@@ -1003,7 +973,7 @@ mod tests {
             assert_eq!(pk1.0, pk2.0, "{ps} seeded keygen must be deterministic");
             assert_eq!(sk1.0, sk2.0, "{ps} seeded keygen must be deterministic");
 
-            let (pk_len, sk_len, _sig_len) = lengths(ps);
+            let (pk_len, sk_len, _sig_len) = try_lengths(ps).expect("lengths");
             assert_eq!(pk1.0.len(), pk_len);
             assert_eq!(sk1.0.len(), sk_len);
             assert_eq!(try_public_key(ps, &sk1).expect("derive pk").0, pk1.0);
@@ -1022,7 +992,7 @@ mod tests {
     #[cfg(feature = "mldsa44")]
     fn hedged_signing_is_randomized_but_seeded_signing_is_not() {
         let ps = ParamSet::MLDSA44;
-        let (pk, sk) = keypair(ps);
+        let (pk, sk) = try_keypair(ps).expect("keygen");
         let a = try_sign(ps, &sk, b"msg").expect("sign");
         let b = try_sign(ps, &sk, b"msg").expect("sign");
         assert_ne!(a, b, "hedged signing must not be deterministic");
@@ -1098,7 +1068,8 @@ mod tests {
             let odd = SecretKey::new(bytes);
             let sig = try_sign(ps, &odd, b"msg").expect("well-formed t0");
             assert_eq!(try_public_key(ps, &odd), Ok(pk.clone()), "{ps}");
-            assert_eq!(sig.len(), lengths(ps).2, "{ps}");
+            let (_pk_len, _sk_len, sig_len) = try_lengths(ps).expect("lengths");
+            assert_eq!(sig.len(), sig_len, "{ps}");
         }
     }
 
@@ -1152,7 +1123,7 @@ mod tests {
     #[test]
     #[cfg(feature = "mldsa44")]
     fn secret_key_accessors_agree_with_the_public_field() {
-        let (_pk, sk) = keypair(ParamSet::MLDSA44);
+        let (_pk, sk) = try_keypair(ParamSet::MLDSA44).expect("keygen");
         assert_eq!(sk.as_bytes(), sk.0.as_slice());
         assert_eq!(sk.len(), sk.0.len());
         assert!(!sk.is_empty());
