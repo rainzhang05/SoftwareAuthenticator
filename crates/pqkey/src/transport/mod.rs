@@ -45,6 +45,20 @@ const INPUT_REPORT_INTERVAL: Duration = Duration::from_millis(1);
 /// flag, the app and the CTAPHID timers again.
 const IDLE_WAIT: Duration = Duration::from_millis(10);
 
+/// The stack of the worker thread the CTAP app runs on (see
+/// [`exec_with_identifier`]).
+///
+/// After each ML-DSA operation `pqkey-mldsa` overwrites the stack below its
+/// caller with a zeroed array of 512 KiB (ML-DSA-44), 768 KiB (ML-DSA-65) or
+/// 1 MiB (ML-DSA-87), more than the about 790 KiB ML-DSA-87's debug frames
+/// reach. That lies below the engine's own frames and the 64 KiB it scrubs
+/// around every request. Rust's default of 2 MiB leaves little room for it,
+/// `RUST_MIN_STACK` in the daemon's environment can lower that default, and
+/// another compiler, profile or algorithm can deepen the frames. An overflow
+/// aborts the whole daemon, so the size is set here, where the environment
+/// cannot override it.
+const CTAP_WORKER_STACK: usize = 8 * 1024 * 1024;
+
 /// Whether the CTAP app is waiting for the user. The app sets it through its
 /// keepalive callback and the loop reports it in CTAPHID keepalives. Clones
 /// share the flag, which may be set from another thread.
@@ -459,6 +473,7 @@ where
     thread::scope(|scope| {
         let worker = thread::Builder::new()
             .name("ctap-app".into())
+            .stack_size(CTAP_WORKER_STACK)
             .spawn_scoped(scope, move || {
                 run_app(app, request_receiver, response_sender, worker_wake, waiting)
             })?;
