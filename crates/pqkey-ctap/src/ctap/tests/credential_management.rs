@@ -714,6 +714,29 @@ fn app_with_cm_token(aaguid: u8) -> (TestApp, TestStore, [u8; 32]) {
     (app, store, token)
 }
 
+/// getCredsMetadata answers from one listing of the store, each of which
+/// reads every record of a file store: existingResidentCredentialsCount is
+/// its discoverable credentials, and the remaining slots are the limit less
+/// all of them, a stored non-discoverable credential included.
+#[test]
+fn creds_metadata_lists_the_store_once() {
+    let (mut app, store, token) = app_with_cm_token(0x3C);
+    insert_owned(&mut app, es256_credential("a.example", &[0xA1]));
+    insert_owned(&mut app, es256_credential("b.example", &[0xB1]));
+    let mut stored_id = vec![0x5C; 33];
+    stored_id[0] = 0x00;
+    insert_owned(&mut app, es256_credential("c.example", &stored_id));
+    let scans = store.scans();
+    let response =
+        credential_management(&mut app, &token, 0x01, None).expect("getCredsMetadata succeeds");
+    assert_eq!(store.scans() - scans, 1);
+    let remaining = (app.store.max_credentials() - 3) as i64;
+    assert_eq!(
+        response_map(&response),
+        [(int(1), int(2)), (int(2), int(remaining))]
+    );
+}
+
 /// enumerateCredentials returns each credential's publicKey (CTAP 2.3
 /// §6.8.4): the COSE_Key of the stored credential, under which its
 /// signatures verify, for every algorithm.

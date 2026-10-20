@@ -275,10 +275,11 @@ struct TestStoreState {
     store: MemoryStore,
     faults: Faults,
     pin_state_writes: Vec<PinStateRecord>,
+    scans: usize,
 }
 
 /// The unit tests' [`CredentialStore`]: a [`MemoryStore`] that records PIN
-/// state writes and fails operations on demand.
+/// state writes and listings, and fails operations on demand.
 ///
 /// Clones share one store, so a test keeps a handle to inspect or fault the
 /// store an app owns, or to start a new app on the same storage.
@@ -313,6 +314,12 @@ impl TestStore {
     /// Every PIN state written so far, oldest first.
     pub(super) fn pin_state_writes(&self) -> Vec<PinStateRecord> {
         self.lock().pin_state_writes.clone()
+    }
+
+    /// How many times `list` or `count` has run; each reads every record of
+    /// a file store.
+    pub(super) fn scans(&self) -> usize {
+        self.lock().scans
     }
 
     /// Every credential, most recently created first.
@@ -377,12 +384,16 @@ impl CredentialStore for TestStore {
 
     fn list(&self) -> Result<Vec<CredentialRecord>, StoreError> {
         self.fail_if(|faults| faults.list)?;
-        self.lock().store.list()
+        let mut state = self.lock();
+        state.scans += 1;
+        state.store.list()
     }
 
     fn count(&self) -> Result<usize, StoreError> {
         self.fail_if(|faults| faults.list)?;
-        self.lock().store.count()
+        let mut state = self.lock();
+        state.scans += 1;
+        state.store.count()
     }
 
     fn max_credentials(&self) -> usize {
