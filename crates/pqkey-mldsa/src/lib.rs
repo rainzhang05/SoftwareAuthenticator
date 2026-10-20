@@ -202,23 +202,13 @@ impl PublicKey {
 /// Secret key wrapper. The inner bytes are the canonical FIPS 204 encoding;
 /// they are zeroized on drop.
 ///
-/// # Hazard: the inner field is public
-///
-/// `SecretKey` zeroizes on drop, but that only protects the buffer it still
-/// owns.  Any of the following defeats it and leaves key material in memory
-/// for the allocator to hand out again:
-///
-/// * `sk.0.clone()` / `sk.as_bytes().to_vec()` — the copy has no `Drop` glue;
-/// * `let bytes = sk.0;` — moving out of the field (only possible because the
-///   field is public) skips this type's `Drop` entirely;
-/// * `sk.0.push(..)` / `sk.0 = ..` — a reallocation leaves the old buffer
-///   behind un-zeroized.
-///
-/// Callers that must copy the bytes out (for persistence, say) are responsible
-/// for zeroizing the copy, e.g. with [`zeroize::Zeroize`].  The field stays
-/// public only because existing callers construct `SecretKey(bytes)` and read
-/// `sk.0` directly; prefer [`SecretKey::new`] and [`SecretKey::as_bytes`].
-pub struct SecretKey(pub Vec<u8>);
+/// The bytes are private: they can be borrowed through
+/// [`SecretKey::as_bytes`], but not moved out or reallocated, either of which
+/// would leave a buffer behind that this type never zeroizes.  A copy made
+/// from the borrow (`sk.as_bytes().to_vec()`, say) is not covered either;
+/// callers that must copy the bytes out are responsible for zeroizing the
+/// copy, e.g. with [`zeroize::Zeroize`].
+pub struct SecretKey(Vec<u8>);
 
 impl SecretKey {
     /// Wrap already-encoded secret key bytes.  No validation is performed
@@ -237,7 +227,7 @@ impl SecretKey {
     /// Borrow the canonical FIPS 204 encoding of this key.
     ///
     /// Borrowing is safe; copying the result out of the borrow is what
-    /// escapes zeroization (see the type-level hazard note).
+    /// escapes zeroization (see [`SecretKey`]).
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
@@ -1122,7 +1112,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "mldsa44")]
-    fn secret_key_accessors_agree_with_the_public_field() {
+    fn secret_key_accessors_agree_with_the_field() {
         let (_pk, sk) = try_keypair(ParamSet::MLDSA44).expect("keygen");
         assert_eq!(sk.as_bytes(), sk.0.as_slice());
         assert_eq!(sk.len(), sk.0.len());

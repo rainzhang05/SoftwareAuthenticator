@@ -120,8 +120,9 @@ fn main() {
         }
         let (rho_prime, key, rho_prime_tail) = rho_prime_and_key(&seed, k, l);
         let (pk, sk) = try_keypair_from_seed(ps, &seed).expect("fixture");
-        let mut malformed = SecretKey::from_slice(sk.as_bytes());
-        malformed.0[128] = 0xff; // out-of-range first s1 coefficient
+        let mut malformed = sk.as_bytes().to_vec();
+        malformed[128] = 0xff; // out-of-range first s1 coefficient
+        let malformed = SecretKey::new(malformed);
         let maximum = [0xaa; MAX_CONTEXT_LEN];
         let overlong = [0xaa; MAX_CONTEXT_LEN + 1];
         let rnd = [0; 32];
