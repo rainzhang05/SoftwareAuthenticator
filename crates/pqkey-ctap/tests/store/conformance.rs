@@ -545,6 +545,19 @@ fn inconsistent_records_are_rejected_and_not_stored<B: Backend>() {
     let mut overlong_blob = new_record(CoseAlg::ES256);
     overlong_blob.cred_blob = Some(vec![0; 33]);
 
+    // The shape of an RSA key, but 65537 divides p - 1: no private exponent
+    // exists, which only the reconstruction every write performs finds.
+    let mut no_key = [0xff; 256];
+    no_key[125] = 0xfe;
+    let mut rsa_without_key = new_record(CoseAlg::ES256);
+    rsa_without_key.alg = CoseAlg::RS256;
+    rsa_without_key.private_key = PrivateKeyMaterial::RsaPrimes { primes: no_key };
+
+    let mut even = no_key;
+    even[255] = 0xfe;
+    let mut even_rsa_prime = rsa_without_key.clone();
+    even_rsa_prime.private_key = PrivateKeyMaterial::RsaPrimes { primes: even };
+
     for (name, record) in [
         ("overlong credential blob", &overlong_blob),
         ("empty credential ID", &empty_id),
@@ -554,6 +567,8 @@ fn inconsistent_records_are_rejected_and_not_stored<B: Backend>() {
         ("P-256 scalar above the group order", &scalar_above_order),
         ("credProtect 0", &cred_protect_zero),
         ("credProtect 4", &cred_protect_four),
+        ("RSA primes that form no key", &rsa_without_key),
+        ("an even RSA prime", &even_rsa_prime),
     ] {
         assert!(
             matches!(store.put(record), Err(StoreError::InvalidRecord(_))),
@@ -965,7 +980,7 @@ fn discoverable_replacement_validates_before_commit<B: Backend>() {
     let before = store.list().unwrap();
     let mut replacement = old.clone();
     replacement.credential_id = random_bytes::<32>().to_vec();
-    for invalid in 0..7 {
+    for invalid in 0..8 {
         let mut candidate = replacement.clone();
         match invalid {
             0 => candidate.credential_id.clear(),
@@ -975,6 +990,13 @@ fn discoverable_replacement_validates_before_commit<B: Backend>() {
             4 => candidate.private_key = PrivateKeyMaterial::P256Scalar { scalar: [0; 32] },
             5 => candidate.cred_blob = Some(vec![0; 33]),
             6 => candidate.credential_id = [vec![0], random_bytes::<32>().to_vec()].concat(),
+            7 => {
+                // The shape of an RSA key, but 65537 divides p - 1.
+                let mut primes = [0xff; 256];
+                primes[125] = 0xfe;
+                candidate.alg = CoseAlg::RS256;
+                candidate.private_key = PrivateKeyMaterial::RsaPrimes { primes };
+            }
             _ => unreachable!(),
         }
         assert!(matches!(

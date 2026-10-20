@@ -1215,8 +1215,11 @@ mod reset_tests;
 mod tests {
     use super::*;
     use crate::CoseAlg;
+    use crate::ctap::constants::{CTAP_CMD_GET_ASSERTION, CTAP2_ERR_PROCESSING};
+    use crate::ctap::{CtapApp, InterruptFlag, presence::AutoApprove};
     use crate::store::PrivateKeyMaterial;
     use crate::store::test_support::TempDir;
+    use ciborium::value::Value;
 
     #[test]
     fn authenticated_invalid_arrays_are_reported_and_replaceable() {
@@ -1370,5 +1373,106 @@ mod tests {
             })
         ));
         assert_eq!(store.list().unwrap(), []);
+    }
+
+    /// An authentic record whose RSA primes have the shape of a key but form
+    /// none (65537 divides p - 1) is read, listed and counted, since reading
+    /// checks only their shape.  It is never written again, and an assertion
+    /// with it fails cleanly when signing reconstructs the key, leaving its
+    /// counter alone.  Primes without the shape of a key are still corrupt.
+    #[test]
+    fn rsa_primes_that_form_no_key_are_read_but_neither_written_nor_used() {
+        static INTERRUPT: InterruptFlag = InterruptFlag::new();
+        let scratch = TempDir::new();
+        let state = scratch.path().join("state");
+        let mut store = FileStore::open(&state).unwrap();
+        store.put(&record(b"bystander")).unwrap();
+        let rsa = |credential_id: &[u8], primes: [u8; 256]| {
+            let mut rsa = record(credential_id);
+            rsa.rp_id = "rsa.example".into();
+            rsa.alg = CoseAlg::RS256;
+            rsa.private_key = PrivateKeyMaterial::RsaPrimes { primes };
+            rsa
+        };
+        let mut no_key_primes = [0xff; 256];
+        no_key_primes[125] = 0xfe;
+        let mut even_primes = no_key_primes;
+        even_primes[255] = 0xfe;
+        let no_key = rsa(&[0x01; 33], no_key_primes);
+        let misshapen = rsa(&[0x03; 33], even_primes);
+        let keys = credential_keys(&store);
+        for (forged, created_at) in [(&no_key, 7), (&misshapen, 8)] {
+            assert!(matches!(
+                store.put(forged),
+                Err(StoreError::InvalidRecord(_))
+            ));
+            let name = keys.file_name(&forged.credential_id).unwrap();
+            let plaintext = codec::encode_credential(forged, created_at).unwrap();
+            forge(&store, &name, &plaintext);
+        }
+
+        assert!(matches!(
+            store.get(&misshapen.credential_id),
+            Err(StoreError::Corrupt {
+                reason: Corruption::Inconsistent,
+                ..
+            })
+        ));
+        let mut stored = no_key.clone();
+        stored.created_at = 7;
+        assert_eq!(
+            store.get(&no_key.credential_id).unwrap(),
+            Some(stored.clone())
+        );
+        assert_eq!(store.count().unwrap(), 2);
+        let listed: Vec<_> = store
+            .list()
+            .unwrap()
+            .iter()
+            .map(|record| record.credential_id.clone())
+            .collect();
+        assert_eq!(
+            listed,
+            [no_key.credential_id.clone(), b"bystander".to_vec()]
+        );
+
+        // Writing it back, as a counter update would, is refused.
+        let file = store
+            .credentials_dir
+            .join(keys.file_name(&no_key.credential_id).unwrap());
+        let sealed = fs::read(&file).unwrap();
+        let mut counted = stored.clone();
+        counted.sign_count += 1;
+        assert!(matches!(
+            store.put(&counted),
+            Err(StoreError::InvalidRecord(_))
+        ));
+        assert_eq!(fs::read(&file).unwrap(), sealed);
+
+        let mut app = CtapApp::with_file_store(store, AutoApprove, &INTERRUPT, [0; 16]);
+        let descriptor = Value::Map(vec![
+            (
+                Value::Text("id".into()),
+                Value::Bytes(no_key.credential_id.clone()),
+            ),
+            (Value::Text("type".into()), Value::Text("public-key".into())),
+        ]);
+        for allow_list in [Some(Value::Array(vec![descriptor])), None] {
+            let mut entries = vec![
+                (Value::Integer(1.into()), Value::Text("rsa.example".into())),
+                (Value::Integer(2.into()), Value::Bytes(vec![0; 32])),
+            ];
+            entries.extend(allow_list.map(|list| (Value::Integer(3.into()), list)));
+            let mut request = vec![CTAP_CMD_GET_ASSERTION];
+            ciborium::ser::into_writer(&Value::Map(entries), &mut request).unwrap();
+            assert_eq!(app.call(&request), [CTAP2_ERR_PROCESSING]);
+        }
+        assert_eq!(
+            FileStore::open(&state)
+                .unwrap()
+                .get(&no_key.credential_id)
+                .unwrap(),
+            Some(stored)
+        );
     }
 }
