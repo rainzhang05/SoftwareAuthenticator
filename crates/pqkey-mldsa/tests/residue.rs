@@ -4,14 +4,15 @@
 //! potentially sensitive intermediate data is destroyed as soon as it is no
 //! longer needed."  ρ′ = SHAKE256(ξ ‖ k ‖ ℓ)[32..96] alone regenerates the
 //! secret vectors s1 and s2, and K = [96..128] is the signing key's PRF key.
-//! After each entry point returns, this test scans the dead stack below its
-//! caller for both 32-byte halves of ρ′, K, and a control nobody computed.
-//! Fixtures precede the wipe; verification follows the scans. Linux also
+//! After each entry point returns, this test copies the dead stack below its
+//! caller aside and looks in the copy for both 32-byte halves of ρ′, K, and a
+//! control nobody computed, reporting how far below the caller it finds each.
+//! Fixtures precede the wipe; verification follows the copy. Linux also
 //! repeats the operations in a child whose OS RNG is forced to fail.
 //!
 //! It is its own program (`harness = false`), single-threaded on the main
 //! thread, because it reads stack memory that other functions left behind:
-//! `wipe` and `scan` look at the same region below `main`'s frame through
+//! `wipe` and `capture` look at the same region below `main`'s frame through
 //! buffers of their own.  Reading those bytes is outside what Rust defines,
 //! so a clean result proves less than a dirty one; it found the residue
 //! before the stack was scrubbed.
@@ -46,7 +47,7 @@ type Operation<'a> = (
     Option<MlDsaError>,
 );
 
-/// How far below `main` the scan reaches, more than signing ever uses.
+/// How far below `main` the probe reaches, more than signing ever uses.
 const SCAN: usize = 2 * 1024 * 1024;
 
 /// Overwrite the region below the caller with zeros.
@@ -61,26 +62,38 @@ fn wipe() {
     core::hint::black_box(&buffer);
 }
 
-/// How often `needle` occurs in the region below the caller.
+/// Copy the region below the caller into `copy`, allocated beforehand:
+/// allocating it would itself run over that region.
 #[inline(never)]
-fn scan(needle: &[u8]) -> usize {
+fn capture(copy: &mut [u8; SCAN]) {
     let buffer: MaybeUninit<[u8; SCAN]> = MaybeUninit::uninit();
     let start = buffer.as_ptr().cast::<u8>();
-    let mut hits = 0;
-    for offset in 0..=SCAN - needle.len() {
+    for (offset, byte) in copy.iter_mut().enumerate() {
         // SAFETY: every byte read is inside `buffer`, which this frame owns.
         // The bytes are uninitialised as far as Rust is concerned: they hold
         // whatever earlier calls left there, which is what this test is after,
-        // and they are only compared, never used as values of another type.
-        let found = (0..needle.len()).all(
-            |index| unsafe { core::ptr::read_volatile(start.add(offset + index)) } == needle[index],
-        );
-        if found {
-            hits += 1;
-        }
+        // and they are only copied, never used as values of another type.
+        *byte = unsafe { core::ptr::read_volatile(start.add(offset)) };
     }
     core::hint::black_box(&buffer);
-    hits
+}
+
+/// How far below the caller, in bytes, each copy of `needle` in `copy` reaches.
+fn find(copy: &[u8; SCAN], needle: &[u8]) -> Vec<usize> {
+    copy.windows(needle.len())
+        .enumerate()
+        .filter(|(_, window)| *window == needle)
+        .map(|(offset, _)| SCAN - offset)
+        .collect()
+}
+
+/// `depths` as the test reports them: how many, and how far down.
+fn hits(depths: &[usize]) -> String {
+    if depths.is_empty() {
+        "0x".to_owned()
+    } else {
+        format!("{}x at {depths:?}", depths.len())
+    }
 }
 
 /// ρ′ and K of the key generated from `seed` with parameters (k, ℓ).
@@ -108,6 +121,10 @@ fn main() {
     let mut shake = Shake256::default();
     shake.update(b"never computed by the signer");
     shake.finalize_xof().read(&mut control);
+    let mut copy: Box<[u8; SCAN]> = vec![0; SCAN]
+        .into_boxed_slice()
+        .try_into()
+        .expect("SCAN bytes");
 
     let mut failures = Vec::new();
     for (ps, k, l) in [
@@ -246,18 +263,19 @@ fn main() {
         for (name, context, operation, expected_error) in operations {
             wipe();
             let result = core::hint::black_box(operation());
-            let found = (
-                scan(&rho_prime),
-                scan(&key),
-                scan(&control),
-                scan(&rho_prime_tail),
+            capture(&mut copy);
+            let found =
+                [&rho_prime, &rho_prime_tail, &key, &control].map(|needle| find(&copy, needle));
+            let summary = format!(
+                "rho' {}/{}, K {}, control {}",
+                hits(&found[0]),
+                hits(&found[1]),
+                hits(&found[2]),
+                hits(&found[3])
             );
-            println!(
-                "{ps} {name} (RNG failure: {rng_failed}): rho' {}x/{}x, K {}x, control {}x",
-                found.0, found.3, found.1, found.2
-            );
-            if found != (0, 0, 0, 0) {
-                failures.push(format!("{ps} {name}"));
+            println!("{ps} {name} (RNG failure: {rng_failed}): {summary}");
+            if found.iter().any(|depths| !depths.is_empty()) {
+                failures.push(format!("{ps} {name}: {summary}"));
             }
             match (result, expected_error) {
                 (Err(actual), Some(expected)) => assert_eq!(actual, expected, "{ps} {name}"),
