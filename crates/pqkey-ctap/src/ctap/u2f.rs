@@ -128,6 +128,10 @@ impl CtapApp<'_> {
     /// Answer one U2F command APDU with data followed by its status word.
     /// Presence blocks here; the HID transport implements client polling.
     pub fn call_u2f(&mut self, apdu: &[u8]) -> Vec<u8> {
+        crate::crypto::scrub::with_scrubbed_stack(|| self.call_u2f_inner(apdu))
+    }
+
+    fn call_u2f_inner(&mut self, apdu: &[u8]) -> Vec<u8> {
         self.pending_assertion = None;
         self.observe_large_blob_state(None);
         let result =
