@@ -176,6 +176,18 @@ impl CtapApp<'_> {
             return Err(CTAP2_ERR_INVALID_OPTION);
         }
 
+        // "The user handle MUST NOT be empty." (WebAuthn Level 3 §5.4.3)  A
+        // discoverable credential is known by its user handle: step 17.2
+        // overwrites "a credential for the same rp.id and account ID", so
+        // passkeys registered with empty handles would replace each other.
+        // An empty handle is an invalid item length, like an over-long one,
+        // refused here before the PIN checks of steps 6 to 8 and before any
+        // prompt.  A non-discoverable credential stores no user and keeps
+        // accepting it.
+        if rk && user_id.is_empty() {
+            return Err(CTAP1_ERR_INVALID_LENGTH);
+        }
+
         // Step 6: always-UV requires a token even before a PIN is set.
         let protected = self.pin_state.is_set();
         let always_uv = self.pin_state.persistent().always_uv;

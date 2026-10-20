@@ -345,8 +345,8 @@ fn the_up_option_false_is_invalid() {
     );
 }
 
-/// A discoverable registration for `user`, which the authenticator stores.
-fn request_for_user(user: Value) -> Vec<u8> {
+/// A registration for `user`, discoverable (and stored) if `rk`.
+fn request_for_user(user: Value, rk: bool) -> Vec<u8> {
     let entries = vec![
         (int(1), Value::Bytes(CLIENT_DATA_HASH.to_vec())),
         (int(2), canonical_map(vec![(text("id"), text(RP_ID))])),
@@ -358,7 +358,7 @@ fn request_for_user(user: Value) -> Vec<u8> {
                 (text("alg"), int(i64::from(CoseAlg::ES256.identifier()))),
             ])]),
         ),
-        options(&[("rk", true)]),
+        options(&[("rk", rk)]),
     ];
     encode(&canonical_map(entries))
 }
@@ -368,15 +368,47 @@ fn request_for_user(user: Value) -> Vec<u8> {
 #[test]
 fn a_user_handle_longer_than_64_bytes_is_rejected() {
     let (mut app, _) = app(vec![]);
-    for (length, accepted) in [(64, true), (65, false)] {
+    for (length, accepted) in [(1, true), (64, true), (65, false)] {
         let user = canonical_map(vec![(text("id"), Value::Bytes(vec![0x07; length]))]);
-        let result = app.handle_make_credential(&request_for_user(user));
+        let result = app.handle_make_credential(&request_for_user(user, true));
         if accepted {
             assert!(result.is_ok(), "{length} bytes");
         } else {
             assert_eq!(result, Err(CTAP1_ERR_INVALID_LENGTH), "{length} bytes");
         }
     }
+}
+
+/// "The user handle MUST NOT be empty." ([WebAuthn] §5.4.3)  Discoverable
+/// credentials with empty handles would replace each other (CTAP 2.3 §6.1.2
+/// step 17.2), so an empty handle is an invalid item length for one: the user
+/// is not asked and nothing is stored.  The check comes before the PIN checks
+/// of steps 6 to 8, so a PIN without a pinUvAuthParam gets the same status
+/// rather than CTAP2_ERR_PUAT_REQUIRED.  A non-discoverable credential stores
+/// no user and accepts an empty handle.
+#[test]
+fn an_empty_user_handle_is_rejected_for_discoverable_credentials() {
+    let empty = || canonical_map(vec![(text("id"), Value::Bytes(Vec::new()))]);
+    for pin_set in [false, true] {
+        let (mut app, log) = app(vec![]);
+        if pin_set {
+            app.pin_state.set_pin(pin_hash(b"1234"));
+        }
+        assert_eq!(
+            app.handle_make_credential(&request_for_user(empty(), true)),
+            Err(CTAP1_ERR_INVALID_LENGTH),
+            "PIN set {pin_set}"
+        );
+        assert!(log.take().is_empty(), "PIN set {pin_set}: no prompt");
+        assert!(stored(&app).is_empty(), "PIN set {pin_set}: nothing stored");
+    }
+
+    let (mut app, log) = app(vec![]);
+    let response = app
+        .handle_make_credential(&request_for_user(empty(), false))
+        .expect("makeCredential succeeds");
+    assert_eq!(response[0], CTAP2_OK);
+    assert_eq!(log.take(), asked_to_register());
 }
 
 /// user.name and user.displayName are stored truncated to 64 bytes, at a
@@ -392,7 +424,7 @@ fn user_names_are_truncated_to_64_bytes() {
         (text("name"), text(&name)),
         (text("displayName"), text(&display_name)),
     ]);
-    app.handle_make_credential(&request_for_user(user))
+    app.handle_make_credential(&request_for_user(user, true))
         .expect("makeCredential succeeds");
     let credential = &stored(&app)[0];
     assert_eq!(credential.user_name.as_deref(), Some(&name[..63]));

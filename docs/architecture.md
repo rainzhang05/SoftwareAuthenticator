@@ -347,11 +347,14 @@ state written before these fields existed reads with their defaults, and its
 PIN counts as 4 code points long.
 
 Discoverable registration replaces all stored discoverable credentials with
-exactly the same RP ID and user handle through one store transaction. The
-new registration retains its fresh ID, key, extension secrets and creation
-order. Replacement succeeds at logical capacity without deleting an old
-credential first. Physical space for staging remains necessary; a new account
-still respects the configured limit, including stored non-discoverable keys.
+exactly the same RP ID and user handle through one store transaction.
+makeCredential refuses an empty user handle for a discoverable credential
+(CTAP1_ERR_INVALID_LENGTH, as for one over 64 bytes), so passkeys of different
+accounts never replace each other through it. The new registration retains its
+fresh ID, key, extension secrets and creation order. Replacement succeeds at
+logical capacity without deleting an old credential first. Physical space for
+staging remains necessary; a new account still respects the configured limit,
+including stored non-discoverable keys.
 
 Existing stores remain readable. The first atomic registration writes an
 encrypted `credential-format` marker and stages the candidate and encrypted
