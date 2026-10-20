@@ -85,10 +85,13 @@ pub(crate) fn generate<R: TryCryptoRng + ?Sized>(
     })
 }
 
-/// Reconstruct only two distinct, odd 1024-bit primes with a 2048-bit product.
-/// Store bytes are untrusted; reject them before the crate's reconstruction
-/// and validation, which also computes d mod lcm(p-1, q-1) and CRT values.
-pub(crate) fn signing_key(bytes: &[u8]) -> Result<RsaPrivateKey, CryptoError> {
+/// p and q, if p || q has the shape of an RSA-2048 key: two distinct, odd
+/// 1024-bit numbers with a 2048-bit product. Store bytes are untrusted. These
+/// checks are cheap enough for every read of a stored credential; only
+/// [`signing_key`] finds out whether the numbers form a key.
+pub(crate) fn primes(
+    bytes: &[u8],
+) -> Result<(Zeroizing<BoxedUint>, Zeroizing<BoxedUint>), CryptoError> {
     if bytes.len() != 256 {
         return Err(CryptoError::InvalidKey);
     }
@@ -107,6 +110,14 @@ pub(crate) fn signing_key(bytes: &[u8]) -> Result<RsaPrivateKey, CryptoError> {
     if n.bits() != 2048 {
         return Err(CryptoError::InvalidKey);
     }
+    Ok((p, q))
+}
+
+/// Reconstruct only [`primes`] of the right shape. The crate's reconstruction
+/// and validation also computes d mod lcm(p-1, q-1) and CRT values, and
+/// rejects numbers that form no key.
+pub(crate) fn signing_key(bytes: &[u8]) -> Result<RsaPrivateKey, CryptoError> {
+    let (p, q) = primes(bytes)?;
     RsaPrivateKey::from_p_q((*p).clone(), (*q).clone(), 65537u64.into())
         .map_err(|_| CryptoError::InvalidKey)
 }
@@ -285,36 +296,37 @@ mod tests {
 
     #[test]
     fn malformed_primes_are_rejected() {
+        // Without the shape of a key, before any reconstruction.
+        let misshapen = |bytes: &[u8]| {
+            assert_eq!(primes(bytes).err(), Some(CryptoError::InvalidKey));
+            assert_eq!(signing_key(bytes).err(), Some(CryptoError::InvalidKey));
+        };
         for length in [0, 32, 128, 255, 257, 512] {
-            assert_eq!(
-                signing_key(&vec![0xff; length]).err(),
-                Some(CryptoError::InvalidKey)
-            );
+            misshapen(&vec![0xff; length]);
         }
         for offset in [0, 128] {
             let mut short = Zeroizing::new(PRIMES);
             short[offset] &= 0x7f;
-            assert_eq!(signing_key(&short[..]).err(), Some(CryptoError::InvalidKey));
+            misshapen(&short[..]);
             let mut even = Zeroizing::new(PRIMES);
             even[offset + 127] &= 0xfe;
-            assert_eq!(signing_key(&even[..]).err(), Some(CryptoError::InvalidKey));
+            misshapen(&even[..]);
         }
         let mut equal = Zeroizing::new(PRIMES);
         equal.copy_within(..128, 128);
-        assert_eq!(signing_key(&equal[..]).err(), Some(CryptoError::InvalidKey));
+        misshapen(&equal[..]);
         let mut small_n = Zeroizing::new([0; 256]);
         small_n[0] = 0x80;
         small_n[128] = 0x80;
         small_n[127] = 3;
         small_n[255] = 5;
-        assert_eq!(
-            signing_key(&small_n[..]).err(),
-            Some(CryptoError::InvalidKey)
-        );
-        // 65537 divides p-1, so no private exponent exists. This reaches
-        // the RSA crate's checks after the byte and modulus checks.
+        misshapen(&small_n[..]);
+        assert!(primes(&PRIMES).is_ok());
+        // 65537 divides p-1, so no private exponent exists. The bytes have
+        // the shape of a key; only the RSA crate's checks reject them.
         let mut invalid = Zeroizing::new([0xff; 256]);
         invalid[125] = 0xfe;
+        assert!(primes(&invalid[..]).is_ok());
         assert_eq!(
             signing_key(&invalid[..]).err(),
             Some(CryptoError::InvalidKey)
