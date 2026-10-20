@@ -5,17 +5,19 @@ use super::support::{
     TestApp, credential, insert, insert_owned, install_pin_hash, stored, stored_by_id,
 };
 use super::support::{
-    TestStore, encode, es256_credential, get_pin_uv_auth_token, install_pin_uv_auth_token, int,
-    pin_hash, token_pin_auth,
+    TestStore, created_credential, encode, es256_credential, get_pin_uv_auth_token,
+    install_pin_uv_auth_token, int, pin_hash, response_auth_data, token_pin_auth,
+    use_fixed_rsa_key,
 };
 use crate::crypto::verify::verify_signature;
 use crate::ctap::CtapApp;
-use crate::ctap::cbor::canonical_map;
+use crate::ctap::cbor::{canonical_map, map_get};
+use crate::ctap::credential_id::is_discoverable;
 use crate::ctap::credential_management::truncated_rp_id;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_CM, PIN_PERMISSION_GA};
 use crate::ctap::pin::protocol::PIN_UV_AUTH_PROTOCOL_CLASSIC;
 use crate::ctap::pin::token::{MAX_USAGE_TIME_PERIOD, ManualClock};
-use crate::store::CredentialStore;
+use crate::store::{CredentialRecord, CredentialStore};
 use crate::{ClassicPinProtocol, CoseAlg, try_sign_challenge};
 
 use ciborium::{
@@ -507,6 +509,149 @@ fn credential_management_limits_an_rp_scoped_token_to_that_rp() {
         .map(|credential| credential.rp_id.clone())
         .collect();
     assert_eq!(remaining, ["other.example"]);
+}
+
+/// The relying party of the stored non-discoverable credentials below.
+const STORED_RP: &str = "stored.example";
+
+/// Register a non-discoverable credential that makeCredential stores under a
+/// `0x00`-marker ID rather than sealing into its ID: an RS256 one, whose key
+/// does not fit, or an ES256 one with thirdPartyPayment enabled (CTAP 2.3
+/// §12.9).  Neither keeps any user information.
+pub(super) fn register_stored_non_discoverable(
+    app: &mut TestApp,
+    alg: CoseAlg,
+    payment: bool,
+) -> CredentialRecord {
+    let text = |value: &str| Value::Text(value.into());
+    let mut entries = vec![
+        (int(1), Value::Bytes(vec![0x11; 32])),
+        (int(2), canonical_map(vec![(text("id"), text(STORED_RP))])),
+        (
+            int(3),
+            canonical_map(vec![
+                (text("id"), Value::Bytes(vec![0x01])),
+                (text("name"), text("alice")),
+            ]),
+        ),
+        (
+            int(4),
+            Value::Array(vec![canonical_map(vec![
+                (text("type"), text("public-key")),
+                (text("alg"), int(i64::from(alg.identifier()))),
+            ])]),
+        ),
+        (
+            int(7),
+            canonical_map(vec![(text("rk"), Value::Bool(false))]),
+        ),
+    ];
+    if payment {
+        entries.push((
+            int(6),
+            canonical_map(vec![(text("thirdPartyPayment"), Value::Bool(true))]),
+        ));
+    }
+    use_fixed_rsa_key(app);
+    let response = app
+        .handle_make_credential(&encode(&canonical_map(entries)))
+        .expect("makeCredential succeeds");
+    let record = created_credential(app, &response, STORED_RP);
+    assert_eq!(record.credential_id.len(), 33, "{alg:?}");
+    assert_eq!(record.credential_id[0], 0x00, "{alg:?}");
+    assert!(!is_discoverable(&record.credential_id), "{alg:?}");
+    assert_eq!(record.third_party_payment, payment, "{alg:?}");
+    assert!(record.user_id.is_empty(), "{alg:?}");
+    assert!(record.user_name.is_none() && record.user_display_name.is_none());
+    stored_by_id(app, &record.credential_id)
+}
+
+/// Assert that `record` is stored as it was and still asserts through an
+/// allowList: its own counter advances by one, and the response carries no
+/// user entity.
+pub(super) fn assert_stored_non_discoverable_intact(app: &mut TestApp, record: &CredentialRecord) {
+    let text = |value: &str| Value::Text(value.into());
+    assert_eq!(stored_by_id(app, &record.credential_id), *record);
+    let request = canonical_map(vec![
+        (int(1), text(STORED_RP)),
+        (int(2), Value::Bytes(vec![0x22; 32])),
+        (
+            int(3),
+            Value::Array(vec![canonical_map(vec![
+                (text("type"), text("public-key")),
+                (text("id"), Value::Bytes(record.credential_id.clone())),
+            ])]),
+        ),
+    ]);
+    let response = app
+        .handle_get_assertion(&encode(&request))
+        .expect("the credential still asserts");
+    let auth_data = response_auth_data(&response);
+    let counter = u32::from_be_bytes(auth_data[33..37].try_into().expect("signCount"));
+    assert_eq!(counter, record.sign_count + 1);
+    let Value::Map(map) = from_reader(&response[1..]).expect("decode assertion") else {
+        panic!("response must be a map");
+    };
+    assert_eq!(map_get(&map, int(4)), None, "no user entity");
+    let after = stored_by_id(app, &record.credential_id);
+    assert_eq!(after.sign_count, record.sign_count + 1);
+    assert!(after.user_id.is_empty());
+    assert!(after.user_name.is_none() && after.user_display_name.is_none());
+}
+
+/// deleteCredential and updateUserInformation manage discoverable
+/// credentials only (CTAP 2.3 §6.8).  A non-discoverable credential stored
+/// under a `0x00`-marker ID, which enumeration never lists and which keeps no
+/// user information, is absent to them, CTAP2_ERR_NO_CREDENTIALS, whether the
+/// token is scoped to its RP or not.  The store is not consulted, so failing
+/// every credential operation changes nothing, and the credential still
+/// asserts through an allowList afterwards.
+#[test]
+fn stored_non_discoverable_credentials_are_absent_to_delete_and_update() {
+    for (alg, payment) in [(CoseAlg::RS256, false), (CoseAlg::ES256, true)] {
+        for scope in [None, Some(STORED_RP)] {
+            let store = TestStore::new();
+            let mut app = new_app(store.clone(), [0x4B; 16]);
+            let record = register_stored_non_discoverable(&mut app, alg, payment);
+            let token = [0x4B; 32];
+            install_pin_uv_auth_token(
+                &mut app,
+                ClassicPinProtocol::V2,
+                token,
+                PIN_PERMISSION_CM,
+                scope,
+            );
+            // The stored user ID, empty, so only the credential's kind
+            // stands between the update and the record.
+            let user = canonical_map(vec![
+                (
+                    Value::Text("id".into()),
+                    Value::Bytes(record.user_id.clone()),
+                ),
+                (Value::Text("name".into()), Value::Text("mallory".into())),
+            ]);
+            store.faults(|faults| {
+                faults.get = true;
+                faults.put = true;
+                faults.delete = true;
+                faults.list = true;
+            });
+            for (subcommand, user) in [(0x06, None), (0x07, Some(user))] {
+                assert_eq!(
+                    credential_management(
+                        &mut app,
+                        &token,
+                        subcommand,
+                        Some(credential_id_params(&record.credential_id, user))
+                    ),
+                    Err(CTAP2_ERR_NO_CREDENTIALS),
+                    "{alg:?}, subCommand {subcommand:#04x}, scoped to {scope:?}"
+                );
+            }
+            store.faults(|faults| *faults = Default::default());
+            assert_stored_non_discoverable_intact(&mut app, &record);
+        }
+    }
 }
 
 /// A credential management request with only a subCommand, as platforms send

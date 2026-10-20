@@ -1,4 +1,7 @@
 //! Preview wire compatibility and isolation from modern permission grants.
+use super::credential_management::{
+    assert_stored_non_discoverable_intact, register_stored_non_discoverable,
+};
 use super::support::*;
 use crate::crypto::verify::verify_signature;
 use crate::ctap::CtapApp;
@@ -691,6 +694,69 @@ fn preview_enumerates_every_algorithm_and_preserves_keys_after_user_updates() {
                 crate::try_sign_challenge(alg, &after.keypair().unwrap().0, b"auth", b"hash")
                     .unwrap();
             verify_signature(alg, &before.1, b"authhash", &signature).unwrap();
+        }
+    }
+}
+
+/// The preview family manages discoverable credentials only, as 0x0A does:
+/// a stored non-discoverable credential is absent to deleteCredential and
+/// updateUserInformation, without consulting the store, under a legacy
+/// getPinToken token (which skips the cm permission check) and under cm
+/// tokens scoped to its RP or not.
+#[test]
+fn preview_treats_stored_non_discoverable_credentials_as_absent() {
+    for protocol in PROTOCOLS {
+        for (alg, payment) in [(CoseAlg::RS256, false), (CoseAlg::ES256, true)] {
+            for (legacy, scoped) in [(true, false), (false, false), (false, true)] {
+                let store = TestStore::new();
+                let mut app = new_app(store.clone(), [0x42; 16]);
+                let record = register_stored_non_discoverable(&mut app, alg, payment);
+                set_pin_padded(&mut app, protocol, &padded_pin(PIN)).unwrap();
+                let token = if legacy {
+                    get_pin_token(&mut app, protocol, PIN).unwrap()
+                } else {
+                    let rp = scoped.then_some(record.rp_id.as_str());
+                    get_pin_uv_auth_token(&mut app, protocol, PIN, PIN_PERMISSION_CM.into(), rp)
+                        .unwrap()
+                };
+                assert_eq!(
+                    app.pin_state.token_origin(),
+                    Some(if legacy {
+                        TokenOrigin::LegacyGetPinToken
+                    } else {
+                        TokenOrigin::PermissionBearing
+                    })
+                );
+                let user = canonical_map(vec![
+                    (
+                        Value::Text("id".into()),
+                        Value::Bytes(record.user_id.clone()),
+                    ),
+                    (Value::Text("name".into()), Value::Text("mallory".into())),
+                ]);
+                store.faults(|f| {
+                    f.get = true;
+                    f.put = true;
+                    f.delete = true;
+                    f.list = true;
+                });
+                for (sub, user) in [(6, None), (7, Some(user))] {
+                    assert_eq!(
+                        manage(
+                            &mut app,
+                            PRE,
+                            protocol,
+                            &token,
+                            sub,
+                            Some(params_id(&record.credential_id, user))
+                        ),
+                        [CTAP2_ERR_NO_CREDENTIALS],
+                        "{alg:?}, subCommand {sub}, legacy {legacy}, scoped {scoped}"
+                    );
+                }
+                store.faults(|f| *f = Faults::default());
+                assert_stored_non_discoverable_intact(&mut app, &record);
+            }
         }
     }
 }
