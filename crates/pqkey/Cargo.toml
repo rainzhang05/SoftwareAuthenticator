@@ -41,12 +41,14 @@ zeroize.workspace = true
 unicode-normalization = { version = "0.1.25", default-features = false, features = ["std"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 # Desktop notifications for user presence, over the D-Bus session bus. Pure
-# Rust: the blocking API on zbus's own async-io runtime, nothing else.
-zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
-futures-lite = { version = "2", default-features = false, features = ["std"] }
+# Rust: zbus's client API on its own runtime, zruntime, which the presence
+# thread drives with `zbus::block_on`; nothing else.
+zbus = { version = "6.0", default-features = false, features = ["default-rt"] }
 # zbus's runtime, for a timer on connecting to the bus, which zbus does not
-# limit.
-async-io = "2"
+# limit, and on waiting for a signal.
+zruntime = { version = "0.2", default-features = false, features = ["helper"] }
+# The `Stream` trait of zbus's signal stream.
+futures-core = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 # The test verifier, which checks the signatures of the full-stack and

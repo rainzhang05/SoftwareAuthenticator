@@ -14,22 +14,24 @@
 //! * Presence requests are rare and wait for a person for seconds; the few
 //!   milliseconds a connection takes do not matter, and nothing is kept open
 //!   while the daemon is idle.
+//!
+//! zbus's API is async. Each call here runs it to completion on the calling
+//! thread with `zbus::block_on`, which runs zbus's runtime meanwhile.
 
 use std::{
     collections::HashMap,
-    thread,
+    future::poll_fn,
+    num::NonZeroUsize,
+    pin::Pin,
     time::{Duration, Instant},
 };
 
-use futures_lite::{StreamExt, future};
+use futures_core::Stream;
 use zbus::{
-    MatchRule, Message, MessageStream,
-    blocking::{Connection, MessageIterator, fdo::DBusProxy},
-    connection,
-    message::Type,
-    names::BusName,
-    zvariant::Value,
+    Connection, MatchRule, Message, MessageStream, OwnedGuid, Variant, connection, message::Type,
+    names::OwnedUniqueName,
 };
+use zruntime::SharedRuntime;
 
 use crate::presence::notification::{
     APPROVE_ACTION, ConnectError, DENY_ACTION, Notification, NotificationEvent, NotificationServer,
@@ -40,13 +42,18 @@ const NOTIFICATIONS_NAME: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 const NOTIFICATIONS_INTERFACE: &str = "org.freedesktop.Notifications";
 
+/// The message bus itself.
+const BUS_NAME: &str = "org.freedesktop.DBus";
+const BUS_PATH: &str = "/org/freedesktop/DBus";
+const BUS_INTERFACE: &str = "org.freedesktop.DBus";
+
 /// The longest connecting to the session bus, or a single D-Bus call, may
 /// take. It bounds how long a hung bus or notification server can hold up a
 /// cancelled request or the daemon's shutdown.
 const METHOD_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// How often [`SessionBus::next_event`] looks for a signal.
-const EVENT_POLL: Duration = Duration::from_millis(5);
+/// How many signals wait for [`SessionBus::next_event`] to take them.
+const SIGNAL_QUEUE: Option<NonZeroUsize> = NonZeroUsize::new(64);
 
 /// The application name notifications are shown under.
 const APP_NAME: &str = "Security key";
@@ -87,168 +94,178 @@ impl SessionBus {
 impl NotificationServer for SessionBus {
     fn connect(&mut self) -> Result<ServerInfo, ConnectError> {
         self.disconnect();
-        // Uses DBUS_SESSION_BUS_ADDRESS, or $XDG_RUNTIME_DIR/bus without it.
-        let builder = connection::Builder::session()
-            .map_err(|err| ConnectError::NoSession(err.to_string()))?;
-        let connection = connect_bus(builder, METHOD_TIMEOUT)?;
+        let (session, info) = zbus::block_on(async {
+            // Uses DBUS_SESSION_BUS_ADDRESS, or $XDG_RUNTIME_DIR/bus without it.
+            let connection = connect_bus(connection::Builder::session(), METHOD_TIMEOUT).await?;
 
-        // Also starts a D-Bus activatable server that is not running yet.
-        let capabilities: Vec<String> = connection
-            .call_method(
-                Some(NOTIFICATIONS_NAME),
-                NOTIFICATIONS_PATH,
-                Some(NOTIFICATIONS_INTERFACE),
-                "GetCapabilities",
-                &(),
-            )
-            .and_then(|reply| reply.body().deserialize())
-            .map_err(|err| ConnectError::NoServer(err.to_string()))?;
-        // (name, vendor, version, spec_version).  Only the name is used, to
-        // nudge GNOME Shell's queue; a server that does not answer is not
-        // nudged.
-        let name = connection
-            .call_method(
-                Some(NOTIFICATIONS_NAME),
-                NOTIFICATIONS_PATH,
-                Some(NOTIFICATIONS_INTERFACE),
-                "GetServerInformation",
-                &(),
-            )
-            .and_then(|reply| {
-                reply
-                    .body()
-                    .deserialize::<(String, String, String, String)>()
-            })
-            .map(|(name, ..)| name)
-            .ok();
+            // Also starts a D-Bus activatable server that is not running yet.
+            let capabilities: Vec<String> = connection
+                .call_method(
+                    Some(NOTIFICATIONS_NAME),
+                    NOTIFICATIONS_PATH,
+                    Some(NOTIFICATIONS_INTERFACE),
+                    "GetCapabilities",
+                    &(),
+                )
+                .await
+                .and_then(|reply| reply.body().deserialize())
+                .map_err(|err| ConnectError::NoServer(err.to_string()))?;
+            // (name, vendor, version, spec_version).  Only the name is used, to
+            // nudge GNOME Shell's queue; a server that does not answer is not
+            // nudged.
+            let name = connection
+                .call_method(
+                    Some(NOTIFICATIONS_NAME),
+                    NOTIFICATIONS_PATH,
+                    Some(NOTIFICATIONS_INTERFACE),
+                    "GetServerInformation",
+                    &(),
+                )
+                .await
+                .and_then(|reply| {
+                    reply
+                        .body()
+                        .deserialize::<(String, String, String, String)>()
+                })
+                .map(|(name, ..)| name)
+                .ok();
 
-        // Only signals from the process that owns the name count: any client
-        // on the bus can emit a signal claiming to be ActionInvoked.
-        let bus =
-            DBusProxy::new(&connection).map_err(|err| ConnectError::NoServer(err.to_string()))?;
-        let owner = BusName::try_from(NOTIFICATIONS_NAME)
-            .map_err(zbus::Error::from)
-            .and_then(|name| Ok(bus.get_name_owner(name)?))
-            .map_err(|err: zbus::Error| ConnectError::NoServer(err.to_string()))?;
-        // Names this bus, so a recorded prompt is only ever withdrawn from the
-        // server instance that showed it.
-        let bus_id = bus.get_id().ok().map(|id| id.to_string());
-        let rule =
-            signal_rule(owner.as_str()).map_err(|err| ConnectError::Failed(err.to_string()))?;
-        let signals = MessageIterator::for_match_rule(rule, &connection, Some(64))
-            .map_err(|err| ConnectError::Failed(err.to_string()))?
-            .into_inner();
+            // Only signals from the process that owns the name count: any client
+            // on the bus can emit a signal claiming to be ActionInvoked.
+            let owner: OwnedUniqueName = connection
+                .call_method(
+                    Some(BUS_NAME),
+                    BUS_PATH,
+                    Some(BUS_INTERFACE),
+                    "GetNameOwner",
+                    &(NOTIFICATIONS_NAME,),
+                )
+                .await
+                .and_then(|reply| reply.body().deserialize())
+                .map_err(|err| ConnectError::NoServer(err.to_string()))?;
+            // Names this bus, so a recorded prompt is only ever withdrawn from the
+            // server instance that showed it.
+            let bus_id = connection
+                .call_method(Some(BUS_NAME), BUS_PATH, Some(BUS_INTERFACE), "GetId", &())
+                .await
+                .and_then(|reply| reply.body().deserialize::<OwnedGuid>())
+                .ok()
+                .map(|id| id.to_string());
+            let rule =
+                signal_rule(owner.as_str()).map_err(|err| ConnectError::Failed(err.to_string()))?;
+            let signals = MessageStream::for_match_rule(rule, &connection, SIGNAL_QUEUE)
+                .await
+                .map_err(|err| ConnectError::Failed(err.to_string()))?;
 
-        self.session = Some(Session {
-            connection,
-            signals,
-        });
-        Ok(ServerInfo {
-            supports_actions: capabilities.iter().any(|c| c == "actions"),
-            supports_body: capabilities.iter().any(|c| c == "body"),
-            body_markup: capabilities.iter().any(|c| c == "body-markup"),
-            refresh_interval: super::notification::refresh_interval(name.as_deref()),
-            name,
-            identity: bus_id.map(|scope| (scope, owner.to_string())),
-        })
+            let info = ServerInfo {
+                supports_actions: capabilities.iter().any(|c| c == "actions"),
+                supports_body: capabilities.iter().any(|c| c == "body"),
+                body_markup: capabilities.iter().any(|c| c == "body-markup"),
+                refresh_interval: super::notification::refresh_interval(name.as_deref()),
+                name,
+                identity: bus_id.map(|scope| (scope, owner.to_string())),
+            };
+            Ok((
+                Session {
+                    connection,
+                    signals,
+                },
+                info,
+            ))
+        })?;
+
+        self.session = Some(session);
+        Ok(info)
     }
 
     fn notify(&mut self, notification: &Notification) -> Result<u32, String> {
         let session = self.session()?;
         let actions = [APPROVE_ACTION, "Approve", DENY_ACTION, "Deny"];
         let hints = HashMap::from([
-            ("urgency", Value::U8(URGENCY_CRITICAL)),
-            ("category", Value::from("device")),
+            ("urgency", Variant::U8(URGENCY_CRITICAL)),
+            ("category", Variant::from("device")),
         ]);
         let expire_timeout = i32::try_from(notification.timeout.as_millis()).unwrap_or(i32::MAX);
-        session
-            .connection
-            .call_method(
-                Some(NOTIFICATIONS_NAME),
-                NOTIFICATIONS_PATH,
-                Some(NOTIFICATIONS_INTERFACE),
-                "Notify",
-                &(
-                    APP_NAME,
-                    0u32,
-                    APP_ICON,
-                    notification.summary,
-                    notification.body.as_str(),
-                    &actions[..],
-                    hints,
-                    expire_timeout,
-                ),
-            )
-            .and_then(|reply| reply.body().deserialize::<u32>())
-            .map_err(|err| format!("Notify failed: {err}"))
+        zbus::block_on(session.connection.call_method(
+            Some(NOTIFICATIONS_NAME),
+            NOTIFICATIONS_PATH,
+            Some(NOTIFICATIONS_INTERFACE),
+            "Notify",
+            &(
+                APP_NAME,
+                0u32,
+                APP_ICON,
+                notification.summary,
+                notification.body.as_str(),
+                &actions[..],
+                hints,
+                expire_timeout,
+            ),
+        ))
+        .and_then(|reply| reply.body().deserialize::<u32>())
+        .map_err(|err| format!("Notify failed: {err}"))
     }
 
     fn next_event(&mut self, wait: Duration) -> Result<Option<NotificationEvent>, String> {
         let session = self.session()?;
         let deadline = Instant::now() + wait;
-        loop {
-            // Messages are read from the socket on zbus's own thread; this
-            // only takes what has arrived.
-            match future::block_on(future::poll_once(session.signals.next())) {
-                Some(Some(Ok(message))) => {
-                    if let Some(event) = parse_signal(&message) {
-                        return Ok(Some(event));
+        // zbus reads the socket on this thread while it waits here, and on
+        // zruntime's helper thread in between; signals queue up meanwhile.
+        zbus::block_on(async {
+            let runtime = SharedRuntime::current().map_err(|err| err.to_string())?;
+            loop {
+                let signal = poll_fn(|cx| Pin::new(&mut session.signals).poll_next(cx));
+                match runtime.timeout_at(deadline, signal).await {
+                    Ok(Some(Ok(message))) => {
+                        if let Some(event) = parse_signal(&message) {
+                            return Ok(Some(event));
+                        }
                     }
-                }
-                Some(Some(Err(err))) => return Err(err.to_string()),
-                Some(None) => return Err("the session bus connection closed".to_owned()),
-                None => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Ok(None);
-                    }
-                    thread::sleep(EVENT_POLL.min(deadline - now));
+                    Ok(Some(Err(err))) => return Err(err.to_string()),
+                    Ok(None) => return Err("the session bus connection closed".to_owned()),
+                    Err(_) => return Ok(None),
                 }
             }
-        }
+        })
     }
 
     fn close(&mut self, id: u32) -> Result<(), String> {
-        self.session()?
-            .connection
-            .call_method(
-                Some(NOTIFICATIONS_NAME),
-                NOTIFICATIONS_PATH,
-                Some(NOTIFICATIONS_INTERFACE),
-                "CloseNotification",
-                &(id,),
-            )
-            .map(drop)
-            .map_err(|err| format!("CloseNotification failed: {err}"))
+        zbus::block_on(self.session()?.connection.call_method(
+            Some(NOTIFICATIONS_NAME),
+            NOTIFICATIONS_PATH,
+            Some(NOTIFICATIONS_INTERFACE),
+            "CloseNotification",
+            &(id,),
+        ))
+        .map(drop)
+        .map_err(|err| format!("CloseNotification failed: {err}"))
     }
 
     fn nudge(&mut self) -> Result<u32, String> {
         let session = self.session()?;
         let hints = HashMap::from([
-            ("urgency", Value::U8(URGENCY_NORMAL)),
-            ("transient", Value::Bool(true)),
-            ("suppress-sound", Value::Bool(true)),
+            ("urgency", Variant::U8(URGENCY_NORMAL)),
+            ("transient", Variant::Bool(true)),
+            ("suppress-sound", Variant::Bool(true)),
         ]);
-        let id = session
-            .connection
-            .call_method(
-                Some(NOTIFICATIONS_NAME),
-                NOTIFICATIONS_PATH,
-                Some(NOTIFICATIONS_INTERFACE),
-                "Notify",
-                &(
-                    APP_NAME,
-                    0u32,
-                    "",
-                    APP_NAME,
-                    "",
-                    &[] as &[&str],
-                    hints,
-                    1_000i32,
-                ),
-            )
-            .and_then(|reply| reply.body().deserialize::<u32>())
-            .map_err(|err| format!("Notify failed: {err}"))?;
+        let id = zbus::block_on(session.connection.call_method(
+            Some(NOTIFICATIONS_NAME),
+            NOTIFICATIONS_PATH,
+            Some(NOTIFICATIONS_INTERFACE),
+            "Notify",
+            &(
+                APP_NAME,
+                0u32,
+                "",
+                APP_NAME,
+                "",
+                &[] as &[&str],
+                hints,
+                1_000i32,
+            ),
+        ))
+        .and_then(|reply| reply.body().deserialize::<u32>())
+        .map_err(|err| format!("Notify failed: {err}"))?;
         self.close(id)?;
         Ok(id)
     }
@@ -260,7 +277,7 @@ impl NotificationServer for SessionBus {
         }) = self.session.take()
         {
             drop(signals);
-            if let Err(err) = connection.close() {
+            if let Err(err) = zbus::block_on(connection.close()) {
                 log::debug!("closing the session bus connection: {err}");
             }
         }
@@ -274,31 +291,28 @@ impl Drop for SessionBus {
 }
 
 /// Connect to the bus `builder` names within `timeout`, with every method
-/// call on the connection limited to `timeout` as well.
+/// call on the connection limited to `timeout` as well. Runs inside
+/// `zbus::block_on`, on the calling thread's runtime.
 ///
 /// zbus limits method calls with the builder's `method_timeout`, but not
 /// connecting: authentication and `Hello` wait as long as the bus takes, so a
 /// bus that accepts the connection and never answers would hold the presence
 /// request, and the daemon's shutdown, forever.
-fn connect_bus(
+async fn connect_bus(
     builder: connection::Builder<'_>,
     timeout: Duration,
 ) -> Result<Connection, ConnectError> {
-    let connect = async {
-        builder
-            .method_timeout(timeout)
-            .build()
-            .await
-            .map_err(|err| ConnectError::NoSession(err.to_string()))
-    };
-    let expire = async {
-        async_io::Timer::after(timeout).await;
-        Err(ConnectError::Failed(format!(
+    let runtime = SharedRuntime::current().map_err(|err| ConnectError::Failed(err.to_string()))?;
+    match runtime
+        .timeout(timeout, builder.method_timeout(timeout).build())
+        .await
+    {
+        Ok(connection) => connection.map_err(|err| ConnectError::NoSession(err.to_string())),
+        Err(_) => Err(ConnectError::Failed(format!(
             "the session bus did not answer within {} ms",
             timeout.as_millis()
-        )))
-    };
-    async_io::block_on(future::or(connect, expire)).map(Connection::from)
+        ))),
+    }
 }
 
 /// The notification server's signals, from `owner` only.
@@ -306,12 +320,12 @@ fn connect_bus(
 /// `owner` must be the unique name that owns org.freedesktop.Notifications:
 /// a rule naming the well-known name matches a signal from any sender.
 fn signal_rule(owner: &str) -> zbus::Result<MatchRule<'_>> {
-    Ok(MatchRule::builder()
+    MatchRule::builder()
         .msg_type(Type::Signal)
-        .sender(owner)?
-        .path(NOTIFICATIONS_PATH)?
-        .interface(NOTIFICATIONS_INTERFACE)?
-        .build())
+        .sender(owner)
+        .path(NOTIFICATIONS_PATH)
+        .interface(NOTIFICATIONS_INTERFACE)
+        .build()
 }
 
 /// The event an ActionInvoked or NotificationClosed signal reports.
@@ -337,8 +351,7 @@ fn parse_signal(message: &Message) -> Option<NotificationEvent> {
 /// Identify this daemon without subscribing to or accepting presence actions.
 /// Connection, Notify and closing share one absolute delivery deadline.
 pub(crate) fn identify(device: &str, deadline: Instant) -> std::io::Result<()> {
-    let builder = connection::Builder::session().map_err(std::io::Error::other)?;
-    identify_on_bus(builder, device, deadline)
+    identify_on_bus(connection::Builder::session(), device, deadline)
 }
 
 fn identify_on_bus(
@@ -353,9 +366,9 @@ fn identify_on_bus(
         let remaining = deadline.saturating_duration_since(Instant::now());
         let connection = builder.method_timeout(remaining).build().await?;
         let hints = HashMap::from([
-            ("urgency", Value::U8(URGENCY_NORMAL)),
-            ("transient", Value::Bool(true)),
-            ("category", Value::from("device")),
+            ("urgency", Variant::U8(URGENCY_NORMAL)),
+            ("transient", Variant::Bool(true)),
+            ("category", Variant::from("device")),
         ]);
         let body = format!("pqkey software security key (device {device}).");
         let reply = connection
@@ -380,13 +393,15 @@ fn identify_on_bus(
         connection.close().await?;
         Ok::<(), zbus::Error>(())
     };
-    let expire = async {
-        async_io::Timer::at(deadline).await;
-        Err(zbus::Error::Failure(
-            "identification delivery timed out".into(),
-        ))
-    };
-    async_io::block_on(future::or(notification, expire)).map_err(std::io::Error::other)
+    zbus::block_on(async {
+        match SharedRuntime::current()?
+            .timeout_at(deadline, notification)
+            .await
+        {
+            Ok(delivered) => delivered.map_err(std::io::Error::other),
+            Err(_) => Err(std::io::Error::other("identification delivery timed out")),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -405,7 +420,7 @@ mod tests {
         let started = Instant::now();
         let budget = Duration::from_millis(50);
         let result = identify_on_bus(
-            connection::Builder::address(address.as_str()).unwrap(),
+            connection::Builder::address(address.as_str()),
             "pqkey-123",
             started + budget,
         );
@@ -422,7 +437,6 @@ mod tests {
                 NOTIFICATIONS_INTERFACE,
                 "NotificationClosed",
             )
-            .unwrap()
             .build(&(7u32, reason))
             .unwrap();
             assert_eq!(
@@ -440,9 +454,7 @@ mod tests {
         let rule = signal_rule(":1.7").unwrap();
         let action = |sender: &str| {
             Message::signal(NOTIFICATIONS_PATH, NOTIFICATIONS_INTERFACE, "ActionInvoked")
-                .unwrap()
                 .sender(sender)
-                .unwrap()
                 .build(&(7u32, APPROVE_ACTION))
                 .unwrap()
         };
@@ -458,11 +470,11 @@ mod tests {
         // from them or answers.
         let _listener = UnixListener::bind(&path).unwrap();
         let address = format!("unix:path={}", path.display());
-        let builder = connection::Builder::address(address.as_str()).unwrap();
+        let builder = connection::Builder::address(address.as_str());
 
         let timeout = Duration::from_millis(200);
         let started = Instant::now();
-        match connect_bus(builder, timeout) {
+        match zbus::block_on(connect_bus(builder, timeout)) {
             Err(ConnectError::Failed(err)) => assert!(err.contains("did not answer"), "{err}"),
             Err(err) => panic!("unexpected error: {err:?}"),
             Ok(_) => panic!("connected to a bus that never answers"),
