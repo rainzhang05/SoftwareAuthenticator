@@ -231,11 +231,11 @@ suite requires `/dev/uhid`.
     forces one replacement and invalidates tokens. Authorized RP IDs can
     read the current boolean through the creation extension; see
     [the PIN policy](pin-complexity-policy.md).
-- Up to 1,000 stored credentials. Credential management lists and counts
-  discoverable credentials only. Non-discoverable credentials are sealed
-  into their own ID when their key fits and payment metadata is disabled; RSA
-  and payment-enabled non-discoverable credentials are stored and
-  consume a slot too.
+- Up to 1,000 stored credentials. Credential management lists, counts,
+  updates and deletes discoverable credentials only. Non-discoverable
+  credentials are sealed into their own ID when their key fits and payment
+  metadata is disabled; RSA and payment-enabled non-discoverable credentials
+  are stored and consume a slot too.
 - Credential management uses standard `0x0A` (§6.8) and backwards-compatible
   `0x41` (§6.13). getInfo retains `credMgmt: true` and adds
   `credentialMgmtPreview: true` and `FIDO_2_1_PRE`. Both families share

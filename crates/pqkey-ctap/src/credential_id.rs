@@ -58,7 +58,9 @@ pub(crate) fn is_sealed(credential_id: &[u8]) -> bool {
 ///   bytes. They keep their own signature counters and random CredRandom values. Newly
 ///   created non-discoverable records keep no user ID or names. They take room
 ///   in the store and a reset erases them, but credential management does not
-///   list them or include them in its discoverable credential count.
+///   list them, include them in its discoverable credential count, or delete
+///   or update them: deleteCredential and updateUserInformation treat their
+///   IDs as absent.
 /// * Any other stored ID, such as the 32 random bytes of credentials created
 ///   before non-discoverable credentials existed, all of which were
 ///   discoverable, is discoverable.

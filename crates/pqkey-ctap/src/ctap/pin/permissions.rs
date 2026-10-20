@@ -62,7 +62,9 @@ impl CtapApp<'_> {
     ///   permission and no associated permissions RP ID" (§6.8.2, §6.8.3).
     /// * deleteCredential and updateUserInformation: only for a credential of
     ///   that RP, "the pinUvAuthToken permissions RP ID matches the RP ID of
-    ///   the credential" (§6.8.5, §6.8.6).
+    ///   the credential" (§6.8.5, §6.8.6).  The credential is looked up as
+    ///   those subcommands do, so a non-discoverable ID is absent,
+    ///   CTAP2_ERR_NO_CREDENTIALS, whatever its RP.
     /// * enumerateCredentialsBegin: only for that RP.  This follows CTAP 2.1,
     ///   not the step text of CTAP 2.3, which contradicts the rest of 2.3:
     ///   - CTAP 2.3 §6.8.4 step 3: "The authenticator verifies that the
@@ -119,7 +121,7 @@ impl CtapApp<'_> {
                 let Some(id) = request::public_key_credential_id(descriptor)? else {
                     return Err(CTAP2_ERR_NO_CREDENTIALS);
                 };
-                let Some(credential) = self.stored_credential(id)? else {
+                let Some(credential) = self.managed_credential(id)? else {
                     return Err(CTAP2_ERR_NO_CREDENTIALS);
                 };
                 if credential.rp_id == binding {

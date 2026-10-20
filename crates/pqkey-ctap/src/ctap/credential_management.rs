@@ -172,6 +172,22 @@ impl CtapApp<'_> {
         Ok(credentials)
     }
 
+    /// The credential with `credential_id` if it is one this command manages:
+    /// a discoverable one (CTAP 2.3 §6.8).  A non-discoverable stored record
+    /// (RSA, Brainpool, payment-enabled or older) is never enumerated and
+    /// keeps no user information, so deleteCredential and
+    /// updateUserInformation treat its ID as absent, CTAP2_ERR_NO_CREDENTIALS
+    /// (§6.8.5, §6.8.6), without reading the store.
+    pub(super) fn managed_credential(
+        &self,
+        credential_id: &[u8],
+    ) -> Result<Option<CredentialRecord>, u8> {
+        if !is_discoverable(credential_id) {
+            return Ok(None);
+        }
+        self.stored_credential(credential_id)
+    }
+
     /// existingResidentCredentialsCount counts discoverable credentials.
     /// maxPossibleRemainingResidentCredentialsCount is the free space of the
     /// store, which stored non-discoverable credentials (RSA, payment-enabled
@@ -373,8 +389,13 @@ impl CtapApp<'_> {
         }
     }
 
+    /// deleteCredential (CTAP 2.3 §6.8.5), for a discoverable credential
+    /// only: a non-discoverable ID is absent, as for
+    /// [`Self::managed_credential`].
     fn cm_delete_credential(&mut self, params: &[(Value, Value)]) -> Result<(), u8> {
-        let Some(id) = request::public_key_credential_id(required_map(params, 2)?)? else {
+        let Some(id) = request::public_key_credential_id(required_map(params, 2)?)?
+            .filter(|id| is_discoverable(id))
+        else {
             return Err(CTAP2_ERR_NO_CREDENTIALS);
         };
         // Per-record errors can follow publication; an attempted mutation
@@ -393,6 +414,9 @@ impl CtapApp<'_> {
         Ok(())
     }
 
+    /// updateUserInformation (CTAP 2.3 §6.8.6), for a discoverable credential
+    /// only: a non-discoverable ID is absent, as for
+    /// [`Self::managed_credential`], once the user entity has parsed.
     fn cm_update_user_information(&mut self, params: &[(Value, Value)]) -> Result<(), u8> {
         let Some(id) = request::public_key_credential_id(required_map(params, 2)?)? else {
             return Err(CTAP2_ERR_NO_CREDENTIALS);
@@ -400,7 +424,7 @@ impl CtapApp<'_> {
         let user_map = required_map(params, 3)?;
         let user_id = cbor::structure_bytes(user_map, "id")?;
 
-        let Some(mut credential) = self.stored_credential(id)? else {
+        let Some(mut credential) = self.managed_credential(id)? else {
             return Err(CTAP2_ERR_NO_CREDENTIALS);
         };
         if credential.user_id != user_id {
