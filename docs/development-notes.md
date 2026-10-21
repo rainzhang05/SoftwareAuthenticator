@@ -19,7 +19,7 @@ systems before creating logs, installing tools or changing system setup.
 
 | Script | What it does |
 |---|---|
-| `scripts/check.sh` | Runs every check CI runs: formatting, lints, tests, docs, the minimum Rust version, dependencies and coverage. `--quick` runs formatting, installer checks, lints and tests. |
+| `scripts/check.sh` | Runs every check CI runs: formatting, lints, tests, docs, the minimum Rust version, dependencies and coverage. `--quick` runs formatting, installer checks, lints and tests. On macOS its lints and tests are those of the portable crates above, and it skips the checks that need Linux. |
 | `scripts/install-tests.sh` | Runs the actual installer in disposable Docker filesystems with controlled prerequisites, PTYs and fault injection; requires Docker. |
 | `scripts/e2e.sh` | Runs the end-to-end tests against four test keys, through libfido2 and python-fido2. |
 | `scripts/fuzz.sh` | Runs each fuzz target for 30 seconds, or one target for as long as you ask. |
