@@ -17,6 +17,10 @@
 //!   contains explicit large-blob commits, abandoned writes, expiration and
 //!   stable credential keys under both PIN/UV auth protocols.
 //! * `credential_key`: valid and invalid key material for every algorithm.
+//! * `store_records`: `pqkey_ctap::store::fuzzing::seeds`, valid encodings of
+//!   every stored record and the credential-set manifest, legacy shapes among
+//!   them, and envelopes that fail only at authentication, each after its
+//!   object's index in `Object::ALL`.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -27,6 +31,7 @@ use ciborium::value::Value;
 use p256::elliptic_curve::sec1::ToSec1Point;
 use pqkey::transport::ctaphid_host::MAX_MESSAGE_SIZE;
 use pqkey_ctap::CoseAlg;
+use pqkey_ctap::store::fuzzing::{self, Object};
 use pqkey_fuzz::cbor::{bytes, int, text};
 use pqkey_fuzz::ctaphid::{Action, CONT_DATA, Channel, INIT_DATA, Mangle};
 use pqkey_fuzz::requests::command;
@@ -60,6 +65,7 @@ fn main() {
     );
     sequence_seeds(&root);
     credential_key(&root.join("credential_key"));
+    store_records(&root.join("store_records"));
 }
 
 fn sequence_seeds(root: &Path) {
@@ -1445,6 +1451,27 @@ fn credential_key(dir: &Path) {
             seeds.push(layout(alg, alg, &vec![0x42; length]));
         }
     }
+    write_all(dir, &seeds);
+}
+
+fn store_records(dir: &Path) {
+    let seeds = fuzzing::seeds();
+    for object in Object::ALL {
+        assert!(
+            seeds.iter().any(|(seed, _)| *seed == object),
+            "no {object:?} seed: the store's encoders failed"
+        );
+    }
+    let seeds: Vec<Vec<u8>> = seeds
+        .into_iter()
+        .map(|(object, bytes)| {
+            let index = Object::ALL
+                .iter()
+                .position(|o| *o == object)
+                .expect("every object is in Object::ALL");
+            [&[index as u8][..], &bytes].concat()
+        })
+        .collect();
     write_all(dir, &seeds);
 }
 
