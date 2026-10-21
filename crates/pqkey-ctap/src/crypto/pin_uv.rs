@@ -1,11 +1,12 @@
 //! The PIN/UV auth protocols' cryptography: the key derivation from the
-//! ECDH shared secret (CTAP 2.3 §6.5.6, §6.5.7), AES-256-CBC, and the PIN
-//! hash.
+//! ECDH shared secret (CTAP 2.3 §6.5.6, §6.5.7), AES-256-CBC, the HMAC of
+//! `authenticate`, and the PIN hash.
 
 use aes::Aes256;
 use cbc::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::NoPadding};
 use cbc::{Decryptor, Encryptor};
 use core::fmt;
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -199,6 +200,37 @@ pub fn decrypt_classic_pin_block(
                 .map_err(|_| CryptoError::InvalidPinBlock)
         }
     }
+}
+
+/// Length of a protocol one MAC: `authenticate` returns "the first 16 bytes of
+/// the result of computing HMAC-SHA-256" (CTAP 2.3 §6.5.6).
+const PROTOCOL_ONE_MAC_LEN: usize = 16;
+
+/// `authenticate(key, message)` for the given PIN/UV auth protocol.
+///
+/// * Protocol one (CTAP 2.3 §6.5.6): "Return the first 16 bytes of the result
+///   of computing HMAC-SHA-256 with the given key and message."
+/// * Protocol two (CTAP 2.3 §6.5.7): "Return the result of computing
+///   HMAC-SHA-256 on key and message", i.e. all 32 bytes.
+///
+/// `key` is used as given: protocol two's "discard the excess" step for a key
+/// longer than 32 bytes is the caller's.
+pub(crate) fn authenticate(
+    protocol: ClassicPinProtocol,
+    key: &[u8],
+    message: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    // HMAC takes a key of any length, so InvalidLength cannot happen; it is
+    // still reported, as InvalidKey, rather than unwrapped.
+    let mut mac =
+        <Hmac<Sha256> as KeyInit>::new_from_slice(key).map_err(|_| CryptoError::InvalidKey)?;
+    mac.update(message);
+    let tag = Zeroizing::new(mac.finalize().into_bytes());
+    let len = match protocol {
+        ClassicPinProtocol::V1 => PROTOCOL_ONE_MAC_LEN,
+        ClassicPinProtocol::V2 => tag.len(),
+    };
+    Ok(Zeroizing::new(tag[..len].to_vec()))
 }
 
 /// `LEFT(SHA-256(pin), 16)`.  An authenticator stores it as CurrentStoredPIN

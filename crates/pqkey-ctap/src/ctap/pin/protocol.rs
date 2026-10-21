@@ -1,6 +1,7 @@
 //! PIN/UV auth protocol plumbing: protocol selection, the key-agreement
 //! session, shared-secret encryption and pinUvAuthParam verification.
 
+use crate::crypto::pin_uv;
 use crate::ctap::CtapApp;
 use crate::ctap::cbor::canonical_map;
 use crate::{
@@ -9,7 +10,7 @@ use crate::{
 };
 
 use ciborium::value::{Integer, Value};
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::Hmac;
 use p256::{
     PublicKey as P256PublicKey, Sec1Point, SecretKey as P256SecretKey, ecdh::diffie_hellman,
     elliptic_curve::sec1::ToSec1Point,
@@ -48,16 +49,8 @@ const PIN_UV_PROTOCOLS_SUPPORTED: [i32; 2] = [
 
 pub(crate) type PinProtocol = ClassicPinProtocol;
 
-/// Length of a protocol one MAC: `authenticate` returns "the first 16 bytes of
-/// the result of computing HMAC-SHA-256" (CTAP 2.3 §6.5.6).
-const PROTOCOL_ONE_MAC_LEN: usize = 16;
-
-/// `authenticate(key, message)` for the given PIN/UV auth protocol.
-///
-/// * Protocol one (CTAP 2.3 §6.5.6): "Return the first 16 bytes of the result
-///   of computing HMAC-SHA-256 with the given key and message."
-/// * Protocol two (CTAP 2.3 §6.5.7): "Return the result of computing
-///   HMAC-SHA-256 on key and message", i.e. all 32 bytes.
+/// `authenticate(key, message)` for the given PIN/UV auth protocol (CTAP 2.3
+/// §6.5.6, §6.5.7), as [`pin_uv::authenticate`] computes it.
 ///
 /// `key` is either the HMAC half of a shared secret or a pinUvAuthToken; both
 /// are exactly 32 bytes, so protocol two's "discard the excess" step is a no-op.
@@ -66,14 +59,7 @@ pub(crate) fn authenticate(
     key: &[u8; 32],
     message: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, u8> {
-    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| CTAP2_ERR_PROCESSING)?;
-    mac.update(message);
-    let tag = Zeroizing::new(mac.finalize().into_bytes());
-    let len = match protocol {
-        ClassicPinProtocol::V1 => PROTOCOL_ONE_MAC_LEN,
-        ClassicPinProtocol::V2 => tag.len(),
-    };
-    Ok(Zeroizing::new(tag[..len].to_vec()))
+    pin_uv::authenticate(protocol, key, message).map_err(|_| CTAP2_ERR_PROCESSING)
 }
 
 /// `verify(key, message, signature)` for the given PIN/UV auth protocol.

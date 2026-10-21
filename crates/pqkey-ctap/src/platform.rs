@@ -28,14 +28,13 @@
 //! # Ok::<(), pqkey_ctap::CryptoError>(())
 //! ```
 
-use hmac::{Hmac, KeyInit, Mac};
 use p256::{
     PublicKey as P256PublicKey, SecretKey as P256SecretKey, ecdh::diffie_hellman,
     elliptic_curve::sec1::ToSec1Point,
 };
-use sha2::Sha256;
 use zeroize::Zeroizing;
 
+use crate::crypto::pin_uv;
 use crate::crypto::scrub::with_scrubbed_stack;
 use crate::{
     ClassicPinProtocol, CryptoError, PinUvSessionKeys, decrypt_classic_pin_block,
@@ -142,13 +141,9 @@ impl PlatformKeyAgreement {
 /// 16 bytes for protocol one (§6.5.6) and whole for protocol two (§6.5.7).
 /// With a pinUvAuthToken as the key this is a request's pinUvAuthParam.
 pub fn authenticate(protocol: ClassicPinProtocol, key: &[u8], message: &[u8]) -> Vec<u8> {
-    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC takes any key");
-    mac.update(message);
-    let tag = mac.finalize().into_bytes();
-    match protocol {
-        ClassicPinProtocol::V1 => tag[..16].to_vec(),
-        ClassicPinProtocol::V2 => tag.to_vec(),
-    }
+    pin_uv::authenticate(protocol, key, message)
+        .expect("HMAC takes any key")
+        .to_vec()
 }
 
 /// `newPin` padded on the right with zeros to 64 bytes, the plaintext of
