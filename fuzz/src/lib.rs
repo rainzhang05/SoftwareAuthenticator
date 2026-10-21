@@ -2,7 +2,8 @@
 //! every CTAP response must pass, a structure-aware CTAP request generator,
 //! the platform side of the PIN/UV auth protocols, and the bodies of the
 //! targets, so the seed corpus generator (`examples/seeds.rs`) can drive
-//! them too.
+//! them too. `store_records` drives the credential store's record decoders
+//! rather than the engine.
 
 pub mod cbor;
 pub mod ctaphid;
@@ -11,6 +12,7 @@ pub mod platform;
 pub mod requests;
 pub mod rng;
 pub mod sequence;
+pub mod store_records;
 pub mod structured;
 
 mod key_agreement;

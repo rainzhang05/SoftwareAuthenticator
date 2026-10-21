@@ -4,7 +4,7 @@ version = "0.0.0"
 publish = false
 edition = "2024"
 license = "MIT"
-description = "libFuzzer targets for the CTAPHID framing and the CTAP2 engine"
+description = "libFuzzer targets for the CTAPHID framing, the CTAP2 engine and the credential store's records"
 
 [package.metadata]
 cargo-fuzz = true
@@ -60,6 +60,13 @@ bench = false
 [[bin]]
 name = "credential_key"
 path = "fuzz_targets/credential_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "store_records"
+path = "fuzz_targets/store_records.rs"
 test = false
 doc = false
 bench = false
