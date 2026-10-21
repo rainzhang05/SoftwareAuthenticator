@@ -370,9 +370,9 @@ macro_rules! dispatch {
 fn with_scrubbed_stack<T>(ps: ParamSet, operation: impl FnOnce() -> T) -> T {
     let result = run_below(operation);
     match ps {
-        ParamSet::MLDSA44 => scrub_stack::<{ 512 * 1024 / 8 }>(),
-        ParamSet::MLDSA65 => scrub_stack::<{ 768 * 1024 / 8 }>(),
-        ParamSet::MLDSA87 => scrub_stack::<{ 1024 * 1024 / 8 }>(),
+        ParamSet::MLDSA44 => scrub_stack::<{ 640 * 1024 / 8 }>(),
+        ParamSet::MLDSA65 => scrub_stack::<{ 960 * 1024 / 8 }>(),
+        ParamSet::MLDSA87 => scrub_stack::<{ 1600 * 1024 / 8 }>(),
     }
     result
 }
@@ -386,16 +386,41 @@ fn run_below<T>(operation: impl FnOnce() -> T) -> T {
 
 /// Overwrite the `WORDS` × 8 bytes of stack below the caller with zeros.
 ///
-/// The sizes [`with_scrubbed_stack`] uses cover the deepest residue
-/// probes found, with room to spare. With `ml-dsa` 0.1.1 on aarch64, Rust
-/// 1.89 debug left ML-DSA-65's rho-prime and K at depths 580,544–580,688
-/// bytes below this helper's caller, beyond the old 512 KiB bound. The
-/// 768 KiB bound includes those retired frames with about 200 KiB of margin.
-/// ML-DSA-44's seed locals were about 413 KiB down; earlier ML-DSA-87 probes
-/// reached about 790 KiB, covered by 1 MiB. Frame layouts and incidental
-/// overwrites change with compiler, CPU backend and profile, so CI runs the
-/// probes on stable and Rust 1.89 in debug and release on both Linux arches.
-/// `zeroize` writes with volatile stores the compiler may not remove.
+/// The sizes [`with_scrubbed_stack`] uses are at least 30% more than the
+/// deepest any operation with that parameter set reached without a scrub,
+/// rounded up to 64 KiB.  `tests/residue.rs` measures that depth: it fills
+/// the stack below its caller with a canary, runs each operation's `ml-dsa`
+/// calls with nothing scrubbing after them, and finds the deepest byte that
+/// changed.  It fails once a bound is less than 25% more, which leaves room
+/// for the 5% single operations moved between Rust 1.89 and 1.99.  With
+/// `ml-dsa` 0.1.1, the deepest of the operations it runs, in KiB below the
+/// caller:
+///
+/// | Target | Rust | Profile | ML-DSA-44 | ML-DSA-65 | ML-DSA-87 |
+/// |---|---|---|--:|--:|--:|
+/// | `aarch64-apple-darwin` | 1.98.1 | debug | 453.6 | 723.8 | 1,188.2 |
+/// | `aarch64-apple-darwin` | 1.98.1 | release | 320.2 | 422.6 | 782.6 |
+/// | `aarch64-apple-darwin` | 1.99.1 | debug | 453.4 | 723.6 | 1,188.1 |
+/// | `aarch64-apple-darwin` | 1.99.1 | release | 320.2 | 440.6 | 781.6 |
+/// | `aarch64-unknown-linux-gnu` | 1.89.0 | debug | 441.9 | 714.4 | 1,194.5 |
+/// | `aarch64-unknown-linux-gnu` | 1.89.0 | release | 322.7 | 425.9 | 785.9 |
+/// | `aarch64-unknown-linux-gnu` | 1.99.1 | debug | 453.4 | 723.6 | 1,188.1 |
+/// | `aarch64-unknown-linux-gnu` | 1.99.1 | release | 320.2 | 443.5 | 784.5 |
+/// | `x86_64-unknown-linux-gnu` | 1.89.0 | debug | 441.1 | 714.2 | 1,194.3 |
+/// | `x86_64-unknown-linux-gnu` | 1.89.0 | release | 319.4 | 422.5 | 660.1 |
+/// | `x86_64-unknown-linux-gnu` | 1.99.1 | debug | 451.4 | 721.6 | 1,187.9 |
+/// | `x86_64-unknown-linux-gnu` | 1.99.1 | release | 320.2 | 440.5 | 668.1 |
+/// | Bound | | | 640 | 960 | 1,600 |
+///
+/// The x86_64 builds were cross-compiled and run under QEMU.  In debug builds
+/// the deepest operations are the expanded-key ones and the seed key pair,
+/// both `hazmat`; signing from a seed stays within 60 KiB of them.  Building
+/// without incremental state, with one codegen unit, or `-p pqkey-mldsa`
+/// alone or the whole workspace instead of `-p pqkey-ctap -p pqkey-mldsa`
+/// left the debug figures unchanged.  The former 1 MiB bound for ML-DSA-87
+/// fell about 170 KiB short in every debug build.  CI repeats the measurement
+/// on Linux, with stable and Rust 1.89, in debug and release, and on macOS in
+/// debug.  `zeroize` writes with volatile stores the compiler may not remove.
 #[inline(never)]
 fn scrub_stack<const WORDS: usize>() {
     let mut words = [0u64; WORDS];

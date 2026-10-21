@@ -879,7 +879,7 @@ mod tests {
     }
 
     /// ML-DSA-87 goes deepest into the stack of the worker the app runs on
-    /// (`CTAP_WORKER_STACK` in the transport): each operation zeroes 1 MiB
+    /// (`CTAP_WORKER_STACK` in the transport): each operation zeroes 1,600 KiB
     /// below the engine's frames, and its frames are largest in a debug build,
     /// the one `cargo test` makes. Registration expands a key, derives its
     /// public key and signs its own attestation; an assertion opens the key

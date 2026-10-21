@@ -35,18 +35,17 @@ debug and release, as they do the stack residue tests.
 The final cleanup scan also checks blocks released by the last controls.
 
 ML-DSA drops its owned expanded keys inside a separate operation frame, then
-scrubs the retired stack before returning either success or an error. The
-bounds are 512 KiB for ML-DSA-44, 768 KiB for ML-DSA-65 and 1 MiB for
-ML-DSA-87. Rust 1.89.0 debug on Linux/aarch64 left copies of ML-DSA-65's
-rho-prime and K about 567 KiB below the cleanup frame, outside the former
-512 KiB wipe. Seed expansion creates plain locals, moves SHAKE state and
-clones an expanded key; wiping the final owned values does not erase all
-retired copies. Stable's different temporary layout happened to leave no
-detected residue. Parameter dispatch now precedes the secret-handling closure,
-so each retired frame holds only one parameter set's key and decode result;
-the previous combined frame also escaped cleanup on expanded-key success and
-malformed-key errors. The larger bound covers the originally measured locations
-with about 200 KiB of margin, without additional secret-bearing allocations.
+scrubs the retired stack before returning either success or an error. Seed
+expansion creates plain locals, moves SHAKE state and clones an expanded key;
+wiping the final owned values does not erase all retired copies. Parameter
+dispatch precedes the secret-handling closure, so each retired frame holds
+only one parameter set's key and decode result. The bounds are 640 KiB for
+ML-DSA-44, 960 KiB for ML-DSA-65 and 1,600 KiB for ML-DSA-87: at least 30%
+more than the deepest the operations of each parameter set reach without the
+scrub, which debug builds do, at up to 454, 724 and 1,195 KiB. The table of
+measured depths is in the documentation of `scrub_stack` in `pqkey-mldsa`.
+The former 1 MiB bound left the deepest 170 KiB of ML-DSA-87's debug frames
+unscrubbed, below the copies of rho-prime and K the probes look for.
 
 The stack probes retain their 2 MiB scans and controls, and check both
 32-byte halves of the 64-byte rho-prime and K after individual seed,

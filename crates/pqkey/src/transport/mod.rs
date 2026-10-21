@@ -49,14 +49,14 @@ const IDLE_WAIT: Duration = Duration::from_millis(10);
 /// [`exec_with_identifier`]).
 ///
 /// After each ML-DSA operation `pqkey-mldsa` overwrites the stack below its
-/// caller with a zeroed array of 512 KiB (ML-DSA-44), 768 KiB (ML-DSA-65) or
-/// 1 MiB (ML-DSA-87), more than the about 790 KiB ML-DSA-87's debug frames
-/// reach. That lies below the engine's own frames and the 64 KiB it scrubs
-/// around every request. Rust's default of 2 MiB leaves little room for it,
-/// `RUST_MIN_STACK` in the daemon's environment can lower that default, and
-/// another compiler, profile or algorithm can deepen the frames. An overflow
-/// aborts the whole daemon, so the size is set here, where the environment
-/// cannot override it.
+/// caller with a zeroed array of 640 KiB (ML-DSA-44), 960 KiB (ML-DSA-65) or
+/// 1,600 KiB (ML-DSA-87), at least 30% more than the up to 1,195 KiB that
+/// ML-DSA-87's debug frames reach. That lies below the engine's own frames
+/// and the 64 KiB it scrubs around every request. Rust's default of 2 MiB
+/// leaves little room for it, `RUST_MIN_STACK` in the daemon's environment
+/// can lower that default, and another compiler, profile or algorithm can
+/// deepen the frames. An overflow aborts the whole daemon, so the size is set
+/// here, where the environment cannot override it.
 const CTAP_WORKER_STACK: usize = 8 * 1024 * 1024;
 
 /// Whether the CTAP app is waiting for the user. The app sets it through its
