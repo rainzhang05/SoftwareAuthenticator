@@ -554,9 +554,10 @@ with `cargo run --locked --release --manifest-path fuzz/Cargo.toml --example see
 twice and compare filenames/content hashes. The explicit sequence fixtures carry
 an algorithm index and check their own round trips against locked `arbitrary`.
 Keep source snapshots, exact commands/statuses, compiler and architecture
-identity, full probe logs, corpus manifests and five explicit 30-second
-sanitizer results outside the repository. Linux snapshots come from `git archive`
-extracted with `tar -xm`, with separate compiler/architecture/sanitizer caches.
+identity, full probe logs, corpus manifests and an explicit 30-second sanitizer
+result for every fuzz target outside the repository. Linux snapshots come from
+`git archive` extracted with `tar -xm`, with separate
+compiler/architecture/sanitizer caches.
 
 ## Persistent credential management validation
 
