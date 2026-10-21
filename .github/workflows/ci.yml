@@ -2,7 +2,8 @@ name: CI
 
 # The pqkey daemon requires Linux and creates the virtual key through
 # /dev/uhid. This workflow is the authoritative Linux gate for the project,
-# including x86_64 and arm64 tests. pqkey-ctap and pqkey-mldsa are portable.
+# including x86_64 and arm64 tests. pqkey-ctap and pqkey-mldsa are portable,
+# and are also linted and tested on macOS.
 
 on:
   push:
@@ -180,8 +181,9 @@ jobs:
         run: cargo test --workspace --locked --doc
 
       # The stack residue tests look for secrets that signing leaves in the
-      # stack. Optimised builds lay out frames differently and are what the
-      # daemon runs, so they also run in release.
+      # stack, and the ML-DSA one checks how deep each operation reaches
+      # against its scrub. Optimised builds lay out frames differently and are
+      # what the daemon runs, so they also run in release.
       - name: Stack residue (release)
         run: cargo test --locked --release -p pqkey-mldsa -p pqkey-ctap --test residue
 
@@ -217,6 +219,30 @@ jobs:
             cargo report future-incompatibilities 2>&1 || echo 'No report was generated for this build.'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The portable crates on macOS, with the commands docs/development-notes.md
+  # gives for it, so that what it promises holds. Apple's toolchain lays out
+  # frames differently, and the ML-DSA residue test measures how deep each
+  # operation reaches against its scrub there too. CARGO_INCREMENTAL=0 above
+  # applies here as everywhere, unlike a local build; the scrub bounds were
+  # measured both ways.
+  test-macos:
+    name: test (macOS, portable crates)
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo clippy -p pqkey-ctap -p pqkey-mldsa --all-targets --locked -- -D warnings
+      - run: cargo test --locked -p pqkey-ctap -p pqkey-mldsa --all-targets
+      # `--all-targets` silently excludes doctests, so run them explicitly.
+      - run: cargo test --locked -p pqkey-ctap -p pqkey-mldsa --doc
 
   # The root Cargo.toml declares the minimum supported Rust version under
   # [workspace.package]. This job is what makes that declaration true: it reads

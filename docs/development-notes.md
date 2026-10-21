@@ -3,9 +3,11 @@
 pqkey builds with Rust stable, 1.89 or later; `rust-toolchain.toml` picks the
 toolchain. The daemon and CLI require Linux, with a compile-time diagnostic
 on other systems. `pqkey-ctap` and `pqkey-mldsa` are portable and can be
-tested independently, including on macOS:
+linted and tested on their own, including on macOS, as CI's "test (macOS,
+portable crates)" job does:
 
 ```bash
+cargo clippy -p pqkey-ctap -p pqkey-mldsa --all-targets --locked -- -D warnings
 cargo test --locked -p pqkey-ctap -p pqkey-mldsa --all-targets
 cargo test --locked -p pqkey-ctap -p pqkey-mldsa --doc
 ```
