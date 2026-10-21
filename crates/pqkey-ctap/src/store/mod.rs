@@ -92,6 +92,8 @@ mod codec;
 mod envelope;
 mod file;
 mod fsio;
+#[cfg(feature = "test-support")]
+pub mod fuzzing;
 mod keys;
 mod large_blobs;
 mod manifest;

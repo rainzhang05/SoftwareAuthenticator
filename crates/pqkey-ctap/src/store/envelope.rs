@@ -94,7 +94,7 @@ pub(crate) fn seal(
     seal_with_nonce(key, record_type, name, &nonce, plaintext)
 }
 
-fn seal_with_nonce(
+pub(super) fn seal_with_nonce(
     key: &SubKey,
     record_type: RecordType,
     name: &str,
