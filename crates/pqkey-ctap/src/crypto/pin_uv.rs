@@ -1,5 +1,6 @@
 //! The PIN/UV auth protocols' cryptography: the key derivation from the
-//! ECDH shared secret (CTAP 2.3 §6.5.6, §6.5.7) and AES-256-CBC.
+//! ECDH shared secret (CTAP 2.3 §6.5.6, §6.5.7), AES-256-CBC, and the PIN
+//! hash.
 
 use aes::Aes256;
 use cbc::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::NoPadding};
@@ -198,6 +199,18 @@ pub fn decrypt_classic_pin_block(
                 .map_err(|_| CryptoError::InvalidPinBlock)
         }
     }
+}
+
+/// `LEFT(SHA-256(pin), 16)`.  An authenticator stores it as CurrentStoredPIN
+/// when setPIN or changePIN sets the PIN (CTAP 2.3 §6.5.5.5, §6.5.5.6), and
+/// it is what getPinToken and changePIN send encrypted, as pinHashEnc, to
+/// prove the current PIN (§6.5.5.6, §6.5.5.7.1, and §6.5.5.7.2 for
+/// getPinUvAuthTokenUsingPinWithPermissions).
+pub fn pin_hash(pin: &[u8]) -> Zeroizing<[u8; 16]> {
+    let digest = Zeroizing::new(Sha256::digest(pin));
+    let mut hash = Zeroizing::new([0u8; 16]);
+    hash.copy_from_slice(&digest[..16]);
+    hash
 }
 
 #[cfg(test)]

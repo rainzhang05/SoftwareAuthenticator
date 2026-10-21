@@ -33,7 +33,7 @@ use p256::{
     PublicKey as P256PublicKey, SecretKey as P256SecretKey, ecdh::diffie_hellman,
     elliptic_curve::sec1::ToSec1Point,
 };
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use crate::crypto::scrub::with_scrubbed_stack;
@@ -41,6 +41,8 @@ use crate::{
     ClassicPinProtocol, CryptoError, PinUvSessionKeys, decrypt_classic_pin_block,
     derive_classic_pin_uv_session_keys, encrypt_classic_pin_block,
 };
+
+pub use crate::crypto::pin_uv::pin_hash;
 
 /// The secret of a platform key agreement key: a P-256 scalar, zeroized on
 /// drop.
@@ -147,14 +149,6 @@ pub fn authenticate(protocol: ClassicPinProtocol, key: &[u8], message: &[u8]) ->
         ClassicPinProtocol::V1 => tag[..16].to_vec(),
         ClassicPinProtocol::V2 => tag.to_vec(),
     }
-}
-
-/// `LEFT(SHA-256(pin), 16)`, what getPinToken and changePIN send encrypted.
-pub fn pin_hash(pin: &[u8]) -> Zeroizing<[u8; 16]> {
-    let digest = Zeroizing::new(Sha256::digest(pin));
-    let mut hash = Zeroizing::new([0u8; 16]);
-    hash.copy_from_slice(&digest[..16]);
-    hash
 }
 
 /// `newPin` padded on the right with zeros to 64 bytes, the plaintext of

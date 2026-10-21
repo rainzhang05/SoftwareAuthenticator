@@ -7,6 +7,7 @@ use super::protocol::{PinProtocol, decrypt, parse_required_pin_uv_auth_protocol,
 use super::state::MAX_PIN_RETRIES;
 use super::token::{TokenGrant, TokenOrigin};
 use crate::PinUvSessionKeys;
+use crate::crypto::pin_uv::pin_hash;
 use crate::ctap::CtapApp;
 use crate::ctap::cbor::{self, canonical_map, required_bytes, required_map};
 use crate::store::CommitDurability;
@@ -15,7 +16,6 @@ use ciborium::{
     ser::into_writer,
     value::{Integer, Value},
 };
-use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -108,14 +108,6 @@ fn decode_new_pin(
     Ok((Zeroizing::new(new_pin.to_vec()), code_points as u8))
 }
 
-/// CurrentStoredPIN for `pin`: `LEFT(SHA-256(pin), 16)`.
-fn hash_pin(pin: &[u8]) -> Zeroizing<[u8; 16]> {
-    let digest = Zeroizing::new(Sha256::digest(pin));
-    let mut hash = Zeroizing::new([0u8; 16]);
-    hash.copy_from_slice(&digest[..16]);
-    hash
-}
-
 /// Publication alone cannot confirm a spent or restored verification retry.
 fn require_confirmed_retry(durability: CommitDurability) -> Result<(), u8> {
     if durability == CommitDurability::Unconfirmed {
@@ -145,7 +137,7 @@ impl CtapApp<'_> {
             policy.min_pin_length,
             policy.pin_complexity_policy,
         )?;
-        Ok((hash_pin(&new_pin), length))
+        Ok((pin_hash(&new_pin), length))
     }
 
     /// The PIN check of changePIN (CTAP 2.3 §6.5.5.6), getPinToken
