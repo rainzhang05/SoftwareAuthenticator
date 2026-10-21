@@ -49,11 +49,19 @@ unscrubbed, below the copies of rho-prime and K the probes look for.
 
 The stack probes retain their 2 MiB scans and controls, and check both
 32-byte halves of the 64-byte rho-prime and K after individual seed,
-expanded-key, context, malformed-key and CTAP wrapper operations. Linux
-children also force an OS randomness failure after seed expansion to check
-the returned-error cleanup path. CI forces Rust 1.89.0 for runtime stack
-and heap probes in debug and release on x86_64 and aarch64, alongside the
-stable tests and the declared-MSRV compilation check.
+expanded-key, context, malformed-key and CTAP wrapper operations. The ML-DSA
+probe reports how far down it finds each copy, and measures depth too: it
+fills the 2 MiB with a canary first, and nothing below the zeros an
+operation's scrub leaves may change but the scrub's own frame. Each operation
+then runs again from a copy of the wrapper's `ml-dsa` calls with no scrub
+after it, and the probe fails unless the bound is at least 25% deeper than
+that run reaches. In debug builds, which go deepest, the copy's frames match
+the wrapper's function for function, to within 48 bytes; an optimised build
+can inline the copy differently. Linux children also force an OS randomness
+failure after seed expansion to check the returned-error cleanup path. CI
+forces Rust 1.89.0 for runtime stack and heap probes in debug and release on
+x86_64 and aarch64, alongside the stable tests and the declared-MSRV
+compilation check.
 
 These are bounded empirical checks of selected patterns and operations.
 The stack scanners read uninitialized, retired storage, outside Rust's

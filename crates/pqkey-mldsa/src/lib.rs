@@ -367,6 +367,9 @@ macro_rules! dispatch {
 /// `Result::Err` takes the same cleanup path as a success. The bounded probes
 /// in `tests/residue.rs` check selected secret patterns, not every intermediate
 /// or compiler-generated copy; this is not an erasure guarantee during unwind.
+/// That test also measures how deep each operation reaches, partly through a
+/// copy of the closures here that runs without this scrub: keep the two in
+/// step.
 fn with_scrubbed_stack<T>(ps: ParamSet, operation: impl FnOnce() -> T) -> T {
     let result = run_below(operation);
     match ps {
