@@ -65,6 +65,8 @@ use rand_core::{CryptoRng, UnwrapErr};
 type OsRng = UnwrapErr<SysRng>;
 
 use crate::transport::{CTAPHID_FRAME_LEN, CtapHidFrame};
+/// CTAP2_ERR_KEEPALIVE_CANCEL, the CTAP status of a cancelled request.
+pub use pqkey_ctap::ctap::constants::CTAP2_ERR_KEEPALIVE_CANCEL;
 use pqkey_ctap::ctap::u2f::{SW_CONDITIONS_NOT_SATISFIED, requests_presence};
 
 /// Initial presence requests receive a polling response within this time.
@@ -149,9 +151,6 @@ pub struct IdentificationRequest {
     pub token: u64,
     pub deadline: u64,
 }
-
-/// CTAP2_ERR_KEEPALIVE_CANCEL, the CTAP status of a cancelled request.
-pub const CTAP2_ERR_KEEPALIVE_CANCEL: u8 = 0x2D;
 
 /// How many channels CTAPHID_INIT keeps allocated. Every client that opens
 /// the device allocates one and none is ever released, so the least recently
