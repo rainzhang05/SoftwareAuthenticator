@@ -138,12 +138,12 @@ impl PrivateKeyMaterial {
         })
     }
 
-    /// [`Self::try_generate`] for tests and tools that cannot go on without a
-    /// key.
+    /// [`Self::try_generate`] for tests that cannot go on without a key.
     ///
     /// # Panics
     ///
     /// Panics if key generation fails.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn generate(alg: CoseAlg) -> Self {
         Self::try_generate(alg).expect("credential key generation failed")

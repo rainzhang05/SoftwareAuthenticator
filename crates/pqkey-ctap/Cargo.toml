@@ -82,5 +82,7 @@ harness = false
 
 [features]
 # `verify_signature`, the signature verifier that the tests of pqkey and the
-# fuzz targets check signatures with.  The daemon leaves it out.
+# fuzz targets check signatures with, and `PrivateKeyMaterial::generate`, the
+# key generation helper of pqkey's tests, which panics on failure.  The daemon
+# leaves them out.
 test-support = []
