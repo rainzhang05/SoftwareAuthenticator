@@ -525,10 +525,12 @@ fn inconsistent_records_are_rejected_and_not_stored<B: Backend>() {
     empty_id.credential_id.clear();
 
     let mut es256_with_seed = new_record(CoseAlg::ES256);
-    es256_with_seed.private_key = PrivateKeyMaterial::generate(CoseAlg::MLDSA44);
+    es256_with_seed.private_key =
+        PrivateKeyMaterial::try_generate(CoseAlg::MLDSA44).expect("generate key material");
 
     let mut mldsa_with_scalar = new_record(CoseAlg::MLDSA65);
-    mldsa_with_scalar.private_key = PrivateKeyMaterial::generate(CoseAlg::ES256);
+    mldsa_with_scalar.private_key =
+        PrivateKeyMaterial::try_generate(CoseAlg::ES256).expect("generate key material");
 
     let mut zero_scalar = new_record(CoseAlg::ES256);
     zero_scalar.private_key = PrivateKeyMaterial::P256Scalar { scalar: [0; 32] };

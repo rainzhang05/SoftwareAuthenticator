@@ -56,7 +56,7 @@ pub fn new_record(alg: CoseAlg) -> CredentialRecord {
         user_name: Some("alice@example.com".into()),
         user_display_name: Some("Alice Example".into()),
         alg,
-        private_key: PrivateKeyMaterial::generate(alg),
+        private_key: PrivateKeyMaterial::try_generate(alg).expect("generate key material"),
         cred_random_with_uv: random_bytes(),
         cred_random_without_uv: random_bytes(),
         cred_blob: None,
@@ -77,7 +77,9 @@ pub fn with_created_at(record: &CredentialRecord, created_at: u64) -> Credential
 
 pub fn attestation_record(certificates: &[usize]) -> AttestationRecord {
     AttestationRecord {
-        private_key: match PrivateKeyMaterial::generate(CoseAlg::ES256) {
+        private_key: match PrivateKeyMaterial::try_generate(CoseAlg::ES256)
+            .expect("generate attestation key")
+        {
             PrivateKeyMaterial::P256Scalar { scalar } => scalar,
             PrivateKeyMaterial::Seed { .. } | PrivateKeyMaterial::RsaPrimes { .. } => {
                 unreachable!()
