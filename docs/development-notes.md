@@ -163,7 +163,8 @@ Ctrl-C stops it, and `pqkey start` brings the service back.
 GitHub Actions runs these workflows:
 
 - **CI** runs the checks of `scripts/check.sh` on Linux, with workspace
-  tests on both x86_64 and arm64.
+  tests on both x86_64 and arm64, and lints and tests the portable crates
+  on macOS.
 - **E2E** runs `scripts/e2e.sh`'s real HID tests on Linux.
 - **Security** runs `cargo audit` and `cargo deny`.
 - **Fuzz** runs each target for 30 seconds on changes and for 30 minutes

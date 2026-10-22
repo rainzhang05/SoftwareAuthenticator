@@ -588,7 +588,7 @@ on exit; neither is trusted without the lock and a matching pid.
 | Store tests | `crates/pqkey-ctap/tests/store/`, persistence, tampering and known-answer vectors |
 | ML-DSA known answers | `crates/pqkey-mldsa/tests/`, NIST ACVP vectors |
 | End to end | `tests/e2e/`, the release daemon driven by libfido2 and python-fido2 |
-| Fuzzing | `fuzz/`, CTAPHID packets, CTAP requests and request sequences |
+| Fuzzing | `fuzz/`, CTAPHID packets, CTAP requests, request sequences, credential key bytes and stored records |
 
 The heap residue test in `crates/pqkey/tests/heap_residue.rs` scans retained
 freed blocks after key operations and store roundtrips. Live controls show
