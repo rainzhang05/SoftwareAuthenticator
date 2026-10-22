@@ -12,11 +12,12 @@
 //!    5  user_display_name       text string, omitted when absent
 //!    6  alg                     integer: COSE algorithm identifier, one of CoseAlg's
 //!    7  private key type        unsigned integer: 1 = P-256 scalar, 2 = seed (ML-DSA's ξ,
-//!                               an ECDSA key's seed on P-384, P-521 or
-//!                               secp256k1, an Ed25519 private key, or an
-//!                               Ed448 key's seed), 3 (RSA primes)
+//!                               an ECDSA key's seed on P-384, P-521, secp256k1,
+//!                               brainpoolP256r1 or brainpoolP384r1, an Ed25519
+//!                               private key, or an Ed448 key's seed),
+//!                               3 = RSA primes
 //!    8  private key             byte string, 32 bytes (types 1-2),
-//!                               256 bytes (type 3, RSA primes p || q)
+//!                               256 bytes (type 3, RSA-2048 primes p || q)
 //!    9  cred_random_with_uv     byte string, 32 bytes
 //!   10  cred_random_without_uv  byte string, 32 bytes
 //!   11  cred_protect            unsigned integer, 1-3

@@ -19,8 +19,11 @@
 //! ```
 //!
 //! where `name` is the object's logical name in UTF-8: `pin-state`,
-//! `attestation`, `signature-counter`, `large-blobs`, or `credentials/`
-//! followed by the 64-hex-digit file name.
+//! `attestation`, `signature-counter`, `large-blobs`,
+//! `credentials/<64 hex digits>` (legacy credential records, which keep the
+//! name when migration moves them), `credential-set/records/<64 hex digits>`
+//! (managed credential records), `credential-set/active` (type 6), or
+//! `credential-format` (type 7).
 //! Copying one object over another therefore fails authentication even when
 //! both are encrypted under the same key.
 //!

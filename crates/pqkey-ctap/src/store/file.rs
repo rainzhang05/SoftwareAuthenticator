@@ -105,7 +105,8 @@ const ATTESTATION_FILE: &str = "attestation";
 ///      0       4  magic, ASCII "FTSA"
 ///      4       1  format version, 1
 ///      5       1  record type: 1 credential, 2 PIN state, 3 attestation,
-///                             4 signature counter, 5 large-blob array
+///                             4 signature counter, 5 large-blob array,
+///                             6 credential set, 7 credential format
 ///      6      24  XChaCha20-Poly1305 nonce, freshly random for every write
 ///     30       n  ciphertext of the n-byte record encoding
 ///   30+n      16  Poly1305 tag
@@ -117,10 +118,14 @@ const ATTESTATION_FILE: &str = "attestation";
 /// "FTSA" || version || record type || u16 big-endian length of name || name
 /// ```
 ///
-/// where `name` is the object's path relative to the state directory:
-/// `pin-state`, `attestation`, `signature-counter`, `large-blobs`, or
-/// `credentials/<64 hex digits>`. Copying one file over another therefore
-/// fails authentication even under the same key.
+/// where `name` is the object's logical name, its path relative to the state
+/// directory once committed: `pin-state`, `attestation`, `signature-counter`,
+/// `large-blobs`, `credentials/<64 hex digits>` (legacy credential records,
+/// which keep the name when migration moves them),
+/// `credential-set/records/<64 hex digits>` (managed credential records),
+/// `credential-set/active` (type 6), or `credential-format` (type 7).
+/// Copying one file over another therefore fails authentication even under
+/// the same key.
 /// Envelopes are at most 1 MiB.
 ///
 /// # Records
@@ -137,18 +142,21 @@ const ATTESTATION_FILE: &str = "attestation";
 ///    1  credential_id           byte string
 ///    2  rp_id                   text string
 ///    3  user_id                 byte string
-///    4  user_name               text string, optional
-///    5  user_display_name       text string, optional
-///    6  alg                     integer, COSE algorithm identifier, one of CoseAlg's
-///    7  private key type        unsigned: 1 = P-256 scalar, 2 = seed (ML-DSA's ξ, an
-///                               ECDSA key's seed on P-384, P-521 or secp256k1, an
-///                               Ed25519 private key, or an Ed448 key's seed)
-///    8  private key             byte string, 32 bytes
+///    4  user_name               text string, omitted when absent
+///    5  user_display_name       text string, omitted when absent
+///    6  alg                     integer: COSE algorithm identifier, one of CoseAlg's
+///    7  private key type        unsigned integer: 1 = P-256 scalar, 2 = seed (ML-DSA's ξ,
+///                               an ECDSA key's seed on P-384, P-521, secp256k1,
+///                               brainpoolP256r1 or brainpoolP384r1, an Ed25519
+///                               private key, or an Ed448 key's seed),
+///                               3 = RSA primes
+///    8  private key             byte string, 32 bytes (types 1-2),
+///                               256 bytes (type 3, RSA-2048 primes p || q)
 ///    9  cred_random_with_uv     byte string, 32 bytes
 ///   10  cred_random_without_uv  byte string, 32 bytes
-///   11  cred_protect            unsigned, 1-3
-///   12  sign_count              unsigned, 32 bits
-///   13  created_at              unsigned, 64 bits
+///   11  cred_protect            unsigned integer, 1-3
+///   12  sign_count              unsigned integer, 32 bits
+///   13  created_at              unsigned integer, 64 bits
 ///   14  cred_blob               byte string, at most 32 bytes, optional
 ///   15  large_blob_key          byte string, 32 bytes, optional
 ///   16  third_party_payment     boolean, default false, omitted when false
