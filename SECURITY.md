@@ -47,7 +47,8 @@ sensor software cannot press.
   every private key and large-blob key, or use the key while a prompt is up,
   or interfere with the notification. A single copy of `keys/credential.key`
   also opens every sealed non-discoverable credential until the next reset;
-  RSA credentials require their encrypted stored records as well.
+  stored ones, such as RSA, Brainpool and payment-enabled credentials,
+  require their encrypted records as well.
 - **Offline PIN guessing by such an attacker.** The stored PIN hash is an
   unsalted, truncated SHA-256.
 - **Rolling files back.** Integrity is per file, so an older copy of
@@ -130,8 +131,9 @@ keys: on Ubuntu, sssd's rules give the `sssd` user every security token.
 - Registrations use self attestation, which says nothing about the key beyond
   its AAGUID. That AAGUID is the same for every installation, so it identifies
   pqkey, not you.
-- Non-discoverable credentials share one signature counter, as on most
-  hardware keys.
+- Sealed non-discoverable credentials share one signature counter, as on
+  most hardware keys. Stored ones (RSA, Brainpool and payment-enabled) keep
+  their own.
 - Logs name sites and users only at debug level.
 - The USB IDs `1209:0001` are a [pid.codes](https://pid.codes/1209/0001/) test
   ID that is not unique to pqkey.
