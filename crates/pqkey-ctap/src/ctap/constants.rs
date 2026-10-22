@@ -1,11 +1,13 @@
 //! CTAP command codes and authenticator status (error) codes.
 //!
 //! The status codes below are transcribed from the FIDO Alliance
-//! "Client to Authenticator Protocol (CTAP)" v2.1, Proposed Standard, 2021-06-15,
+//! "Client to Authenticator Protocol (CTAP)" v2.3, Proposed Standard, 2026-02-26,
 //! § 8.2 "Status codes" (anchor `#error-responses`):
-//! <https://fidoalliance.org/specs/fido-v2.1-ps-20210615/fido-client-to-authenticator-protocol-v2.1-ps-20210615.html#error-responses>
+//! <https://fidoalliance.org/specs/fido-v2.3-ps-20260226/fido-client-to-authenticator-protocol-v2.3-ps-20260226.html#error-responses>
 //!
-//! Command codes come from § 6 of the same document.
+//! Command codes come from § 6 of the same document. Both were first
+//! transcribed from CTAP v2.1 (Proposed Standard, 2021-06-15), whose values
+//! v2.3 keeps.
 //!
 //! These values are wire-visible: a wrong number is silently reported to the client
 //! platform as a *different* error, so every status code here is pinned to its spec
@@ -21,7 +23,7 @@
 // its documentation; the module header says where to look them up.
 #![allow(missing_docs)]
 
-// -- Command codes (CTAP 2.1 § 6) --------------------------------------------
+// -- Command codes (CTAP 2.3 § 6) --------------------------------------------
 
 pub const CTAP_CMD_MAKE_CREDENTIAL: u8 = 0x01;
 pub const CTAP_CMD_GET_ASSERTION: u8 = 0x02;
@@ -51,7 +53,7 @@ pub const CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE: u8 = 0x41;
 /// § 11.2.4), the transport the engine is served over.
 pub const MAX_RESPONSE_SIZE: usize = 7609;
 
-// -- Status codes (CTAP 2.1 § 8.2) -------------------------------------------
+// -- Status codes (CTAP 2.3 § 8.2) -------------------------------------------
 //
 // Ordered by value so the table can be diffed against the spec by eye.
 
@@ -176,12 +178,12 @@ mod tests {
         ("CTAP1_ERR_OTHER", CTAP1_ERR_OTHER),
     ];
 
-    /// Each status code must equal the literal printed in CTAP 2.1 § 8.2.
+    /// Each status code must equal the literal printed in CTAP 2.3 § 8.2.
     ///
     /// Written as literals on purpose: comparing a constant to itself proves nothing,
     /// so the right-hand sides are transcribed by hand from the spec table.
     #[test]
-    fn status_codes_match_ctap21_spec_table() {
+    fn status_codes_match_spec_table() {
         assert_eq!(CTAP2_OK, 0x00);
         assert_eq!(CTAP1_ERR_INVALID_COMMAND, 0x01);
         assert_eq!(CTAP1_ERR_INVALID_PARAMETER, 0x02);
@@ -269,9 +271,9 @@ mod tests {
         }
     }
 
-    /// Command codes come from CTAP 2.1 § 6; pinned for the same reason.
+    /// Command codes come from CTAP 2.3 § 6; pinned for the same reason.
     #[test]
-    fn command_codes_match_ctap21_spec() {
+    fn command_codes_match_spec() {
         assert_eq!(CTAP_CMD_MAKE_CREDENTIAL, 0x01);
         assert_eq!(CTAP_CMD_GET_ASSERTION, 0x02);
         assert_eq!(CTAP_CMD_GET_INFO, 0x04);
@@ -282,6 +284,7 @@ mod tests {
         assert_eq!(CTAP_CMD_CREDENTIAL_MANAGEMENT, 0x0A);
         assert_eq!(CTAP_CMD_SELECTION, 0x0B);
         assert_eq!(CTAP_CMD_LARGE_BLOBS, 0x0C);
+        assert_eq!(CTAP_CMD_AUTHENTICATOR_CONFIG, 0x0D);
         // § 6.12 prototype command.
         assert_eq!(CTAP_CMD_BIO_ENROLLMENT_PROTOTYPE, 0x40);
         assert_eq!(CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE, 0x41);
