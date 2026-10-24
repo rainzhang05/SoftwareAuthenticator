@@ -122,6 +122,7 @@ fn assert_get_info_response(app: &mut TestApp, aaguid: [u8; 16], pin_set: bool, 
         (uint(7), uint(8)),
         (uint(8), uint(128)),
         (uint(9), Value::Array(vec![text("usb")])),
+        (uint(0x1A), Value::Array(vec![text("usb")])),
         (uint(10), algorithms),
         (uint(11), uint(16384)),
         (uint(12), Value::Bool(false)),
@@ -212,6 +213,21 @@ fn client_pin_option_reports_whether_a_pin_is_set() {
 fn uv_option_is_absent_without_built_in_user_verification() {
     let mut app = test_app([0xAD; 16]);
     assert!(options(&mut app).iter().all(|(key, _)| *key != text("uv")));
+}
+
+/// transportsForReset: "List of transports that support the reset command."
+/// (CTAP 2.3 §6.4)  It is USB HID, the only transport.  The optional
+/// firmwareVersion is left out, since no version pqkey has increases with
+/// every released code change, as §6.4 requires.
+#[test]
+fn transports_for_reset_is_usb_and_firmware_version_is_absent() {
+    let mut app = test_app([0xB0; 16]);
+    let response = app.handle_get_info().expect("getInfo succeeds");
+    let Value::Map(map) = from_reader(&response[1..]).expect("decode getInfo") else {
+        panic!("getInfo must be a map");
+    };
+    assert!(map.contains(&(uint(0x1A), Value::Array(vec![text("usb")]))));
+    assert!(map.iter().all(|(key, _)| *key != uint(0x0E)));
 }
 
 /// attestationFormats: "List of supported attestation formats. [...] The list

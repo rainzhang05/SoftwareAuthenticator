@@ -66,6 +66,7 @@ def test_get_info(ctap: Ctap2):
     assert info[5] == 1768, "maxMsgSize"
     assert sorted(info[6]) == [1, 2], f"pinUvAuthProtocols {info[6]}"
     assert info[9] == ["usb"]
+    assert info[0x1A] == ["usb"], "transportsForReset"
     assert info[10] == [
         {"type": "public-key", "alg": client.ES256},
         {"type": "public-key", "alg": client.ML_DSA_44},

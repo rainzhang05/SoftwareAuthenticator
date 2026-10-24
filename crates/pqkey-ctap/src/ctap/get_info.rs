@@ -122,6 +122,10 @@ impl CtapApp<'_> {
 
         let transports = Value::Array(vec![text("usb")]);
         map.push((uint(9), transports));
+        // transportsForReset: "List of transports that support the reset
+        // command." (CTAP 2.3 §6.4)  §6.6 lets authenticators choose per
+        // transport, and pqkey's only one, USB HID, supports reset.
+        map.push((uint(0x1A), Value::Array(vec![text("usb")])));
 
         let algorithms = CoseAlg::ALL
             .into_iter()
@@ -139,6 +143,10 @@ impl CtapApp<'_> {
         let persistent = self.pin_state.persistent();
         map.push((uint(0x0C), Value::Bool(persistent.force_pin_change)));
         map.push((uint(0x0D), uint(u64::from(persistent.min_pin_length))));
+        // No firmwareVersion (0x0E): it MUST increase with every released code
+        // change (§6.4), but pqkey is built from whatever commit is checked
+        // out, its crate version does not change per commit, and build-time
+        // git data is unreliable (shallow CI checkouts, `git archive` builds).
         // maxCredBlobLength (CTAP 2.3 §6.4), required by §12.2.1.
         map.push((uint(0x0F), uint(MAX_CRED_BLOB_LENGTH as u64)));
         map.push((
