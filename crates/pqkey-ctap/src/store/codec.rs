@@ -354,6 +354,18 @@ impl Item {
     }
 }
 
+/// How deeply [`Fields::parse`] lets arrays, maps and tags nest, counting the
+/// record's own map as the first level.  Stored records nest at most two
+/// levels: the record map holding an array (`min_pin_length_rp_ids`,
+/// `certificate_chain`) or a map (a persistent token).  Four leaves room and
+/// matches the nesting CTAP 2.3 §8 allows messages: "at most four (4) levels".
+/// No field accepts deeper nesting, so an input nested three or more levels
+/// deep is [`Corruption::Encoding`] with or without the cap: the cap changes
+/// no input's result.  It bounds the decoder's stack and the `store_records`
+/// fuzz target's memory under AddressSanitizer, which keeps a stack trace for
+/// every allocation path; every new nesting pattern is a new path.
+const MAX_RECORD_NESTING: usize = 4;
+
 /// The entries of a decoded CBOR map, keyed by unsigned integer.  Entries are
 /// taken out one by one; whatever is left is wiped on drop.
 struct Fields(Vec<(u64, Item)>);
@@ -362,7 +374,8 @@ impl Fields {
     fn parse(bytes: &[u8]) -> Result<Self, Corruption> {
         let mut reader = bytes;
         let value: Value =
-            ciborium::de::from_reader(&mut reader).map_err(|_| Corruption::Encoding)?;
+            ciborium::de::from_reader_with_recursion_limit(&mut reader, MAX_RECORD_NESTING)
+                .map_err(|_| Corruption::Encoding)?;
         let mut value = Item(value);
         if !reader.is_empty() {
             return Err(Corruption::Encoding);
@@ -1243,6 +1256,28 @@ mod tests {
                 decode_attestation(&encoding).err(),
                 Some(Corruption::Encoding),
                 "{name}"
+            );
+        }
+    }
+
+    /// [`MAX_RECORD_NESTING`] counts the record's own map, and arrays, maps
+    /// and tags alike.  `Fields::parse` checks only that map and its keys,
+    /// so four levels parse and a fifth is [`Corruption::Encoding`].
+    #[test]
+    fn nesting_deeper_than_four_levels_is_rejected() {
+        for (four, five) in [
+            // {1: [[[0]]]} and {1: [[[[0]]]]}
+            ("a10181818100", "a1018181818100"),
+            // {1: {1: {1: {1: 0}}}} and one more map
+            ("a101a101a101a10100", "a101a101a101a101a10100"),
+            // {1: 1(1(1(0)))} and one more tag
+            ("a101c1c1c100", "a101c1c1c1c100"),
+        ] {
+            assert!(Fields::parse(&unhex(four)).is_ok(), "{four}");
+            assert_eq!(
+                Fields::parse(&unhex(five)).err(),
+                Some(Corruption::Encoding),
+                "{five}"
             );
         }
     }
