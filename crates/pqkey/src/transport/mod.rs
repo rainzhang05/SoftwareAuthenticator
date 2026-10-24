@@ -35,6 +35,25 @@ pub const CAPABILITY_WINK: u8 = 0x01; // Implements CTAPHID_WINK
 pub const CAPABILITY_CBOR: u8 = 0x04; // Implements CTAPHID_CBOR
 pub const CAPABILITY_NMSG: u8 = 0x08; // Does NOT implement CTAPHID_MSG
 
+/// The device version CTAPHID_INIT reports: the crate's, so it matches what
+/// `pqkey --version` prints. Its major, minor and build bytes are the
+/// vendor's, not a CTAP version: "The meaning and interpretation of the
+/// device version number is vendor defined." (CTAP 2.3 §11.2.9.1.3) A part
+/// over 255 fails const evaluation, so such a version does not build.
+const DEVICE_VERSION: Version = Version {
+    major: version_part(env!("CARGO_PKG_VERSION_MAJOR")),
+    minor: version_part(env!("CARGO_PKG_VERSION_MINOR")),
+    build: version_part(env!("CARGO_PKG_VERSION_PATCH")),
+};
+
+/// One part of the crate version, as a byte of [`DEVICE_VERSION`].
+const fn version_part(part: &str) -> u8 {
+    match u8::from_str_radix(part, 10) {
+        Ok(part) => part,
+        Err(_) => panic!("a part of the crate version does not fit in a byte"),
+    }
+}
+
 /// The largest CTAPHID message, and so the longest answer the app can give.
 pub const MESSAGE_SIZE: usize = MAX_MESSAGE_SIZE;
 
@@ -481,11 +500,7 @@ where
         let (identification, identification_thread) =
             IdentificationWorker::spawn(scope, identifier, worker_wake_clone)?;
         let mut host = CtaphidHost::new();
-        host.set_version(Version {
-            major: 2,
-            minor: 1,
-            build: 0,
-        });
+        host.set_version(DEVICE_VERSION);
         host.set_capabilities(CAPABILITY_CBOR | CAPABILITY_WINK);
         let mut transport = Transport {
             device,
@@ -524,9 +539,9 @@ mod tests {
     use super::*;
     use crate::platform::test_support::uhid;
     use crate::shutdown::is_shutdown;
-    use crate::transport::ctaphid_host::Command;
+    use crate::transport::ctaphid_host::{BROADCAST_CID, Command};
 
-    use crate::platform::test_support::socket_device;
+    use crate::platform::test_support::{pair, socket_device};
 
     /// Answers CTAPHID_CBOR by echoing the request, or panics on 0xFF.
     struct EchoApp<'interrupt> {
@@ -638,6 +653,44 @@ mod tests {
             assert_eq!(report[..4], 0x0102_0304u32.to_be_bytes());
             assert_eq!(report[4], Command::KeepAlive.into_u8() | 0x80);
         }
+    }
+
+    /// CTAPHID_INIT reports the crate version, which `pqkey --version`
+    /// prints, as the device version (CTAP 2.3 §11.2.9.1.3).
+    #[test]
+    fn init_reports_the_crate_version_as_the_device_version() {
+        let (device, mut kernel) = pair();
+        let shutdown = ShutdownSignal::new();
+        let stop = shutdown.clone();
+        let server = thread::spawn(move || {
+            exec(
+                device,
+                &mut EchoApp {
+                    interrupt: &InterruptFlag::new(),
+                },
+                &WaitingForUser::new(),
+                shutdown,
+                || Ok(()),
+            )
+        });
+        let nonce = [7; 8];
+        kernel
+            .send(&message_frames(BROADCAST_CID, Command::Init, &nonce)[0])
+            .unwrap();
+        let answer = kernel
+            .receive(Duration::from_secs(60))
+            .unwrap()
+            .expect("an INIT response");
+        stop.request();
+        assert!(is_shutdown(&server.join().unwrap().unwrap_err()));
+
+        assert_eq!(answer[4], Command::Init.into_u8() | 0x80);
+        // The nonce, the channel ID, the CTAPHID protocol version, then the
+        // major, minor and build device version numbers.
+        let response = &answer[7..7 + 17];
+        assert_eq!(response[..8], nonce);
+        let version = format!("{}.{}.{}", response[13], response[14], response[15]);
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
