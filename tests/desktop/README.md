@@ -66,6 +66,11 @@ relax these guards or point this harness at a personal installation.
   final revision's installer updates that same state. Original-PIN verification,
   signed assertions and increasing counters must survive rerun/update/restart.
 
+Both scenarios end with CTAPHID_WINK, whose identification notification Dunst
+shows and expires, and an approved `pqkey reset`. The reset restarts the key, so
+its request arrives within the 10-second window after power-up. getInfo and an
+assertion attempt then show the PIN, policy and passkeys erased.
+
 Every failed presence request must leave discoverable capacity unchanged. The
 next approved assertion must advance the retained credential's counter by
 exactly one. Minimum PIN length, always-UV and the minimum-length RP disclosure
@@ -80,6 +85,35 @@ mode establishes these results. The existing fake-server E2E suite and
 An owned launcher records its PID/start identity before executing real dmenu,
 because Dunst detaches the menu process. Its input/output and action selection
 remain Dunst's normal menu protocol.
+
+## System call evidence
+
+Each scenario runs the installed daemon under the system call filter being
+evaluated for the shipped unit. A drop-in with `SystemCallFilter=@system-service`
+and `SystemCallErrorNumber=EPERM` is in place before the first install and stays
+through every rerun, update, restart and reset. The shipped unit is not changed.
+
+A refused call returns EPERM silently unless its seccomp filter asks the kernel
+to log it. `SystemCallLog=` cannot do that here: for exactly the calls in
+question, the filter's EPERM outranks its log action. So `prepare` makes two
+runtime changes, which cleanup undoes:
+- It starts the owned user manager with `SYSTEMD_LOG_SECCOMP=1`, through a
+  drop-in for its `user@UID.service`. systemd then flags every seccomp filter it
+  installs for logging.
+- It sets `kernel.printk_ratelimit=0`. The runner has no auditd, so audit records
+  reach the journal through the rate-limited kernel log.
+
+A canary transient unit under the same filter calls `chroot`, which is outside
+the set. It runs before the first install and again after the daemon stops, and
+both records must appear. The `seccomp` case fails if any of these holds:
+- a kernel record names the daemon: its executable, systemd's `(pqkey)`
+  executor, or a service PID
+- a canary record is missing
+- the kernel or journald reports lost messages
+- the daemons' seccomp filter counts differ
+
+`seccomp.log` keeps the run's audit records. The summary's "System call filter"
+section names each refused call.
 
 ## Results and cleanup
 

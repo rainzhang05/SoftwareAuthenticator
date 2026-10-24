@@ -38,6 +38,33 @@ class Results(unittest.TestCase):
             (directory / 'upgrade/result.json').write_text('truncated')
             self.assertFalse(results.finalize(directory, 'success'))
 
+    def test_summary_names_calls_refused_for_the_daemon(self):
+        refused = {'pid': '4242', 'exe': '/usr/local/bin/pqkey', 'syscall': '161', 'name': 'chroot', 'code': '0x50000'}
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            results.initialize(directory, 'a' * 40)
+            for scenario in results.REQUIRED:
+                result = self.result(scenario)
+                check = {'case': 'seccomp', 'status': 'pass', 'refused': [], 'canaries': {'start': True, 'end': True},
+                         'lost': [], 'missed_kernel_messages': [], 'filter_counts': ['11']}
+                if scenario == 'upgrade':
+                    check.update(status='fail', refused=[refused])
+                result['events'] = [row for row in result['events'] if row['case'] != 'seccomp'] + [check]
+                (directory / scenario / 'result.json').write_text(json.dumps(result))
+                (directory / scenario / 'runner-cleanup-status').write_text('0\n')
+            self.assertFalse(results.finalize(directory, 'success'))
+            summary = (directory / 'summary.md').read_text()
+            self.assertIn('- fresh: PASS; refused calls for pqkey: 0; canaries: start logged, end logged; '
+                          'lost records: 0; filter counts: 11\n', summary)
+            self.assertIn('- upgrade: FAILED; refused calls for pqkey: 1 (chroot 161);', summary)
+            report = json.loads((directory / 'report.json').read_text())
+            self.assertEqual([row['seccomp']['status'] for row in report['scenarios']], ['pass', 'fail'])
+
+    def test_a_missing_or_incomplete_check_is_reported(self):
+        self.assertEqual(results.seccomp_summary({'events': []}), 'NOT CHECKED')
+        incomplete = {'events': [{'case': 'seccomp', 'status': 'fail', 'error_type': 'TimeoutError'}]}
+        self.assertEqual(results.seccomp_summary(incomplete), 'FAILED: the check did not complete (TimeoutError)')
+
 
 if __name__ == "__main__":
     unittest.main()

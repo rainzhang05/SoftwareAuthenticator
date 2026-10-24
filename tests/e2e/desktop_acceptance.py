@@ -32,6 +32,67 @@ from setup_support import BINARY, node, run  # noqa: E402
 from desktop_results import BASELINE, scenario_pass  # noqa: E402
 
 RP = 'installed.desktop.example'
+# The system call filter under evaluation, for this run only. The owned user
+# manager runs with SYSTEMD_LOG_SECCOMP=1 (see desktop-acceptance.sh), so the
+# kernel logs every call the filter refuses.
+SECCOMP_DROP_IN = ('# Desktop acceptance only: run the daemon under the system call filter\n'
+                   '# being evaluated; the kernel logs each call it refuses.\n'
+                   '[Service]\nSystemCallFilter=@system-service\nSystemCallErrorNumber=EPERM\n')
+# chroot is outside @system-service and fails unprivileged anyway: a harmless
+# call the filter refuses, which proves that refusals reach the journal.
+CANARY = 'import os\nprint(os.getpid(), flush=True)\ntry:\n    os.chroot("/")\nexcept PermissionError:\n    pass\n'
+# The audit record's code is the seccomp action alone, without the errno.
+SECCOMP_RET_ERRNO = '0x50000'
+# journald's "Missed N kernel messages".
+JOURNAL_MISSED = 'MESSAGE_ID=e9bf28e6e834481bb6f48f548ad13606'
+AUDIT_FIELD = re.compile(r'(\w+)=("[^"]*"|\S+)')
+
+
+def audit_record(line):
+    """The fields of a kernel audit record, with hex-encoded comm and exe decoded."""
+    fields = {}
+    for key, value in AUDIT_FIELD.findall(line.split('): ', 1)[-1]):
+        if value.startswith('"'):
+            value = value[1:-1]
+        elif key in ('comm', 'exe') and re.fullmatch(r'(?:[0-9A-F]{2})+', value):
+            value = bytes.fromhex(value).decode(errors='replace')
+        fields[key] = value
+    return fields
+
+
+def syscall_names(header=Path('/usr/include/x86_64-linux-gnu/asm/unistd_64.h')):
+    try:
+        return {number: name for name, number in re.findall(r'#define __NR_(\w+) (\d+)', header.read_text())}
+    except OSError:
+        return {}
+
+
+def seccomp_check(lines, *, daemon_pids, canaries, uid, names=None):
+    """Sort the journal's seccomp records (audit type 1326) and audit losses.
+
+    A record names the daemon by its executable, by systemd's executor before
+    it executes the daemon ("(pqkey)"), or by a process ID the run observed.
+    """
+    names = names or {}
+    found = {'daemon': [], 'canaries': {phase: False for phase in canaries}, 'other': [], 'lost': []}
+    for line in lines:
+        if 'audit_lost=' in line:
+            found['lost'].append(line)
+        if 'audit: type=1326 ' not in line:
+            continue
+        record = audit_record(line)
+        row = {key: record.get(key) for key in ('pid', 'uid', 'comm', 'exe', 'arch', 'syscall', 'code')}
+        if record.get('arch') == 'c000003e':
+            row['name'] = names.get(record.get('syscall'))
+        canary = next((phase for phase, pid in canaries.items() if pid == record.get('pid')), None)
+        if canary:
+            found['canaries'][canary] |= record.get('code') == SECCOMP_RET_ERRNO
+        elif (record.get('exe') in (BINARY, BINARY + ' (deleted)') or record.get('comm') == '(pqkey)'
+              or record.get('pid') in daemon_pids):
+            found['daemon'].append(row)
+        elif record.get('uid') == uid:
+            found['other'].append(row)
+    return found
 
 
 def wait_for(predicate, message, seconds=8):
@@ -67,6 +128,8 @@ class Acceptance:
         self.env = dict(os.environ, PATH='/usr/local/bin:/usr/bin:/bin', NO_COLOR='1')
         self.state = Path.home() / '.local/share/pqkey'
         self.prompt = self.state / 'authenticator.prompt'
+        self.drop_in = Path.home() / '.config/systemd/user/pqkey.service.d/50-seccomp-evidence.conf'
+        self.seccomp = None
         self.pin, self.new_pin = secrets.token_hex(8), secrets.token_hex(8)
         self.private = (self.pin, self.new_pin)
         self.processes = OwnedProcesses()
@@ -125,7 +188,8 @@ class Acceptance:
         pid = int(self.systemctl('show', 'pqkey.service', '--property=MainPID', '--value'))
         assert pid > 1
         proc = Path(f'/proc/{pid}')
-        uid_fields = next(line.split()[1:] for line in (proc / 'status').read_text().splitlines() if line.startswith('Uid:'))
+        status = (proc / 'status').read_text().splitlines()
+        uid_fields = next(line.split()[1:] for line in status if line.startswith('Uid:'))
         assert uid_fields == [str(os.getuid())] * 4, 'service belongs to another user'
         def published_header():
             try:
@@ -147,7 +211,8 @@ class Acceptance:
         assert os.getgroups() == self.groups_before, 'login groups changed'
         info = {'pid': pid, 'start': (proc / 'stat').read_text().rsplit(')', 1)[1].split()[19],
                 'inode': installed.st_ino, 'sha256': hashlib.sha256(Path(BINARY).read_bytes()).hexdigest(),
-                'argv': [arg.decode() for arg in argv[:-1]], 'manager': self.manager_before}
+                'argv': [arg.decode() for arg in argv[:-1]], 'manager': self.manager_before,
+                'seccomp_filters': next(line.split()[1] for line in status if line.startswith('Seccomp_filters:'))}
         self.metadata.setdefault('services', []).append(info)
         self.write()
         return info
@@ -225,8 +290,8 @@ class Acceptance:
     def displayed(self):
         return int(self.command(['dunstctl', 'count', 'displayed']))
 
-    def prompt_shown(self, name):
-        wait_for(lambda: self.prompt.exists() and self.displayed() == 1, 'prompt not displayed by Dunst')
+    def prompt_shown(self, name, seconds=8):
+        wait_for(lambda: self.prompt.exists() and self.displayed() == 1, 'prompt not displayed by Dunst', seconds)
         self.command(['scrot', str(self.out / f'{name}.png')])
 
     def withdrawn(self):
@@ -410,10 +475,129 @@ class Acceptance:
         self.metadata['openssl'] = backend.openssl_version_text()
         self.write()
 
+    def seccomp_begin(self):
+        """Run every daemon under the filter being evaluated, once refusals are shown to be journaled."""
+        assert 'errno' in Path('/proc/sys/kernel/seccomp/actions_logged').read_text().split(), 'refusals not logged'
+        assert Path('/proc/sys/kernel/printk_ratelimit').read_text().strip() == '0', 'audit records may be dropped'
+        flag = self.command(['sudo', '-n', 'grep', '-czx', 'SYSTEMD_LOG_SECCOMP=1',
+                             f"/proc/{self.manager_before['pid']}/environ"], check=False)
+        assert flag == '1', 'user manager does not flag seccomp filters for logging'
+        self.drop_in.parent.mkdir(parents=True)
+        self.drop_in.write_text(SECCOMP_DROP_IN)
+        self.command(['systemd-analyze', 'syscall-filter', '@system-service'])
+        cursor = self.command(['sudo', '-n', 'journalctl', '--system', '-n', '1', '-o', 'json',
+                               '--output-fields=__CURSOR'])
+        self.seccomp = {'cursor': json.loads(cursor)['__CURSOR'], 'canaries': {}}
+        self.metadata['seccomp'] = {'drop_in': str(self.drop_in), 'printk_ratelimit': 0, 'manager_flag': True}
+        self.write()
+        assert self.canary('start')[1], 'refused system calls do not reach the journal'
+
+    def canary(self, phase):
+        """One refused call from a transient unit under the filter; returns the audit lines and whether it shows."""
+        assert self.authorized
+        pid = self.command(['env', '-u', 'DBUS_SESSION_BUS_ADDRESS', 'systemd-run', '--user', '--pipe', '--wait',
+                            '--quiet', '--collect', '-p', 'NoNewPrivileges=yes',
+                            '-p', 'SystemCallFilter=@system-service', '-p', 'SystemCallErrorNumber=EPERM',
+                            '/usr/bin/python3', '-I', '-c', CANARY])
+        assert pid.isdigit(), 'canary did not report its process ID'
+        self.seccomp['canaries'][phase] = pid
+        deadline = time.monotonic() + 15
+        while True:
+            lines = self.kernel_audit()
+            seen = seccomp_check(lines, daemon_pids=(), canaries={phase: pid}, uid=str(os.getuid()))['canaries'][phase]
+            if seen or time.monotonic() > deadline:
+                return lines, seen
+            time.sleep(1)
+
+    def kernel_audit(self):
+        """The kernel's seccomp records and audit losses since the run began."""
+        return self.command(['sudo', '-n', 'journalctl', '-q', '-k', '--no-pager', '-o', 'cat',
+                             '--after-cursor=' + self.seccomp['cursor'], '--grep=^audit: (type=1326 |audit_lost=)'],
+                            check=False).splitlines()
+
+    def seccomp_unit(self):
+        shown = dict(line.split('=', 1) for line in self.systemctl(
+            'show', 'pqkey.service', '--property=DropInPaths,SystemCallErrorNumber,SystemCallFilter').splitlines())
+        allowed = shown['SystemCallFilter'].split()
+        assert str(self.drop_in) in shown['DropInPaths'].split(), 'system call filter drop-in not loaded'
+        assert shown['SystemCallErrorNumber'] == '1' and 'read' in allowed and 'chroot' not in allowed
+        self.metadata['seccomp'].update(drop_in_paths=shown['DropInPaths'].split(), allowed_calls=len(allowed))
+        self.write()
+
+    def seccomp_finish(self):
+        """Once the daemon has stopped: fail if any record names it, or if records may have been lost."""
+        if self.seccomp is None:
+            return
+        # Kernel messages are journaled in order: with the end canary's record,
+        # every earlier record has been read.
+        lines, _ = self.canary('end')
+        missed = self.command(['sudo', '-n', 'journalctl', '-q', '--system', '--no-pager', '-o', 'cat',
+                               '--after-cursor=' + self.seccomp['cursor'], JOURNAL_MISSED], check=False).splitlines()
+        services = self.metadata.get('services', [])
+        found = seccomp_check(lines, daemon_pids={str(service['pid']) for service in services},
+                              canaries=self.seccomp['canaries'], uid=str(os.getuid()), names=syscall_names())
+        (self.out / 'seccomp.log').write_text(''.join(line + '\n' for line in lines))
+        # Every daemon ran with the same filters, the drop-in's included.
+        filters = sorted({service['seccomp_filters'] for service in services})
+        passed = (not found['daemon'] and all(found['canaries'].values()) and not found['lost'] and not missed
+                  and len(filters) == 1)
+        self.events.append({'case': 'seccomp', 'status': 'pass' if passed else 'fail',
+                            'filter': 'SystemCallFilter=@system-service SystemCallErrorNumber=EPERM',
+                            'refused': found['daemon'], 'canaries': found['canaries'],
+                            'other_user_records': found['other'], 'lost': found['lost'],
+                            'missed_kernel_messages': missed, 'filter_counts': filters})
+        self.write()
+
+    def identification(self):
+        # CTAPHID_WINK (CTAP 2.3 §11.2.9.2.1): a transient notification without
+        # actions names the key and expires after two seconds.
+        self.withdrawn()
+        with self.connection() as device:
+            device.wink()
+            wait_for(lambda: self.displayed() == 1, 'identification not displayed by Dunst')
+            self.command(['scrot', str(self.out / 'identification.png')])
+            assert device.ping(b'identified') == b'identified'
+        self.withdrawn()
+        self.record('identification')
+
+    def reset(self):
+        # authenticatorReset is accepted only within 10 seconds of power-up
+        # (CTAP 2.3 §6.6), so `pqkey reset` restarts the service first. It erases
+        # the PIN, policy and passkeys, so nothing runs after it.
+        from fido2.ctap import CtapError
+        from fido2.ctap2 import Ctap2
+        before = self.identity()
+        self.withdrawn()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.command, [BINARY, 'reset', '--yes'], timeout=60)
+            self.prompt_shown('reset', seconds=20)
+            self.answer('Approve', 'reset')
+            output = future.result(timeout=60)
+        self.withdrawn()
+        assert 'The key is reset' in output
+        after = self.identity()
+        assert after['pid'] != before['pid']
+        self.device = node(self.env)
+        with self.connection() as device:
+            ctap = Ctap2(device)
+            info = ctap.get_info()
+            assert info.options['clientPin'] is False and info.options.get('alwaysUv') is False
+            assert info.min_pin_length == 4 and not info.force_pin_change
+            assert info.remaining_disc_creds > self.remaining, 'passkeys survived reset'
+            try:
+                ctap.get_assertion(RP, secrets.token_bytes(32),
+                                   [{'type': 'public-key', 'id': self.credential.credential_id}], options={'up': False})
+            except CtapError as error:
+                assert error.code == CtapError.ERR.NO_CREDENTIALS, 'incorrect CTAP failure status'
+            else:
+                raise AssertionError('credential survived reset')
+        self.record('reset', remaining_disc_creds=info.remaining_disc_creds)
+
     def exercise(self):
         from fido2.ctap import CtapError
         from fido2.ctap2 import ClientPin, Config, Ctap2, PinProtocolV2
         self.preflight()
+        self.seccomp_begin()
         self.processes.start(['openbox'], self.out / 'openbox.log', env=self.env)
         self.env['DBUS_SESSION_BUS_ADDRESS'] = 'unix:path=' + str(self.control / 'notifications.bus')
         self.processes.start(['dbus-daemon', '--nofork', '--config-file=' + str(HERE / 'session-bus.conf'),
@@ -428,6 +612,7 @@ class Acceptance:
             with self.connection() as device:
                 assert Ctap2(device).get_info().options['clientPin'] is False
         self.install('ready', source=source, pin=self.pin)
+        self.seccomp_unit()
         assert self.manager_identity() == self.manager_before and os.getgroups() == self.groups_before
         assert self.command(['loginctl', 'show-session', self.session, '--property=Active', '--value']) == 'yes'
         self.command(['getfacl', '-p', '/dev/uhid', self.device])
@@ -499,6 +684,8 @@ class Acceptance:
         self.verify_rp_policy()
         self.record('policy-retained', final_counter=self.counter, discoverable=True,
                     original_pin_through_update_and_restart=True)
+        self.identification()
+        self.reset()
 
     def verify_rp_policy(self):
         # A denied registration discloses no extension. Use approved requests and
@@ -535,6 +722,9 @@ class Acceptance:
                 assert owner_record(self.control)['uid'] == os.getuid()
                 if Path(BINARY).exists():
                     self.command([BINARY, 'setup', '--uninstall'], timeout=30)
+                if self.drop_in.exists():
+                    self.drop_in.unlink()
+                    self.drop_in.parent.rmdir()
             except Exception:
                 failures.append('owned uninstall failed')
         failures.extend(self.processes.cleanup())
@@ -572,6 +762,11 @@ def main():
         except Exception as error:
             test.events.append({'case': 'cleanup', 'status': 'fail', 'error_type': type(error).__name__})
             test.cleanup_ok = False
+            test.write()
+        try:
+            test.seccomp_finish()
+        except Exception as error:
+            test.events.append({'case': 'seccomp', 'status': 'fail', 'error_type': type(error).__name__})
             test.write()
     return 0 if scenario_pass({'metadata': test.metadata, 'events': test.events, 'cleanup': test.cleanup_ok}) else 1
 

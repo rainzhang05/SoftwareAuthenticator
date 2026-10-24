@@ -76,6 +76,17 @@ PY_OWNER
   git status --porcelain > "$evidence/source-status.txt"
   test ! -s "$evidence/source-status.txt"
   uname -a > "$evidence/kernel.txt"
+  # System call evidence (tests/desktop/README.md): before the login starts the
+  # owned user manager, have it flag its units' seccomp filters for logging, and
+  # let the kernel print every audit record, so each refused call is journaled.
+  manager_dropin=/run/systemd/system/user@$uid.service.d
+  test ! -e "$manager_dropin"
+  test ! -L "$manager_dropin"
+  sysctl -n kernel.printk_ratelimit > "$work/printk-ratelimit"
+  sudo sysctl -q -w kernel.printk_ratelimit=0
+  sudo mkdir "$manager_dropin"
+  printf '[Service]\nEnvironment=SYSTEMD_LOG_SECCOMP=1\n' | sudo tee "$manager_dropin/pqkey-seccomp-evidence.conf" >/dev/null
+  sudo systemctl daemon-reload
   if [ -d /sys/module/uhid ]; then touch "$work/uhid-was-loaded"; fi
   # Do not let package installation start a second, unowned display manager.
   touch "$work/masked-lightdm"
@@ -286,11 +297,26 @@ sudo rm -f /usr/local/bin/pqkey /usr/local/bin/pqkey.previous /usr/local/bin/pqk
 sudo udevadm control --reload-rules || failed=1
 if [ -f "$work/module-managed" ] && [ ! -f "$work/uhid-was-loaded" ]; then sudo modprobe -r uhid || failed=1; fi
 if [ -f "$work/masked-lightdm" ]; then sudo systemctl unmask lightdm.service || failed=1; fi
+# Undo prepare's system call evidence settings.
+manager_dropin=
+if [ -f "$work/uid" ]; then manager_dropin=/run/systemd/system/user@$(cat "$work/uid").service.d; fi
+if [ -n "$manager_dropin" ] && sudo test -e "$manager_dropin"; then
+  sudo rm -f -- "$manager_dropin/pqkey-seccomp-evidence.conf" || failed=1
+  sudo rmdir -- "$manager_dropin" || failed=1
+  sudo systemctl daemon-reload || failed=1
+fi
+if [ -f "$work/printk-ratelimit" ]; then
+  sudo sysctl -q -w "kernel.printk_ratelimit=$(cat "$work/printk-ratelimit")" || failed=1
+fi
 if [ -n "$(find /sys/devices/virtual/misc/uhid -name 'hidraw*' -print 2>/dev/null || true)" ]; then failed=1; fi
 # Confirm every owned global resource was actually removed.
 for path in /usr/local/bin/pqkey /usr/local/bin/pqkey.previous "$owned_home" "$rule" "$module" "$sudoers"; do
   if sudo test -e "$path" || sudo test -L "$path"; then failed=1; fi
 done
+if [ -n "$manager_dropin" ] && { sudo test -e "$manager_dropin" || sudo test -L "$manager_dropin"; }; then failed=1; fi
+if [ -f "$work/printk-ratelimit" ] && [ "$(sysctl -n kernel.printk_ratelimit)" != "$(cat "$work/printk-ratelimit")" ]; then
+  failed=1
+fi
 if id "$user" >/dev/null 2>&1; then failed=1; fi
 if systemctl is-active --quiet "$unit"; then failed=1; fi
 printf '%s\n' "$failed" > "$evidence/runner-cleanup-status"
