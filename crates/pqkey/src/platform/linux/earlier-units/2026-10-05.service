@@ -1,0 +1,75 @@
+# systemd user unit for pqkey, the ML-DSA software authenticator.
+#
+# install.sh, through "pqkey setup", installs this unit with ExecStart naming
+# the installed binary, and starts it. It runs under your user service manager:
+# the key belongs to your desktop session, and its state lives in
+# $XDG_DATA_HOME/pqkey (~/.local/share/pqkey). If you set XDG_DATA_HOME in
+# your shell, set it for the user manager too (environment.d(5)).
+#
+# Every registration, sign-in and reset is approved in a desktop notification,
+# sent over the D-Bus session bus. The user manager passes the bus's address
+# where it is the per-user bus, as on current distributions. Where the desktop
+# starts a bus of its own per login, import its address from the session:
+#   systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS
+# Without a bus or a notification server with buttons, every request is
+# denied, and `journalctl --user -u pqkey` says why. Never add
+# --presence auto-approve here: it lets any program running as you use your
+# passkeys unnoticed.
+
+[Unit]
+Description=pqkey ML-DSA software authenticator (virtual FIDO security key)
+Documentation=https://github.com/rainzhang05/SoftwareAuthenticator
+# Give up after 5 failed starts within a minute instead of retrying forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/pqkey run
+Environment=RUST_LOG=info
+# Keep secrets out of core files. The daemon also sets this limit itself,
+# and makes itself non-dumpable before opening its store, so crash handlers
+# cannot collect its memory and other user processes cannot attach to it.
+LimitCORE=0
+# On SIGTERM the daemon removes the virtual device and exits with status 0, so
+# stopping the service is not a failure and does not trigger a restart.
+Restart=on-failure
+RestartSec=5s
+# Status 3: a key started by hand ("pqkey start" with other options, or
+# "pqkey run") holds the state directory. Restarting cannot change that, so
+# the unit stays failed until it is started again; "pqkey status" says why.
+RestartPreventExitStatus=3
+
+# Sandboxing. A user service manager has no privileges, so this uses only
+# settings enforced with prctl() and seccomp, which need none:
+NoNewPrivileges=yes
+# No sockets other than AF_UNIX, which the D-Bus session bus uses and NSS may
+# use to look up group names.
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+#
+# Deliberately not used:
+#  - ProtectSystem=, ProtectHome=, ReadWritePaths=, PrivateTmp=,
+#    PrivateNetwork=, ProtectKernelTunables=, ProtectKernelModules=,
+#    ProtectKernelLogs=, ProtectClock=, ProtectHostname=,
+#    CapabilityBoundingSet=: these need mount or other namespaces, which a
+#    user manager can only set up inside a user namespace, so systemd has to
+#    add PrivateUsers= to use them. Where unprivileged user namespaces are
+#    restricted, as on Ubuntu 24.04 by default, the service may then fail to
+#    start. A user service has no capabilities to drop anyway.
+#  - PrivateDevices=: the same, and its private /dev would not contain
+#    /dev/uhid.
+#  - DeviceAllow=, DevicePolicy=, IPAddressDeny=: enforced with cgroup BPF
+#    programs, which only the system service manager can install.
+#  - ProtectControlGroups=, ProtectProc=: system services only.
+#  - SystemCallFilter=@system-service: probably fine, but not yet tested; a
+#    system call missing from the set would kill the daemon.
+
+[Install]
+WantedBy=default.target

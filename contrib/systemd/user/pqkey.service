@@ -52,6 +52,10 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
+# Confine a compromised daemon to the calls systemd allows common services.
+SystemCallFilter=@system-service
+# A refused call fails its operation with EPERM instead of killing the daemon.
+SystemCallErrorNumber=EPERM
 UMask=0077
 #
 # Deliberately not used:
@@ -68,8 +72,6 @@ UMask=0077
 #  - DeviceAllow=, DevicePolicy=, IPAddressDeny=: enforced with cgroup BPF
 #    programs, which only the system service manager can install.
 #  - ProtectControlGroups=, ProtectProc=: system services only.
-#  - SystemCallFilter=@system-service: probably fine, but not yet tested; a
-#    system call missing from the set would kill the daemon.
 
 [Install]
 WantedBy=default.target

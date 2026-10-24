@@ -19,6 +19,9 @@ const UNIT: &str = "pqkey.service";
 /// `/usr/local/bin/pqkey`.
 pub(crate) const UNIT_TEMPLATE: &str =
     include_str!("../../../../../contrib/systemd/user/pqkey.service");
+/// Units earlier versions shipped, which setup replaces as it does its own:
+/// the one from 2026-10-05 until system calls were filtered.
+const EARLIER_UNITS: [&str; 1] = [include_str!("earlier-units/2026-10-05.service")];
 
 /// Where the user's systemd units live.
 fn unit_dir() -> PathBuf {
@@ -135,8 +138,9 @@ fn install_unit(binary: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
-/// Only units matching the shipped template, with the default state path,
-/// are rewritten. User drop-ins remain under systemd's control.
+/// Only units matching the shipped template or one an earlier version
+/// shipped, with the default state path, are rewritten. User drop-ins remain
+/// under systemd's control.
 fn managed_unit(unit: &str) -> bool {
     let without_exec = |text: &str| {
         text.lines()
@@ -174,7 +178,11 @@ fn managed_unit(unit: &str) -> bool {
         }
         None => one_word(exec),
     });
-    ordinary_exec && without_exec(unit) == without_exec(UNIT_TEMPLATE)
+    let body = without_exec(unit);
+    ordinary_exec
+        && std::iter::once(UNIT_TEMPLATE)
+            .chain(EARLIER_UNITS)
+            .any(|template| without_exec(template) == body)
 }
 
 /// Run `systemctl --user` with `args`, failing with its message.
@@ -387,6 +395,28 @@ exit 0
         ));
         assert!(commands.contains("--user enable pqkey.service:unset"));
         let managed = fs::read_to_string(&unit).unwrap();
+        // An update replaces the unit an earlier version installed.
+        let exec = managed
+            .lines()
+            .find(|line| line.starts_with("ExecStart="))
+            .unwrap();
+        let [earlier] = EARLIER_UNITS;
+        let earlier: String = earlier
+            .lines()
+            .map(|line| {
+                if line.starts_with("ExecStart=") {
+                    exec
+                } else {
+                    line
+                }
+            })
+            .flat_map(|line| [line, "\n"])
+            .collect();
+        fs::write(&unit, &earlier).unwrap();
+        let updated = child("");
+        assert!(updated.status.success(), "{updated:?}");
+        assert!(String::from_utf8_lossy(&updated.stdout).contains("CHANGED:true"));
+        assert_eq!(fs::read_to_string(&unit).unwrap(), managed);
         let custom_state = UNIT_TEMPLATE.replace(
             "ExecStart=/usr/local/bin/pqkey run",
             "ExecStart=/usr/local/bin/pqkey --state-dir \"/retained/custom state\" run",
@@ -440,5 +470,11 @@ exit 0
         assert!(!managed_unit(
             &old.replace("Restart=on-failure", "Restart=no")
         ));
+        let [earlier] = EARLIER_UNITS;
+        assert!(!earlier.contains("\nSystemCallFilter="));
+        assert!(managed_unit(earlier));
+        assert!(!managed_unit(&format!(
+            "{earlier}\nEnvironment=CUSTOM=yes\n"
+        )));
     }
 }

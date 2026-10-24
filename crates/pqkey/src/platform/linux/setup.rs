@@ -255,6 +255,8 @@ mod tests {
         assert_eq!(unit.lines().count(), UNIT_TEMPLATE.lines().count());
         assert!(unit.contains("RestartPreventExitStatus=3"));
         assert!(unit.contains("LimitCORE=0"));
+        assert!(unit.contains("\nSystemCallFilter=@system-service\n"));
+        assert!(unit.contains("\nSystemCallErrorNumber=EPERM\n"));
 
         let unit = unit_file(Path::new("/home/a b/100%/pqkey")).unwrap();
         assert!(
