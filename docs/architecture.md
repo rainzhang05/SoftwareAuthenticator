@@ -322,6 +322,9 @@ The native client offers explicit protocol-specific read-only token acquisition.
 Listing selects pcmr from advertised capabilities and otherwise uses cm;
 delete/update require writable cm. It keeps no automatic token cache on disk.
 Optional getInfo encIdentifier and encCredStoreState remain absent.
+transportsForReset lists `usb`, the only transport. firmwareVersion is
+deliberately absent: it must increase with every released code change, and
+pqkey's crate version does not change per commit.
 
 ## Credential store
 
