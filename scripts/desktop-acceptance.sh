@@ -16,7 +16,9 @@ fi
 [[ ${GITHUB_RUN_ID:-} =~ ^[0-9]+$ && ${GITHUB_RUN_ATTEMPT:-} =~ ^[0-9]+$ ]] || exit 2
 run_root=/var/tmp/pqkey-desktop-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
 [ "${PQKEY_DESKTOP_ROOT:-$run_root}" = "$run_root" ] || exit 2
-test -d "$run_root" && test ! -L "$run_root" && test -O "$run_root"
+test -d "$run_root"
+test ! -L "$run_root"
+test -O "$run_root"
 [ "$(stat -c %a "$run_root")" = 755 ] || exit 2
 work=$run_root/control-$scenario
 evidence=$run_root/evidence/$scenario
@@ -45,7 +47,8 @@ if [ "$mode" = prepare ]; then
   test -z "$(find /usr/local/bin -maxdepth 1 -name 'pqkey.install-*' -print)"
   if id "$user" >/dev/null 2>&1; then exit 1; fi
   for path in /usr/local/bin/pqkey /usr/local/bin/pqkey.previous "$rule" "$module" "$sudoers"; do
-    test ! -e "$path" && test ! -L "$path"
+    test ! -e "$path"
+    test ! -L "$path"
   done
   test -d /run/systemd/system
   if systemctl is-active --quiet display-manager.service || systemctl is-active --quiet lightdm.service; then exit 1; fi
