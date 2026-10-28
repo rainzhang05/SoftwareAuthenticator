@@ -174,6 +174,23 @@ Dependabot proposes updates every week. Cargo updates that are
 semver-compatible and pass every workflow are merged automatically. Commit
 changes to `Cargo.lock` and `fuzz/Cargo.lock` together.
 
+`main` is the development branch, and its commits are tested after they are
+pushed. `stable` follows the newest commit on main that passed CI, E2E and
+Security. The **Promote stable** workflow moves it forward with
+`.github/scripts/promote-stable.sh` when one of those workflows finishes on
+main, and every six hours, which catches runs that another workflow started,
+such as the Dependabot auto-merge's; `gh workflow run promote.yml` runs it at
+once. It counts only runs started by a push, a schedule or a dispatch, and
+never moves `stable` back. GitHub does not let the workflow's token give
+`stable` workflow files that main's head does not have, so it skips a commit
+whose `.github/workflows` differs from both main's head and `stable`, and
+`stable` waits for a newer one. With `DRY_RUN=1` it only prints what it would
+do:
+
+```bash
+DRY_RUN=1 REPO=rainzhang05/SoftwareAuthenticator .github/scripts/promote-stable.sh
+```
+
 ## Linux platform boundary
 
 The [architecture notes](architecture.md) describe the boundary between

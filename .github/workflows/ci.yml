@@ -55,9 +55,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
 
-  # The Python tests of the Dependabot auto-merge decision
-  # (.github/scripts/test_dependabot_automerge.py). The runner image has
-  # python3, bash and jq.
+  # The Python tests of the decision scripts in .github/scripts: the Dependabot
+  # auto-merge (test_dependabot_automerge.py) and the stable promotion
+  # (test_promote_stable.py). The runner image has python3, bash and jq.
   automerge-scripts:
     name: auto-merge scripts
     runs-on: ubuntu-latest

@@ -1,0 +1,63 @@
+name: Promote stable
+
+# Moves the `stable` branch to the newest commit on main whose CI, E2E and
+# Security runs all passed. It only ever fast-forwards. The decision logic is in
+# .github/scripts/promote-stable.sh so it can be dry-run locally:
+#
+#   DRY_RUN=1 REPO=owner/repo .github/scripts/promote-stable.sh
+#
+# workflow_run starts it as soon as one of the three finishes on main, but the
+# script takes nothing from that event: the branch filter matches the branch
+# the finished run was for, and a pull request from a fork can name its branch
+# main too. The script decides from main's history and from each workflow's own
+# list of runs.
+#
+# The schedule catches commits whose event never came. Runs started with
+# GITHUB_TOKEN start no workflow_run, so when the Dependabot auto-merge merges a
+# pull request and dispatches the gates on main, the merge waits for the
+# schedule.
+#
+# Limitation: GITHUB_TOKEN cannot have the `workflows` permission, and GitHub
+# refuses its ref writes that point a branch at workflow files main's head does
+# not have, unless the write changes none. So a commit only qualifies if its
+# .github/workflows equals main's head's or stable's; otherwise stable waits
+# for a newer commit. A write GitHub refuses anyway, for example because main
+# moved during the run, fails the run and leaves stable where it is.
+
+on:
+  workflow_run:
+    workflows: [CI, E2E, Security]
+    types: [completed]
+    branches: [main]
+  schedule:
+    # Every six hours at 41 minutes past, away from the start of the hour,
+    # when GitHub delays and can drop scheduled runs.
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  # One run at a time. A run that waits behind another is replaced by the next
+  # one to arrive, which loses nothing: every run decides from the current state.
+  group: promote-stable
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: promote stable
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # create or fast-forward stable
+      actions: read # read the runs of CI, E2E and Security
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Fast-forward stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: .github/scripts/promote-stable.sh
