@@ -30,6 +30,10 @@ sys.path.insert(0, str(ROOT / 'tests/browser'))
 from runtime import OwnedProcesses, fido_devices, public_log  # noqa: E402
 from setup_support import BINARY, node, run  # noqa: E402
 from desktop_results import BASELINE, scenario_pass  # noqa: E402
+import seccomp_audit  # noqa: E402
+# The installer E2E judges refused calls by the same rules (seccomp_audit.py);
+# the offline tests reach these through this module.
+from seccomp_audit import audit_record, seccomp_check, syscall_names  # noqa: E402,F401
 
 RP = 'installed.desktop.example'
 # The system call filter under evaluation, for this run only. The owned user
@@ -38,68 +42,6 @@ RP = 'installed.desktop.example'
 SECCOMP_DROP_IN = ('# Desktop acceptance only: run the daemon under the system call filter\n'
                    '# being evaluated; the kernel logs each call it refuses.\n'
                    '[Service]\nSystemCallFilter=@system-service\nSystemCallErrorNumber=EPERM\n')
-# chroot is outside @system-service and fails unprivileged anyway: a harmless
-# call the filter refuses, which proves that refusals reach the journal.
-CANARY = 'import os\nprint(os.getpid(), flush=True)\ntry:\n    os.chroot("/")\nexcept PermissionError:\n    pass\n'
-# The audit record's code is the seccomp action alone, without the errno.
-SECCOMP_RET_ERRNO = '0x50000'
-# clone3 by audit architecture (x86_64, aarch64). No filter can see clone3's
-# flags, so for RestrictNamespaces= systemd's seccomp_restrict_namespaces()
-# fails every clone3, with ENOSYS so that glibc falls back to clone(). As the
-# filter allows clone3 (seccomp_unit), these records are ignored, not refused.
-CLONE3 = {('c000003e', '435'), ('c00000b7', '435')}
-# journald's "Missed N kernel messages".
-JOURNAL_MISSED = 'MESSAGE_ID=e9bf28e6e834481bb6f48f548ad13606'
-AUDIT_FIELD = re.compile(r'(\w+)=("[^"]*"|\S+)')
-
-
-def audit_record(line):
-    """The fields of a kernel audit record, with hex-encoded comm and exe decoded."""
-    fields = {}
-    for key, value in AUDIT_FIELD.findall(line.split('): ', 1)[-1]):
-        if value.startswith('"'):
-            value = value[1:-1]
-        elif key in ('comm', 'exe') and re.fullmatch(r'(?:[0-9A-F]{2})+', value):
-            value = bytes.fromhex(value).decode(errors='replace')
-        fields[key] = value
-    return fields
-
-
-def syscall_names(header=Path('/usr/include/x86_64-linux-gnu/asm/unistd_64.h')):
-    try:
-        return {number: name for name, number in re.findall(r'#define __NR_(\w+) (\d+)', header.read_text())}
-    except OSError:
-        return {}
-
-
-def seccomp_check(lines, *, daemon_pids, canaries, uid, names=None):
-    """Sort the journal's seccomp records (audit type 1326) and audit losses.
-
-    A record names the daemon by its executable, by systemd's executor before
-    it executes the daemon ("(pqkey)"), or by a process ID the run observed.
-    Its clone3 records (CLONE3) are ignored, not refused.
-    """
-    names = names or {}
-    found = {'daemon': [], 'ignored': [], 'canaries': {phase: False for phase in canaries}, 'other': [], 'lost': []}
-    for line in lines:
-        if 'audit_lost=' in line:
-            found['lost'].append(line)
-        if 'audit: type=1326 ' not in line:
-            continue
-        record = audit_record(line)
-        row = {key: record.get(key) for key in ('pid', 'uid', 'comm', 'exe', 'arch', 'syscall', 'code')}
-        if record.get('arch') == 'c000003e':
-            row['name'] = names.get(record.get('syscall'))
-        canary = next((phase for phase, pid in canaries.items() if pid == record.get('pid')), None)
-        if canary:
-            found['canaries'][canary] |= record.get('code') == SECCOMP_RET_ERRNO
-        elif (record.get('exe') in (BINARY, BINARY + ' (deleted)') or record.get('comm') == '(pqkey)'
-              or record.get('pid') in daemon_pids):
-            clone3 = (record.get('arch'), record.get('syscall')) in CLONE3 and record.get('code') == SECCOMP_RET_ERRNO
-            found['ignored' if clone3 else 'daemon'].append(row)
-        elif record.get('uid') == uid:
-            found['other'].append(row)
-    return found
 
 
 def wait_for(predicate, message, seconds=8):
@@ -484,17 +426,11 @@ class Acceptance:
 
     def seccomp_begin(self):
         """Run every daemon under the filter being evaluated, once refusals are shown to be journaled."""
-        assert 'errno' in Path('/proc/sys/kernel/seccomp/actions_logged').read_text().split(), 'refusals not logged'
-        assert Path('/proc/sys/kernel/printk_ratelimit').read_text().strip() == '0', 'audit records may be dropped'
-        flag = self.command(['sudo', '-n', 'grep', '-czx', 'SYSTEMD_LOG_SECCOMP=1',
-                             f"/proc/{self.manager_before['pid']}/environ"], check=False)
-        assert flag == '1', 'user manager does not flag seccomp filters for logging'
+        seccomp_audit.require_logging(self.command, self.manager_before['pid'])
         self.drop_in.parent.mkdir(parents=True)
         self.drop_in.write_text(SECCOMP_DROP_IN)
         self.command(['systemd-analyze', 'syscall-filter', '@system-service'])
-        cursor = self.command(['sudo', '-n', 'journalctl', '--system', '-n', '1', '-o', 'json',
-                               '--output-fields=__CURSOR'])
-        self.seccomp = {'cursor': json.loads(cursor)['__CURSOR'], 'canaries': {}}
+        self.seccomp = {'cursor': seccomp_audit.journal_cursor(self.command), 'canaries': {}}
         self.metadata['seccomp'] = {'drop_in': str(self.drop_in), 'printk_ratelimit': 0, 'manager_flag': True}
         self.write()
         assert self.canary('start')[1], 'refused system calls do not reach the journal'
@@ -502,33 +438,13 @@ class Acceptance:
     def canary(self, phase):
         """One refused call from a transient unit under the filter; returns the audit lines and whether it shows."""
         assert self.authorized
-        pid = self.command(['env', '-u', 'DBUS_SESSION_BUS_ADDRESS', 'systemd-run', '--user', '--pipe', '--wait',
-                            '--quiet', '--collect', '-p', 'NoNewPrivileges=yes',
-                            '-p', 'SystemCallFilter=@system-service', '-p', 'SystemCallErrorNumber=EPERM',
-                            '/usr/bin/python3', '-I', '-c', CANARY])
-        assert pid.isdigit(), 'canary did not report its process ID'
-        self.seccomp['canaries'][phase] = pid
-        deadline = time.monotonic() + 15
-        while True:
-            lines = self.kernel_audit()
-            seen = seccomp_check(lines, daemon_pids=(), canaries={phase: pid}, uid=str(os.getuid()))['canaries'][phase]
-            if seen or time.monotonic() > deadline:
-                return lines, seen
-            time.sleep(1)
-
-    def kernel_audit(self):
-        """The kernel's seccomp records and audit losses since the run began."""
-        return self.command(['sudo', '-n', 'journalctl', '-q', '-k', '--no-pager', '-o', 'cat',
-                             '--after-cursor=' + self.seccomp['cursor'], '--grep=^audit: (type=1326 |audit_lost=)'],
-                            check=False).splitlines()
+        pid = self.seccomp['canaries'][phase] = seccomp_audit.run_canary(self.command)
+        return seccomp_audit.await_canary(self.command, self.seccomp['cursor'], phase, pid)
 
     def seccomp_unit(self):
-        shown = dict(line.split('=', 1) for line in self.systemctl(
-            'show', 'pqkey.service', '--property=DropInPaths,SystemCallErrorNumber,SystemCallFilter').splitlines())
-        allowed = shown['SystemCallFilter'].split()
+        shown, allowed = seccomp_audit.unit_filter(
+            self.systemctl('show', 'pqkey.service', seccomp_audit.FILTER_PROPERTIES))
         assert str(self.drop_in) in shown['DropInPaths'].split(), 'system call filter drop-in not loaded'
-        assert shown['SystemCallErrorNumber'] == '1' and 'read' in allowed and 'chroot' not in allowed
-        assert 'clone3' in allowed, 'filter refuses clone3; its records would be refusals'
         self.metadata['seccomp'].update(drop_in_paths=shown['DropInPaths'].split(), allowed_calls=len(allowed))
         self.write()
 
@@ -539,16 +455,14 @@ class Acceptance:
         # Kernel messages are journaled in order: with the end canary's record,
         # every earlier record has been read.
         lines, _ = self.canary('end')
-        missed = self.command(['sudo', '-n', 'journalctl', '-q', '--system', '--no-pager', '-o', 'cat',
-                               '--after-cursor=' + self.seccomp['cursor'], JOURNAL_MISSED], check=False).splitlines()
+        missed = seccomp_audit.missed_messages(self.command, self.seccomp['cursor'])
         services = self.metadata.get('services', [])
         found = seccomp_check(lines, daemon_pids={str(service['pid']) for service in services},
                               canaries=self.seccomp['canaries'], uid=str(os.getuid()), names=syscall_names())
         (self.out / 'seccomp.log').write_text(''.join(line + '\n' for line in lines))
         # Every daemon ran with the same filters, the drop-in's included.
         filters = sorted({service['seccomp_filters'] for service in services})
-        passed = (not found['daemon'] and all(found['canaries'].values()) and not found['lost'] and not missed
-                  and len(filters) == 1)
+        passed = not seccomp_audit.problems(found, missed, filters)
         self.events.append({'case': 'seccomp', 'status': 'pass' if passed else 'fail',
                             'filter': 'SystemCallFilter=@system-service SystemCallErrorNumber=EPERM',
                             'refused': found['daemon'], 'ignored': found['ignored'], 'canaries': found['canaries'],

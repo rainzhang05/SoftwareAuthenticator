@@ -186,25 +186,52 @@ jobs:
 
       # The runner is disposable. This is the only E2E mode that runs the
       # installer and writes a real systemd user unit; developer runs skip it.
+      # The test also fails on any call the shipped unit's system call filter
+      # refuses the daemon (tests/e2e/seccomp_audit.py), so refusals must be
+      # logged: a user manager started with SYSTEMD_LOG_SECCOMP=1 has systemd
+      # flag the seccomp filters of its units for logging, and without auditd
+      # the kernel prints audit records rate-limited unless printk_ratelimit
+      # is 0. The runner's user manager may already run, so it is restarted to
+      # read its drop-in; that stops only its own services, never this job.
       - name: Prepare the installer E2E user manager
         if: success()
+        timeout-minutes: 5
         run: |
+          uid=$(id -u)
+          manager="user@$uid.service"
+          runtime="/run/user/$uid"
+          cat /proc/self/cgroup
+          if grep -qF "/$manager" /proc/self/cgroup; then
+            echo "::error::This job runs inside $manager, which the system call check must restart"
+            exit 1
+          fi
+          sudo mkdir -p "/run/systemd/system/$manager.d"
+          printf '[Service]\nEnvironment=SYSTEMD_LOG_SECCOMP=1\n' |
+            sudo tee "/run/systemd/system/$manager.d/50-pqkey-seccomp-log.conf" >/dev/null
+          sudo systemctl daemon-reload
+          sudo sysctl -q -w kernel.printk_ratelimit=0
           sudo loginctl enable-linger "$(id -un)"
-          runtime="/run/user/$(id -u)"
+          sudo systemctl restart "$manager"
           for _attempt in $(seq 1 50); do
-            if [ -S "$runtime/systemd/private" ]; then break; fi
+            if [ -S "$runtime/systemd/private" ] && [ -S "$runtime/bus" ]; then break; fi
             sleep 0.2
           done
           test -S "$runtime/systemd/private"
+          test -S "$runtime/bus"
+          # The check's canary reaches the manager through the user bus, as
+          # this trivial unit does, which also activates that bus.
+          env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$runtime" \
+            systemd-run --user --wait --quiet --collect /bin/true
           echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
 
+      # -rA shows the kernel's seccomp records of a passing run too.
       - name: Actual installer and setup over real HID
         if: success()
         timeout-minutes: 10
         env:
           PQKEY_INSTALLER_E2E: "1"
         run: |
-          "$RUNNER_TEMP/e2e-venv/bin/python" -m pytest tests/e2e/test_setup.py -v \
+          "$RUNNER_TEMP/e2e-venv/bin/python" -m pytest tests/e2e/test_setup.py -v -rA \
             --junitxml="$RUNNER_TEMP/e2e-diagnostics/setup-junit.xml"
 
       - name: Stop the installer E2E session bus
@@ -218,9 +245,13 @@ jobs:
         if: failure() || cancelled()
         run: |
           mkdir -p "$RUNNER_TEMP/e2e-diagnostics"
-          # Only dmesg needs sudo; the runner owns the output file.
+          # Only dmesg and journalctl need sudo; the runner owns the output files.
           # shellcheck disable=SC2024
           sudo dmesg > "$RUNNER_TEMP/e2e-diagnostics/dmesg.txt" 2>&1 || true
+          # The installed service's log, from the installer E2E.
+          # shellcheck disable=SC2024
+          sudo journalctl --no-pager _SYSTEMD_USER_UNIT=pqkey.service \
+            > "$RUNNER_TEMP/e2e-diagnostics/pqkey-service.txt" 2>&1 || true
           # A race in the kernel's uhid driver can kill the key's thread on
           # arm64 (drivers/hid/uhid.c reads its queue without the queue lock).
           if grep -q usercopy "$RUNNER_TEMP/e2e-diagnostics/dmesg.txt" &&

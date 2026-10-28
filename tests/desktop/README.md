@@ -121,6 +121,10 @@ records (syscall 435 on x86_64 and aarch64) as ignored instead of failing.
 `seccomp.log` keeps the run's audit records. The summary's "System call filter"
 section names each refused call and counts the ignored clone3 calls.
 
+These rules live in `tests/e2e/seccomp_audit.py`. The installer E2E in
+[e2e.yml](../../.github/workflows/e2e.yml) applies them on every push, on
+x86_64 and arm64, to the shipped unit as installed, through reset and WINK.
+
 ## Results and cleanup
 
 The workflow initializes incomplete results before setup. Final `report.json`
