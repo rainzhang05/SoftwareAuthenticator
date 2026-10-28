@@ -1225,6 +1225,10 @@ mod replacement_tests;
 mod reset_tests;
 
 #[cfg(test)]
+#[path = "durability_tests.rs"]
+mod durability_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::CoseAlg;
