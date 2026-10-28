@@ -289,7 +289,7 @@ impl KeySource for FileKeySource {
         let key = RootKey::generate()?;
         fsio::replace_file(&self.dir, Self::file_name(domain), key.expose())?;
         if let Some(previous) = previous
-            && let Err(err) = fsio::overwrite_with_zeros(&previous)
+            && let Err(err) = fsio::overwrite_with_zeros(&previous, &path)
         {
             log::warn!("credential store: could not overwrite the old {domain} key: {err}");
         }
@@ -377,6 +377,10 @@ pub(crate) fn is_credential_file_name(name: &str) -> bool {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test links a second name to a key file directly, to watch rotation wipe it"
+)]
 mod tests {
     use super::*;
     use crate::store::test_support::TempDir;

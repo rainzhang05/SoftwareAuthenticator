@@ -1,5 +1,10 @@
 //! Real filesystem failures and process exits at transaction boundaries.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "tests remove, move and roll back store files directly, outside the store's wrappers"
+)]
+
 use std::cell::{Cell, RefCell};
 use std::process::{Command, Stdio};
 use std::rc::Rc;

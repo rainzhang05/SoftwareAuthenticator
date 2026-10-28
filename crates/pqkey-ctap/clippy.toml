@@ -1,0 +1,18 @@
+# The credential store makes its flushes, renames, links and removals only
+# through the wrappers in src/store/fsio.rs. Each wrapper emits the test
+# checkpoints of its own call, so removing a call also removes its checkpoints
+# from the traces the store's crash tests check. The wrappers carry
+# `#[expect(clippy::disallowed_methods)]`, as do the test modules that damage
+# or roll back store files directly.
+#
+# Clippy uses the first clippy.toml it finds from a package's manifest
+# directory upwards, so this file applies to pqkey-ctap alone, and replaces
+# rather than extends any clippy.toml further up.
+disallowed-methods = [
+    { path = "std::fs::File::sync_all", reason = "flush through fsio::sync_file or fsio::sync_dir_strict" },
+    { path = "std::fs::File::sync_data", reason = "flush through fsio::sync_file or fsio::sync_dir_strict" },
+    { path = "std::fs::rename", reason = "rename through fsio::rename" },
+    { path = "std::fs::hard_link", reason = "link through fsio::hard_link" },
+    { path = "std::fs::remove_file", reason = "remove through fsio::remove_file_if_present" },
+    { path = "std::fs::remove_dir", reason = "remove through fsio::remove_dir" },
+]

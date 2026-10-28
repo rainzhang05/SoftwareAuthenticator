@@ -1,5 +1,10 @@
 //! Failed reset must never roll back a surviving credential's counter.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "tests link a second name to the old key file directly, to watch reset wipe it"
+)]
+
 use std::cell::RefCell;
 use std::process::{Command, Stdio};
 use std::rc::Rc;

@@ -8,6 +8,10 @@
 //!   temporary file in the same directory, which is flushed with `fsync` before
 //!   it is renamed or linked into place, and the directory is flushed after
 //!   that, so a crash leaves either the old file or the complete new one.
+//! * Each flush, rename, link and removal goes through one function here,
+//!   which emits the test checkpoints of that call itself, so a crash test's
+//!   trace loses them when the call is removed.  The crate's `clippy.toml`
+//!   refuses the underlying `std::fs` calls everywhere else.
 
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Read, Write};
@@ -93,11 +97,57 @@ pub(crate) fn sync_dir(dir: &Path) -> Result<(), StoreError> {
 
 /// Transaction preparation cannot assume unsupported directory flushing
 /// made a candidate's name durable.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the store's directory flush, which emits its checkpoints"
+)]
 pub(crate) fn sync_dir_strict(dir: &Path) -> Result<(), StoreError> {
     checkpoint("directory-flush", dir)?;
     let handle = File::open(dir).map_err(|err| io_error(dir, err))?;
     handle.sync_all().map_err(|err| io_error(dir, err))?;
     checkpoint("directory-flushed", dir)
+}
+
+/// Flush the contents and metadata of `file`, which was opened as `path`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the store's file flush, which emits its checkpoints"
+)]
+fn sync_file(file: &File, path: &Path) -> Result<(), StoreError> {
+    checkpoint("file-flush", path)?;
+    file.sync_all().map_err(|err| io_error(path, err))?;
+    checkpoint("file-flushed", path)
+}
+
+/// Rename `from` to `to`, between the checkpoints `before` and `after`.
+///
+/// An error leaves `to` as it was.  Once the rename has happened, the result
+/// of `after` is returned inside `Ok`, so that each caller decides what an
+/// error after publication means.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the store's rename, which emits its checkpoints"
+)]
+pub(crate) fn rename(
+    from: &Path,
+    to: &Path,
+    before: &str,
+    after: &str,
+) -> Result<Result<(), StoreError>, StoreError> {
+    checkpoint(before, to)?;
+    fs::rename(from, to).map_err(|err| io_error(to, err))?;
+    Ok(checkpoint(after, to))
+}
+
+/// Link `from` to the new name `to`, which must not exist yet.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the store's hard link, which emits its checkpoints"
+)]
+fn hard_link(from: &Path, to: &Path) -> Result<(), StoreError> {
+    checkpoint("link", to)?;
+    fs::hard_link(from, to).map_err(|err| io_error(to, err))?;
+    checkpoint("linked", to)
 }
 
 /// Read at most `limit` bytes of a file, or `None` if it does not exist.
@@ -126,7 +176,7 @@ pub(crate) fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> Result<()
         name,
         contents,
         false,
-        |from, to| fs::rename(from, to),
+        |from, to| rename(from, to, "rename", "renamed"),
         sync_dir,
     )
 }
@@ -140,13 +190,14 @@ pub(crate) fn replace_pin_state(
 ) -> Result<CommitDurability, StoreError> {
     let target = dir.join(name);
     let temp = write_temp_file(dir, contents)?;
-    if let Err(err) = checkpoint("rename", &target)
-        .and_then(|()| fs::rename(&temp, &target).map_err(|err| io_error(&target, err)))
-    {
-        let _ = fs::remove_file(temp);
-        return Err(err);
-    }
-    match checkpoint("renamed", &target).and_then(|()| sync_dir_strict(dir)) {
+    let renamed = match rename(&temp, &target, "rename", "renamed") {
+        Ok(renamed) => renamed,
+        Err(err) => {
+            let _ = remove_file_if_present(&temp);
+            return Err(err);
+        }
+    };
+    match renamed.and_then(|()| sync_dir_strict(dir)) {
         Ok(()) => Ok(CommitDurability::Flushed),
         Err(err) => {
             log::warn!("PIN state published with unconfirmed durability: {err}");
@@ -168,7 +219,7 @@ pub(crate) fn replace_file_committed(
         name,
         contents,
         true,
-        |from, to| fs::rename(from, to),
+        |from, to| rename(from, to, "rename", "renamed"),
         sync_dir,
     )
 }
@@ -178,20 +229,18 @@ fn replace_file_with(
     name: &str,
     contents: &[u8],
     rename_commits: bool,
-    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    rename: impl FnOnce(&Path, &Path) -> Result<Result<(), StoreError>, StoreError>,
     flush: impl FnOnce(&Path) -> Result<(), StoreError>,
 ) -> Result<(), StoreError> {
     let target = dir.join(name);
     let temp = write_temp_file(dir, contents)?;
-    if let Err(err) = checkpoint("rename", &target) {
-        let _ = fs::remove_file(&temp);
-        return Err(err);
+    match rename(&temp, &target) {
+        Ok(renamed) => renamed?,
+        Err(err) => {
+            let _ = remove_file_if_present(&temp);
+            return Err(err);
+        }
     }
-    if let Err(err) = rename(&temp, &target) {
-        let _ = fs::remove_file(&temp);
-        return Err(io_error(&target, err));
-    }
-    checkpoint("renamed", &target)?;
     match flush(dir) {
         Err(err) if rename_commits => {
             log::warn!(
@@ -218,20 +267,26 @@ pub(crate) fn create_file_exclusive(
 ) -> Result<bool, StoreError> {
     let target = dir.join(name);
     let temp = write_temp_file(dir, contents)?;
-    let linked = fs::hard_link(&temp, &target);
-    let _ = fs::remove_file(&temp);
+    let linked = hard_link(&temp, &target);
+    let _ = remove_file_if_present(&temp);
     match linked {
         Ok(()) => {
             sync_dir(dir)?;
             Ok(true)
         }
-        Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(false),
-        Err(err) => Err(io_error(&target, err)),
+        Err(StoreError::Io { source, .. }) if source.kind() == ErrorKind::AlreadyExists => {
+            Ok(false)
+        }
+        Err(err) => Err(err),
     }
 }
 
 /// Remove a file if it exists, returning whether it did.  The caller is
 /// responsible for flushing the directory.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the store's file removal, which emits its checkpoints"
+)]
 pub(crate) fn remove_file_if_present(path: &Path) -> Result<bool, StoreError> {
     checkpoint("remove", path)?;
     match fs::remove_file(path) {
@@ -242,6 +297,18 @@ pub(crate) fn remove_file_if_present(path: &Path) -> Result<bool, StoreError> {
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
         Err(err) => Err(io_error(path, err)),
     }
+}
+
+/// Remove the directory `dir`, which fails unless it is empty.  The caller is
+/// responsible for flushing its parent.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the store's directory removal, which emits its checkpoints"
+)]
+pub(crate) fn remove_dir(dir: &Path) -> Result<(), StoreError> {
+    checkpoint("remove", dir)?;
+    fs::remove_dir(dir).map_err(|err| io_error(dir, err))?;
+    checkpoint("removed", dir)
 }
 
 /// Remove every non-directory entry of `dir`, then flush it.  A missing
@@ -275,28 +342,30 @@ pub(crate) fn remove_temp_files(dir: &Path) {
     };
     for entry in entries.flatten() {
         if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
-            let _ = fs::remove_file(entry.path());
+            let _ = remove_file_if_present(&entry.path());
         }
     }
 }
 
-/// Overwrite the whole of an open file with zeros and flush it.
+/// Overwrite the whole of an open file with zeros and flush it.  `path` is
+/// where the file was opened, for errors and checkpoints.
 ///
 /// Used on a key file that has already been unlinked, so no reader can see
 /// the zeros.  On filesystems that update data in place this destroys the old
 /// key's blocks; on copy-on-write filesystems and SSDs it may not, which is
 /// why this is only a best effort.
-pub(crate) fn overwrite_with_zeros(file: &File) -> io::Result<()> {
+pub(crate) fn overwrite_with_zeros(file: &File, path: &Path) -> Result<(), StoreError> {
     const CHUNK: [u8; 4096] = [0; 4096];
-    let len = file.metadata()?.len();
+    let len = file.metadata().map_err(|err| io_error(path, err))?.len();
     let mut offset = 0u64;
     while offset < len {
         let remaining = usize::try_from(len - offset).unwrap_or(CHUNK.len());
         let chunk = &CHUNK[..remaining.min(CHUNK.len())];
-        file.write_all_at(chunk, offset)?;
+        file.write_all_at(chunk, offset)
+            .map_err(|err| io_error(path, err))?;
         offset += chunk.len() as u64;
     }
-    file.sync_all()
+    sync_file(file, path)
 }
 
 /// Write `contents` to a new, uniquely named `0600` file in `dir`, flush it,
@@ -319,15 +388,13 @@ pub(crate) fn write_temp_file(dir: &Path, contents: &[u8]) -> Result<PathBuf, St
             file.write_all(contents)
                 .map_err(|err| io_error(&path, err))?;
             checkpoint("written", &path)?;
-            checkpoint("file-flush", &path)?;
-            file.sync_all().map_err(|err| io_error(&path, err))?;
-            checkpoint("file-flushed", &path)
+            sync_file(&file, &path)
         })();
         return match write {
             Ok(()) => Ok(path),
             Err(err) => {
                 drop(file);
-                let _ = fs::remove_file(&path);
+                let _ = remove_file_if_present(&path);
                 Err(err)
             }
         };
@@ -570,7 +637,7 @@ mod tests {
             "large-blobs",
             b"pending",
             true,
-            |_, _| Err(io::Error::other("injected rename failure")),
+            |_, to| Err(io_error(to, io::Error::other("injected rename failure"))),
             |_| panic!("flush must not run when rename failed"),
         );
         assert!(matches!(result, Err(StoreError::Io { .. })));
@@ -590,7 +657,7 @@ mod tests {
             "large-blobs",
             b"committed",
             true,
-            |from, to| fs::rename(from, to),
+            |from, to| rename(from, to, "rename", "renamed"),
             |path| Err(io_error(path, io::Error::other("injected flush failure"))),
         );
         assert!(result.is_ok());
@@ -606,7 +673,7 @@ mod tests {
                 "other",
                 b"visible",
                 false,
-                |from, to| fs::rename(from, to),
+                |from, to| rename(from, to, "rename", "renamed"),
                 |path| Err(io_error(path, io::Error::other("injected flush failure"))),
             )
             .is_err()
@@ -652,7 +719,7 @@ mod tests {
         let path = scratch.path().join("secret");
         fs::write(&path, vec![0xa5; 5000]).unwrap();
         let file = OpenOptions::new().write(true).open(&path).unwrap();
-        overwrite_with_zeros(&file).unwrap();
+        overwrite_with_zeros(&file, &path).unwrap();
         assert_eq!(fs::read(&path).unwrap(), vec![0; 5000]);
     }
 }

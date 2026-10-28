@@ -1,5 +1,10 @@
 //! File-backed PIN commands at the publication boundary, in both layouts.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a test removes the PIN state file directly, outside the store's wrappers"
+)]
+
 use super::*;
 use crate::ClassicPinProtocol;
 use crate::ctap::pin_observation as observation;

@@ -572,13 +572,13 @@ impl<K: KeySource> FileStore<K> {
         )?;
         let temp = fsio::write_temp_file(&dir, &sealed)?;
         let target = dir.join(name);
-        if let Err(err) = fsio::checkpoint("rename", &target)
-            .and_then(|()| fs::rename(&temp, &target).map_err(|err| fsio::io_error(&target, err)))
-        {
-            let _ = fs::remove_file(temp);
-            return Err(err);
+        match fsio::rename(&temp, &target, "rename", "renamed") {
+            Ok(renamed) => renamed?,
+            Err(err) => {
+                let _ = fsio::remove_file_if_present(&temp);
+                return Err(err);
+            }
         }
-        fsio::checkpoint("renamed", &target)?;
         fsio::sync_dir_strict(&dir)
     }
 
@@ -606,19 +606,25 @@ impl<K: KeySource> FileStore<K> {
         let dir = self.root.join(MANAGED_DIR);
         let temp = self.prepare_manifest(keys, manifest, &dir)?;
         let target = dir.join(ACTIVE_FILE);
-        if let Err(err) = fsio::checkpoint("publication", &target)
-            .and_then(|()| fs::rename(&temp, &target).map_err(|err| fsio::io_error(&target, err)))
-        {
-            let _ = fs::remove_file(temp);
-            return Err(err);
+        match fsio::rename(&temp, &target, "publication", "published") {
+            Ok(published) => Ok(self.finish_commit(manifest, &dir, published)),
+            Err(err) => {
+                let _ = fsio::remove_file_if_present(&temp);
+                Err(err)
+            }
         }
-        Ok(self.finish_commit(manifest, &dir))
     }
 
-    fn finish_commit(&self, manifest: &Manifest, publication_dir: &Path) -> CredentialCommit {
+    /// `published` is the outcome of the checkpoint after the publishing
+    /// rename.
+    fn finish_commit(
+        &self,
+        manifest: &Manifest,
+        publication_dir: &Path,
+        published: Result<(), StoreError>,
+    ) -> CredentialCommit {
         // Nothing after publication is returned as a failed transaction.
-        let published = self.root.join(MANAGED_DIR).join(ACTIVE_FILE);
-        if let Err(err) = fsio::checkpoint("published", &published)
+        if let Err(err) = published
             .and_then(|()| fsio::sync_dir_strict(publication_dir))
             .and_then(|()| {
                 if publication_dir != self.root {
@@ -920,18 +926,17 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
         }
         let temp = self.prepare_manifest(&keys, &manifest, &namespace)?;
         let active = namespace.join(ACTIVE_FILE);
-        if let Err(err) = fsio::checkpoint("rename", &active)
-            .and_then(|()| fs::rename(&temp, &active).map_err(|err| fsio::io_error(&active, err)))
-        {
-            let _ = fs::remove_file(temp);
-            return Err(err);
+        match fsio::rename(&temp, &active, "rename", "renamed") {
+            Ok(renamed) => renamed?,
+            Err(err) => {
+                let _ = fsio::remove_file_if_present(&temp);
+                return Err(err);
+            }
         }
-        fsio::checkpoint("renamed", &active)?;
         fsio::sync_dir_strict(&namespace)?;
         let managed = self.root.join(MANAGED_DIR);
-        fsio::checkpoint("publication", &managed)?;
-        fs::rename(&namespace, &managed).map_err(|err| fsio::io_error(&managed, err))?;
-        Ok(self.finish_commit(&manifest, &self.root))
+        let published = fsio::rename(&namespace, &managed, "publication", "published")?;
+        Ok(self.finish_commit(&manifest, &self.root, published))
     }
 
     fn delete(&mut self, credential_id: &[u8]) -> Result<bool, StoreError> {
@@ -1002,7 +1007,7 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
             fsio::remove_all_files(&self.credentials_dir)?;
             if exists(&self.credentials_dir)? {
                 // Leave unknown directories alone, as the legacy reset does.
-                let _ = fs::remove_dir(&self.credentials_dir);
+                let _ = fsio::remove_dir(&self.credentials_dir);
             }
         } else {
             fsio::remove_all_files(&self.credentials_dir)?;

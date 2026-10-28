@@ -1,6 +1,11 @@
 //! Tests that only apply to `FileStore`: persistence, the on-disk format,
 //! encryption, tamper detection, key handling, and permissions.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "tests remove and move store files directly; the store's wrappers are private"
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::fs;
