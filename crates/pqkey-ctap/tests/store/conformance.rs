@@ -1,4 +1,5 @@
-//! One suite of behavioural cases, run against every `CredentialStore`.
+//! One suite of behavioural cases, run against every `CredentialStore`, and
+//! against the file store in both of its on-disk layouts.
 //!
 //! Each case is a function generic over a [`Backend`].  The
 //! `conformance_suite!` invocation at the bottom instantiates every case once
@@ -43,6 +44,7 @@ impl Backend for Memory {
     }
 }
 
+/// A file store in the legacy layout that every store starts in.
 pub struct File;
 
 impl Backend for File {
@@ -56,6 +58,38 @@ impl Backend for File {
             store,
             _dir: Some(dir),
         }
+    }
+}
+
+/// A file store in the managed layout, which a store moves to at its first
+/// passkey registration and keeps: the layout of every store a passkey was
+/// ever registered with.
+///
+/// It opens a [`File`] store, registers a passkey as makeCredential does, with
+/// `insert_or_replace_discoverable`, and deletes it as deleteCredential does,
+/// which leaves the store empty in the managed layout.  The capacity is set
+/// afterwards, so that a store too small to hold that passkey is migrated too.
+pub struct ManagedFile;
+
+impl Backend for ManagedFile {
+    type Store = FileStore;
+    fn create(max_credentials: usize) -> Fixture<FileStore> {
+        let mut fixture = File::create(DEFAULT_MAX_CREDENTIALS);
+        let store = &mut fixture.store;
+        let mut passkey = new_record(CoseAlg::ES256);
+        // The ID of a credential made with "rk" true.
+        passkey.credential_id = [vec![1], random_bytes::<32>().to_vec()].concat();
+        store
+            .insert_or_replace_discoverable(&passkey)
+            .expect("register a passkey");
+        assert!(store.delete(&passkey.credential_id).expect("delete"));
+        let state = store.state_dir();
+        assert!(state.join("credential-format").is_file());
+        assert!(state.join("credential-set").join("active").is_file());
+        assert!(!state.join("credentials").exists());
+        assert_eq!(store.count().unwrap(), 0);
+        fixture.store = fixture.store.with_max_credentials(max_credentials);
+        fixture
     }
 }
 
@@ -823,6 +857,15 @@ macro_rules! conformance_suite {
                 #[test]
                 fn $case() {
                     super::$case::<super::File>();
+                }
+            )+
+        }
+
+        mod managed_file {
+            $(
+                #[test]
+                fn $case() {
+                    super::$case::<super::ManagedFile>();
                 }
             )+
         }
