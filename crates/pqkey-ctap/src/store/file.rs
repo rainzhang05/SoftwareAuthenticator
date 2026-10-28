@@ -1496,4 +1496,96 @@ mod tests {
             Some(stored)
         );
     }
+
+    fn unhex(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// Pins a legacy and a managed credential record's envelope, and with them
+    /// the logical names bound into their associated data, to the independent
+    /// implementation that `envelope_matches_independent_implementation` in
+    /// the envelope tests describes, cross-checked with PyCryptodome's
+    /// XChaCha20-Poly1305:
+    ///
+    /// ```text
+    /// key       = credential record subkey of root key bytes(range(32))
+    /// nonce     = bytes(range(0x40, 0x58))
+    /// plaintext = the ML-DSA-44 credential encoding pinned in the codec tests
+    /// file      = hmac.new(index_subkey, bytes(range(16)), sha256).hexdigest(),
+    ///             the file name of the plaintext's credential ID
+    /// name      = "credentials/" + file (legacy), or
+    ///             "credential-set/records/" + file (managed); record type 1
+    /// aad       = b"FTSA" + b"\x01\x01" + len(name).to_bytes(2, "big") + name
+    /// envelope  = b"FTSA\x01\x01" + nonce + ciphertext + tag
+    /// ```
+    ///
+    /// with the record and index subkeys that the keys tests'
+    /// `key_hierarchy_matches_independent_implementation` pins. Sharing key,
+    /// nonce and plaintext, the two envelopes differ only in the tag. A legacy
+    /// record keeps its name when migration moves it into `credential-set/`,
+    /// so the store must read both from these bytes.
+    #[test]
+    fn credential_envelopes_match_independent_implementation() {
+        let keys = CredentialKeys::derive(&RootKey::from_bytes(core::array::from_fn(|i| i as u8)))
+            .unwrap();
+        let nonce = core::array::from_fn(|i| 0x40 + i as u8);
+        let plaintext = unhex(concat!(
+            "ac",
+            "0150000102030405060708090a0b0c0d0e0f",
+            "026b6578616d706c652e636f6d",
+            "03420102",
+            "0465616c696365",
+            "06382f",
+            "0702",
+            "085820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+            "095820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "0a5820bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "0b02",
+            "0c19012c",
+            "0d1a00011170",
+        ));
+        let file = "e6acd32208f1e29a4d694ffe4a80571d0c7bc4be80089bf42a321fcfaa1c86ad";
+        assert_eq!(keys.file_name(&(0..16).collect::<Vec<u8>>()).unwrap(), file);
+        // Header, nonce and ciphertext, which both envelopes share.
+        let shared = concat!(
+            "465453410101404142434445464748494a4b4c4d4e4f5051525354555657",
+            "72f7a4467c10b8ea017e3360107fc14cd65622dd0b0357a17153b81f7211e77bcf",
+            "335433a3db53c1711a6ea04eaff62cf84e5e115e47713160d1fbfcb1de9cfad4d6",
+            "da3edcd18f85aff96efded398ab1cc5ca973c4e1b2955140196878e790ecac47f8",
+            "27aee15bc2888d7c1aae7a8772ff8b7574a44d2e22a9addc0589dd287b91e01a96",
+            "453395a1ea1d3aa713958df44f99c1dac53f92b1b9ef2f77bc87e973d8fea4f010",
+        );
+        let scratch = TempDir::new();
+        let store = FileStore::open(scratch.path().join("state")).unwrap();
+        for (location, tag) in [
+            (Location::Legacy, "0bd66b16c6ed6e2e4e58e6d408f20b81"),
+            (Location::Managed, "5ae835c6ec729e77575f261f9978f93a"),
+        ] {
+            let name = credential_object(file, location);
+            let expected = unhex(&format!("{shared}{tag}"));
+            assert_eq!(
+                envelope::seal_with_nonce(
+                    &keys.record,
+                    RecordType::Credential,
+                    &name,
+                    &nonce,
+                    &plaintext
+                )
+                .unwrap(),
+                expected,
+                "{name}"
+            );
+            fs::write(scratch.path().join(file), &expected).unwrap();
+            assert_eq!(
+                store
+                    .read_credential_in(&keys, file, scratch.path(), location)
+                    .unwrap(),
+                Some(codec::decode_credential(&plaintext).unwrap()),
+                "{name}"
+            );
+        }
+    }
 }
