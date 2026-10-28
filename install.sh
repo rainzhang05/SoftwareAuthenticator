@@ -157,6 +157,18 @@ size() { # size MB: MB, readably
 [ "$mb_free" -ge "$mb_needed" ] ||
   fail "pqkey needs about $(size "$mb_needed") of disk space, but only $(size "$mb_free") is free"
 
+# Whether this commit passed CI, from this clone's own refs (no network):
+# stable only ever moves to main commits whose CI, E2E and Security runs
+# passed. Nothing to say without git, or in a copy that is not a clone.
+ci_note=''
+if command -v git >/dev/null && [ "$(git rev-parse --show-toplevel 2>/dev/null)" -ef . ]; then
+  if ! git rev-parse --quiet --verify refs/remotes/origin/stable >/dev/null 2>&1; then
+    ci_note='Note: without a stable branch, this clone cannot tell whether this commit passed CI.'
+  elif ! git merge-base --is-ancestor HEAD refs/remotes/origin/stable 2>/dev/null; then
+    ci_note='Warning: this commit is not on the stable branch, so it has not passed CI yet.'
+  fi
+fi
+
 tools=("${missing[@]/linker/a C linker}")
 tools=("${tools[@]/acl/device ACL tools}")
 have_rust || tools+=("Rust")
@@ -168,6 +180,8 @@ echo "  - pqkey, built in this clone (about $(size "$mb_build")) and installed i
 echo "  - access to /dev/uhid for the key: udev rules and the uhid module"
 echo "  - the key, started now and with every login, and its PIN"
 echo
+[ -z "$ci_note" ] ||
+  printf '%s%s%s\nTo install stable: git fetch origin && git switch stable && ./install.sh\n\n' "$bold" "$ci_note" "$reset"
 echo "It needs your password once, for sudo."
 if ! $yes; then
   [ -t 0 ] || fail "no terminal to ask on; run it with --yes"
@@ -177,6 +191,7 @@ fi
 
 mkdir -p "$(dirname "$log")" || fail "cannot create the installation log directory"
 : >"$log" || fail "cannot write $log"
+[ -z "$ci_note" ] || echo "$ci_note" >>"$log"
 
 # The sudo password once, now, kept fresh until the script ends: the steps
 # below that need root then never stop to ask, not even after a long build.

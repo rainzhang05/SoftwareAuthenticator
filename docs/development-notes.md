@@ -210,7 +210,7 @@ socket-backed devices; real HID E2E tests require access to `/dev/uhid`.
 Run `scripts/install-tests.sh` with Docker running. It sends the installer and
 fixtures to disposable Linux containers, with no writable host mounts, host
 sudo or host devices. `INSTALL_TEST_IMAGE` may select a compatible preloaded
-image (Bash, Python 3 and coreutils); the default is `rust:1.89-bookworm`.
+image (Bash, Python 3, coreutils and Git); the default is `rust:1.89-bookworm`.
 Both `scripts/check.sh` modes and the CI installer job run these checks.
 Missing Docker is a failed required check rather than an implicit pass.
 

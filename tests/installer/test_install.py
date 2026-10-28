@@ -14,6 +14,12 @@ import unittest
 SOURCE = Path(__file__).resolve().parents[2]
 INSTALLED = Path("/usr/local/bin/pqkey")
 RECOVERY = Path(str(INSTALLED) + ".previous")
+GIT = shutil.which("git")
+GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+               GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+WARNING = "Warning: this commit is not on the stable branch, so it has not passed CI yet."
+NOTE = "Note: without a stable branch, this clone cannot tell whether this commit passed CI."
+HINT = "git fetch origin && git switch stable && ./install.sh"
 
 
 class Installer(unittest.TestCase):
@@ -101,6 +107,29 @@ class Installer(unittest.TestCase):
     def assert_preserved(self):
         for file in ("credentials", "pin", "policy"):
             self.assertEqual((self.state / file).read_bytes(), f"preserved {file}".encode())
+
+    def git(self, *args, cwd=None):
+        self.assertIsNotNone(GIT, "the installer's stable checks need git in the test image")
+        subprocess.run([GIT, *args], cwd=cwd or self.clone, env=GIT_ENV, check=True, capture_output=True)
+
+    def make_origin(self):
+        # The fixture becomes the repository users clone: main has two commits,
+        # and the installer finds git.
+        origin = self.root / "origin"
+        self.clone.rename(origin)
+        (origin / "install.sh").chmod(0o755)
+        for args in (("init", "-q", "-b", "main"), ("add", "-A"), ("commit", "-q", "-m", "one"),
+                     ("commit", "-q", "--allow-empty", "-m", "two")):
+            self.git(*args, cwd=origin)
+        (self.bin / "git").symlink_to(GIT)
+        return origin
+
+    def run_hint(self):
+        # What the warning and the note tell the user to run, unattended. Its
+        # output includes git's own messages, which name stable.
+        result = subprocess.run(["/bin/bash", "-c", HINT + " --yes"], cwd=self.clone, env=self.env, input=b"",
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+        return result.returncode, result.stdout.decode()
 
     def test_configured_install_and_rerun_preserve_state(self):
         for _ in range(2):
@@ -296,6 +325,67 @@ class Installer(unittest.TestCase):
                 del self.env[variable]
         status, output = self.run_install(args=("--yes", "unexpected"))
         self.assertEqual(status, 2, output)
+
+    def test_stable_clone_builds_without_a_ci_note(self):
+        origin = self.make_origin()
+        self.git("branch", "stable", "main~1", cwd=origin)
+        self.git("clone", "-q", "--branch", "stable", str(origin), str(self.clone), cwd=self.root)
+        status, output = self.run_install()
+        self.assertEqual(status, 0, output)
+        self.assertNotIn("stable", output)
+        # Stable moves on; a fetched clone still builds a commit stable contains.
+        self.git("branch", "-f", "stable", "main", cwd=origin)
+        self.git("fetch", "-q", "origin")
+        status, output = self.run_install()
+        self.assertEqual(status, 0, output)
+        self.assertNotIn("stable", output)
+
+    def test_commit_not_on_stable_warns_before_continuing(self):
+        origin = self.make_origin()
+        self.git("branch", "stable", "main~1", cwd=origin)
+        self.git("clone", "-q", str(origin), str(self.clone), cwd=self.root)
+        status, output = self.run_install(args=(), interactive=True, responses=(("Continue?", "y"),))
+        self.assertEqual(status, 0, output)
+        self.assertIn("pqkey is ready.", output)
+        self.assertLess(output.index(WARNING), output.index("Continue?"))
+        self.assertIn("To install stable: " + HINT, output)
+        self.assertIn(WARNING, (self.home / ".cache/pqkey/install.log").read_text())
+        status, output = self.run_hint()
+        self.assertEqual(status, 0, output)
+        self.assertNotIn("passed CI", output)
+
+    def test_clone_without_stable_is_noted(self):
+        origin = self.make_origin()
+        self.git("clone", "-q", str(origin), str(self.clone), cwd=self.root)
+        self.git("branch", "stable", "main~1", cwd=origin)
+        status, output = self.run_install()
+        self.assertEqual(status, 0, output)
+        self.assertIn(NOTE + "\nTo install stable: " + HINT, output)
+        self.assertNotIn(WARNING, output)
+        self.assertIn(NOTE, (self.home / ".cache/pqkey/install.log").read_text())
+        status, output = self.run_hint()
+        self.assertEqual(status, 0, output)
+        self.assertNotIn("passed CI", output)
+
+    def test_no_ci_note_without_git_or_outside_a_git_clone(self):
+        origin = self.make_origin()
+        self.git("branch", "stable", "main~1", cwd=origin)
+        self.git("clone", "-q", str(origin), str(self.clone), cwd=self.root)
+        (self.bin / "git").unlink()
+        status, output = self.run_install()
+        self.assertEqual(status, 0, output)
+        self.assertNotIn("stable", output)
+        # Copies of the source, alone or inside another clone, are not clones.
+        (self.bin / "git").symlink_to(GIT)
+        for copy in (self.root / "copy", origin / "copy"):
+            with self.subTest(copy=copy):
+                copy.mkdir()
+                for name in ("install.sh", "Cargo.toml"):
+                    shutil.copy2(self.clone / name, copy / name)
+                self.clone = copy
+                status, output = self.run_install()
+                self.assertEqual(status, 0, output)
+                self.assertNotIn("stable", output)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@ maintainer through their GitHub profile,
 [@rainzhang05](https://github.com/rainzhang05). Include the commit you tested,
 the client involved, the steps to reproduce, and what an attacker gains.
 
-pqkey has no releases, so only `main` gets fixes. There is no bug bounty.
+pqkey has no releases: fixes go to `main`, and reach the `stable` branch users
+install once they pass CI, E2E and Security. There is no bug bounty.
 
 ## Threat model
 

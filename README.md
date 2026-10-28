@@ -53,8 +53,10 @@ have it), and a desktop whose notifications show request text and support
 approval actions (GNOME, KDE Plasma or Dunst). Copy this one command:
 
 ```bash
-git clone https://github.com/rainzhang05/SoftwareAuthenticator.git && SoftwareAuthenticator/install.sh
+git clone --branch stable https://github.com/rainzhang05/SoftwareAuthenticator.git && SoftwareAuthenticator/install.sh
 ```
+
+`stable` follows the newest commit on `main` that passed CI, E2E and Security.
 
 The installer says how much disk space it will use (about 1.2 GB with the
 build tools and Rust), asks once to continue and once for your sudo password,
@@ -82,7 +84,9 @@ If your terminal's PATH excludes `/usr/local/bin`, run
 `export PATH="/usr/local/bin:$PATH"` in that terminal and rerun the installer.
 
 Before upgrading, stop the key and back up its complete state directory,
-including the keys. Then run `git pull` and `./install.sh` again. Reruns repair
+including the keys. Then run `git pull` and `./install.sh` again in the clone.
+If the clone follows `main`, switch it to `stable` once with
+`git fetch origin && git switch stable`. Reruns repair
 partial setup and preserve credentials, valid PINs and authenticator policy.
 Updates replace the executable atomically. If setup fails after replacement,
 the previous executable remains at `/usr/local/bin/pqkey.previous`; the
