@@ -54,11 +54,27 @@ class Results(unittest.TestCase):
                 (directory / scenario / 'runner-cleanup-status').write_text('0\n')
             self.assertFalse(results.finalize(directory, 'success'))
             summary = (directory / 'summary.md').read_text()
-            self.assertIn('- fresh: PASS; refused calls for pqkey: 0; canaries: start logged, end logged; '
-                          'lost records: 0; filter counts: 11\n', summary)
+            self.assertIn('- fresh: PASS; refused calls for pqkey: 0; '
+                          'ignored clone3 calls (RestrictNamespaces= ENOSYS): 0; '
+                          'canaries: start logged, end logged; lost records: 0; filter counts: 11\n', summary)
             self.assertIn('- upgrade: FAILED; refused calls for pqkey: 1 (chroot 161);', summary)
             report = json.loads((directory / 'report.json').read_text())
             self.assertEqual([row['seccomp']['status'] for row in report['scenarios']], ['pass', 'fail'])
+
+    def test_summary_counts_ignored_clone3_calls_apart_from_refused_ones(self):
+        clone3 = {'pid': '4242', 'exe': '/usr/local/bin/pqkey', 'arch': 'c000003e', 'syscall': '435', 'name': 'clone3',
+                  'code': '0x50000'}
+        check = {'case': 'seccomp', 'status': 'pass', 'refused': [], 'ignored': [clone3] * 10,
+                 'canaries': {'start': True, 'end': True}, 'lost': [], 'missed_kernel_messages': [],
+                 'filter_counts': ['14']}
+        self.assertEqual(results.seccomp_summary({'events': [check]}),
+                         'PASS; refused calls for pqkey: 0; ignored clone3 calls (RestrictNamespaces= ENOSYS): 10; '
+                         'canaries: start logged, end logged; lost records: 0; filter counts: 14')
+        check.update(status='fail', refused=[{**clone3, 'syscall': '161', 'name': 'chroot'}])
+        self.assertEqual(results.seccomp_summary({'events': [check]}),
+                         'FAILED; refused calls for pqkey: 1 (chroot 161); '
+                         'ignored clone3 calls (RestrictNamespaces= ENOSYS): 10; '
+                         'canaries: start logged, end logged; lost records: 0; filter counts: 14')
 
     def test_a_missing_or_incomplete_check_is_reported(self):
         self.assertEqual(results.seccomp_summary({'events': []}), 'NOT CHECKED')

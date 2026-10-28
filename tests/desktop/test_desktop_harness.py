@@ -73,11 +73,15 @@ class Seccomp(unittest.TestCase):
     CANARY = ('audit: type=1326 audit(1792823746.791:2): auid=2001 uid=2001 gid=2001 ses=3 pid=1586 '
               'comm="python3" exe="/usr/bin/python3.12" sig=0 arch=c00000b7 syscall=51 compat=0 '
               'ip=0xffff8e4f348c code=0x50000')
+    # The daemon's clone3 under RestrictNamespaces= as desktop.yml run 40419494018 journaled it.
+    CLONE3 = ('audit: type=1326 audit(1793057204.506:129): auid=2000 uid=2000 gid=2000 ses=3 subj=unconfined '
+              'pid=18722 comm="pqkey" exe="/usr/local/bin/pqkey" sig=0 arch=c000003e syscall=435 compat=0 '
+              'ip=0x7ffb0e529ebd code=0x50000')
     DELETED = (desktop.BINARY + ' (deleted)').encode().hex().upper()
 
-    def line(self, pid, comm, exe, uid='2001', code='0x50000'):
+    def line(self, pid, comm, exe, uid='2001', code='0x50000', arch='c000003e', syscall='161'):
         return (f'audit: type=1326 audit(1792823750.981:8): auid={uid} uid={uid} gid={uid} ses=3 pid={pid} '
-                f'comm={comm} exe={exe} sig=0 arch=c000003e syscall=161 compat=0 ip=0x7f00 code={code}')
+                f'comm={comm} exe={exe} sig=0 arch={arch} syscall={syscall} compat=0 ip=0x7f00 code={code}')
 
     def test_records_decode_quoted_and_hex_encoded_fields(self):
         record = desktop.audit_record(self.CANARY)
@@ -104,6 +108,24 @@ class Seccomp(unittest.TestCase):
         self.assertEqual([row['comm'] for row in found['other']], ['dunst'])
         self.assertEqual(len(found['lost']), 1)
 
+    def test_only_the_daemons_clone3_failed_by_restrict_namespaces_is_ignored(self):
+        daemon = f'"{desktop.BINARY}"'
+        lines = [self.CANARY, self.CLONE3,
+                 self.line('10', '"pqkey"', daemon, arch='c00000b7', syscall='435'),
+                 self.line('11', '"(pqkey)"', '"/usr/lib/systemd/systemd-executor"', syscall='435'),
+                 self.line('12', '"pqkey"', daemon, arch='c00000b7', syscall='51'),
+                 self.line('13', '"pqkey"', daemon, arch='40000003', syscall='435'),
+                 self.line('14', '"pqkey"', daemon, syscall='435', code='0x80000000'),
+                 self.line('15', '"pqkey"', daemon, syscall='436'),
+                 self.line('30', '"dunst"', '"/usr/bin/dunst"', syscall='435')]
+        found = desktop.seccomp_check(lines, daemon_pids=set(), canaries={'start': '1586'}, uid='2001')
+        # x86_64 and aarch64 clone3, also from systemd's executor.
+        self.assertEqual([row['pid'] for row in found['ignored']], ['18722', '10', '11'])
+        # aarch64 chroot, i386's 435, a killing filter's clone3, and x86_64's 436.
+        self.assertEqual([row['pid'] for row in found['daemon']], ['12', '13', '14', '15'])
+        self.assertEqual([row['comm'] for row in found['other']], ['dunst'])
+        self.assertEqual(found['canaries'], {'start': True})
+
     def test_syscall_names_come_from_the_kernel_header(self):
         with tempfile.TemporaryDirectory() as directory:
             header = Path(directory) / 'unistd_64.h'
@@ -111,14 +133,14 @@ class Seccomp(unittest.TestCase):
             self.assertEqual(desktop.syscall_names(header), {'0': 'read', '161': 'chroot'})
         self.assertEqual(desktop.syscall_names(Path('/nonexistent/unistd_64.h')), {})
 
-    def finish(self, directory, lines, filters=('11', '11')):
+    def finish(self, directory, lines, filters=('11', '11'), end='20', missed=''):
         run = desktop.Acceptance(Path(directory), Path(directory) / 'control')
         run.seccomp = {'cursor': 'cursor', 'canaries': {'start': '1586'}}
         run.metadata['services'] = [{'pid': 10 + index, 'seccomp_filters': count} for index, count in enumerate(filters)]
         def canary(phase):
-            run.seccomp['canaries'][phase] = '20'
+            run.seccomp['canaries'][phase] = end
             return [self.CANARY, self.line('20', '"python3"', '"/usr/bin/python3.12"'), *lines], True
-        with patch.object(run, 'canary', side_effect=canary), patch.object(run, 'command', return_value=''):
+        with patch.object(run, 'canary', side_effect=canary), patch.object(run, 'command', return_value=missed):
             run.seccomp_finish()
         return run.events[-1]
 
@@ -132,6 +154,41 @@ class Seccomp(unittest.TestCase):
             self.assertEqual((event['status'], [row['pid'] for row in event['refused']]), ('fail', ['11']))
             self.assertEqual(self.finish(directory, [], filters=('10', '11'))['status'], 'fail')
             self.assertEqual(self.finish(directory, [], filters=())['status'], 'fail')
+
+    def test_the_daemons_clone3_records_alone_pass_and_are_kept(self):
+        with tempfile.TemporaryDirectory() as directory:
+            arm = self.line('11', '"pqkey"', f'"{desktop.BINARY}"', arch='c00000b7', syscall='435')
+            elsewhere = self.line('30', '"dunst"', '"/usr/bin/dunst"', uid=str(os.getuid()), syscall='435')
+            event = self.finish(directory, [self.CLONE3, arm, elsewhere])
+            self.assertEqual((event['status'], event['refused']), ('pass', []))
+            self.assertEqual([row['pid'] for row in event['ignored']], ['18722', '11'])
+            self.assertEqual([row['comm'] for row in event['other_user_records']], ['dunst'])
+            self.assertEqual(len((Path(directory) / 'seccomp.log').read_text().splitlines()), 5)
+
+    def test_clone3_records_hide_no_refusal_missing_canary_or_lost_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event = self.finish(directory, [self.CLONE3, self.line('11', '"pqkey"', f'"{desktop.BINARY}"')])
+            self.assertEqual((event['status'], [row['pid'] for row in event['refused']], len(event['ignored'])),
+                             ('fail', ['11'], 1))
+            event = self.finish(directory, [self.CLONE3], end='21')
+            self.assertEqual((event['status'], event['canaries']), ('fail', {'start': True, 'end': False}))
+            lost = 'audit: audit_lost=1 audit_rate_limit=0 audit_backlog_limit=64'
+            event = self.finish(directory, [self.CLONE3, lost])
+            self.assertEqual((event['status'], len(event['lost'])), ('fail', 1))
+            event = self.finish(directory, [self.CLONE3], missed='Missed 2 kernel messages.')
+            self.assertEqual((event['status'], len(event['missed_kernel_messages'])), ('fail', 1))
+
+    def test_clone3_records_are_ignored_only_while_the_filter_allows_clone3(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = desktop.Acceptance(Path(directory), Path(directory) / 'control')
+            run.metadata['seccomp'] = {}
+            shown = f'DropInPaths={run.drop_in}\nSystemCallErrorNumber=1\nSystemCallFilter=clone3 read'
+            with patch.object(run, 'systemctl', return_value=shown):
+                run.seccomp_unit()
+            self.assertEqual(run.metadata['seccomp']['allowed_calls'], 2)
+            with patch.object(run, 'systemctl', return_value=shown.replace('clone3 ', '')):
+                with self.assertRaises(AssertionError):
+                    run.seccomp_unit()
 
     def test_an_unbegun_check_records_nothing(self):
         with tempfile.TemporaryDirectory() as directory:

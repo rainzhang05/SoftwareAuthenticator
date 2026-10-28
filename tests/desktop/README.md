@@ -106,14 +106,20 @@ runtime changes, which cleanup undoes:
 A canary transient unit under the same filter calls `chroot`, which is outside
 the set. It runs before the first install and again after the daemon stops, and
 both records must appear. The `seccomp` case fails if any of these holds:
-- a kernel record names the daemon: its executable, systemd's `(pqkey)`
-  executor, or a service PID
+- a kernel record other than clone3's (below) names the daemon: its
+  executable, systemd's `(pqkey)` executor, or a service PID
 - a canary record is missing
 - the kernel or journald reports lost messages
 - the daemons' seccomp filter counts differ
 
+The shipped unit's `RestrictNamespaces=yes` also produces records: a seccomp
+filter cannot see clone3's flags, so systemd fails every clone3 with ENOSYS,
+and glibc falls back to clone(). A record does not show its errno, but the run
+checks that the filter allows clone3, so the case counts the daemon's clone3
+records (syscall 435 on x86_64 and aarch64) as ignored instead of failing.
+
 `seccomp.log` keeps the run's audit records. The summary's "System call filter"
-section names each refused call.
+section names each refused call and counts the ignored clone3 calls.
 
 ## Results and cleanup
 

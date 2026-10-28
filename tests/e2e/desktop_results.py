@@ -46,6 +46,7 @@ def seccomp_summary(result):
     return '; '.join([
         'PASS' if event.get('status') == 'pass' else 'FAILED',
         f'refused calls for pqkey: {len(refused)}' + (f" ({', '.join(calls)})" if calls else ''),
+        f"ignored clone3 calls (RestrictNamespaces= ENOSYS): {len(event.get('ignored', []))}",
         'canaries: ' + ', '.join(f"{phase} {'logged' if seen else 'MISSING'}" for phase, seen in canaries.items()),
         f'lost records: {lost}',
         'filter counts: ' + '/'.join(event.get('filter_counts', [])),
@@ -86,8 +87,10 @@ def finalize(directory, workflow_status):
             lines.append(f"  - {event['case']}: {event['status']}")
     lines += ['', '## System call filter', '',
               'The daemon runs with `SystemCallFilter=@system-service` and `SystemCallErrorNumber=EPERM` from an'
-              ' acceptance-only drop-in, and the kernel journals each call the filter refuses. PASS: no record'
-              ' names pqkey, both canary refusals were journaled, and no record was lost.', '']
+              ' acceptance-only drop-in, and the kernel journals each call the filter refuses. It also journals'
+              ' clone3 failing with ENOSYS, which systemd returns for `RestrictNamespaces=yes` in the unit so that'
+              ' glibc falls back to clone(). The filter allows clone3, so these records are counted as ignored.'
+              ' PASS: no other record names pqkey, both canary refusals were journaled, and no record was lost.', '']
     lines.extend(f"- {row['scenario']}: {seccomp_summary(row['result'])}" for row in rows)
     (directory / 'summary.md').write_text('\n'.join(lines) + '\n')
     return passed
