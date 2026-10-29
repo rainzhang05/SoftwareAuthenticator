@@ -266,13 +266,37 @@ if [ -f "$cargo_home/env" ]; then
 fi
 command -v cargo >/dev/null || fail "cargo is unavailable; check CARGO_HOME or install Rust from https://rustup.rs, then rerun $0"
 
+# The oldest Rust that builds pqkey. With an older one, cargo stops the
+# build and suggests changing Cargo.lock.
+required=$(sed -nE 's/^rust-version *= *"([^"]+)".*/\1/p' Cargo.toml)
+older() { # older VERSION: whether that Rust is older than the one pqkey needs
+  [ "$(printf '%s\n%s\n' "$required" "$1" | sort -V | head -1)" != "$required" ]
+}
+
 # Without rustup, the system's Rust has to be new enough itself.
 if ! command -v rustup >/dev/null; then
-  required=$(sed -nE 's/^rust-version *= *"([^"]+)".*/\1/p' Cargo.toml)
   command -v rustc >/dev/null || fail "Cargo is available but rustc is missing; install Rust with rustup and rerun $0"
   have=$(rustc --version | cut -d' ' -f2)
-  if [ "$(printf '%s\n%s\n' "$required" "$have" | sort -V | head -1)" != "$required" ]; then
+  if older "$have"; then
     fail "Rust $have is older than the $required pqkey needs; install Rust with rustup (https://rustup.rs) and run $0 again"
+  fi
+# With rustup, an older stable toolchain is updated first; the build installs
+# a missing one. The check installs nothing: in this clone, rustup 1.28 and
+# later would install what rust-toolchain.toml names even to list toolchains.
+# What rustup and rustc print goes to the log.
+elif RUSTUP_AUTO_INSTALL=0 rustup toolchain list 2>>"$log" | grep -q '^stable'; then
+  have=$(rustc +stable --version 2>>"$log" | cut -d' ' -f2)
+  if older "$have"; then
+    update_rust() {
+      if rustup toolchain install stable --profile minimal --no-self-update; then
+        have=$(rustc +stable --version | cut -d' ' -f2) || return
+      fi
+      older "$have" || return 0
+      echo "Rust $have is older than the $required pqkey needs; update it with: rustup update stable, then run $0 again"
+      return 1
+    }
+    total_weight=$((total_weight + 20)) # weighed like installing Rust, once known
+    step 20 60 "Updating Rust $have" "Rust updated" update_rust
   fi
 fi
 

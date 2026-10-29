@@ -62,7 +62,8 @@ The installer says how much disk space it will use (about 1.2 GB with the
 build tools and Rust), asks once to continue and once for your sudo password,
 and shows its progress as it:
 
-1. installs a C linker, Rust and ACL tools, if they are missing;
+1. installs a C linker, Rust and ACL tools, if they are missing, and updates
+   rustup's stable Rust if it is older than pqkey needs;
 2. builds pqkey and installs it as `/usr/local/bin/pqkey`;
 3. gives the key access to `/dev/uhid` with
    [udev rules](contrib/udev/70-pqkey.rules), and loads the `uhid` module at

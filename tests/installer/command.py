@@ -8,12 +8,16 @@ import sys
 
 name = Path(sys.argv[0]).name.removesuffix("-source")
 args = sys.argv[1:]
+# The version rustup last installed as stable; until then rustc reports RUST_VERSION.
+stable = Path(os.environ["HOME"], "stable-version")
 with open(os.environ["COMMAND_TRACE"], "a") as trace:
     trace.write(json.dumps([name, *args]) + "\n")
 command = " ".join([name, *args])
 if command == os.environ.get("FAIL_COMMAND") or name == os.environ.get("FAIL_COMMAND"):
     print(f"fixture: {command} failed", file=sys.stderr)
     sys.exit(17)
+if name in ("rustc", "rustup") and "RUST_STDERR" in os.environ:
+    print(os.environ["RUST_STDERR"], file=sys.stderr)
 if name == "uname":
     print(os.environ.get("FIXTURE_OS", "Linux"))
 elif name == "id":
@@ -28,10 +32,17 @@ elif name == "sudo":
         sys.exit(0)
     sys.exit(subprocess.call(args))
 elif name == "rustc":
-    print(f"rustc {os.environ.get('RUST_VERSION', '1.89.0')}")
+    print(f"rustc {stable.read_text() if stable.exists() else os.environ.get('RUST_VERSION', '1.89.0')}")
 elif name == "rustup":
     if args == ["toolchain", "list"]:
+        # As rustup 1.28 and later in the clone: unless told not to, it installs the
+        # components rust-toolchain.toml names, which updates a stable lacking them.
+        if os.environ.get("MISSING_COMPONENTS") and os.environ.get("RUSTUP_AUTO_INSTALL") != "0":
+            print("info: syncing channel updates for 'stable-aarch64-unknown-linux-gnu'", file=sys.stderr)
+            stable.write_text(os.environ.get("LATEST_RUST_VERSION", "1.99.0"))
         print(os.environ.get("TOOLCHAINS", "stable-aarch64-unknown-linux-gnu"))
+    elif args[:3] == ["toolchain", "install", "stable"]:
+        stable.write_text(os.environ.get("LATEST_RUST_VERSION", "1.99.0"))
 elif name == "cargo":
     if "build" in args:
         target = Path("target/release/pqkey")

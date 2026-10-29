@@ -20,6 +20,7 @@ GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@
 WARNING = "Warning: this commit is not on the stable branch, so it has not passed CI yet."
 NOTE = "Note: without a stable branch, this clone cannot tell whether this commit passed CI."
 HINT = "git fetch origin && git switch stable && ./install.sh"
+UPDATE = ["rustup", "toolchain", "install", "stable", "--profile", "minimal", "--no-self-update"]
 
 
 class Installer(unittest.TestCase):
@@ -248,6 +249,57 @@ class Installer(unittest.TestCase):
         self.assertNotEqual(status, 0, output)
         self.assertIn("older than", output)
         self.assertFalse(INSTALLED.exists())
+
+    def test_old_rustup_stable_is_updated_before_build(self):
+        self.env["RUST_VERSION"] = "1.88.0"
+        status, output = self.run_install()
+        self.assertEqual(status, 0, output)
+        self.assertIn("✓ Rust updated", output)
+        self.assertIn("pqkey is ready.", output)
+        commands = self.commands()
+        build = next(command for command in commands if command[0] == "cargo")
+        self.assertEqual(build[:3], ["cargo", "+stable", "build"])
+        self.assertIn(UPDATE, commands)
+        self.assertLess(commands.index(UPDATE), commands.index(build))
+
+    def test_rustup_stable_left_old_stops_before_build(self):
+        # The update fails, or succeeds with a stable still older than 1.89.
+        for variable, value, left in (("FAIL_COMMAND", " ".join(UPDATE), "1.88.0"),
+                                      ("LATEST_RUST_VERSION", "1.88.1", "1.88.1")):
+            with self.subTest(variable=variable):
+                (self.root / "trace").unlink(missing_ok=True)
+                self.env.update(RUST_VERSION="1.88.0", **{variable: value})
+                status, output = self.run_install()
+                self.assertNotEqual(status, 0, output)
+                self.assertIn(f"Rust {left} is older than the 1.89 pqkey needs", output)
+                self.assertIn(UPDATE, self.commands())
+                self.assertFalse(any(command[0] == "cargo" for command in self.commands()))
+                self.assertFalse(INSTALLED.exists())
+                del self.env[variable]
+
+    def test_current_rustup_stable_is_not_updated(self):
+        for version in ("1.89.0", "1.100.0"):
+            with self.subTest(version=version):
+                (self.root / "trace").unlink(missing_ok=True)
+                self.env["RUST_VERSION"] = version
+                status, output = self.run_install()
+                self.assertEqual(status, 0, output)
+                self.assertNotIn("Rust updated", output)
+                commands = self.commands()
+                self.assertIn(["rustc", "+stable", "--version"], commands)
+                self.assertFalse(any(command[:3] == UPDATE[:3] for command in commands))
+                self.assertTrue(any(command[0] == "cargo" for command in commands))
+
+    def test_rust_check_installs_nothing_and_logs_what_rustup_prints(self):
+        # In the clone, rustup 1.28 and later install what rust-toolchain.toml names
+        # even to list toolchains, updating a stable that lacks those components.
+        self.env.update(RUST_VERSION="1.88.0", MISSING_COMPONENTS="1", RUST_STDERR="fixture: rust diagnostics")
+        status, output = self.run_install()
+        self.assertEqual(status, 0, output)
+        self.assertIn("✓ Rust updated", output)
+        self.assertNotIn("fixture: rust diagnostics", output)
+        self.assertNotIn("syncing", output)
+        self.assertIn("fixture: rust diagnostics", (self.home / ".cache/pqkey/install.log").read_text())
 
     def test_build_install_and_setup_failures_leave_recovery(self):
         for failure in ("cargo", "install", "mv", "setup"):
