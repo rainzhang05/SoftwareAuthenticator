@@ -56,6 +56,53 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
 
+  # Lint for the workflows and the shell scripts: actionlint over
+  # .github/workflows, and shellcheck over every tracked shell script
+  # (install.sh, scripts/, .github/scripts/, tests/e2e/). Both commands run the
+  # same locally, from the repository root. actionlint passes each `run:` block
+  # to shellcheck too, but only when it finds shellcheck on PATH, so shellcheck
+  # is installed first.
+  #
+  # Both tools are pinned and checked against a SHA-256. install-action checks
+  # shellcheck against the manifest in its pinned commit and removes the
+  # runner image's older apt shellcheck; `fallback: none` stops it installing
+  # from anywhere else and keeps the token out of the action. install-action
+  # has no actionlint, so that comes from the GitHub release, checked against
+  # the hash in the release's checksums file.
+  lint:
+    name: actionlint and shellcheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install shellcheck
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        with:
+          tool: shellcheck@0.11.0
+          fallback: none
+      - name: Install actionlint
+        env:
+          VERSION: 1.7.12
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          cd "$RUNNER_TEMP"
+          archive="actionlint_${VERSION}_linux_amd64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 10 -o "$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/${archive}"
+          echo "${SHA256}  ${archive}" | sha256sum -c -
+          mkdir -p bin
+          tar -xzf "$archive" -C bin actionlint
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          bin/actionlint -version
+      - run: actionlint
+      - name: Lint the shell scripts
+        if: ${{ !cancelled() }}
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck -x -P SCRIPTDIR
+
   # The Python tests of the decision scripts in .github/scripts: the Dependabot
   # auto-merge (test_dependabot_automerge.py) and the stable promotion
   # (test_promote_stable.py). The runner image has python3, bash and jq.
