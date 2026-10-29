@@ -19,7 +19,7 @@ systems before creating logs, installing tools or changing system setup.
 
 | Script | What it does |
 |---|---|
-| `scripts/check.sh` | Runs every check CI runs: formatting, lints, tests, docs, the minimum Rust version, dependencies and coverage. `--quick` runs formatting, installer checks, lints and tests. On macOS its lints and tests are those of the portable crates above, and it skips the checks that need Linux. |
+| `scripts/check.sh` | Runs the checks of the CI and Security workflows and of the Fuzz workflow's smoke job, as listed below. `--quick` runs formatting, lints and tests only. |
 | `scripts/install-tests.sh` | Runs the actual installer in disposable Docker filesystems with controlled prerequisites, PTYs and fault injection; requires Docker. |
 | `scripts/e2e.sh` | Runs the end-to-end tests against four test keys, through libfido2 and python-fido2. |
 | `scripts/fuzz.sh` | Runs each fuzz target for 30 seconds, or one target for as long as you ask. |
@@ -28,6 +28,27 @@ systems before creating logs, installing tools or changing system setup.
 
 Each script prints one line per step and keeps the full output in
 `target/scripts/`. The top of each script says what it needs.
+
+`scripts/check.sh --quick` runs formatting; actionlint and shellcheck; a
+check that `fuzz/Cargo.lock` is up to date; the installer regression checks;
+the Python tests of the browser and desktop harnesses and of the ML-DSA
+verifier of the end-to-end tests; and clippy, tests and doctests, of the
+workspace and the fuzz crate on Linux and of the portable crates on macOS.
+Without `--quick` it adds the stack and heap residue tests in release mode,
+the release build, rustdoc, Rust 1.89 (a check, and the residue tests in debug
+and release, as CI's MSRV residue job runs them), every feature combination,
+`cargo audit` and `cargo deny` on both lockfiles, line coverage of at least
+85%, the tests of the auto-merge and promotion scripts, and the fuzz smoke
+run: a build of the fuzz targets with the nightly `fuzz.yml` pins, and 30
+seconds of fuzzing each.
+
+It prints a line for each of those checks it does not run, saying why: on
+macOS, those that need Linux; those whose tool or toolchain is not installed,
+with how to get it; and the lints and tests CI also runs on macOS, or on its
+other Linux architecture. The E2E workflow's tests are never run: they need
+`/dev/uhid`, and the installer's need sudo on a disposable machine too. The
+installer regression checks need Docker, and fail without it. A run leaves
+tracked files as they are.
 
 The heap residue test runs credential generation, reconstruction, signing
 and store roundtrips under the binary's wiping allocator. Its test allocator
@@ -162,9 +183,9 @@ Ctrl-C stops it, and `pqkey start` brings the service back.
 
 GitHub Actions runs these workflows:
 
-- **CI** runs the checks of `scripts/check.sh` on Linux, with workspace
-  tests on both x86_64 and arm64, and lints and tests the portable crates
-  on macOS.
+- **CI** runs the checks of `scripts/check.sh` but for Security's and
+  Fuzz's, on Linux, with workspace tests on both x86_64 and arm64, and lints
+  and tests the portable crates on macOS.
 - **E2E** runs `scripts/e2e.sh`'s real HID tests on Linux.
 - **Security** runs `cargo audit` and `cargo deny`.
 - **Fuzz** runs each target for 30 seconds on changes and for 30 minutes
