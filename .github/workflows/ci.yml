@@ -40,7 +40,8 @@ jobs:
   # its own that `--all` does not reach, so it is checked separately.
   fmt:
     name: rustfmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -60,7 +61,8 @@ jobs:
   # (test_promote_stable.py). The runner image has python3, bash and jq.
   automerge-scripts:
     name: auto-merge scripts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -69,7 +71,8 @@ jobs:
 
   installer:
     name: installer regressions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -87,7 +90,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14.7"
       - run: |
@@ -110,7 +113,8 @@ jobs:
   # in fuzz.yml (see .github/scripts/sync-fuzz-lockfile.sh).
   clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     env:
@@ -155,12 +159,13 @@ jobs:
   test:
     name: ${{ matrix.arch == 'x86_64' && 'test' || format('test ({0})', matrix.arch) }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - arch: aarch64
             runner: ubuntu-24.04-arm
     permissions:
@@ -198,9 +203,9 @@ jobs:
       # library is also linted on its own in every combination, with warnings
       # denied: that is where code that is dead without `hazmat` shows up.
       - name: Install cargo-hack
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
         with:
-          tool: cargo-hack
+          tool: cargo-hack@0.6.45
       - name: Check every feature combination
         run: cargo hack check --workspace --locked --all-targets --feature-powerset
       - name: Lint pqkey-mldsa's library in every feature combination
@@ -229,6 +234,7 @@ jobs:
   test-macos:
     name: test (macOS, portable crates)
     runs-on: macos-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -250,7 +256,8 @@ jobs:
   # fails if the workspace or its locked dependency graph stops building on it.
   msrv:
     name: MSRV
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -282,12 +289,13 @@ jobs:
   msrv-residue:
     name: MSRV residue (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - arch: aarch64
             runner: ubuntu-24.04-arm
     permissions:
@@ -323,7 +331,8 @@ jobs:
   # which is most of the documentation in a daemon.
   docs:
     name: rustdoc
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     env:
@@ -343,7 +352,8 @@ jobs:
   # nothing else in this pipeline ever links a release binary.
   build-release:
     name: release build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -367,7 +377,8 @@ jobs:
   # step summary, can be fetched with `gh run view --log`) and the step summary.
   coverage:
     name: coverage
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -379,9 +390,9 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.1
 
       - name: Collect coverage
         run: cargo llvm-cov --workspace --locked --all-features --all-targets --no-report

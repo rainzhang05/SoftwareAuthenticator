@@ -56,7 +56,8 @@ jobs:
   # implicit - it is auditing exactly what CI and releases build.
   audit:
     name: cargo audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -66,9 +67,9 @@ jobs:
         with:
           toolchain: stable
       - name: Install cargo-audit
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
         with:
-          tool: cargo-audit
+          tool: cargo-audit@0.22.2
 
       # .cargo/audit.toml mirrors the documented Marvin exception in deny.toml.
       # Every other vulnerability against the locked tree fails this job.
@@ -93,7 +94,8 @@ jobs:
   # the *only* input to the build, with no git dependency or patch.
   deny:
     name: cargo deny
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -103,7 +105,7 @@ jobs:
         with:
           toolchain: stable
       - name: Install cargo-deny
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
         with:
           # Version-pinned deliberately: cargo-deny's config schema changes
           # between minor releases and a silent bump would break deny.toml.
