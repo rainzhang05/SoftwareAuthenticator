@@ -477,4 +477,27 @@ exit 0
             "{earlier}\nEnvironment=CUSTOM=yes\n"
         )));
     }
+
+    /// Setup replaces an installed unit only if, apart from `ExecStart=`, it
+    /// matches the template or an entry of `EARLIER_UNITS` line for line,
+    /// comments included; any other it keeps as the user's own. A template
+    /// change that does not add the unit it replaces to `EARLIER_UNITS` would
+    /// leave every existing installation on that unit without a word, so the
+    /// template's bytes are pinned here.
+    #[test]
+    fn template_changes_add_the_replaced_unit_to_earlier_units() {
+        use sha2::{Digest, Sha256};
+        let digest: String = Sha256::digest(UNIT_TEMPLATE.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest, "257e51e450c816f5cf72e141987808aa9293ccaf2d6d61727b12ae4b73794bb7",
+            "contrib/systemd/user/pqkey.service changed, and setup upgrades only installed units \
+             that match it or an entry of EARLIER_UNITS. Copy its previous version to \
+             crates/pqkey/src/platform/linux/earlier-units/<date it first shipped>.service, like \
+             2026-10-05.service, add that file to EARLIER_UNITS, then replace the SHA-256 in \
+             this test with the new one (left)"
+        );
+    }
 }
