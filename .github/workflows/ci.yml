@@ -80,7 +80,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install shellcheck
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2
         with:
           tool: shellcheck@0.11.0
           fallback: none
@@ -250,7 +250,7 @@ jobs:
       # library is also linted on its own in every combination, with warnings
       # denied: that is where code that is dead without `hazmat` shows up.
       - name: Install cargo-hack
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2
         with:
           tool: cargo-hack@0.6.45
       - name: Check every feature combination
@@ -437,7 +437,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2
         with:
           tool: cargo-llvm-cov@0.9.1
 
