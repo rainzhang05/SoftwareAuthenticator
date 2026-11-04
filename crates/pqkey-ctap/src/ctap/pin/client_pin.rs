@@ -446,6 +446,10 @@ impl CtapApp<'_> {
         let map = cbor::request_parameters(payload)?;
         let subcommand =
             ClientPinSubcommand::parse(cbor::map_get(&map, Value::Integer(Integer::from(2))))?;
+        // Every subcommand but getKeyAgreement answers from the PIN state.
+        if subcommand != ClientPinSubcommand::GetKeyAgreement {
+            self.read_pin_state_if_unread()?;
+        }
         match subcommand {
             // getPINRetries takes no pinUvAuthProtocol (CTAP 2.3 §6.5.5.2).
             ClientPinSubcommand::GetPinRetries => self.client_pin_get_retries(),

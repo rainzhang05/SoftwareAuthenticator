@@ -1,23 +1,36 @@
 //! How the engine uses its credential store: the overwrite rule, signature
-//! counter persistence, store failures, PIN state persistence and the
-//! fail-closed handling of an unreadable PIN state, and attestation.
+//! counter persistence, store failures, PIN state persistence, the
+//! fail-closed handling of an unreadable PIN state and the read errors that
+//! fail only one command, and attestation.
 
+use super::large_blobs::write_request;
 use super::support::{
-    NEVER_INTERRUPTED, TestApp, TestStore, app_with_store, change_pin, credential, get_pin_retries,
-    get_pin_token, insert, padded_pin, pin_hash, set_pin_padded, stored, test_app,
+    FLAG_UV, NEVER_INTERRUPTED, TestApp, TestRng, TestStore, app_with_store, change_pin,
+    client_pin, credential, get_pin_retries, get_pin_token, get_pin_uv_auth_token, insert, int,
+    make_credential_request, new_app, padded_pin, pin_hash, response_auth_data, set_pin_padded,
+    stored, test_app, token_pin_auth,
 };
+use super::u2f::register_request;
 use crate::ClassicPinProtocol;
 use crate::CoseAlg;
-use crate::ctap::AttestationMode;
 use crate::ctap::cbor::canonical_map;
+use crate::ctap::pin::permissions::{PIN_PERMISSION_LBW, PIN_PERMISSION_MC};
 use crate::ctap::pin::state::{MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES};
-use crate::store::{CredentialStore, PinStateRecord};
+use crate::ctap::presence::AutoApprove;
+use crate::ctap::u2f::SW_COMMAND_NOT_ALLOWED;
+use crate::ctap::{AttestationMode, CtapApp};
+use crate::store::{
+    Corruption, CredentialStore, FileKeySource, FileStore, INITIAL_LARGE_BLOB_ARRAY, KeyDomain,
+    KeySource, PinStateRecord, RootKey, StoreError, test_support::TempDir,
+};
 
 use ciborium::{
     de::from_reader,
     ser::into_writer,
     value::{Integer, Value},
 };
+use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ctap::constants::*;
 
@@ -534,6 +547,557 @@ fn unreadable_pin_state_is_treated_as_set_and_blocked_until_reset() {
         store.pin_state().unwrap().map(|state| state.pin_hash),
         Some(Some(pin_hash(PIN)))
     );
+}
+
+/// getInfo's clientPin and alwaysUv options.
+fn pin_options(app: &mut TestApp) -> (bool, bool) {
+    let response = app.handle_get_info().expect("getInfo succeeds");
+    let Value::Map(info) = from_reader(&response[1..]).expect("decode getInfo") else {
+        panic!("getInfo must be a map");
+    };
+    let Some((_, Value::Map(options))) = info
+        .into_iter()
+        .find(|(key, _)| *key == Value::Integer(Integer::from(4)))
+    else {
+        panic!("getInfo has options");
+    };
+    let option = |name: &str| {
+        options
+            .iter()
+            .find_map(|(key, value)| match value {
+                Value::Bool(set) if *key == Value::Text(name.into()) => Some(*set),
+                _ => None,
+            })
+            .expect("the option is present")
+    };
+    (option("clientPin"), option("alwaysUv"))
+}
+
+/// Whether `token`, from getPinToken, still authorizes a registration with
+/// user verification.
+fn token_authorizes(app: &mut TestApp, token: &[u8; 32]) -> bool {
+    let hash = [0x45; 32];
+    let pin_uv_auth_param = token_pin_auth(ClassicPinProtocol::V2, token, &hash);
+    let request = make_credential_request(
+        &hash,
+        RP_ID,
+        Some((ClassicPinProtocol::V2, pin_uv_auth_param)),
+    );
+    app.handle_make_credential(&request)
+        .is_ok_and(|response| response_auth_data(&response)[32] & FLAG_UV != 0)
+}
+
+/// Set `PIN`, take a token, then spend a retry on a wrong PIN, which leaves
+/// the token in use.  Returns the token.
+fn pin_with_token_and_spent_retry(app: &mut TestApp) -> [u8; 32] {
+    set_pin_padded(app, ClassicPinProtocol::V2, &padded_pin(PIN)).expect("setPIN");
+    let token = get_pin_token(app, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+    assert_eq!(
+        get_pin_token(app, ClassicPinProtocol::V2, b"0000"),
+        Err(CTAP2_ERR_PIN_INVALID)
+    );
+    token
+}
+
+/// A read of the backing storage that failed.
+fn io_error() -> StoreError {
+    StoreError::Io {
+        path: "pin-state".into(),
+        source: std::io::Error::other("injected failure"),
+    }
+}
+
+/// One error of every other kind.
+fn closing_errors() -> [StoreError; 6] {
+    [
+        StoreError::Corrupt {
+            object: "pin-state".into(),
+            reason: Corruption::Authentication,
+        },
+        StoreError::KeyUnavailable {
+            domain: KeyDomain::Credential,
+            detail: "injected failure".into(),
+        },
+        StoreError::CredentialSetUnavailable {
+            object: "credential-set".into(),
+            detail: "injected failure".into(),
+        },
+        StoreError::Full { max: 1 },
+        StoreError::InvalidRecord("injected failure"),
+        StoreError::Random,
+    ]
+}
+
+/// An I/O error while the engine rereads its PIN state, during getInfo or a
+/// token request, fails only that command: getInfo answers from the live
+/// state, and the token request is refused before a retry is spent.  Issued
+/// tokens keep working, and the next command reads the store again, rather
+/// than finding a PIN blocked until a restart.
+#[test]
+fn an_io_error_rereading_the_pin_state_fails_only_that_command() {
+    for during_token_request in [false, true] {
+        let store = TestStore::new();
+        let (mut app, _) = app_with_store(store.clone(), [0x6E; 16], [], &NEVER_INTERRUPTED);
+        let token = pin_with_token_and_spent_retry(&mut app);
+        let writes = store.pin_state_writes().len();
+
+        store.faults(|faults| faults.pin_state_errors.push_back(io_error()));
+        if during_token_request {
+            assert_eq!(
+                get_pin_token(&mut app, ClassicPinProtocol::V2, PIN),
+                Err(CTAP2_ERR_PROCESSING)
+            );
+        } else {
+            assert_eq!(pin_options(&mut app), (true, false), "the live state");
+        }
+        store.faults(|faults| assert!(faults.pin_state_errors.is_empty(), "the read failed"));
+        assert_eq!(store.pin_state_writes().len(), writes, "no retry was spent");
+
+        assert!(token_authorizes(&mut app, &token));
+        assert_eq!(pin_options(&mut app), (true, false));
+        assert_eq!(get_pin_retries(&mut app).0, MAX_PIN_RETRIES - 1);
+        assert_eq!(
+            store.pin_state().unwrap().map(|state| state.pin_retries),
+            Some(MAX_PIN_RETRIES - 1),
+            "the count reported is the stored one"
+        );
+        get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+    }
+}
+
+/// Every other error rereading the PIN state still fails closed, until reset:
+/// the PIN is set and blocked, alwaysUv is on and issued tokens stop working,
+/// even once the record reads again, and nothing is written over it.  A
+/// restart reads the record again.
+#[test]
+fn any_other_error_rereading_the_pin_state_still_fails_closed() {
+    for err in closing_errors() {
+        let name = err.to_string();
+        let store = TestStore::new();
+        let (mut app, _) = app_with_store(store.clone(), [0x6F; 16], [], &NEVER_INTERRUPTED);
+        let token = pin_with_token_and_spent_retry(&mut app);
+        let writes = store.pin_state_writes().len();
+
+        store.faults(|faults| faults.pin_state_errors.push_back(err));
+        assert_eq!(pin_options(&mut app), (true, true), "{name}");
+        assert!(!token_authorizes(&mut app, &token), "{name}");
+        assert_eq!(get_pin_retries(&mut app).0, 0, "{name}");
+        assert_eq!(
+            get_pin_token(&mut app, ClassicPinProtocol::V2, PIN),
+            Err(CTAP2_ERR_PIN_BLOCKED),
+            "{name}"
+        );
+        assert_eq!(pin_options(&mut app), (true, true), "{name}");
+        assert_eq!(store.pin_state_writes().len(), writes, "{name}");
+
+        let mut restarted = new_app(store.clone(), [0x6F; 16]);
+        assert_eq!(
+            get_pin_retries(&mut restarted).0,
+            MAX_PIN_RETRIES - 1,
+            "{name}"
+        );
+        get_pin_token(&mut restarted, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+    }
+}
+
+/// An app over `store` whose reads of the PIN state fail with an I/O error at
+/// start-up and then `more` times.
+fn start_with_io_errors(store: &TestStore, more: usize) -> TestApp {
+    store.faults(|faults| {
+        faults
+            .pin_state_errors
+            .extend(std::iter::repeat_with(io_error).take(more + 1));
+    });
+    new_app(store.clone(), [0x71; 16])
+}
+
+/// An I/O error reading the PIN state at start-up does not block the PIN: the
+/// next command that depends on the state reads it again, failing with
+/// CTAP2_ERR_PROCESSING while the read keeps failing, then answers from the
+/// stored state.
+#[test]
+fn an_io_error_reading_the_pin_state_at_start_up_is_retried_by_the_next_command() {
+    for failing_again in [false, true] {
+        let store = TestStore::new();
+        pin_with_token_and_spent_retry(&mut new_app(store.clone(), [0x71; 16]));
+        let writes = store.pin_state_writes().len();
+
+        let mut app = start_with_io_errors(&store, usize::from(failing_again));
+        if failing_again {
+            assert_eq!(
+                client_pin(&mut app, vec![(int(2), int(0x01))]),
+                Err(CTAP2_ERR_PROCESSING),
+                "getPINRetries while the read fails"
+            );
+        }
+        store.faults(|faults| assert!(faults.pin_state_errors.is_empty(), "every read failed"));
+        assert_eq!(
+            store.pin_state_writes().len(),
+            writes,
+            "nothing was written"
+        );
+
+        assert_eq!(get_pin_retries(&mut app), (MAX_PIN_RETRIES - 1, None));
+        get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+        assert_eq!(pin_options(&mut app), (true, false));
+    }
+}
+
+/// Each command that answers from a PIN state start-up could not read reads
+/// it first: a token request is not refused as blocked, a registration and an
+/// assertion are not refused for want of user verification, and setPIN works
+/// on a store that holds no PIN state.  While the read fails they fail with
+/// CTAP2_ERR_PROCESSING, and getInfo answers from the closed state.
+#[test]
+fn every_command_that_depends_on_a_pin_state_unread_at_start_up_reads_it_first() {
+    let store = TestStore::new();
+    let mut app = new_app(store.clone(), [0x72; 16]);
+    pin_with_token_and_spent_retry(&mut app);
+    let id = register(&mut app, RP_ID, &[0x01], None);
+    drop(app);
+    let writes = store.pin_state_writes().len();
+
+    let mut app = start_with_io_errors(&store, 1);
+    assert_eq!(
+        get_pin_token(&mut app, ClassicPinProtocol::V2, PIN),
+        Err(CTAP2_ERR_PROCESSING)
+    );
+    get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+
+    let registration = make_credential_payload(RP_ID, &[0x02], None);
+    let mut app = start_with_io_errors(&store, 1);
+    assert_eq!(
+        app.handle_make_credential(&registration),
+        Err(CTAP2_ERR_PROCESSING)
+    );
+    app.handle_make_credential(&registration)
+        .expect("no user verification required");
+
+    let mut app = start_with_io_errors(&store, 1);
+    assert_eq!(
+        app.handle_get_assertion(&assertion_with_id(&id)),
+        Err(CTAP2_ERR_PROCESSING)
+    );
+    app.handle_get_assertion(&assertion_with_id(&id))
+        .expect("no user verification required");
+
+    let mut app = start_with_io_errors(&store, 1);
+    assert_eq!(pin_options(&mut app), (true, true), "the closed state");
+    assert_eq!(pin_options(&mut app), (true, false));
+    assert_eq!(
+        store.pin_state_writes().len(),
+        writes + 2,
+        "only the token request's debit and restoration"
+    );
+
+    let fresh = TestStore::new();
+    let mut app = start_with_io_errors(&fresh, 1);
+    assert_eq!(
+        set_pin_padded(&mut app, ClassicPinProtocol::V2, &padded_pin(PIN)),
+        Err(CTAP2_ERR_PROCESSING)
+    );
+    assert_eq!(fresh.pin_state_writes(), []);
+    set_pin_padded(&mut app, ClassicPinProtocol::V2, &padded_pin(PIN)).expect("no PIN was set");
+    assert_eq!(get_pin_retries(&mut app), (MAX_PIN_RETRIES, None));
+}
+
+/// Any other error reading the PIN state at start-up still fails closed until
+/// reset, although the record reads again afterwards: the PIN is set and
+/// blocked, user verification is required, and nothing is written.  A restart
+/// reads the record again.
+#[test]
+fn any_other_error_reading_the_pin_state_at_start_up_still_fails_closed() {
+    for err in closing_errors() {
+        let name = err.to_string();
+        let store = TestStore::new();
+        pin_with_token_and_spent_retry(&mut new_app(store.clone(), [0x73; 16]));
+        let writes = store.pin_state_writes().len();
+
+        store.faults(|faults| faults.pin_state_errors.push_back(err));
+        let mut app = new_app(store.clone(), [0x73; 16]);
+        store.faults(|faults| assert!(faults.pin_state_errors.is_empty(), "{name}"));
+        assert_eq!(pin_options(&mut app), (true, true), "{name}");
+        assert_eq!(get_pin_retries(&mut app).0, 0, "{name}");
+        assert_eq!(
+            get_pin_token(&mut app, ClassicPinProtocol::V2, PIN),
+            Err(CTAP2_ERR_PIN_BLOCKED),
+            "{name}"
+        );
+        assert_eq!(
+            app.handle_make_credential(&make_credential_payload(RP_ID, &[0x02], None)),
+            Err(CTAP2_ERR_PUAT_REQUIRED),
+            "{name}"
+        );
+        assert_eq!(store.pin_state_writes().len(), writes, "{name}");
+
+        let mut restarted = new_app(store.clone(), [0x73; 16]);
+        assert_eq!(
+            get_pin_retries(&mut restarted).0,
+            MAX_PIN_RETRIES - 1,
+            "{name}"
+        );
+        get_pin_token(&mut restarted, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+    }
+}
+
+/// The same over the real store, as the daemon starts it: a `pin-state` that
+/// cannot be read while the engine is built (a directory in its place) is read
+/// by the next command once it is back.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test moves the PIN state aside and back directly, outside the store's wrappers"
+)]
+fn over_a_file_store_a_pin_state_unreadable_at_start_up_is_read_by_the_next_command() {
+    let dir = TempDir::new();
+    let state = dir.path().join("state");
+    let open = || {
+        CtapApp::with_file_store(
+            FileStore::open(&state).unwrap(),
+            AutoApprove,
+            &NEVER_INTERRUPTED,
+            [0x74; 16],
+        )
+    };
+    pin_with_token_and_spent_retry(&mut open());
+
+    let pin_state = state.join("pin-state");
+    let aside = dir.path().join("pin-state");
+    fs::rename(&pin_state, &aside).unwrap();
+    fs::create_dir(&pin_state).unwrap();
+    let mut app = open();
+    assert!(matches!(app.store.pin_state(), Err(StoreError::Io { .. })));
+    fs::remove_dir(&pin_state).unwrap();
+    fs::rename(&aside, &pin_state).unwrap();
+    assert_eq!(get_pin_retries(&mut app).0, MAX_PIN_RETRIES - 1);
+    get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+}
+
+/// A PIN state unread at start-up that then reads as damaged, or fails with
+/// any other error that closes authority, fails closed until reset as a
+/// start-up read of it would have: the command that read it fails, and the
+/// engine stays closed although the record reads again afterwards.  A restart
+/// reads the record again.
+#[test]
+fn a_pin_state_unread_at_start_up_that_then_reads_as_damaged_fails_closed() {
+    for err in closing_errors() {
+        let name = err.to_string();
+        let store = TestStore::new();
+        pin_with_token_and_spent_retry(&mut new_app(store.clone(), [0x75; 16]));
+        let writes = store.pin_state_writes().len();
+
+        store.faults(|faults| {
+            faults.pin_state_errors.push_back(io_error());
+            faults.pin_state_errors.push_back(err);
+        });
+        let mut app = new_app(store.clone(), [0x75; 16]);
+        assert_eq!(
+            client_pin(&mut app, vec![(int(2), int(0x01))]),
+            Err(CTAP2_ERR_PROCESSING),
+            "{name}: getPINRetries reads the damage"
+        );
+        store.faults(|faults| assert!(faults.pin_state_errors.is_empty(), "{name}"));
+        assert_eq!(get_pin_retries(&mut app).0, 0, "{name}");
+        assert_eq!(
+            get_pin_token(&mut app, ClassicPinProtocol::V2, PIN),
+            Err(CTAP2_ERR_PIN_BLOCKED),
+            "{name}"
+        );
+        assert_eq!(pin_options(&mut app), (true, true), "{name}");
+        assert_eq!(
+            app.handle_make_credential(&make_credential_payload(RP_ID, &[0x02], None)),
+            Err(CTAP2_ERR_PUAT_REQUIRED),
+            "{name}"
+        );
+        assert_eq!(store.pin_state_writes().len(), writes, "{name}");
+
+        let mut restarted = new_app(store.clone(), [0x75; 16]);
+        assert_eq!(
+            get_pin_retries(&mut restarted).0,
+            MAX_PIN_RETRIES - 1,
+            "{name}"
+        );
+        get_pin_token(&mut restarted, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+    }
+}
+
+/// A key source whose rotation publishes the new key and then fails, as a
+/// reset can fail after publishing, and whose next load then fails with an
+/// I/O error.
+struct RotationFailsAfterPublishing {
+    keys: FileKeySource,
+    fail_next_load: AtomicBool,
+}
+
+impl KeySource for RotationFailsAfterPublishing {
+    fn load(&self, domain: KeyDomain) -> Result<Option<RootKey>, StoreError> {
+        if self.fail_next_load.swap(false, Ordering::SeqCst) {
+            return Err(io_error());
+        }
+        self.keys.load(domain)
+    }
+
+    fn create(&self, domain: KeyDomain) -> Result<RootKey, StoreError> {
+        self.keys.create(domain)
+    }
+
+    fn rotate(&self, domain: KeyDomain) -> Result<RootKey, StoreError> {
+        self.keys.rotate(domain)?;
+        self.fail_next_load.store(true, Ordering::SeqCst);
+        Err(io_error())
+    }
+}
+
+/// A reset that fails after publishing a new key, and whose read to reconcile
+/// the engine with the store then fails with an I/O error, does not leave the
+/// old authority in force: the engine closes it until the next read, as at
+/// start-up.  The token issued before the reset no longer authorizes a
+/// large-blob write or a registration, and U2F is refused under the closed
+/// state's always-UV.
+#[test]
+fn an_io_error_reconciling_a_failed_reset_closes_authority() {
+    let dir = TempDir::new();
+    let state = dir.path().join("state");
+    let keys = RotationFailsAfterPublishing {
+        keys: FileKeySource::new(state.join("keys")),
+        fail_next_load: AtomicBool::new(false),
+    };
+    let mut app = CtapApp::new(
+        FileStore::open_with_key_source(&state, keys).unwrap(),
+        TestRng::new(0x76),
+        AutoApprove,
+        &NEVER_INTERRUPTED,
+        [0x76; 16],
+    );
+    app.set_reset_window(None);
+    set_pin_padded(&mut app, ClassicPinProtocol::V2, &padded_pin(PIN)).expect("setPIN");
+    let permissions = PIN_PERMISSION_MC | PIN_PERMISSION_LBW;
+    let token = get_pin_uv_auth_token(
+        &mut app,
+        ClassicPinProtocol::V2,
+        PIN,
+        permissions.into(),
+        Some(RP_ID),
+    )
+    .expect("correct PIN");
+
+    assert_eq!(app.handle_reset(), Err(CTAP2_ERR_PROCESSING));
+    assert!(
+        matches!(app.store.pin_state(), Err(StoreError::Corrupt { .. })),
+        "the new key is published, so the old PIN state no longer authenticates"
+    );
+    let blob = INITIAL_LARGE_BLOB_ARRAY;
+    assert_eq!(
+        app.call(&write_request(
+            0,
+            Some(blob.len()),
+            &blob,
+            Some((ClassicPinProtocol::V2, &token))
+        )),
+        [CTAP2_ERR_PIN_AUTH_INVALID]
+    );
+    let registration = app.call_u2f(&register_request());
+    assert_eq!(
+        registration[registration.len() - 2..],
+        SW_COMMAND_NOT_ALLOWED.to_be_bytes()
+    );
+    let hash = [0x45; 32];
+    let pin_uv_auth_param = token_pin_auth(ClassicPinProtocol::V2, &token, &hash);
+    assert_eq!(
+        app.handle_make_credential(&make_credential_request(
+            &hash,
+            RP_ID,
+            Some((ClassicPinProtocol::V2, pin_uv_auth_param)),
+        )),
+        Err(CTAP2_ERR_PROCESSING),
+        "it reads the PIN state first, and finds it damaged"
+    );
+    assert_eq!(get_pin_retries(&mut app).0, 0);
+}
+
+/// The same when the failed reset had published the default state: the token
+/// issued before it does not register with user verification.
+#[test]
+fn an_io_error_reconciling_a_reset_that_published_defaults_drops_the_old_token() {
+    let store = TestStore::new();
+    let (mut app, _) = app_with_store(store.clone(), [0x77; 16], [], &NEVER_INTERRUPTED);
+    set_pin_padded(&mut app, ClassicPinProtocol::V2, &padded_pin(PIN)).expect("setPIN");
+    let token = get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+
+    store.faults(|faults| {
+        faults.clear_after_publishing = true;
+        faults.pin_state_errors.push_back(io_error());
+    });
+    assert_eq!(app.handle_reset(), Err(CTAP2_ERR_PROCESSING));
+    store.faults(|faults| assert!(faults.pin_state_errors.is_empty(), "the read failed"));
+    assert!(!token_authorizes(&mut app, &token));
+    assert_eq!(
+        pin_options(&mut app),
+        (false, false),
+        "the published defaults"
+    );
+}
+
+/// The same over the real store: `keys/credential.key` unreadable during one
+/// getInfo (a directory in its place, which fails to read even as root) costs
+/// nothing, while a `pin-state` that fails authentication still fails closed,
+/// even once it is put back.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test moves the key file aside and back directly, outside the store's wrappers"
+)]
+fn over_a_file_store_an_unreadable_key_fails_one_command_but_damage_fails_closed() {
+    let dir = TempDir::new();
+    let state = dir.path().join("state");
+    let open = || {
+        CtapApp::with_file_store(
+            FileStore::open(&state).unwrap(),
+            AutoApprove,
+            &NEVER_INTERRUPTED,
+            [0x70; 16],
+        )
+    };
+    let mut app = open();
+    let token = pin_with_token_and_spent_retry(&mut app);
+
+    let key = FileStore::open(&state)
+        .unwrap()
+        .key_source()
+        .key_path(KeyDomain::Credential);
+    let aside = dir.path().join("credential.key");
+    fs::rename(&key, &aside).unwrap();
+    fs::create_dir(&key).unwrap();
+    assert!(matches!(app.store.pin_state(), Err(StoreError::Io { .. })));
+    assert_eq!(pin_options(&mut app), (true, false), "the live state");
+    fs::remove_dir(&key).unwrap();
+    fs::rename(&aside, &key).unwrap();
+    assert!(token_authorizes(&mut app, &token));
+    assert_eq!(get_pin_retries(&mut app).0, MAX_PIN_RETRIES - 1);
+    get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+
+    let pin_state = state.join("pin-state");
+    let intact = fs::read(&pin_state).unwrap();
+    let mut damaged = intact.clone();
+    *damaged.last_mut().unwrap() ^= 0x01;
+    fs::write(&pin_state, &damaged).unwrap();
+    assert!(matches!(
+        app.store.pin_state(),
+        Err(StoreError::Corrupt { .. })
+    ));
+    assert_eq!(pin_options(&mut app), (true, true));
+    fs::write(&pin_state, &intact).unwrap();
+    assert_eq!(get_pin_retries(&mut app).0, 0);
+    assert_eq!(
+        get_pin_token(&mut app, ClassicPinProtocol::V2, PIN),
+        Err(CTAP2_ERR_PIN_BLOCKED)
+    );
+    assert_eq!(fs::read(&pin_state).unwrap(), intact, "nothing written");
+
+    drop(app);
+    let mut restarted = open();
+    assert_eq!(get_pin_retries(&mut restarted).0, MAX_PIN_RETRIES);
+    get_pin_token(&mut restarted, ClassicPinProtocol::V2, PIN).expect("correct PIN");
 }
 
 #[test]

@@ -254,6 +254,8 @@ pub(super) struct Faults {
     pub(super) list: bool,
     /// `pin_state` reports the record as corrupt.
     pub(super) pin_state: bool,
+    /// The next `pin_state` reads fail with these errors, oldest first.
+    pub(super) pin_state_errors: VecDeque<StoreError>,
     pub(super) set_pin_state: bool,
     /// Let this many more PIN state writes succeed, then fail every one.
     pub(super) set_pin_state_after: Option<usize>,
@@ -263,6 +265,8 @@ pub(super) struct Faults {
     pub(super) clear_unconfirmed: bool,
     pub(super) attestation: bool,
     pub(super) clear: bool,
+    /// `clear` publishes the default state, then fails.
+    pub(super) clear_after_publishing: bool,
     /// `signature_counter` reports the record as corrupt.
     pub(super) signature_counter: bool,
     pub(super) set_signature_counter: bool,
@@ -402,8 +406,9 @@ impl CredentialStore for TestStore {
 
     fn clear(&mut self) -> Result<crate::store::CommitDurability, StoreError> {
         self.fail_if(|faults| faults.clear)?;
-        let mut state = self.lock();
-        let outcome = state.store.clear()?;
+        let outcome = self.lock().store.clear()?;
+        self.fail_if(|faults| faults.clear_after_publishing)?;
+        let state = self.lock();
         Ok(if state.faults.clear_unconfirmed {
             crate::store::CommitDurability::Unconfirmed
         } else {
@@ -412,6 +417,10 @@ impl CredentialStore for TestStore {
     }
 
     fn pin_state(&self) -> Result<Option<PinStateRecord>, StoreError> {
+        let injected = self.lock().faults.pin_state_errors.pop_front();
+        if let Some(err) = injected {
+            return Err(err);
+        }
         if self.lock().faults.pin_state {
             return Err(StoreError::Corrupt {
                 object: "pin-state".into(),

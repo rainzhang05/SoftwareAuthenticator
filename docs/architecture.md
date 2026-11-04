@@ -315,8 +315,18 @@ intentional MemoryStore volatility. A published but unconfirmed state is adopted
 immediately; it does not return a token. Retry writes also require confirmation.
 Pre-publication failures preserve preceding authority. PIN/key publication can
 commit before a later flush or reset cleanup fails: persistent reads recheck
-stored authority, and failed reset reconciles the live engine. Unreadable
-state closes grants and blocks further PIN writes until explicit reset recovers.
+stored authority, and failed reset reconciles the live engine. A recheck that
+fails with an I/O error fails only that command and keeps live authority and
+tokens; getInfo answers from the live state, and the next command reads again.
+An I/O error at start-up, or on the read that reconciles a failed reset (which
+may have published a new key or the defaults), leaves the state unread: the
+engine drops its tokens, answers from a closed state (PIN set and blocked,
+alwaysUv) and writes nothing, and the next recheck, clientPIN subcommand other
+than getKeyAgreement, makeCredential or getAssertion reads it first, failing
+with CTAP2_ERR_PROCESSING while it cannot.
+Unreadable state closes grants and blocks further PIN writes until explicit
+reset recovers: a record that fails authentication or decoding, a root key
+that is unusable or missing, or no record although a PIN or grant exists.
 
 The native client offers explicit protocol-specific read-only token acquisition.
 Listing selects pcmr from advertised capabilities and otherwise uses cm;

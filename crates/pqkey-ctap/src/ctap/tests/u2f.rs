@@ -26,7 +26,7 @@ fn apdu(ins: u8, control: u8, data: &[u8]) -> Vec<u8> {
     out
 }
 
-fn register_request() -> Vec<u8> {
+pub(super) fn register_request() -> Vec<u8> {
     apdu(1, 0, &[CHALLENGE.as_slice(), &application()].concat())
 }
 

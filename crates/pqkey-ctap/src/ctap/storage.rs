@@ -34,7 +34,23 @@ pub(super) fn store_status(action: &str, err: StoreError) -> u8 {
     }
 }
 
-/// The PIN state the engine starts with, and whether it may be written back.
+/// What the engine has read of the PIN state in its store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StoredPinState {
+    /// Read, or never written: the live persistent state is the stored one,
+    /// and changes to it are written back.
+    Read,
+    /// An I/O error kept it from being read at start-up, or after a failed
+    /// reset (see [`CtapApp::reconcile_persistent_authority`]).  The live
+    /// state is closed and nothing is written; the next command that depends
+    /// on it reads it again, through [`CtapApp::refresh_persistent_authority`].
+    Unread,
+    /// It cannot be trusted (see `closes_authority`).  The live state is
+    /// closed, and nothing is read or written until reset.
+    Unreadable,
+}
+
+/// The PIN state the engine starts with, and what it read of the stored one.
 ///
 /// Only [`PersistentPinState`], the PIN and UV policy, is read from the
 /// store.  The consecutive-mismatch lockout is volatile (a restart is this
@@ -44,9 +60,14 @@ pub(super) fn store_status(action: &str, err: StoreError) -> u8 {
 /// A PIN state that cannot be read fails closed: the PIN is treated as set,
 /// with a random hash nobody knows, and blocked with no retries left, so PIN
 /// checks are refused with CTAP2_ERR_PIN_BLOCKED before any comparison and
-/// always-UV conservatively remains required. Only reset recovers, and
-/// nothing is written back over the unreadable record until then.
-pub(super) fn load_pin_state(store: &dyn CredentialStore, rng: &mut dyn Rng) -> (PinState, bool) {
+/// always-UV conservatively remains required.  Nothing is written back over
+/// the stored record.  After an I/O error the state is only
+/// [`StoredPinState::Unread`]: the commands that depend on it read it again
+/// first.  After any other error only reset recovers.
+pub(super) fn load_pin_state(
+    store: &dyn CredentialStore,
+    rng: &mut dyn Rng,
+) -> (PinState, StoredPinState) {
     match store.pin_state() {
         Ok(Some(record)) => (
             PinState::from_persistent(PersistentPinState {
@@ -60,15 +81,22 @@ pub(super) fn load_pin_state(store: &dyn CredentialStore, rng: &mut dyn Rng) -> 
                 pin_complexity_policy: record.pin_complexity_policy,
                 persistent_tokens: record.persistent_tokens.clone(),
             }),
-            true,
+            StoredPinState::Read,
         ),
-        Ok(None) => (PinState::new(), true),
-        Err(err) => {
+        Ok(None) => (PinState::new(), StoredPinState::Read),
+        Err(err) if closes_authority(&err) => {
             log::error!(
                 "the stored PIN state cannot be read ({err}); treating the PIN as set and \
                  blocked until the authenticator is reset"
             );
-            (unreadable_pin_state(rng), false)
+            (unreadable_pin_state(rng), StoredPinState::Unreadable)
+        }
+        Err(err) => {
+            log::error!(
+                "the stored PIN state could not be read ({err}); treating the PIN as set and \
+                 blocked until it is read"
+            );
+            (unreadable_pin_state(rng), StoredPinState::Unread)
         }
     }
 }
@@ -91,12 +119,47 @@ fn unreadable_pin_state(rng: &mut dyn Rng) -> PinState {
     state
 }
 
+/// Whether `err`, from reading the PIN state at start-up or later, condemns
+/// the stored authority and not just this read of it, so that the engine
+/// closes authority until reset.  Every variant is decided here, so that a
+/// new one has to be.
+fn closes_authority(err: &StoreError) -> bool {
+    match err {
+        // The storage could not be read (EIO, EMFILE, EACCES).  That says
+        // nothing about the record, which the next read can find intact;
+        // closing would report a blocked PIN that only a restart or a reset
+        // clears.
+        StoreError::Io { .. } => false,
+        // The record exists but fails authentication or decoding, or its key
+        // is unusable or missing although data encrypted under it exists:
+        // what it holds cannot be known.  This is what closing is for.
+        StoreError::Corrupt { .. } | StoreError::KeyUnavailable { .. } => true,
+        // The stores never report these from a PIN-state read; they belong to
+        // membership metadata, inserts, write validation and key generation.
+        // A store that does is broken, so they close authority as before.
+        StoreError::CredentialSetUnavailable { .. }
+        | StoreError::Full { .. }
+        | StoreError::InvalidRecord(_)
+        | StoreError::Random => true,
+    }
+}
+
 impl CtapApp<'_> {
     /// Re-read authority before persistent access or PIN verification. In particular,
     /// a failed reset can have published a new key while leaving old ciphertext.
+    ///
+    /// A read that fails with an I/O error returns CTAP2_ERR_PROCESSING and
+    /// changes nothing: the live authority and its tokens stay as they are,
+    /// so the next command reads again.  A record that is missing although a
+    /// PIN or token exists, that cannot be authenticated or decoded, or whose
+    /// key is unusable or missing closes authority until reset, as
+    /// [`load_pin_state`] does.  A PIN state start-up could not read is read
+    /// here as start-up reads it.
     pub(super) fn refresh_persistent_authority(&mut self) -> Result<(), u8> {
-        if !self.pin_state_writable {
-            return Ok(());
+        match self.stored_pin_state {
+            StoredPinState::Read => {}
+            StoredPinState::Unread => return self.read_unread_pin_state(),
+            StoredPinState::Unreadable => return Ok(()),
         }
         let loaded = self.store.pin_state();
         let record = match loaded {
@@ -113,6 +176,9 @@ impl CtapApp<'_> {
             {
                 return Ok(());
             }
+            Err(err) if !closes_authority(&err) => {
+                return Err(store_status("read persistent authority", err));
+            }
             other => {
                 let mut closed = self.pin_state.persistent().clone();
                 closed.persistent_tokens = [None, None];
@@ -121,7 +187,7 @@ impl CtapApp<'_> {
                 self.pin_state.adopt_persistent(closed);
                 self.pin_state.invalidate_pin_uv_auth_tokens();
                 self.cred_mgmt_state.clear();
-                self.pin_state_writable = false;
+                self.stored_pin_state = StoredPinState::Unreadable;
                 if let Err(err) = other {
                     return Err(store_status("read persistent authority", err));
                 }
@@ -160,6 +226,56 @@ impl CtapApp<'_> {
             self.cred_mgmt_state.clear();
         }
         Ok(())
+    }
+
+    /// Re-read authority after a failed reset, which can have published a new
+    /// key or the default PIN state before failing (see
+    /// [`CredentialStore::clear`]); every other PIN-state write that fails has
+    /// published nothing ([`CredentialStore::set_pin_state`]).  As
+    /// [`Self::refresh_persistent_authority`], except that an I/O error does
+    /// not keep the live authority, which may now be wider than the stored
+    /// one: it is closed as at start-up, and the next command that depends on
+    /// it reads it again.
+    pub(super) fn reconcile_persistent_authority(&mut self) {
+        // Only an I/O error fails a refresh and leaves the state `Read`.
+        if self.refresh_persistent_authority().is_err()
+            && self.stored_pin_state == StoredPinState::Read
+        {
+            let closed = unreadable_pin_state(&mut *self.rng);
+            self.pin_state.adopt_persistent(closed.persistent().clone());
+            self.pin_state.invalidate_pin_uv_auth_tokens();
+            self.cred_mgmt_state.clear();
+            self.stored_pin_state = StoredPinState::Unread;
+        }
+    }
+
+    /// Read the PIN state an I/O error kept from being read, as start-up reads
+    /// it, and adopt its persistent part.  The clock, the key agreement keys
+    /// and the token state are kept; no token is issued while the state is
+    /// unread.  Fails with CTAP2_ERR_PROCESSING, leaving the live state
+    /// closed, while it cannot be read.
+    fn read_unread_pin_state(&mut self) -> Result<(), u8> {
+        let (loaded, stored) = load_pin_state(&*self.store, &mut *self.rng);
+        self.stored_pin_state = stored;
+        match stored {
+            StoredPinState::Read => {
+                self.pin_state.adopt_persistent(loaded.persistent().clone());
+                self.pin_state.invalidate_pin_uv_auth_tokens();
+                self.cred_mgmt_state.clear();
+                Ok(())
+            }
+            StoredPinState::Unread | StoredPinState::Unreadable => Err(CTAP2_ERR_PROCESSING),
+        }
+    }
+
+    /// Read the PIN state first if it is unread, before a command that answers
+    /// from it without rereading it.  Does nothing once it is read.
+    pub(super) fn read_pin_state_if_unread(&mut self) -> Result<(), u8> {
+        if self.stored_pin_state == StoredPinState::Unread {
+            self.refresh_persistent_authority()
+        } else {
+            Ok(())
+        }
     }
 
     /// Refuse a failed or repeating random source before publishing authority.
@@ -237,8 +353,8 @@ impl CtapApp<'_> {
     /// any published state, but verification requires Flushed or intentional
     /// Volatile persistence before comparison and authorization.
     ///
-    /// While the stored PIN state is unreadable nothing is written, so the
-    /// fail-closed placeholder never replaces it.
+    /// While the stored PIN state is unread or unreadable nothing is written,
+    /// so the fail-closed placeholder never replaces it.
     pub(super) fn save_persistent_pin_state(&mut self) -> Result<CommitDurability, u8> {
         let persistent = self.pin_state.persistent().clone();
         self.save_pin_state(&persistent)
@@ -250,7 +366,7 @@ impl CtapApp<'_> {
         &mut self,
         persistent: &PersistentPinState,
     ) -> Result<CommitDurability, u8> {
-        if !self.pin_state_writable {
+        if self.stored_pin_state != StoredPinState::Read {
             return Err(CTAP2_ERR_PROCESSING);
         }
         let record = PinStateRecord {

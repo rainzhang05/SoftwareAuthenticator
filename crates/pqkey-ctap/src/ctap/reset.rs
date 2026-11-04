@@ -3,7 +3,7 @@
 use super::CtapApp;
 use super::credential_management::CredentialManagementState;
 use super::presence::{PresenceOperation, PresenceRequest};
-use super::storage::store_status;
+use super::storage::{StoredPinState, store_status};
 
 use core::time::Duration;
 
@@ -31,9 +31,12 @@ impl CtapApp<'_> {
     /// deletes every credential, restores the initial large-blob array,
     /// writes the default PIN state and, for the file store, replaces their
     /// root key before discarding counters or PIN/UV policy. Rotation errors
-    /// can precede or follow key publication. If reset fails, the in-memory
-    /// PIN state is kept. Surviving credentials retain their PIN/UV policy
-    /// across restart; unreadable PIN state is set and blocked with always-UV.
+    /// can precede or follow key publication. If reset fails, the engine
+    /// rereads the PIN state and adopts what it finds; if that read fails with
+    /// an I/O error, it closes the in-memory state until a later read rather
+    /// than keep what the reset may have replaced. Surviving credentials
+    /// retain their PIN/UV policy across restart; unreadable PIN state is set
+    /// and blocked with always-UV.
     /// After durable key rotation, later errors cannot revive old credentials.
     /// Published defaults complete reset even with unconfirmed durability;
     /// the running engine adopts them before returning success.
@@ -51,7 +54,7 @@ impl CtapApp<'_> {
             Ok(durability) => durability,
             Err(err) => {
                 // A rotation error does not tell us which authority is now visible.
-                let _ = self.refresh_persistent_authority();
+                self.reconcile_persistent_authority();
                 return Err(store_status("reset the credential store", err));
             }
         };
@@ -62,7 +65,7 @@ impl CtapApp<'_> {
         // agreement key go back to their initial values, as at power-up
         // (CTAP 2.3 §6.5.5.1).  The store already holds the default PIN state.
         self.pin_state.reset();
-        self.pin_state_writable = true;
+        self.stored_pin_state = StoredPinState::Read;
         Ok(vec![CTAP2_OK])
     }
 }

@@ -148,9 +148,9 @@ pub struct CtapApp<'interrupt> {
     interrupt: &'interrupt InterruptFlag,
     aaguid: [u8; 16],
     pin_state: PinState,
-    /// False while the stored PIN state is unreadable; see
+    /// What the engine has read of the stored PIN state; see
     /// [`storage::load_pin_state`].
-    pin_state_writable: bool,
+    stored_pin_state: storage::StoredPinState,
     attestation_mode: AttestationMode,
     cred_mgmt_state: CredentialManagementState,
     pending_assertion: Option<PendingAssertion>,
@@ -206,7 +206,7 @@ impl<'interrupt> CtapApp<'interrupt> {
         aaguid: [u8; 16],
     ) -> Self {
         let mut rng = rng;
-        let (pin_state, pin_state_writable) = storage::load_pin_state(&store, &mut rng);
+        let (pin_state, stored_pin_state) = storage::load_pin_state(&store, &mut rng);
         Self {
             store: Box::new(store),
             rng: Box::new(rng),
@@ -214,7 +214,7 @@ impl<'interrupt> CtapApp<'interrupt> {
             interrupt,
             aaguid,
             pin_state,
-            pin_state_writable,
+            stored_pin_state,
             attestation_mode: AttestationMode::default(),
             cred_mgmt_state: CredentialManagementState::new(),
             pending_assertion: None,

@@ -39,7 +39,7 @@ fn message(offset: u32, fragment: &[u8]) -> Vec<u8> {
     message
 }
 
-fn write_request(
+pub(super) fn write_request(
     offset: u32,
     length: Option<usize>,
     fragment: &[u8],

@@ -143,6 +143,9 @@ impl CtapApp<'_> {
             None => return Err(CTAP2_ERR_MISSING_PARAMETER),
         };
 
+        // The steps below answer from the PIN and UV policy.
+        self.read_pin_state_if_unread()?;
+
         // Step 1: a zero length pinUvAuthParam asks the user to select this
         // authenticator.
         if request::is_zero_length(parameter(8)) {

@@ -131,6 +131,9 @@ impl CtapApp<'_> {
         };
         let client_hash = request::client_data_hash(parameter(2))?;
 
+        // The steps below answer from the PIN and UV policy.
+        self.read_pin_state_if_unread()?;
+
         // Step 1: a zero length pinUvAuthParam asks the user to select this
         // authenticator.
         if request::is_zero_length(parameter(6)) {
