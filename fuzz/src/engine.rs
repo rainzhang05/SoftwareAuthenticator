@@ -1,13 +1,14 @@
 //! The CTAP engine as the fuzz targets drive it, and the checks every
 //! response must pass.
 
+use std::fmt;
 use std::sync::{
-    Arc,
+    Arc, Once,
     atomic::{AtomicU8, AtomicU64, Ordering},
 };
 use std::time::Duration;
 
-use crate::storage::{HarnessStore, Write};
+use crate::storage::{Event, HarnessStore, Write};
 use ciborium::value::Value;
 use pqkey_ctap::ctap::constants::*;
 use pqkey_ctap::ctap::presence::{Cancellation, PresenceOutcome, PresenceRequest, UserPresence};
@@ -19,6 +20,46 @@ use crate::rng::SplitMix;
 /// The interrupt flag of every fuzzed engine.  Nothing marks it: the
 /// transport, which would, is not part of these targets.
 static NEVER_INTERRUPTED: InterruptFlag = InterruptFlag::new();
+
+/// The logger of every fuzzed engine.  The daemon runs at Info
+/// (`RUST_LOG=info` in `contrib/systemd/user/pqkey.service`), and the `log`
+/// macros evaluate their arguments only for an enabled level: without a
+/// logger the engine's request log line, which decodes every payload again,
+/// would never run.  Records are formatted, as a logger writing them would,
+/// into nothing.
+struct DiscardingLogger;
+
+/// A formatter destination that keeps nothing.
+struct Discard;
+
+impl fmt::Write for Discard {
+    fn write_str(&mut self, _: &str) -> fmt::Result {
+        Ok(())
+    }
+}
+
+impl log::Log for DiscardingLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            fmt::write(&mut Discard, *record.args()).expect("a log record formats");
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Install [`DiscardingLogger`] at Info, once per process.
+fn install_logger() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        log::set_logger(&DiscardingLogger).expect("no other logger is installed");
+        log::set_max_level(log::LevelFilter::Info);
+    });
+}
 
 /// The largest CTAPHID message, and so the longest answer the engine may give
 /// (`pqkey::MESSAGE_SIZE`).
@@ -145,6 +186,7 @@ impl Engine {
     }
 
     fn with_harness(seed: u64, store: HarnessStore) -> Self {
+        install_logger();
         let presence = FuzzPresence::default();
         let mut app = CtapApp::new(
             store.clone(),
@@ -181,20 +223,50 @@ impl Engine {
         self.store.schedule(mode, after);
     }
 
+    /// See [`HarnessStore::schedule_fault`].
+    pub(crate) fn schedule_fault(&self, slot: u8, kind: u8, after: u8) {
+        self.store.schedule_fault(slot, kind, after);
+    }
+
     pub(crate) fn take_pin_writes(&self) -> Vec<Write> {
         self.store.take_writes()
     }
 
+    /// The store calls since the last time, in order.
+    pub(crate) fn take_events(&self) -> Vec<Event> {
+        self.store.take_events()
+    }
+
+    // The store as it is, read past the harness's faults and its record of
+    // the engine's calls.
+
     pub(crate) fn pin_record(&self) -> Option<PinStateRecord> {
-        self.store.pin_state().unwrap()
+        self.store.inner(|store| store.pin_state().unwrap())
     }
 
     pub(crate) fn credentials(&self) -> Vec<pqkey_ctap::store::CredentialRecord> {
-        self.store.list().unwrap()
+        self.store.inner(|store| store.list().unwrap())
     }
 
     pub(crate) fn signature_counter(&self) -> u32 {
-        self.store.signature_counter().unwrap()
+        self.store.inner(|store| store.signature_counter().unwrap())
+    }
+
+    pub(crate) fn large_blob_array(&self) -> Vec<u8> {
+        self.store.inner(|store| store.large_blob_array().unwrap())
+    }
+
+    /// The persisted count of the credential `id`: the global counter for a
+    /// sealed credential, its own for a stored one, `None` if it is not
+    /// stored.
+    pub(crate) fn persisted_counter(&self, id: &[u8]) -> Option<u32> {
+        self.store.inner(|store| {
+            if crate::sequence::is_sealed(id) {
+                Some(store.signature_counter().unwrap())
+            } else {
+                store.get(id).unwrap().map(|record| record.sign_count)
+            }
+        })
     }
 
     /// Reconstruct only the engine, keeping the harness's published storage.

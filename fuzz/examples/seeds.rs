@@ -15,7 +15,8 @@
 //!   status no earlier one did (for the sequence target: PIN set, tokens,
 //!   credentials made, asserted and managed). The sequence corpus also
 //!   contains explicit large-blob commits, abandoned writes, expiration and
-//!   stable credential keys under both PIN/UV auth protocols.
+//!   stable credential keys under both PIN/UV auth protocols, and a store
+//!   fault of every kind with what shows it failed only its command.
 //! * `credential_key`: valid and invalid key material for every algorithm.
 //! * `store_records`: `pqkey_ctap::store::fuzzing::seeds`, valid encodings of
 //!   every stored record and the credential-set manifest, legacy shapes among

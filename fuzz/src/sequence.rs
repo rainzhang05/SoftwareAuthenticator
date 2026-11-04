@@ -35,12 +35,33 @@
 //!   succeeding without pinUvAuthParam, and U2F from signing;
 //! * counters never decrease between successful resets, including the shared global
 //!   counter; U2F handles work only for their application, with ES256,
-//!   non-discoverable credentials and credProtect 1 or 2.
+//!   non-discoverable credentials and credProtect 1 or 2;
+//! * a signature is never returned with a count above the persisted one, and
+//!   no persisted count falls below a count returned;
+//! * the store holds exactly the stored credentials the platform saw
+//!   published and not deleted, and the large-blob array changes only by a
+//!   committed write;
+//! * under scheduled store faults (`Op::StoreFault`), a store call that fails
+//!   fails only its command, which answers CTAP2_ERR_PROCESSING
+//!   (SW_INTERNAL_ERROR for U2F) and makes no further store call, except
+//!   where the engine tolerates the failure: getInfo answers from the PIN
+//!   state it holds when that or the credential count cannot be read, an
+//!   enumeration continuation answers CTAP2_ERR_NOT_ALLOWED when the PIN
+//!   state cannot be read, a corrupt credential is skipped as a listing skips
+//!   it, and an unreadable large-blob array is served as the initial one;
+//! * a PIN-state read that fails with an I/O error changes nothing, except
+//!   the one reconciling a failed reset, after which the engine answers from
+//!   a closed state (PIN set and blocked, alwaysUv) until a read succeeds; a
+//!   corrupt one closes it until reset; a closed state is never written;
+//! * retries are debited only by published writes, and a PIN verdict (a token,
+//!   a changed PIN or CTAP2_ERR_PIN_INVALID) needs a confirmed debit before
+//!   it; the right PIN is never refused as blocked while retries are left.
 
 use crate::cbor::{self, bytes, decode_map, get_int, get_text, int, text};
 use crate::engine::Engine;
 use crate::platform::{Session, authenticate, pin_hash, protocol_value};
 use crate::requests::{self, Overrides, command};
+use crate::storage::{Call, Event, Fault};
 use arbitrary::{Arbitrary, Result, Unstructured};
 use ciborium::value::Value;
 use p256::elliptic_curve::{
@@ -249,6 +270,66 @@ enum Op {
         case: u8,
         wrong_pin: bool,
     },
+    /// One scheduled store fault (`HarnessStore::schedule_fault`): a
+    /// PIN-state, credential, credential-set, signature counter or large-blob
+    /// call that fails, with the error the file store returns.
+    StoreFault {
+        slot: u8,
+        kind: u8,
+        after: u8,
+    },
+}
+
+/// The number of [`Op`] variants, which picks one from a fuzz input.
+const OP_VARIANTS: u32 = 34;
+
+/// Whether `id` is a sealed credential ID, which carries its credential and
+/// counts on the global signature counter, rather than naming a stored one.
+pub(crate) fn is_sealed(id: &[u8]) -> bool {
+    id.len() == 107 && id[0] == 2
+}
+
+/// What the engine has read of the stored PIN state, which decides what it
+/// answers from (`StoredPinState` in `crates/pqkey-ctap/src/ctap/storage.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Authority {
+    /// It answers from the stored state, the platform's model of it.
+    Read,
+    /// An I/O error kept it from being read at start-up, or when a failed
+    /// reset was reconciled.  The engine answers from a closed state, writes
+    /// none, and reads it again first for the commands that depend on it.
+    Unread,
+    /// It cannot be trusted: closed, and neither read nor written until
+    /// reset.  `kept` when the engine closed the state it had read, which
+    /// keeps that state's PIN and policy.
+    Unreadable { kept: bool },
+}
+
+/// The PIN state the engine answers from (see [`Platform::live`]).
+struct Live {
+    pin_set: bool,
+    retries: u8,
+    always_uv: bool,
+    minimum: u8,
+    force_change: bool,
+    complexity: bool,
+}
+
+/// The first store call in `events` whose failure fails the command
+/// `command` (`None` for a U2F APDU), if one failed.  The engine tolerates
+/// some: getInfo answers from the PIN state it holds, a credential count that
+/// fails only leaves remainingDiscoverableCredentials out of getInfo, a
+/// corrupt credential is skipped as a listing skips it, and an unreadable
+/// large-blob array is served as the initial one (§6.10.2).
+fn failed_call(command: Option<u8>, events: &[Event]) -> Option<usize> {
+    events
+        .iter()
+        .position(|event| match (event.call, event.fault) {
+            (_, None) | (Call::PinWrite, _) => false,
+            (Call::PinRead, _) => command != Some(CTAP_CMD_GET_INFO),
+            (Call::Count | Call::BlobRead, _) | (Call::Get, Some(Fault::Corrupt)) => false,
+            _ => true,
+        })
 }
 
 struct Credential {
@@ -315,6 +396,7 @@ struct Platform {
     token_id: u64,
     token_permissions: u8,
     management: management::Oracle,
+    authority: Authority,
 }
 
 impl Drop for Platform {
@@ -460,6 +542,8 @@ fn proposed_array(length: usize, fill: u8, valid_hash: bool) -> Vec<u8> {
 
 impl Platform {
     fn new(engine: Engine) -> Self {
+        // The engine read the PIN state as it started, before any fault.
+        engine.take_events();
         Self {
             global_counter: 0,
             retries: 8,
@@ -488,6 +572,7 @@ impl Platform {
             token_id: 0,
             token_permissions: 0,
             management: management::Oracle::default(),
+            authority: Authority::Read,
         }
     }
 
@@ -500,18 +585,176 @@ impl Platform {
 
     fn call(&mut self, request: &[u8]) -> Vec<u8> {
         let response = self.engine.call(request);
+        let events = self.engine.take_events();
+        if let Some(index) = failed_call(request.first().copied(), &events) {
+            let continuation = matches!(
+                request.first(),
+                Some(&CTAP_CMD_CREDENTIAL_MANAGEMENT | &CTAP_CMD_CREDENTIAL_MANAGEMENT_PROTOTYPE)
+            ) && matches!(
+                CtapApp::decode_request_parameters(&request[1..]),
+                Some(Value::Map(parameters)) if matches!(unsigned(get_int(&parameters, 1)), Some(3 | 5))
+            );
+            let call = events[index].call;
+            let expected = if continuation && call == Call::PinRead {
+                CTAP2_ERR_NOT_ALLOWED
+            } else {
+                CTAP2_ERR_PROCESSING
+            };
+            // The status alone: a response can carry a largeBlobKey.
+            assert!(
+                response == [expected],
+                "a failed {call:?} answered {:#04x}, not {expected:#04x}",
+                status(&response)
+            );
+            assert_eq!(
+                events.len(),
+                index + 1,
+                "the engine went on after a failed {call:?}"
+            );
+        }
+        // Before the oracle: a read that closes or recovers the PIN state
+        // drops the engine's tokens before the command goes on.
+        self.audit_authority(request, &events);
         self.management.check(
             request,
             &response,
             &self.credentials,
             self.engine.clock().now(),
+            &events,
         );
         self.audit_pin_writes(request, &response);
-        self.observe(request, &response);
+        self.observe(request, &response, &events);
         if self.force_change {
             self.management.invalidate();
         }
+        self.check_store();
         response
+    }
+
+    /// The PIN state the engine answers from: the stored one once it has read
+    /// it, else the closed state it holds instead (`load_pin_state` and
+    /// `refresh_persistent_authority` in `crates/pqkey-ctap/src/ctap/storage.rs`).
+    fn live(&self) -> Live {
+        let read = Live {
+            pin_set: self.pin.is_some(),
+            retries: self.retries,
+            always_uv: self.always_uv,
+            minimum: self.minimum,
+            force_change: self.force_change,
+            complexity: self.complexity,
+        };
+        match self.authority {
+            Authority::Read => read,
+            Authority::Unreadable { kept: true } => Live {
+                retries: 0,
+                always_uv: true,
+                ..read
+            },
+            // A PIN nobody knows, blocked, under the default policy.
+            Authority::Unread | Authority::Unreadable { kept: false } => Live {
+                pin_set: true,
+                retries: 0,
+                always_uv: true,
+                minimum: 4,
+                force_change: false,
+                complexity: false,
+            },
+        }
+    }
+
+    /// The engine dropped its pinUvAuthToken and enumeration state.
+    fn tokens_dropped(&mut self) {
+        self.clear_client_token();
+        self.management.restart();
+    }
+
+    /// Follow what the engine has read of the PIN state through one command's
+    /// store calls, in order.  The commands that depend on it read it before
+    /// they write it; a reset whose clear failed then reads it to reconcile
+    /// what the clear may have published.
+    fn audit_authority(&mut self, request: &[u8], events: &[Event]) {
+        let reset = request.first() == Some(&CTAP_CMD_RESET);
+        let mut reconciling = false;
+        for event in events {
+            match event.call {
+                Call::PinWrite if reset => reconciling = event.fault.is_some(),
+                Call::PinWrite => assert_eq!(
+                    self.authority,
+                    Authority::Read,
+                    "a PIN state the engine had not read was written over"
+                ),
+                Call::PinRead => {
+                    self.authority = match (self.authority, event.fault) {
+                        (Authority::Unreadable { .. }, _) => {
+                            panic!("an unreadable PIN state was read again before reset")
+                        }
+                        (Authority::Read, None) => Authority::Read,
+                        // An I/O error fails only its command and changes
+                        // nothing ...
+                        (Authority::Read, Some(Fault::Io)) if !reconciling => Authority::Read,
+                        // ... but a failed reset may have replaced the state
+                        // the engine holds.
+                        (Authority::Read, Some(Fault::Io)) => {
+                            self.tokens_dropped();
+                            Authority::Unread
+                        }
+                        (Authority::Read, Some(Fault::Corrupt)) => {
+                            self.tokens_dropped();
+                            Authority::Unreadable { kept: true }
+                        }
+                        (Authority::Unread, None) => {
+                            self.tokens_dropped();
+                            Authority::Read
+                        }
+                        (Authority::Unread, Some(Fault::Io)) => Authority::Unread,
+                        (Authority::Unread, Some(Fault::Corrupt)) => {
+                            Authority::Unreadable { kept: false }
+                        }
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The store holds exactly the stored credentials the platform saw
+    /// published and not deleted; no persisted count is below a count a
+    /// signature returned; and the large-blob array is the last committed.
+    fn check_store(&self) {
+        let stored = self.engine.credentials();
+        let mut ids: Vec<&[u8]> = stored
+            .iter()
+            .map(|record| record.credential_id.as_slice())
+            .collect();
+        ids.sort_unstable();
+        let mut published: Vec<&[u8]> = self
+            .credentials
+            .iter()
+            .filter(|credential| !is_sealed(&credential.id))
+            .map(|credential| credential.id.as_slice())
+            .collect();
+        published.sort_unstable();
+        assert!(
+            ids == published,
+            "the store holds other credentials than those published"
+        );
+        for record in &stored {
+            let counted = self
+                .known(&record.credential_id)
+                .map_or(0, |credential| credential.counter);
+            assert!(
+                record.sign_count >= counted,
+                "a persisted counter fell below a count returned"
+            );
+        }
+        assert!(
+            self.engine.signature_counter() >= self.global_counter,
+            "the persisted global counter fell below a count returned"
+        );
+        assert!(
+            self.engine.large_blob_array() == self.committed,
+            "the large-blob array changed without a committed write"
+        );
     }
 
     fn audit_pin_writes(&mut self, request: &[u8], response: &[u8]) {
@@ -581,12 +824,24 @@ impl Platform {
                 );
             }
         }
+        // A PIN verdict, a token, a changed PIN or CTAP2_ERR_PIN_INVALID,
+        // follows a confirmed debit and the write that settles the comparison.
+        if verifying && matches!(status(response), CTAP2_OK | CTAP2_ERR_PIN_INVALID) {
+            assert!(
+                writes.len() >= 2
+                    && matches!(
+                        writes[0].outcome,
+                        Some(CommitDurability::Flushed | CommitDurability::Volatile)
+                    ),
+                "a PIN verdict without a confirmed retry debit"
+            );
+        }
         if request.first() == Some(&CTAP_CMD_CLIENT_PIN)
             && get_int(&parameters, 2) == Some(&int(1))
             && status(response) == CTAP2_OK
         {
             let body = decode_map(&response[1..]).unwrap();
-            assert_eq!(get_int(&body, 3), Some(&int(self.retries.into())));
+            assert_eq!(get_int(&body, 3), Some(&int(self.live().retries.into())));
             assert_eq!(
                 get_int(&body, 4),
                 (self.mismatches >= 3).then_some(&Value::Bool(true))
@@ -638,30 +893,65 @@ impl Platform {
             .expect("known counter");
         assert!(counter >= credential.counter, "signature counter decreased");
         credential.counter = counter;
-        if id.len() == 107 && id[0] == 2 {
+        let persisted = self
+            .engine
+            .persisted_counter(id)
+            .expect("a credential that signs is stored or sealed");
+        assert!(
+            persisted >= counter,
+            "a signature was returned with a count that was not persisted"
+        );
+        if is_sealed(id) {
             assert!(counter >= self.global_counter, "global counter decreased");
             self.global_counter = counter;
         }
     }
 
     fn call_u2f(&mut self, request: &[u8]) -> Vec<u8> {
-        use pqkey_ctap::ctap::u2f::{SW_COMMAND_NOT_ALLOWED, SW_NO_ERROR};
+        use pqkey_ctap::ctap::u2f::SW_INTERNAL_ERROR;
         self.pending = PendingArray::default();
         self.assertion_rp = None;
         self.assertion_large_blob_key = false;
         self.assertion_third_party_payment = false;
         let response = self.engine.call_u2f(request);
+        let events = self.engine.take_events();
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event.call, Call::PinRead | Call::PinWrite)),
+            "U2F read or wrote the PIN state"
+        );
+        if let Some(index) = failed_call(None, &events) {
+            let call = events[index].call;
+            assert!(
+                response == SW_INTERNAL_ERROR.to_be_bytes(),
+                "a failed {call:?} answered {:#06x}, not SW_INTERNAL_ERROR",
+                u16::from_be_bytes(response[response.len() - 2..].try_into().unwrap())
+            );
+            assert_eq!(
+                events.len(),
+                index + 1,
+                "the engine went on after a failed {call:?}"
+            );
+        }
+        self.observe_u2f(request, &response);
+        self.check_store();
+        response
+    }
+
+    fn observe_u2f(&mut self, request: &[u8], response: &[u8]) {
+        use pqkey_ctap::ctap::u2f::{SW_COMMAND_NOT_ALLOWED, SW_NO_ERROR};
         let end = response.len() - 2;
         let status = u16::from_be_bytes(response[end..].try_into().unwrap());
         let ins = request.get(1).copied().unwrap_or(0);
-        if self.always_uv && request.len() >= 4 && request[0] == 0 && matches!(ins, 1 | 2) {
+        if self.live().always_uv && request.len() >= 4 && request[0] == 0 && matches!(ins, 1 | 2) {
             assert_eq!(
                 status, SW_COMMAND_NOT_ALLOWED,
                 "U2F signed while alwaysUv was enabled"
             );
         }
         if status != SW_NO_ERROR || ins == 3 {
-            return response;
+            return;
         }
         let data = crate::engine::u2f_data(request).expect("successful APDU body");
         let application: [u8; 32] = data[32..64].try_into().unwrap();
@@ -707,13 +997,15 @@ impl Platform {
             .unwrap();
             self.observe_counter(id, u32::from_be_bytes(response[1..5].try_into().unwrap()));
         }
-        response
     }
 
     /// Model the protocol's volatile counters separately from the engine.
     /// Only accepted fragments can change the committed array; reads compare
-    /// against that model even after a partial transfer was discarded.
-    fn observe_array(&mut self, request: &[u8], response: &[u8]) {
+    /// against that model even after a partial transfer was discarded.  An
+    /// array that cannot be read is served as the initial one (§6.10.2), and
+    /// a commit that fails leaves the complete array staged, so an empty
+    /// fragment at its end commits it again.
+    fn observe_array(&mut self, request: &[u8], response: &[u8], events: &[Event]) {
         let now = self.engine.clock().now();
         if request.first() != Some(&CTAP_CMD_LARGE_BLOBS)
             || self
@@ -757,16 +1049,20 @@ impl Platform {
                 let count = unsigned(Some(get)).expect("get is unsigned") as usize;
                 let offset = offset.expect("offset is required") as usize;
                 assert!(count <= 1_704, "oversized get accepted");
-                assert!(
-                    offset <= self.committed.len(),
-                    "get past the array accepted"
-                );
+                let served: &[u8] = if events
+                    .iter()
+                    .any(|event| event.call == Call::BlobRead && event.fault.is_some())
+                {
+                    &INITIAL_LARGE_BLOB_ARRAY
+                } else {
+                    &self.committed
+                };
+                assert!(offset <= served.len(), "get past the array accepted");
                 let body = decode_map(&response[1..]).expect("large-blob response");
                 assert_eq!(
                     get_int(&body, 1),
                     Some(&bytes(
-                        &self.committed
-                            [offset..offset.saturating_add(count).min(self.committed.len())]
+                        &served[offset..offset.saturating_add(count).min(served.len())]
                     )),
                     "read exposed bytes outside the last committed array"
                 );
@@ -807,7 +1103,10 @@ impl Platform {
             self.pending = PendingArray::default();
             return;
         }
-        if !matches!(status(response), CTAP2_OK | CTAP2_ERR_INTEGRITY_FAILURE) {
+        let commit_failed = events
+            .iter()
+            .any(|event| event.call == Call::BlobWrite && event.fault.is_some());
+        if !matches!(status(response), CTAP2_OK | CTAP2_ERR_INTEGRITY_FAILURE) && !commit_failed {
             return;
         }
         assert!(offset + fragment.len() as u64 <= self.pending.length);
@@ -843,7 +1142,9 @@ impl Platform {
         self.pending.next = self.pending.bytes.len() as u64;
         self.pending.last_fragment = Some(now);
         if self.pending.next == self.pending.length {
-            if valid_array(&self.pending.bytes) {
+            if commit_failed {
+                assert!(valid_array(&self.pending.bytes), "invalid array written");
+            } else if valid_array(&self.pending.bytes) {
                 assert_eq!(
                     status(response),
                     CTAP2_OK,
@@ -869,8 +1170,8 @@ impl Platform {
 
     /// Check what a successful response says against what the platform
     /// knows, and learn from it.
-    fn observe(&mut self, request: &[u8], response: &[u8]) {
-        self.observe_array(request, response);
+    fn observe(&mut self, request: &[u8], response: &[u8], events: &[Event]) {
+        self.observe_array(request, response, events);
         let Some(&code) = request.first() else {
             return;
         };
@@ -900,7 +1201,7 @@ impl Platform {
         let body = decode_map(&response[1..]).unwrap_or_default();
         match code {
             CTAP_CMD_MAKE_CREDENTIAL => {
-                if self.always_uv {
+                if self.live().always_uv {
                     assert!(
                         get_int(&parameters, 8).is_some(),
                         "alwaysUv makeCredential succeeded without pinUvAuthParam"
@@ -1066,7 +1367,7 @@ impl Platform {
                 });
             }
             CTAP_CMD_GET_ASSERTION | CTAP_CMD_GET_NEXT_ASSERTION => {
-                if code == CTAP_CMD_GET_ASSERTION && self.always_uv {
+                if code == CTAP_CMD_GET_ASSERTION && self.live().always_uv {
                     let up = !matches!(
                         get_int(&parameters, 5),
                         Some(Value::Map(options))
@@ -1216,6 +1517,7 @@ impl Platform {
                 }
             }
             CTAP_CMD_RESET => {
+                self.authority = Authority::Read;
                 self.pin = None;
                 self.clear_client_token();
                 // Keep reset-invalidated IDs available to the existing
@@ -1297,32 +1599,40 @@ impl Platform {
                 _ => panic!("unsupported config subcommand succeeded"),
             },
             CTAP_CMD_GET_INFO => {
-                assert_eq!(get_int(&body, 0x1b), Some(&Value::Bool(self.complexity)));
+                // getInfo answers from the PIN state the engine holds, closed
+                // while it cannot read the stored one.
+                let live = self.live();
+                assert_eq!(get_int(&body, 0x1b), Some(&Value::Bool(live.complexity)));
                 assert!(
                     matches!(get_int(&body, 0x1c), Some(Value::Bytes(url)) if url == b"https://github.com/rainzhang05/SoftwareAuthenticator/blob/main/docs/pin-complexity-policy.md")
                 );
                 let versions = get_int(&body, 1).unwrap().as_array().unwrap();
-                assert_eq!(versions.contains(&text("U2F_V2")), !self.always_uv);
+                assert_eq!(versions.contains(&text("U2F_V2")), !live.always_uv);
                 assert_eq!(
                     get_int(&body, 0x0D),
-                    Some(&int(i64::from(self.minimum))),
+                    Some(&int(i64::from(live.minimum))),
                     "minimum differs from the model"
                 );
                 assert_eq!(
                     get_int(&body, 0x0C),
-                    Some(&Value::Bool(self.force_change)),
+                    Some(&Value::Bool(live.force_change)),
                     "forcePINChange differs from the model"
                 );
                 let Some(Value::Map(options)) = get_int(&body, 4) else {
                     panic!("getInfo without options");
                 };
                 assert_eq!(
+                    get_text(options, "clientPin"),
+                    Some(&Value::Bool(live.pin_set)),
+                    "clientPin differs from the model"
+                );
+                assert_eq!(
                     get_text(options, "alwaysUv"),
-                    Some(&Value::Bool(self.always_uv))
+                    Some(&Value::Bool(live.always_uv))
                 );
                 assert_eq!(
                     get_text(options, "makeCredUvNotRqd"),
-                    Some(&Value::Bool(!self.always_uv))
+                    Some(&Value::Bool(!live.always_uv))
                 );
                 assert_eq!(get_text(options, "largeBlobs"), Some(&Value::Bool(true)));
                 assert_eq!(
@@ -1406,6 +1716,18 @@ impl Platform {
                     Some(Some(protocol_value(protocol))),
                 )
             }
+        }
+    }
+
+    /// The right PIN is not refused as blocked while the engine has retries
+    /// left: a read error must not leave it holding a blocked PIN (P3-01).
+    fn check_not_blocked(&self, response: &[u8]) {
+        if self.live().retries > 0 {
+            assert_ne!(
+                status(response),
+                CTAP2_ERR_PIN_BLOCKED,
+                "the right PIN refused as blocked with retries left"
+            );
         }
     }
 
@@ -1563,6 +1885,7 @@ impl Platform {
                         CTAP2_ERR_PIN_INVALID,
                         "the right PIN refused"
                     );
+                    self.check_not_blocked(&response);
                 }
                 if status(&response) == CTAP2_OK {
                     assert!(knows_pin, "changePIN with the wrong PIN");
@@ -1625,6 +1948,9 @@ impl Platform {
                         CTAP2_ERR_PIN_INVALID,
                         "the right PIN refused"
                     );
+                }
+                if knows_pin {
+                    self.check_not_blocked(&response);
                 }
                 if status(&response) == CTAP2_OK {
                     assert!(knows_pin, "a pinUvAuthToken for the wrong PIN");
@@ -1979,8 +2305,21 @@ impl Platform {
                 self.call(&[CTAP_CMD_RESET]);
             }
             Op::PinWriteFault { mode, after } => self.engine.schedule_pin_write(mode, after),
+            Op::StoreFault { slot, kind, after } => self.engine.schedule_fault(slot, kind, after),
             Op::Restart => {
                 self.engine.restart();
+                // The engine reads the PIN state as it starts, and nothing
+                // else.
+                let events = self.engine.take_events();
+                let [start] = events.as_slice() else {
+                    panic!("start-up made {} store calls", events.len());
+                };
+                assert_eq!(start.call, Call::PinRead);
+                self.authority = match start.fault {
+                    None => Authority::Read,
+                    Some(Fault::Io) => Authority::Unread,
+                    Some(Fault::Corrupt) => Authority::Unreadable { kept: false },
+                };
                 self.management.restart();
                 self.retries = self.saved_retries;
                 self.mismatches = 0;
@@ -3156,7 +3495,237 @@ pub fn seed_corpus() -> Vec<Vec<u8>> {
             }
         }
     }
+    let faults = fault_cases();
+    assert_eq!(faults.len(), FAULT_SEEDS);
+    cases.extend(faults);
     cases.iter().map(|ops| encode_fixture(ops)).collect()
+}
+
+/// The number of [`fault_cases`], the last seeds of [`seed_corpus`].
+const FAULT_SEEDS: usize = 16;
+
+/// Store faults of every slot and kind, each followed by what shows the
+/// engine failed only that command (`HarnessStore::schedule_fault`).
+fn fault_cases() -> Vec<Vec<Op>> {
+    const PIN_READ: u8 = 0;
+    const CREDENTIAL_READ: u8 = 1;
+    const CREDENTIAL_SET: u8 = 2;
+    const CREDENTIAL_WRITE: u8 = 3;
+    const COUNTER_READ: u8 = 4;
+    const COUNTER_WRITE: u8 = 5;
+    const BLOB_READ: u8 = 6;
+    const BLOB_WRITE: u8 = 7;
+    const IO: u8 = 0;
+    const CORRUPT: u8 = 1;
+    let fault = |slot, kind| Op::StoreFault {
+        slot,
+        kind,
+        after: 0,
+    };
+    let create = |rk, third_party_payment, user| Op::CreateCredential {
+        alg: 0,
+        rp: 0,
+        large_blob_key: None,
+        third_party_payment,
+        rk,
+        user,
+    };
+    let assert = |discoverable| Op::AssertCredentials {
+        large_blob_key: None,
+        third_party_payment: None,
+        discoverable,
+    };
+    let enumerate = |next| Op::EnumerateCredentials {
+        auth: if next { Auth::None } else { Auth::Token },
+        next,
+    };
+    let manage = |subcommand| Op::ManageKnown {
+        preview: false,
+        auth: Auth::Token,
+        subcommand,
+        rp: 0,
+        credential: 0,
+        valid_user: true,
+    };
+    let get = || Op::LargeBlobGet {
+        offset: 0,
+        length: 5,
+        extra: 0,
+    };
+    let write = || Op::LargeBlobWrite {
+        auth: Auth::None,
+        length: 2,
+        fragment: 5,
+        valid_hash: true,
+    };
+    let mut cases = Vec::new();
+    for v2 in [false, true] {
+        let set = || Op::SetPin {
+            v2,
+            pin: 0,
+            bad_auth: false,
+            pad_to: 2,
+        };
+        let token = || Op::GetToken {
+            v2,
+            right_pin: true,
+            legacy: false,
+            permissions: 6,
+            rp: None,
+        };
+        // An I/O error fails the token's read of the PIN state, and nothing
+        // else: the retries and the PIN stay as they are.
+        cases.push(vec![
+            set(),
+            fault(PIN_READ, IO),
+            token(),
+            Op::GetPinRetries,
+            token(),
+            Op::GetInfo,
+        ]);
+        // Unread at start-up: closed until a read succeeds.
+        cases.push(vec![
+            set(),
+            fault(PIN_READ, IO),
+            Op::Restart,
+            fault(PIN_READ, IO),
+            Op::GetInfo,
+            Op::GetPinRetries,
+            token(),
+        ]);
+        // Corrupt: closed until reset.
+        cases.push(vec![
+            set(),
+            token(),
+            fault(PIN_READ, CORRUPT),
+            Op::GetInfo,
+            Op::GetPinRetries,
+            token(),
+            Op::Reset,
+            Op::GetInfo,
+            set(),
+        ]);
+        // A failed reset whose reconciling read fails: closed until a read
+        // succeeds.
+        cases.push(vec![
+            set(),
+            Op::PinWriteFault { mode: 2, after: 0 },
+            fault(PIN_READ, IO),
+            Op::Reset,
+            fault(PIN_READ, IO),
+            Op::GetInfo,
+            token(),
+        ]);
+    }
+    // The global counter of a sealed credential.
+    cases.push(vec![
+        create(false, None, 1),
+        fault(COUNTER_WRITE, IO),
+        assert(false),
+        fault(COUNTER_READ, IO),
+        assert(false),
+        assert(false),
+        Op::Restart,
+        assert(false),
+    ]);
+    cases.push(vec![
+        Op::U2fRegister { rp: 0 },
+        fault(COUNTER_READ, CORRUPT),
+        Op::U2fAuthenticate {
+            credential: 0,
+            rp: 0,
+            control: 0,
+            corrupt: false,
+        },
+        fault(COUNTER_WRITE, IO),
+        Op::U2fAuthenticate {
+            credential: 0,
+            rp: 0,
+            control: 0,
+            corrupt: false,
+        },
+        Op::U2fAuthenticate {
+            credential: 0,
+            rp: 0,
+            control: 0,
+            corrupt: false,
+        },
+    ]);
+    // A stored credential's own counter, and reading it.
+    cases.push(vec![
+        create(true, None, 1),
+        fault(CREDENTIAL_WRITE, IO),
+        assert(true),
+        fault(CREDENTIAL_READ, IO),
+        assert(false),
+        assert(false),
+    ]);
+    // Credentials that cannot be stored.
+    cases.push(vec![
+        fault(CREDENTIAL_WRITE, CORRUPT),
+        create(true, None, 1),
+        fault(CREDENTIAL_READ, IO),
+        create(false, Some(true), 2),
+        fault(CREDENTIAL_WRITE, IO),
+        create(false, Some(true), 2),
+        create(true, None, 1),
+        create(false, Some(true), 2),
+        assert(false),
+    ]);
+    // Enumeration past a corrupt and an unreadable credential, then deletion
+    // and metadata that fail.
+    cases.push(vec![
+        create(true, None, 1),
+        create(true, None, 2),
+        create(true, None, 3),
+        Op::Enroll {
+            v2: true,
+            permissions: 10,
+            rp: None,
+        },
+        enumerate(false),
+        fault(CREDENTIAL_READ, CORRUPT),
+        enumerate(true),
+        enumerate(false),
+        fault(CREDENTIAL_READ, IO),
+        enumerate(true),
+        enumerate(true),
+        fault(CREDENTIAL_WRITE, IO),
+        manage(6),
+        fault(CREDENTIAL_SET, IO),
+        manage(1),
+        manage(6),
+        manage(1),
+    ]);
+    cases.push(vec![
+        create(true, None, 1),
+        fault(CREDENTIAL_SET, IO),
+        assert(true),
+        fault(CREDENTIAL_SET, CORRUPT),
+        Op::GetInfo,
+        assert(true),
+    ]);
+    // A large-blob commit that fails stays staged.
+    cases.push(vec![
+        fault(BLOB_WRITE, IO),
+        write(),
+        Op::LargeBlobContinue {
+            auth: Auth::None,
+            offset: None,
+            length: None,
+            fragment: 0,
+        },
+        get(),
+    ]);
+    cases.push(vec![
+        write(),
+        fault(BLOB_READ, CORRUPT),
+        get(),
+        fault(BLOB_READ, IO),
+        get(),
+        get(),
+    ]);
+    cases
 }
 
 fn encode_fixture(ops: &[Op]) -> Vec<u8> {
@@ -3201,19 +3770,19 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 permissions,
                 rp: None,
             } => {
-                variant(&mut output, 6, 33);
+                variant(&mut output, 6, OP_VARIANTS);
                 output.extend_from_slice(&[u8::from(*v2), *permissions, 0]);
                 extra = if pin_set { 17 } else { 34 };
                 pin_set = true;
             }
-            Op::GetNextAssertion => variant(&mut output, 5, 33),
+            Op::GetNextAssertion => variant(&mut output, 5, OP_VARIANTS),
             Op::Presence(value) => {
-                variant(&mut output, 12, 33);
+                variant(&mut output, 12, OP_VARIANTS);
                 output.push(*value);
             }
-            Op::GetInfo => variant(&mut output, 9, 33),
+            Op::GetInfo => variant(&mut output, 9, OP_VARIANTS),
             Op::Reset => {
-                variant(&mut output, 11, 33);
+                variant(&mut output, 11, OP_VARIANTS);
                 pin_set = false;
             }
             Op::LargeBlobBegin {
@@ -3223,7 +3792,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 valid_hash,
                 fill,
             } => {
-                variant(&mut output, 15, 33);
+                variant(&mut output, 15, OP_VARIANTS);
                 auth(&mut output, *value);
                 output.extend_from_slice(&length.to_le_bytes());
                 output.extend_from_slice(&fragment.to_le_bytes());
@@ -3235,7 +3804,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 length,
                 fragment,
             } => {
-                variant(&mut output, 16, 33);
+                variant(&mut output, 16, OP_VARIANTS);
                 auth(&mut output, *value);
                 option_u16(&mut output, *offset);
                 option_u16(&mut output, *length);
@@ -3246,13 +3815,13 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 length,
                 extra,
             } => {
-                variant(&mut output, 17, 33);
+                variant(&mut output, 17, OP_VARIANTS);
                 output.extend_from_slice(&offset.to_le_bytes());
                 output.extend_from_slice(&length.to_le_bytes());
                 output.push(*extra);
             }
             Op::Advance(millis) => {
-                variant(&mut output, 18, 33);
+                variant(&mut output, 18, OP_VARIANTS);
                 output.extend_from_slice(&millis.to_le_bytes());
             }
             Op::LargeBlobWrite {
@@ -3261,7 +3830,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 fragment,
                 valid_hash,
             } => {
-                variant(&mut output, 19, 33);
+                variant(&mut output, 19, OP_VARIANTS);
                 auth(&mut output, *value);
                 output.extend_from_slice(&length.to_le_bytes());
                 output.extend_from_slice(&fragment.to_le_bytes());
@@ -3276,7 +3845,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 rk,
                 user,
             } => {
-                variant(&mut output, 20, 33);
+                variant(&mut output, 20, OP_VARIANTS);
                 output.extend_from_slice(&[*alg, *rp]);
                 option_bool(&mut output, *large_blob_key);
                 option_bool(&mut output, *third_party_payment);
@@ -3287,18 +3856,18 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 third_party_payment,
                 discoverable,
             } => {
-                variant(&mut output, 21, 33);
+                variant(&mut output, 21, OP_VARIANTS);
                 option_bool(&mut output, *large_blob_key);
                 option_bool(&mut output, *third_party_payment);
                 output.push(u8::from(*discoverable));
             }
             Op::EnumerateCredentials { auth: value, next } => {
-                variant(&mut output, 22, 33);
+                variant(&mut output, 22, OP_VARIANTS);
                 auth(&mut output, *value);
                 output.push(u8::from(*next));
             }
             Op::U2fRegister { rp } => {
-                variant(&mut output, 23, 33);
+                variant(&mut output, 23, OP_VARIANTS);
                 output.push(*rp);
             }
             Op::U2fAuthenticate {
@@ -3307,10 +3876,10 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 control,
                 corrupt,
             } => {
-                variant(&mut output, 24, 33);
+                variant(&mut output, 24, OP_VARIANTS);
                 output.extend_from_slice(&[*credential, *rp, *control, u8::from(*corrupt)]);
             }
-            Op::U2fVersion => variant(&mut output, 25, 33),
+            Op::U2fVersion => variant(&mut output, 25, OP_VARIANTS),
             Op::AuthenticatorConfig {
                 auth: value,
                 subcommand,
@@ -3319,7 +3888,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 force_change: None,
                 complexity,
             } => {
-                variant(&mut output, 8, 33);
+                variant(&mut output, 8, OP_VARIANTS);
                 auth(&mut output, *value);
                 output.extend_from_slice(&[*subcommand, 0, u8::from(rp_ids.is_some())]);
                 if let Some(ids) = rp_ids {
@@ -3332,18 +3901,18 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 option_bool(&mut output, *complexity);
             }
             Op::PinWriteFault { mode, after } => {
-                variant(&mut output, 28, 33);
+                variant(&mut output, 28, OP_VARIANTS);
                 output.extend_from_slice(&[*mode, *after]);
             }
-            Op::Restart => variant(&mut output, 29, 33),
-            Op::GetPinRetries => variant(&mut output, 10, 33),
+            Op::Restart => variant(&mut output, 29, OP_VARIANTS),
+            Op::GetPinRetries => variant(&mut output, 10, OP_VARIANTS),
             Op::SetPin {
                 v2,
                 pin,
                 bad_auth,
                 pad_to,
             } => {
-                variant(&mut output, 0, 33);
+                variant(&mut output, 0, OP_VARIANTS);
                 output.extend_from_slice(&[u8::from(*v2), *pin, u8::from(*bad_auth), *pad_to]);
                 extra = 17;
                 pin_set = true;
@@ -3353,7 +3922,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 right_pin,
                 new_pin,
             } => {
-                variant(&mut output, 1, 33);
+                variant(&mut output, 1, OP_VARIANTS);
                 output.extend_from_slice(&[u8::from(*v2), u8::from(*right_pin), *new_pin]);
                 extra = 33;
             }
@@ -3364,7 +3933,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 permissions,
                 rp,
             } => {
-                variant(&mut output, 2, 33);
+                variant(&mut output, 2, OP_VARIANTS);
                 output.extend_from_slice(&[
                     u8::from(*v2),
                     u8::from(*right_pin),
@@ -3385,7 +3954,7 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 credential,
                 valid_user,
             } => {
-                variant(&mut output, 31, 33);
+                variant(&mut output, 31, OP_VARIANTS);
                 output.push(u8::from(*preview));
                 auth(&mut output, *value);
                 output.extend_from_slice(&[*subcommand, *rp, *credential, u8::from(*valid_user)]);
@@ -3395,14 +3964,14 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 auth: value,
                 subcommand,
             } => {
-                variant(&mut output, 7, 33);
+                variant(&mut output, 7, OP_VARIANTS);
                 output.push(u8::from(*preview));
                 auth(&mut output, *value);
                 output.push(*subcommand);
                 extra = 64;
             }
             Op::UsePersistent { v2 } => {
-                variant(&mut output, 30, 33);
+                variant(&mut output, 30, OP_VARIANTS);
                 output.push(u8::from(*v2));
             }
             Op::KeyAgreement {
@@ -3411,8 +3980,12 @@ fn encode_fixture(ops: &[Op]) -> Vec<u8> {
                 case,
                 wrong_pin,
             } => {
-                variant(&mut output, 32, 33);
+                variant(&mut output, 32, OP_VARIANTS);
                 output.extend_from_slice(&[u8::from(*v2), *consumer, *case, u8::from(*wrong_pin)]);
+            }
+            Op::StoreFault { slot, kind, after } => {
+                variant(&mut output, 33, OP_VARIANTS);
+                output.extend_from_slice(&[*slot, *kind, *after]);
             }
             _ => panic!("operation has no fixture encoder"),
         }
@@ -3581,10 +4154,11 @@ mod tests {
         let seeds = seed_corpus();
         assert_eq!(
             seeds.len(),
-            110 + 2 * 7 * usize::from(crate::key_agreement::CASE_COUNT) * 2
+            110 + 2 * 7 * usize::from(crate::key_agreement::CASE_COUNT) * 2 + FAULT_SEEDS
         );
         let traces: Vec<_> = seeds.iter().map(|seed| run_traced(seed)).collect();
-        let original_end = traces.len() - 2 * 7 * usize::from(crate::key_agreement::CASE_COUNT) * 2;
+        let original_end =
+            traces.len() - 2 * 7 * usize::from(crate::key_agreement::CASE_COUNT) * 2 - FAULT_SEEDS;
         for trace in &traces[original_end - 4..original_end] {
             assert_eq!(
                 trace
@@ -3676,6 +4250,225 @@ mod tests {
                 3
             );
         }
+    }
+
+    /// Each fault seed fails the command it aims at and only that command,
+    /// and what follows shows it changed nothing it should not have.
+    #[test]
+    fn fault_seeds_fail_only_their_commands() {
+        use pqkey_ctap::ctap::u2f::{SW_INTERNAL_ERROR, SW_NO_ERROR};
+        let traces: Vec<_> = fault_cases()
+            .iter()
+            .map(|ops| run_traced(&encode_fixture(ops)))
+            .collect();
+        let pin = |status| (CTAP_CMD_CLIENT_PIN, u16::from(status));
+        let info = (CTAP_CMD_GET_INFO, u16::from(CTAP2_OK));
+        let reset = |status| (CTAP_CMD_RESET, u16::from(status));
+        let make = |status| (CTAP_CMD_MAKE_CREDENTIAL, u16::from(status));
+        let assertion = |status| (CTAP_CMD_GET_ASSERTION, u16::from(status));
+        let manage = |status| (CTAP_CMD_CREDENTIAL_MANAGEMENT, u16::from(status));
+        let blobs = |status| (CTAP_CMD_LARGE_BLOBS, u16::from(status));
+        let (ok, failed) = (CTAP2_OK, CTAP2_ERR_PROCESSING);
+        for protocol in [0, 4] {
+            // The token's read fails; the retries and the PIN do not change.
+            assert_eq!(
+                traces[protocol],
+                [
+                    pin(ok),
+                    pin(ok),
+                    pin(ok),
+                    pin(failed),
+                    pin(ok),
+                    pin(ok),
+                    pin(ok),
+                    info
+                ]
+            );
+            // Unread at start-up, getInfo answers closed; the next read
+            // recovers the stored state.
+            assert_eq!(
+                traces[protocol + 1],
+                [pin(ok), pin(ok), info, pin(ok), pin(ok), pin(ok)]
+            );
+            // Corrupt: blocked until reset.
+            assert_eq!(
+                traces[protocol + 2],
+                [
+                    pin(ok),
+                    pin(ok),
+                    pin(ok),
+                    pin(ok),
+                    info,
+                    pin(ok),
+                    pin(ok),
+                    pin(CTAP2_ERR_PIN_BLOCKED),
+                    reset(ok),
+                    info,
+                    pin(ok),
+                    pin(ok)
+                ]
+            );
+            // A failed reset left unread, recovered by the token's read.
+            assert_eq!(
+                traces[protocol + 3],
+                [pin(ok), pin(ok), reset(failed), info, pin(ok), pin(ok)]
+            );
+        }
+        assert_eq!(
+            traces[8],
+            [
+                make(ok),
+                assertion(failed),
+                assertion(failed),
+                assertion(ok),
+                assertion(ok)
+            ]
+        );
+        assert_eq!(
+            traces[9],
+            [
+                (0x81, SW_NO_ERROR),
+                (0x82, SW_INTERNAL_ERROR),
+                (0x82, SW_INTERNAL_ERROR),
+                (0x82, SW_NO_ERROR)
+            ]
+        );
+        assert_eq!(
+            traces[10],
+            [
+                make(ok),
+                assertion(failed),
+                assertion(failed),
+                assertion(ok)
+            ]
+        );
+        assert_eq!(
+            traces[11],
+            [
+                make(failed),
+                make(failed),
+                make(failed),
+                make(ok),
+                make(ok),
+                assertion(ok)
+            ]
+        );
+        assert_eq!(
+            traces[12],
+            [
+                make(ok),
+                make(ok),
+                make(ok),
+                pin(ok),
+                pin(ok),
+                pin(ok),
+                pin(ok),
+                manage(ok),
+                manage(ok),
+                manage(ok),
+                manage(failed),
+                manage(ok),
+                manage(failed),
+                manage(failed),
+                manage(ok),
+                manage(ok)
+            ]
+        );
+        assert_eq!(
+            traces[13],
+            [make(ok), assertion(failed), info, assertion(ok)]
+        );
+        assert_eq!(traces[14], [blobs(failed), blobs(ok), blobs(ok)]);
+        assert_eq!(traces[15], [blobs(ok), blobs(ok), blobs(ok), blobs(ok)]);
+    }
+
+    /// After a PIN-state read error the token issued before it still works.
+    #[test]
+    fn a_pin_state_read_error_keeps_the_token() {
+        let mut p = Platform::new(Engine::new(29));
+        let filler = [0x0Fu8; 1 << 12];
+        let mut u = Unstructured::new(&filler);
+        let metadata = || Op::ManageKnown {
+            preview: false,
+            auth: Auth::Token,
+            subcommand: 1,
+            rp: 0,
+            credential: 0,
+            valid_user: true,
+        };
+        for op in [
+            Op::Enroll {
+                v2: true,
+                permissions: 0,
+                rp: None,
+            },
+            Op::StoreFault {
+                slot: 0,
+                kind: 0,
+                after: 0,
+            },
+            metadata(),
+            metadata(),
+        ] {
+            p.step(op, &mut u).unwrap();
+        }
+        let trace = p.engine.take_trace();
+        assert_eq!(
+            trace[trace.len() - 2..],
+            [
+                (
+                    CTAP_CMD_CREDENTIAL_MANAGEMENT,
+                    u16::from(CTAP2_ERR_PROCESSING)
+                ),
+                (CTAP_CMD_CREDENTIAL_MANAGEMENT, u16::from(CTAP2_OK))
+            ]
+        );
+        assert_eq!(p.authority, Authority::Read);
+    }
+
+    #[test]
+    #[should_panic(expected = "the store holds other credentials than those published")]
+    fn store_check_catches_an_unpublished_credential() {
+        let mut p = Platform::new(Engine::new(31));
+        let mut u = Unstructured::new(&[]);
+        p.step(
+            Op::CreateCredential {
+                alg: 0,
+                rp: 0,
+                large_blob_key: None,
+                third_party_payment: None,
+                rk: true,
+                user: 1,
+            },
+            &mut u,
+        )
+        .unwrap();
+        // As if the response had been lost.
+        p.credentials.clear();
+        p.check_store();
+    }
+
+    #[test]
+    #[should_panic(expected = "a signature was returned with a count that was not persisted")]
+    fn counter_check_catches_an_unpersisted_count() {
+        let mut p = Platform::new(Engine::new(37));
+        let mut u = Unstructured::new(&[]);
+        p.step(
+            Op::CreateCredential {
+                alg: 0,
+                rp: 0,
+                large_blob_key: None,
+                third_party_payment: None,
+                rk: false,
+                user: 1,
+            },
+            &mut u,
+        )
+        .unwrap();
+        let id = p.credentials[0].id.clone();
+        assert!(is_sealed(&id));
+        // A count the store never saw.
+        p.observe_counter(&id, 1);
     }
 
     /// The platform side of the harness is right: it sets a PIN, gets a

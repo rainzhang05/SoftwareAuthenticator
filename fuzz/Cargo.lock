@@ -1079,6 +1079,7 @@ dependencies = [
  "arbitrary",
  "ciborium",
  "libfuzzer-sys",
+ "log",
  "p256",
  "pqkey",
  "pqkey-ctap",

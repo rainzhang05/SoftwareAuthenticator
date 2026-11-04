@@ -142,12 +142,16 @@ impl Oracle {
     }
     /// Run before the parent observes successful data mutations. Rejected
     /// requests must never advance the independent credential data model.
+    /// `events` are the request's store calls: an enumeration continuation
+    /// reads each credential it reaches, and moves past one whose read fails
+    /// or finds it corrupt.
     pub(super) fn check(
         &mut self,
         request: &[u8],
         response: &[u8],
         credentials: &[Credential],
         now: Duration,
+        events: &[Event],
     ) {
         self.observe_time(now);
         let Some(&code) = request.first() else {
@@ -250,6 +254,21 @@ impl Oracle {
                 }
             }
             if !success {
+                let failed_read = events
+                    .iter()
+                    .find(|event| event.call == Call::Get && event.fault == Some(Fault::Io));
+                if sub == 5
+                    && let Some(failed) = failed_read
+                    && let Some(cursor) = self.credentials.as_mut()
+                {
+                    skip_absent(cursor, credentials, events);
+                    assert_eq!(
+                        cursor.entries.get(cursor.index),
+                        Some(&failed.id),
+                        "enumeration skipped a credential"
+                    );
+                    cursor.index += 1;
+                }
                 return;
             }
             let body = decode_map(&response[1..]).unwrap_or_default();
@@ -329,13 +348,7 @@ impl Oracle {
                 }
                 5 => {
                     let cursor = self.credentials.as_mut().unwrap();
-                    while cursor
-                        .entries
-                        .get(cursor.index)
-                        .is_some_and(|id| !credentials.iter().any(|c| c.id == *id))
-                    {
-                        cursor.index += 1;
-                    }
+                    skip_absent(cursor, credentials, events);
                     check_id(
                         &body,
                         cursor
@@ -436,6 +449,19 @@ impl Oracle {
         }
     }
 }
+/// Move `cursor` past the credentials an enumeration skips: those deleted
+/// since it began, and those whose read in `events` found them corrupt.
+fn skip_absent(cursor: &mut Cursor<Vec<u8>>, credentials: &[Credential], events: &[Event]) {
+    while cursor.entries.get(cursor.index).is_some_and(|id| {
+        !credentials.iter().any(|c| c.id == *id)
+            || events.iter().any(|event| {
+                event.call == Call::Get && event.fault == Some(Fault::Corrupt) && event.id == *id
+            })
+    }) {
+        cursor.index += 1;
+    }
+}
+
 fn check_id(body: &[(Value, Value)], expected: &[u8]) {
     let Some(Value::Map(desc)) = get_int(body, 7) else {
         panic!("descriptor")
@@ -471,7 +497,7 @@ mod tests {
                 ),
             ]),
         );
-        oracle.check(&request, &[CTAP2_OK], &[], Duration::ZERO);
+        oracle.check(&request, &[CTAP2_OK], &[], Duration::ZERO, &[]);
     }
 
     #[test]
@@ -494,6 +520,7 @@ mod tests {
             &[CTAP2_OK],
             &[],
             Duration::ZERO,
+            &[],
         );
     }
 }
