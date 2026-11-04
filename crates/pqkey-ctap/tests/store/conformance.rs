@@ -10,9 +10,9 @@
 
 use pqkey_ctap::CoseAlg;
 use pqkey_ctap::store::{
-    AttestationRecord, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS, FileStore,
-    INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY, MemoryStore, PinStateRecord,
-    PrivateKeyMaterial, SEALED_ID_OVERHEAD, StoreError,
+    AttestationRecord, CredentialRecord, CredentialStore, DEFAULT_MAX_CREDENTIALS, DirectoryFlush,
+    FileStore, INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY, MemoryStore,
+    PinStateRecord, PrivateKeyMaterial, SEALED_ID_OVERHEAD, StoreError,
 };
 
 use crate::common::{
@@ -707,6 +707,16 @@ fn pin_state_is_independent_of_credentials<B: Backend>() {
     assert_eq!(store.count().unwrap(), 0);
 }
 
+/// On a filesystem that flushes directories, as the test's does, every store
+/// says its PIN state writes can be confirmed.
+fn directory_flushes_are_supported<B: Backend>() {
+    let fixture = fresh::<B>();
+    assert!(matches!(
+        fixture.store.directory_flush(),
+        DirectoryFlush::Supported
+    ));
+}
+
 fn attestation_round_trips_without_a_size_cap<B: Backend>() {
     let mut fixture = fresh::<B>();
     let store = &mut fixture.store;
@@ -1168,6 +1178,7 @@ conformance_suite!(
     invalid_attestation_is_rejected,
     pin_state_round_trips,
     pin_state_is_independent_of_credentials,
+    directory_flushes_are_supported,
     attestation_round_trips_without_a_size_cap,
     clear_removes_credentials_and_resets_pin_state,
     clear_keeps_the_attestation_record,

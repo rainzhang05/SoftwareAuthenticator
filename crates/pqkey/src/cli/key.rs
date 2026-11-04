@@ -19,8 +19,9 @@ use pqkey_ctap::ctap::constants::{
     CTAP2_ERR_KEEPALIVE_CANCEL, CTAP2_ERR_KEY_STORE_FULL, CTAP2_ERR_NOT_ALLOWED,
     CTAP2_ERR_OPERATION_DENIED, CTAP2_ERR_PIN_AUTH_BLOCKED, CTAP2_ERR_PIN_BLOCKED,
     CTAP2_ERR_PIN_INVALID, CTAP2_ERR_PIN_NOT_SET, CTAP2_ERR_PIN_POLICY_VIOLATION,
-    CTAP2_ERR_PUAT_REQUIRED, CTAP2_ERR_USER_ACTION_TIMEOUT,
+    CTAP2_ERR_PROCESSING, CTAP2_ERR_PUAT_REQUIRED, CTAP2_ERR_USER_ACTION_TIMEOUT,
 };
+use pqkey_ctap::store::{DirectoryFlush, FileStore};
 use signal_hook::{consts::SIGINT, flag};
 
 use super::ConfigAction;
@@ -149,6 +150,7 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
             problems.extend(running_problems(state_dir, &system, running, STATUS_WAIT)?);
         }
     }
+    problems.extend(state_dir_problem(state_dir));
     problems.extend(service_problems(state_dir, running)?);
     if !problems.is_empty() {
         outln!()?;
@@ -232,6 +234,27 @@ pub fn running_problems(
         super::PresenceArg::AutoApprove => {}
     }
     Ok(problems)
+}
+
+/// A state directory whose filesystem does not support flushing directories,
+/// where the key refuses to set or check a PIN and cannot save passkeys.
+fn state_dir_problem(state_dir: &Path) -> Option<Problem> {
+    let DirectoryFlush::Unsupported(err) = FileStore::directory_flush_in(state_dir) else {
+        return None;
+    };
+    Some(Problem::new(
+        format!(
+            "the key cannot use a PIN or save passkeys in its state directory, which cannot be \
+             flushed ({err}): it refuses to set or check a PIN there"
+        ),
+        format!(
+            "run `pqkey stop`, move {} to a local filesystem (or copy it and verify the copy \
+             before deleting the original), leave a symbolic link in its place, then run `pqkey \
+             start`, which checks again; until then use the key only as a security key, without \
+             a PIN",
+            state_dir.display()
+        ),
+    ))
 }
 
 /// What the desktop's notification server says about itself.
@@ -379,8 +402,16 @@ fn set_or_change_pin<L: ReportLink>(
     match info.pin_set {
         Some(false) => {
             let new = pins.new_pin(minimum)?;
-            key.set_pin(new.as_bytes())
-                .map_err(|err| new_pin_error(key, err, minimum, false))?;
+            key.set_pin(new.as_bytes()).map_err(|err| match err {
+                // The key could not store the PIN: it could not write its
+                // state, or refused to where its state directory cannot keep
+                // one, which `status` reports.
+                ClientError::Status(CTAP2_ERR_PROCESSING) => io::Error::other(
+                    "the key could not store the PIN; `pqkey status` says whether its state \
+                     directory can keep one, and `journalctl --user -u pqkey` says why",
+                ),
+                err => new_pin_error(key, err, minimum, false),
+            })?;
             Ok(PinChange::Set)
         }
         Some(true) => {
@@ -1071,6 +1102,48 @@ mod tests {
             PinChange::Changed
         );
         assert!(key.management_token(b"5678").is_ok());
+    }
+
+    /// A PIN the key could not store names where to find out why: `status`,
+    /// which reports a state directory that cannot keep one, and the log.
+    #[test]
+    fn a_pin_the_key_cannot_store_points_at_status_and_the_log() {
+        let dir = TempDir::new("cli-pin-not-stored");
+        let (_daemon, mut key) = start(&dir);
+        // A directory in the PIN state's place fails its write before
+        // anything is published, as CTAP2_ERR_PROCESSING.
+        std::fs::create_dir_all(dir.path().join("pin-state").join("occupied")).unwrap();
+        let message = set_or_change_pin(&mut key, &mut Script::of(&["1234"]))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("could not store the PIN"), "{message}");
+        assert!(message.contains("`pqkey status`"), "{message}");
+        assert!(message.contains("journalctl --user -u pqkey"), "{message}");
+        assert_eq!(key.info().unwrap().pin_set, Some(false));
+    }
+
+    /// `status` reports a state directory whose filesystem refuses to flush
+    /// directories, as procfs does with EINVAL, with its fix; nothing for one
+    /// that flushes, or that does not exist yet.
+    #[test]
+    fn status_reports_a_state_directory_that_cannot_keep_a_pin() {
+        let dir = TempDir::new("status-flush");
+        assert_eq!(state_dir_problem(dir.path()), None);
+        assert_eq!(state_dir_problem(&dir.path().join("missing")), None);
+        let problem = state_dir_problem(Path::new("/proc")).expect("procfs cannot be flushed");
+        assert!(problem.what.contains("cannot use a PIN"), "{problem:?}");
+        assert!(problem.what.contains("(/proc: "), "{problem:?}");
+        // The key is stopped before its directory moves, and started after.
+        let at = |text: &str| {
+            problem
+                .fix
+                .find(text)
+                .unwrap_or_else(|| panic!("{problem:?}"))
+        };
+        assert!(at("run `pqkey stop`") < at("move /proc to a local filesystem"));
+        assert!(at("move /proc to a local filesystem") < at("run `pqkey start`"));
+        assert!(problem.fix.contains("verify the copy"), "{problem:?}");
+        assert!(problem.fix.contains("without a PIN"), "{problem:?}");
     }
 
     #[test]

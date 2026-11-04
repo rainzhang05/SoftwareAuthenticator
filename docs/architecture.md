@@ -478,6 +478,18 @@ block, while the published retry budget persists; zero retries requires reset.
 Unreadable PIN state remains set, blocked and alwaysUv, and its placeholder is
 never written over the stored record.
 
+Where the store's filesystem does not support directory flushes (fsync of the
+state directory fails with EINVAL, EOPNOTSUPP/ENOTSUP or ENOSYS), every PIN
+state write would be `Unconfirmed`, so no PIN could be verified there. setPIN
+and every PIN check (changePIN, getPinToken,
+getPinUvAuthTokenUsingPinWithPermissions) refuse with CTAP2_ERR_PROCESSING
+before they write anything: a check spends no retry and compares nothing, as
+it compared nothing before, when it refused after publishing its debit. The
+engine flushes the directory to find out at its first PIN operation and keeps
+a definite answer until it restarts; a flush that fails otherwise, as with EIO,
+refuses nothing and is asked again next time. The daemon logs the condition at
+start-up and `pqkey status` reports it with its fix.
+
 Other record writes retain their atomic file replacement behavior. Most report
 a directory-flush error even though the renamed file remains visible;
 large-blob writes return success after rename and log that error. Successful

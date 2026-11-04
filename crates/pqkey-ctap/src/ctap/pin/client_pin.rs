@@ -151,7 +151,10 @@ impl CtapApp<'_> {
     /// The decremented counter is persisted before pinHashEnc is decrypted, so
     /// cutting power part-way through the check still costs a retry.  It is
     /// decremented on a copy that is adopted once it is published, so a write
-    /// that fails before publication leaves the counter as stored.  A
+    /// that fails before publication leaves the counter as stored.  Where
+    /// the store cannot flush the directory the counter is published in, no
+    /// write of it could ever be confirmed, so the check is refused before
+    /// the debit is written: it spends no retry and compares nothing.  A
     /// pinHashEnc that fails to decrypt counts as a mismatch ("If an error
     /// results, or a mismatch is detected").
     fn verify_pin_hash_enc(
@@ -163,6 +166,17 @@ impl CtapApp<'_> {
         self.refresh_persistent_authority()?;
         let mut debited = self.pin_state.retry_state();
         let attempt = debited.begin_attempt()?;
+        // Here the debit would be published unconfirmed, and the comparison
+        // refused all the same (`require_confirmed_retry`).
+        if let Some(err) = self.unsupported_directory_flush() {
+            log::error!(
+                "refusing to check a PIN, without using up a retry: the credential store's \
+                 filesystem cannot flush directories ({err}), so no retry it used up could be \
+                 stored durably; stop the authenticator, then move the store to a local \
+                 filesystem"
+            );
+            return Err(CTAP2_ERR_PROCESSING);
+        }
         let durability = self.save_pin_state(debited.persistent())?;
         self.pin_state.adopt_retry_state(debited);
         require_confirmed_retry(durability)?;
@@ -221,6 +235,17 @@ impl CtapApp<'_> {
         let keys = self.decapsulate(protocol, key_agreement)?;
         verify(protocol, &keys.auth_key, new_pin_enc, pin_auth_param)?;
         let (hash, length) = self.new_pin_hash(protocol, &keys, new_pin_enc)?;
+        // A PIN whose retries cannot be stored durably could never be
+        // checked (see `verify_pin_hash_enc`).
+        if let Some(err) = self.unsupported_directory_flush() {
+            log::error!(
+                "refusing to set a PIN: the credential store's filesystem cannot flush \
+                 directories ({err}), so no retry of the PIN could be stored durably and the PIN \
+                 could never be checked; stop the authenticator, then move the store to a local \
+                 filesystem"
+            );
+            return Err(CTAP2_ERR_PROCESSING);
+        }
         self.store_new_pin(&hash, length)?;
         Ok(vec![CTAP2_OK])
     }

@@ -129,6 +129,21 @@ pub enum CommitDurability {
     Unconfirmed,
 }
 
+/// What flushing the directory a store publishes its PIN state in shows of
+/// its filesystem; see [`CredentialStore::directory_flush`].
+#[derive(Debug)]
+pub enum DirectoryFlush {
+    /// The flush worked, or the store has no directory to flush.
+    Supported,
+    /// The filesystem does not support directory flushes, and refused this
+    /// one with this error (EINVAL, ENOSYS, or EOPNOTSUPP, which on Linux is
+    /// also ENOTSUP), as it will every other.
+    Unsupported(StoreError),
+    /// The flush failed in a way the next one need not (EIO or EACCES, say),
+    /// which shows neither.
+    Failed(StoreError),
+}
+
 /// A successful credential-set transaction. Every value means committed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CredentialCommit {
@@ -234,6 +249,19 @@ pub trait CredentialStore {
     /// an error means it was not published. Unconfirmed publication can roll
     /// back after power loss and must not authorize a PIN comparison or token.
     fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<CommitDurability, StoreError>;
+
+    /// Flush the directory the PIN state is published in, and say what that
+    /// shows of the filesystem.
+    ///
+    /// Where it is [`DirectoryFlush::Unsupported`], every
+    /// [`Self::set_pin_state`] is published [`CommitDurability::Unconfirmed`],
+    /// which never authorizes a PIN comparison: each check of a PIN would
+    /// spend a retry and then refuse to compare, until the PIN was blocked.
+    /// A store without a directory is [`DirectoryFlush::Supported`].  Each
+    /// call flushes again.
+    fn directory_flush(&self) -> DirectoryFlush {
+        DirectoryFlush::Supported
+    }
 
     /// The global signature counter: the signature count of the credentials
     /// that keep none of their own, the non-discoverable ones sealed into

@@ -8,7 +8,7 @@ use pqkey_ctap::ctap::{
     AttestationMode, Clock, CtapApp, InterruptFlag, RESET_WINDOW_AFTER_POWER_UP,
     presence::{AutoApprove, UserPresence},
 };
-use pqkey_ctap::store::{AttestationRecord, CredentialStore, FileStore};
+use pqkey_ctap::store::{AttestationRecord, CredentialStore, DirectoryFlush, FileStore};
 
 use crate::{
     WaitingForUser,
@@ -371,6 +371,7 @@ pub fn serve_ctap_with_presence<C: Clock + 'static>(
     // Through this the transport cancels the request the app is processing.
     let interrupt = InterruptFlag::new();
     let waiting = WaitingForUser::new();
+    log_if_state_dir_cannot_flush(data.store.state_dir());
     let mut ctap = CtapApp::with_file_store(data.store, presence, &interrupt, data.aaguid);
     ctap.set_clock(clock()?);
     ctap.set_attestation_mode(data.attestation);
@@ -396,6 +397,24 @@ pub fn serve_ctap_with_presence<C: Clock + 'static>(
         on_ready,
         move |deadline| platform::identify(&identity, deadline),
     )
+}
+
+/// Log that the key cannot use a PIN or save passkeys in `state_dir`, if
+/// its filesystem does not support flushing directories: no PIN-state write
+/// could be confirmed there, so the engine refuses to set or check a PIN,
+/// and saving a passkey fails.
+fn log_if_state_dir_cannot_flush(state_dir: &Path) {
+    if let DirectoryFlush::Unsupported(err) = FileStore::directory_flush_in(state_dir) {
+        log::error!(
+            "the key cannot use a PIN or save passkeys in its state directory, which cannot be \
+             flushed ({err}): no PIN retry could be stored durably there, so setting or checking \
+             a PIN is refused, without using up a retry, and saving a passkey fails. Stop the \
+             key (`pqkey stop`), move the state directory to a local filesystem (or copy it and \
+             verify the copy before deleting the original), leave a symbolic link in its place, \
+             then start the key (`pqkey start`), which checks again; until then use the key only \
+             as a security key, without a PIN"
+        );
+    }
 }
 
 /// The shortest user action timeout CTAP allows: "This timeout MUST be at
@@ -703,6 +722,37 @@ mod tests {
                 .any(|(level, message)| *level == log::Level::Warn
                     && message.contains("MUST be at least 10 seconds")),
             "{warned:?}"
+        );
+    }
+
+    /// A state directory whose filesystem refuses to flush directories, as
+    /// procfs does with EINVAL, is reported as one where the key cannot use a
+    /// PIN, with the fix; one that flushes is not reported.
+    #[test]
+    fn a_state_directory_that_cannot_be_flushed_is_reported() {
+        use crate::test_support::logs;
+        logs::install();
+        let flushing = TempDir::new("flushing-state");
+        log_if_state_dir_cannot_flush(flushing.path());
+        assert!(logs::containing(&flushing.path().display().to_string()).is_empty());
+        log_if_state_dir_cannot_flush(Path::new("/proc"));
+        let logged = logs::containing("(/proc: ");
+        // The key is stopped before its directory moves, and started after.
+        let in_order = |message: &str, parts: &[&str]| {
+            let at: Vec<_> = parts.iter().map(|part| message.find(part)).collect();
+            at.iter().all(Option::is_some) && at.windows(2).all(|pair| pair[0] < pair[1])
+        };
+        assert!(
+            logged
+                .iter()
+                .any(|(level, message)| *level == log::Level::Error
+                    && message.contains("cannot use a PIN")
+                    && message.contains("setting or checking a PIN is refused")
+                    && in_order(
+                        message,
+                        &["`pqkey stop`", "to a local filesystem", "`pqkey start`"]
+                    )),
+            "{logged:?}"
         );
     }
 

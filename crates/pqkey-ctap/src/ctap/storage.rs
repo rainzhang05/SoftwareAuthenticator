@@ -10,8 +10,8 @@
 use super::CtapApp;
 use super::pin::state::{PersistentPinState, PinState};
 use crate::store::{
-    AttestationRecord, CommitDurability, CredentialRecord, CredentialStore, PinStateRecord,
-    StoreError,
+    AttestationRecord, CommitDurability, CredentialRecord, CredentialStore, DirectoryFlush,
+    PinStateRecord, StoreError,
 };
 
 use rand_core::Rng;
@@ -386,6 +386,30 @@ impl CtapApp<'_> {
         self.store
             .set_pin_state(&record)
             .map_err(|err| store_status("save the PIN state", err))
+    }
+
+    /// The error with which the store's filesystem refuses to flush the
+    /// directory the PIN state is published in, if it does not support
+    /// directory flushes ([`CredentialStore::directory_flush`]).  There no
+    /// PIN-state write is ever confirmed, so a PIN could never be checked:
+    /// setPIN and every PIN check refuse before they write anything.
+    ///
+    /// The store is asked at the first PIN operation that needs to know, and
+    /// its answer is kept for the engine's life, so that a PIN check costs no
+    /// flush of its own; a restart asks again.  A flush that merely failed
+    /// shows nothing and is not kept: the operation goes on, and the next one
+    /// asks again.
+    pub(super) fn unsupported_directory_flush(&mut self) -> Option<&StoreError> {
+        if self.directory_flush.is_none() {
+            match self.store.directory_flush() {
+                DirectoryFlush::Failed(_) => return None,
+                known => self.directory_flush = Some(known),
+            }
+        }
+        match &self.directory_flush {
+            Some(DirectoryFlush::Unsupported(err)) => Some(err),
+            _ => None,
+        }
     }
 
     /// Every readable credential, most recently created first.

@@ -77,7 +77,7 @@ use self::get_assertion::PendingAssertion;
 use self::large_blobs::LargeBlobState;
 use self::pin::state::PinState;
 use self::presence::{DEFAULT_PRESENCE_TIMEOUT, UserPresence};
-use crate::store::{CredentialStore, FileStore, PrivateKeyMaterial};
+use crate::store::{CredentialStore, DirectoryFlush, FileStore, PrivateKeyMaterial};
 use crate::{CoseAlg, CryptoError};
 
 use ciborium::{de::from_reader, value::Value};
@@ -151,6 +151,10 @@ pub struct CtapApp<'interrupt> {
     /// What the engine has read of the stored PIN state; see
     /// [`storage::load_pin_state`].
     stored_pin_state: storage::StoredPinState,
+    /// What the store's directory flush showed, once it showed
+    /// [`DirectoryFlush::Supported`] or [`DirectoryFlush::Unsupported`]; see
+    /// [`Self::unsupported_directory_flush`].
+    directory_flush: Option<DirectoryFlush>,
     attestation_mode: AttestationMode,
     cred_mgmt_state: CredentialManagementState,
     pending_assertion: Option<PendingAssertion>,
@@ -215,6 +219,7 @@ impl<'interrupt> CtapApp<'interrupt> {
             aaguid,
             pin_state,
             stored_pin_state,
+            directory_flush: None,
             attestation_mode: AttestationMode::default(),
             cred_mgmt_state: CredentialManagementState::new(),
             pending_assertion: None,

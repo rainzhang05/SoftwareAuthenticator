@@ -18,8 +18,9 @@ use super::manifest::{
 };
 use super::{
     AttestationRecord, CommitDurability, Corruption, CredentialCommit, CredentialRecord,
-    CredentialStore, DEFAULT_MAX_CREDENTIALS, INITIAL_LARGE_BLOB_ARRAY, PinStateRecord, StoreError,
-    next_created_at, sort_newest_first, validate_attestation, validate_credential,
+    CredentialStore, DEFAULT_MAX_CREDENTIALS, DirectoryFlush, INITIAL_LARGE_BLOB_ARRAY,
+    PinStateRecord, StoreError, next_created_at, sort_newest_first, validate_attestation,
+    validate_credential,
 };
 
 const CREDENTIALS_DIR: &str = "credentials";
@@ -270,7 +271,8 @@ const ATTESTATION_FILE: &str = "attestation";
 /// Credential-set membership follows the explicit commit rules above.
 /// `Flushed` relies on the filesystem and hardware honoring flushes; it is
 /// not protection against snapshot rollback. Unsupported directory flushing
-/// aborts transaction preparation or gives `Unconfirmed` after publication.
+/// aborts transaction preparation or gives `Unconfirmed` after publication;
+/// [`directory_flush`](CredentialStore::directory_flush) detects it.
 #[derive(Debug)]
 pub struct FileStore<K = FileKeySource> {
     root: PathBuf,
@@ -288,6 +290,14 @@ impl FileStore<FileKeySource> {
     pub fn open(state_dir: impl AsRef<Path>) -> Result<Self, StoreError> {
         let state_dir = state_dir.as_ref();
         Self::open_with_key_source(state_dir, FileKeySource::new(state_dir.join(KEYS_DIR)))
+    }
+
+    /// [`CredentialStore::directory_flush`] of the store in `state_dir`,
+    /// without opening it, which would create the directory and its keys.
+    /// A directory that does not exist is [`DirectoryFlush::Failed`].
+    #[must_use]
+    pub fn directory_flush_in(state_dir: &Path) -> DirectoryFlush {
+        fsio::directory_flush(state_dir)
     }
 }
 
@@ -1054,6 +1064,10 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
     fn set_pin_state(&mut self, state: &PinStateRecord) -> Result<CommitDurability, StoreError> {
         let keys = CredentialKeys::derive(&self.root_key_for_write(KeyDomain::Credential)?)?;
         self.write_pin_state(&keys, state)
+    }
+
+    fn directory_flush(&self) -> DirectoryFlush {
+        fsio::directory_flush(&self.root)
     }
 
     fn signature_counter(&self) -> Result<u32, StoreError> {

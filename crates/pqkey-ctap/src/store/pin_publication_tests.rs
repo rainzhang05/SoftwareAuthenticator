@@ -471,6 +471,242 @@ fn real_file_failed_retry_debits_spend_nothing_and_need_no_restart() {
     }
 }
 
+/// Every file under `dir`, with its contents.
+fn contents(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let data = fs::read(&path).unwrap();
+                files.insert(path, data);
+            }
+        }
+    }
+    files
+}
+
+/// The checkpoints of one PIN state write that is flushed.
+const PIN_STATE_WRITE: [&str; 8] = [
+    "write",
+    "written",
+    "file-flush",
+    "file-flushed",
+    "rename",
+    "renamed",
+    "directory-flush",
+    "directory-flushed",
+];
+
+/// The checkpoints of the flush that tells an engine whether its store's
+/// directory can be flushed.
+const FLUSH_CHECK: [&str; 2] = ["directory-flush", "directory-flushed"];
+
+/// `operation`'s result and the checkpoints it passed, in order, with every
+/// directory flush failing with `flush_error()` if there is one.
+fn traced<T>(
+    flush_error: Option<fn() -> std::io::Error>,
+    operation: impl FnOnce() -> T,
+) -> (T, Vec<String>) {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let seen = events.clone();
+    let result = fsio::with_hook(
+        Box::new(move |event, path| {
+            seen.borrow_mut().push(event.to_owned());
+            match flush_error {
+                Some(error) if event == "directory-flush" => Err(fsio::io_error(path, error())),
+                _ => Ok(()),
+            }
+        }),
+        operation,
+    );
+    (result, Rc::try_unwrap(events).unwrap().into_inner())
+}
+
+/// What a filesystem without directory flushes answers one.
+const UNSUPPORTED: [fn() -> std::io::Error; 2] = [
+    || std::io::Error::from(ErrorKind::Unsupported),
+    || std::io::Error::from(ErrorKind::InvalidInput),
+];
+
+/// Where directory flushes are unsupported, every PIN state write would be
+/// published unconfirmed, so no PIN set there could ever be verified: setPIN
+/// is refused before anything is written, and the key carries on without a
+/// PIN.  The engine keeps the answer; a restart asks again.
+#[test]
+fn set_pin_is_refused_where_directory_flushes_are_unsupported() {
+    for managed in [false, true] {
+        for protocol in PROTOCOLS {
+            for unsupported in UNSUPPORTED {
+                let scratch = TempDir::new();
+                let path = scratch.path().join("state");
+                setup(&path, managed);
+                let mut engine = app(&path);
+                let session = Session::new(&mut engine, protocol);
+                let before = contents(&path);
+                let (response, events) = traced(Some(unsupported), || session.set(&mut engine));
+                assert_eq!(response, [CTAP2_ERR_PROCESSING]);
+                // Only the flush that told: nothing was written, let alone
+                // published.
+                assert_eq!(events, FLUSH_CHECK[..1]);
+                assert_eq!(contents(&path), before);
+                // The answer is kept: refused again, without another flush.
+                assert_eq!(
+                    traced(None, || session.set(&mut engine)),
+                    (vec![CTAP2_ERR_PROCESSING], vec![])
+                );
+                let mut restarted = app(&path);
+                for instance in [&mut engine, &mut restarted] {
+                    let Value::Map(options) = options(instance) else {
+                        panic!("options");
+                    };
+                    assert!(options.contains(&(text("clientPin"), Value::Bool(false))));
+                    let session = Session::new(instance, protocol);
+                    assert_eq!(session.token(instance, PIN), [CTAP2_ERR_PIN_NOT_SET]);
+                }
+                // Restarted where flushes work, the key sets the PIN.
+                let session = Session::new(&mut restarted, protocol);
+                assert_eq!(session.set(&mut restarted), [CTAP2_OK]);
+                assert_eq!(session.token(&mut restarted, PIN)[0], CTAP2_OK);
+            }
+        }
+    }
+}
+
+/// Where directory flushes are unsupported, a PIN set before, elsewhere or
+/// by an older version, is never checked: changePIN, getPinToken and
+/// getPinUvAuthTokenUsingPinWithPermissions are refused before they debit a
+/// retry.  However often they are tried, with the right PIN or a wrong one,
+/// no retry is spent, nothing is decrypted or compared, nothing is written,
+/// and the filesystem is asked once.  At HEAD each check published its debit
+/// and then refused to compare: no comparison either way, but a retry gone.
+#[test]
+fn pin_checks_spend_no_retry_where_directory_flushes_are_unsupported() {
+    for managed in [false, true] {
+        for protocol in PROTOCOLS {
+            for unsupported in UNSUPPORTED {
+                let scratch = TempDir::new();
+                let path = scratch.path().join("state");
+                setup(&path, managed);
+                let mut engine = app(&path);
+                assert_eq!(
+                    Session::new(&mut engine, protocol).set(&mut engine),
+                    [CTAP2_OK]
+                );
+                // The key restarts where directory flushes are unsupported.
+                let mut engine = app(&path);
+                let session = Session::new(&mut engine, protocol);
+                let before = contents(&path);
+                observation::take();
+                let ((), events) = traced(Some(unsupported), || {
+                    for _ in 0..=crate::ctap::MAX_PIN_RETRIES {
+                        for pin in [PIN, NEW] {
+                            let hash = Value::Bytes(session.encrypted(&pin_hash(pin)[..]));
+                            assert_eq!(
+                                session.command(&mut engine, 5, vec![(int(6), hash)]),
+                                [CTAP2_ERR_PROCESSING]
+                            );
+                            assert_eq!(session.token(&mut engine, pin), [CTAP2_ERR_PROCESSING]);
+                            assert_eq!(session.read_only(&mut engine, pin), [CTAP2_ERR_PROCESSING]);
+                        }
+                        assert_eq!(session.change(&mut engine), [CTAP2_ERR_PROCESSING]);
+                    }
+                });
+                assert_eq!(observation::take(), [0, 0, 0]);
+                assert_eq!(events, FLUSH_CHECK[..1]);
+                assert_eq!(contents(&path), before);
+                assert_eq!(
+                    field(
+                        &call(&mut engine, CTAP_CMD_CLIENT_PIN, vec![(int(2), int(1))]),
+                        3
+                    ),
+                    int(8)
+                );
+                // Restarted where flushes work, the PIN works.
+                let mut restarted = app(&path);
+                let session = Session::new(&mut restarted, protocol);
+                assert_eq!(session.token(&mut restarted, PIN)[0], CTAP2_OK);
+            }
+        }
+    }
+}
+
+/// Where flushes work, an engine asks once, at its first PIN operation, and
+/// keeps the answer: setPIN and PIN checks write what they wrote before, and
+/// no later one flushes anything more.  A restarted engine asks again.
+#[test]
+fn an_engine_checks_directory_flushes_once() {
+    for protocol in PROTOCOLS {
+        let scratch = TempDir::new();
+        let path = scratch.path().join("state");
+        setup(&path, false);
+        let mut engine = app(&path);
+        let session = Session::new(&mut engine, protocol);
+        let (response, events) = traced(None, || session.set(&mut engine));
+        assert_eq!(response, [CTAP2_OK]);
+        assert_eq!(events, [&FLUSH_CHECK[..], &PIN_STATE_WRITE].concat());
+        for _ in 0..3 {
+            let (response, events) = traced(None, || session.token(&mut engine, PIN));
+            assert_eq!(response[0], CTAP2_OK);
+            // The debit, then the restored count.
+            assert_eq!(events, [PIN_STATE_WRITE, PIN_STATE_WRITE].concat());
+        }
+        let mut restarted = app(&path);
+        let session = Session::new(&mut restarted, protocol);
+        let (response, events) = traced(None, || session.token(&mut restarted, PIN));
+        assert_eq!(response[0], CTAP2_OK);
+        assert_eq!(
+            events,
+            [&FLUSH_CHECK[..], &PIN_STATE_WRITE, &PIN_STATE_WRITE].concat()
+        );
+    }
+}
+
+/// A flush that fails in a way the next need not, as with EIO, does not say
+/// flushes are unsupported: setPIN goes on, and its own flush decides.  The
+/// failure is not kept, so the next PIN operation asks again.
+#[test]
+fn a_transient_flush_failure_does_not_refuse_set_pin() {
+    for protocol in PROTOCOLS {
+        let scratch = TempDir::new();
+        let path = scratch.path().join("state");
+        setup(&path, false);
+        let mut engine = app(&path);
+        let session = Session::new(&mut engine, protocol);
+        let mut writes = 0;
+        let response = fsio::with_hook(
+            Box::new(move |event, path| {
+                if event == "write" {
+                    writes += 1;
+                }
+                if event == "directory-flush" && writes == 0 {
+                    // EIO, the same on Linux and macOS.
+                    Err(fsio::io_error(path, std::io::Error::from_raw_os_error(5)))
+                } else {
+                    Ok(())
+                }
+            }),
+            || session.set(&mut engine),
+        );
+        assert_eq!(response, [CTAP2_OK]);
+        let stored = FileStore::open(&path)
+            .unwrap()
+            .pin_state()
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.pin_hash, Some(*pin_hash(PIN)));
+        let (response, events) = traced(None, || session.token(&mut engine, PIN));
+        assert_eq!(response[0], CTAP2_OK);
+        assert_eq!(
+            events,
+            [&FLUSH_CHECK[..], &PIN_STATE_WRITE, &PIN_STATE_WRITE].concat()
+        );
+    }
+}
+
 #[test]
 fn reset_final_default_publication_commits_only_after_prior_work() {
     for managed in [false, true] {

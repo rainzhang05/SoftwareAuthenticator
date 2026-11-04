@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use getrandom::SysRng;
 use rand_core::TryRng;
 
-use super::{CommitDurability, StoreError};
+use super::{CommitDurability, DirectoryFlush, StoreError};
 
 /// Mode of every directory the store creates.
 pub(crate) const DIR_MODE: u32 = 0o700;
@@ -80,19 +80,39 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), StoreError> {
 }
 
 /// Flush a directory, making the creation, renaming, and removal of entries in
-/// it durable.
+/// it durable.  A filesystem that does not support directory flushes (see
+/// [`flush_unsupported`]) counts as flushed.
 pub(crate) fn sync_dir(dir: &Path) -> Result<(), StoreError> {
     match sync_dir_strict(dir) {
-        Err(StoreError::Io { source, .. })
-            if matches!(
-                source.kind(),
-                ErrorKind::InvalidInput | ErrorKind::Unsupported
-            ) =>
-        {
-            Ok(())
-        }
+        Err(err) if flush_unsupported(&err) => Ok(()),
         result => result,
     }
+}
+
+/// Flush `dir` and say what that shows of its filesystem: an error
+/// [`flush_unsupported`] counts is [`DirectoryFlush::Unsupported`], any other
+/// [`DirectoryFlush::Failed`].  The flush changes nothing.
+pub(crate) fn directory_flush(dir: &Path) -> DirectoryFlush {
+    match sync_dir_strict(dir) {
+        Ok(()) => DirectoryFlush::Supported,
+        Err(err) if flush_unsupported(&err) => DirectoryFlush::Unsupported(err),
+        Err(err) => DirectoryFlush::Failed(err),
+    }
+}
+
+/// Whether `err`, from flushing a directory, says that its filesystem does
+/// not support directory flushes, so that every flush there fails alike:
+/// EINVAL (`InvalidInput`), with which fsync(2) refuses a file that does not
+/// support synchronization (Linux does for a directory of procfs, say), or an
+/// error Rust reports as `Unsupported`: ENOSYS, or EOPNOTSUPP, which on Linux
+/// is also ENOTSUP.  Any other error, such as an I/O, permission or space
+/// error, may not recur.
+fn flush_unsupported(err: &StoreError) -> bool {
+    matches!(
+        err,
+        StoreError::Io { source, .. }
+            if matches!(source.kind(), ErrorKind::InvalidInput | ErrorKind::Unsupported)
+    )
 }
 
 /// Transaction preparation cannot assume unsupported directory flushing
@@ -570,6 +590,84 @@ mod tests {
             replace_pin_state(scratch.path(), "pin-state", b"flushed").unwrap(),
             CommitDurability::Flushed
         );
+    }
+
+    /// What [`directory_flush`] says of `dir` while every flush of it fails
+    /// with `error()`, checked against what `sync_dir` ignores: the errors
+    /// it calls unsupported.
+    fn probe_failing(dir: &Path, error: fn() -> io::Error) -> DirectoryFlush {
+        let failing = || -> Hook {
+            Box::new(move |event, path| {
+                if event == "directory-flush" {
+                    Err(io_error(path, error()))
+                } else {
+                    Ok(())
+                }
+            })
+        };
+        let probed = with_hook(failing(), || directory_flush(dir));
+        let ignored = with_hook(failing(), || sync_dir(dir)).is_ok();
+        assert_eq!(
+            matches!(probed, DirectoryFlush::Unsupported(_)),
+            ignored,
+            "{}",
+            error()
+        );
+        probed
+    }
+
+    /// Only the errors that say directory flushes are unsupported are
+    /// reported so; a failed flush that may not recur is only a failure.
+    #[test]
+    fn only_unsupported_directory_flushes_are_reported() {
+        let scratch = scratch_dir();
+        let mut unsupported: Vec<fn() -> io::Error> = vec![
+            || io::Error::from(ErrorKind::Unsupported),
+            || io::Error::from(ErrorKind::InvalidInput),
+            // EINVAL, the same on Linux and macOS.
+            || io::Error::from_raw_os_error(22),
+        ];
+        if cfg!(target_os = "linux") {
+            // Linux's ENOSYS, and its EOPNOTSUPP, which is also its ENOTSUP.
+            unsupported.push(|| io::Error::from_raw_os_error(38));
+            unsupported.push(|| io::Error::from_raw_os_error(95));
+        }
+        for error in unsupported {
+            let DirectoryFlush::Unsupported(StoreError::Io { path, source }) =
+                probe_failing(scratch.path(), error)
+            else {
+                panic!("{} is not reported", error());
+            };
+            assert_eq!(path, scratch.path());
+            assert_eq!(source.kind(), error().kind());
+        }
+        let transient: [fn() -> io::Error; 7] = [
+            || io::Error::other("injected"),
+            || io::Error::from(ErrorKind::Interrupted),
+            || io::Error::from(ErrorKind::TimedOut),
+            // EIO, EACCES, ENOSPC and EROFS, the same on Linux and macOS.
+            || io::Error::from_raw_os_error(5),
+            || io::Error::from_raw_os_error(13),
+            || io::Error::from_raw_os_error(28),
+            || io::Error::from_raw_os_error(30),
+        ];
+        for error in transient {
+            let DirectoryFlush::Failed(StoreError::Io { source, .. }) =
+                probe_failing(scratch.path(), error)
+            else {
+                panic!("{} is not a mere failure", error());
+            };
+            assert_eq!(source.kind(), error().kind());
+        }
+        assert!(matches!(
+            directory_flush(scratch.path()),
+            DirectoryFlush::Supported
+        ));
+        // A directory that cannot be opened says nothing about flushing it.
+        assert!(matches!(
+            directory_flush(&scratch.path().join("missing")),
+            DirectoryFlush::Failed(_)
+        ));
     }
 
     #[test]
