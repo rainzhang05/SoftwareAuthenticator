@@ -4,10 +4,12 @@
 use super::support::TestApp;
 use super::support::new_app;
 use super::support::{
-    PlatformPinSession, TestStore, client_pin, get_pin_retries, get_pin_token, int, padded_pin,
-    pin_hash,
+    PlatformPinSession, TestStore, change_pin, client_pin, get_pin_retries, get_pin_token,
+    get_pin_uv_auth_token, int, padded_pin, pin_hash,
 };
 use crate::ClassicPinProtocol;
+use crate::ctap::pin::observation;
+use crate::ctap::pin::permissions::PIN_PERMISSION_CM;
 use crate::ctap::pin::state::{
     MAX_CONSECUTIVE_PIN_MISMATCHES, MAX_PIN_RETRIES, PersistentPinState, PinRetryState,
 };
@@ -362,6 +364,63 @@ fn change_pin_persists_the_spent_retry_before_comparing() {
     let last = writes.last().expect("new PIN persisted");
     assert_eq!(last.pin_retries, MAX_PIN_RETRIES);
     assert_eq!(last.pin_hash, Some(pin_hash(b"5678")));
+}
+
+/// The retry spent before a comparison is spent only once it is published.
+/// While writing it fails before publication, as on a full disk, each PIN
+/// check fails with CTAP2_ERR_PROCESSING before any comparison and the count
+/// stays the stored one, however many checks fail; none of them is a
+/// mismatch.  Once writes work again the correct PIN yields a token, with no
+/// restart.
+#[test]
+fn a_retry_debit_that_is_not_published_is_not_spent() {
+    let (mut app, store) = app_with_pin();
+    for _ in 0..2 {
+        assert_eq!(
+            get_pin_token(&mut app, ClassicPinProtocol::V2, b"0000").map(|_| ()),
+            Err(CTAP2_ERR_PIN_INVALID)
+        );
+    }
+    let stored = MAX_PIN_RETRIES - 2;
+    let writes = store.pin_state_writes().len();
+    observation::take();
+
+    store.faults(|faults| faults.set_pin_state = true);
+    for check in 0..=MAX_PIN_RETRIES {
+        let pin = if check % 2 == 0 {
+            PIN
+        } else {
+            b"0000".as_slice()
+        };
+        let result = match check % 3 {
+            0 => get_pin_token(&mut app, ClassicPinProtocol::V2, pin).map(|_| ()),
+            1 => get_pin_uv_auth_token(
+                &mut app,
+                ClassicPinProtocol::V1,
+                pin,
+                PIN_PERMISSION_CM.into(),
+                None,
+            )
+            .map(|_| ()),
+            _ => change_pin(&mut app, ClassicPinProtocol::V2, pin, b"5678").map(|_| ()),
+        };
+        assert_eq!(result, Err(CTAP2_ERR_PROCESSING), "check {check}");
+        assert_eq!(get_pin_retries(&mut app), (stored, None), "check {check}");
+    }
+    assert_eq!(observation::take(), [0, 0, 0], "no PIN was compared");
+    assert_eq!(
+        store.pin_state_writes().len(),
+        writes,
+        "nothing was published"
+    );
+    store.faults(|faults| faults.set_pin_state = false);
+
+    assert_eq!(
+        store.pin_state().unwrap().map(|state| state.pin_retries),
+        Some(stored)
+    );
+    get_pin_token(&mut app, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+    assert_eq!(get_pin_retries(&mut app), (MAX_PIN_RETRIES, None));
 }
 
 #[test]

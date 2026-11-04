@@ -1038,6 +1038,58 @@ fn an_io_error_reconciling_a_reset_that_published_defaults_drops_the_old_token()
     );
 }
 
+/// Any other error on the read that reconciles a failed reset, whether or not
+/// the reset had published the default state, still fails closed until reset,
+/// as on any other reread: even once the record reads again, the PIN is set
+/// and blocked, alwaysUv is on and nothing is written.  A restart reads the
+/// record again.
+#[test]
+fn any_other_error_reconciling_a_failed_reset_still_fails_closed() {
+    for published in [false, true] {
+        for err in closing_errors() {
+            let name = format!("{err} (defaults published: {published})");
+            let store = TestStore::new();
+            let (mut app, _) = app_with_store(store.clone(), [0x78; 16], [], &NEVER_INTERRUPTED);
+            set_pin_padded(&mut app, ClassicPinProtocol::V2, &padded_pin(PIN)).expect("setPIN");
+            let writes = store.pin_state_writes().len();
+
+            store.faults(|faults| {
+                faults.clear = !published;
+                faults.clear_after_publishing = published;
+                faults.pin_state_errors.push_back(err);
+            });
+            assert_eq!(app.handle_reset(), Err(CTAP2_ERR_PROCESSING), "{name}");
+            store.faults(|faults| {
+                assert!(
+                    faults.pin_state_errors.is_empty(),
+                    "{name}: the read failed"
+                );
+                faults.clear = false;
+                faults.clear_after_publishing = false;
+            });
+            assert_eq!(get_pin_retries(&mut app).0, 0, "{name}");
+            assert_eq!(
+                get_pin_token(&mut app, ClassicPinProtocol::V2, PIN),
+                Err(CTAP2_ERR_PIN_BLOCKED),
+                "{name}"
+            );
+            assert_eq!(pin_options(&mut app), (true, true), "{name}");
+            assert_eq!(store.pin_state_writes().len(), writes, "{name}");
+
+            let mut restarted = new_app(store.clone(), [0x78; 16]);
+            assert_eq!(
+                get_pin_retries(&mut restarted),
+                (MAX_PIN_RETRIES, None),
+                "{name}"
+            );
+            assert_eq!(pin_options(&mut restarted), (!published, false), "{name}");
+            if !published {
+                get_pin_token(&mut restarted, ClassicPinProtocol::V2, PIN).expect("correct PIN");
+            }
+        }
+    }
+}
+
 /// The same over the real store: `keys/credential.key` unreadable during one
 /// getInfo (a directory in its place, which fails to read even as root) costs
 /// nothing, while a `pin-state` that fails authentication still fails closed,

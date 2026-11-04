@@ -462,11 +462,14 @@ Pre-publication errors keep the preceding PIN and policy; changePIN may still
 have legitimately consumed or restored retries while checking the old PIN.
 
 PIN verification has a stronger persistence requirement. The engine debits a
-retry before decrypting or comparing pinHashEnc. Only `Flushed` or intentional
-`Volatile` writes allow comparison. Failed and unconfirmed debits return
-CTAP2_ERR_PROCESSING without a PIN verdict or token and may conservatively
-reduce the live budget. Successful comparison stages restoration of retries
-until publication. Failed restoration retains the spent budget and preceding
+retry before decrypting or comparing pinHashEnc, and adopts the debit only once
+it is published. Only `Flushed` or intentional `Volatile` writes allow
+comparison. Failed and unconfirmed debits return CTAP2_ERR_PROCESSING without a
+PIN verdict or token. A failed debit leaves the live budget as stored, so
+failing writes (a full disk, say) spend no retries, and the PIN works again as
+soon as writes do, without a restart; an unconfirmed debit is published, so it
+stays spent. Successful comparison stages restoration of retries until
+publication. Failed restoration retains the spent budget and preceding
 mismatch history; unconfirmed restoration adopts the published retry state but
 still returns CTAP2_ERR_PROCESSING without authorizing a token or PIN change.
 An observed mismatch remains spent and counts toward the three-mismatch

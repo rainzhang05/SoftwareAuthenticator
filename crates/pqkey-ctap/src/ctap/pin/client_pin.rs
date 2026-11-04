@@ -149,7 +149,9 @@ impl CtapApp<'_> {
     /// > against its internally stored CurrentStoredPIN.
     ///
     /// The decremented counter is persisted before pinHashEnc is decrypted, so
-    /// cutting power part-way through the check still costs a retry.  A
+    /// cutting power part-way through the check still costs a retry.  It is
+    /// decremented on a copy that is adopted once it is published, so a write
+    /// that fails before publication leaves the counter as stored.  A
     /// pinHashEnc that fails to decrypt counts as a mismatch ("If an error
     /// results, or a mismatch is detected").
     fn verify_pin_hash_enc(
@@ -159,8 +161,11 @@ impl CtapApp<'_> {
         pin_hash_enc: &[u8],
     ) -> Result<(), u8> {
         self.refresh_persistent_authority()?;
-        let attempt = self.pin_state.begin_pin_attempt()?;
-        require_confirmed_retry(self.save_persistent_pin_state()?)?;
+        let mut debited = self.pin_state.retry_state();
+        let attempt = debited.begin_attempt()?;
+        let durability = self.save_pin_state(debited.persistent())?;
+        self.pin_state.adopt_retry_state(debited);
+        require_confirmed_retry(durability)?;
         #[cfg(test)]
         super::observation::record(super::observation::Phase::Decryption);
         let candidate = decrypt(protocol, keys, pin_hash_enc);

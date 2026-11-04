@@ -347,8 +347,10 @@ impl CtapApp<'_> {
         Ok(())
     }
 
-    /// Persist [`PersistentPinState`].  Called after every change to the PIN
-    /// or to pinRetries, including the retry spent before a PIN is compared.
+    /// Persist the live [`PersistentPinState`], one the engine has already
+    /// adopted, as after a PIN mismatch.  A state it adopts only once stored,
+    /// such as the retry spent before a PIN is compared, is written with
+    /// [`Self::save_pin_state`] instead.
     /// Publication and durability are returned separately: settings may adopt
     /// any published state, but verification requires Flushed or intentional
     /// Volatile persistence before comparison and authorization.

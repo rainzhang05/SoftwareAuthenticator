@@ -427,6 +427,50 @@ fn real_file_unconfirmed_retry_debits_stop_before_verification_and_restart_recov
     }
 }
 
+/// A retry debit that fails before publication, as on a full disk, spends
+/// nothing, however often it fails: the live count stays the stored one and
+/// the correct PIN works once writes do, without a restart.
+#[test]
+fn real_file_failed_retry_debits_spend_nothing_and_need_no_restart() {
+    for managed in [false, true] {
+        for protocol in PROTOCOLS {
+            for failing in PRE {
+                let scratch = TempDir::new();
+                let path = scratch.path().join("state");
+                setup(&path, managed);
+                let mut engine = app(&path);
+                let session = Session::new(&mut engine, protocol);
+                assert_eq!(session.set(&mut engine), [CTAP2_OK]);
+                observation::take();
+                for _ in 0..=crate::ctap::MAX_PIN_RETRIES {
+                    assert_eq!(
+                        fault(failing, 1, || session.token(&mut engine, PIN)),
+                        [CTAP2_ERR_PROCESSING]
+                    );
+                }
+                assert_eq!(observation::take(), [0, 0, 0]);
+                assert_eq!(
+                    FileStore::open(&path)
+                        .unwrap()
+                        .pin_state()
+                        .unwrap()
+                        .unwrap()
+                        .pin_retries,
+                    8
+                );
+                assert_eq!(
+                    field(
+                        &call(&mut engine, CTAP_CMD_CLIENT_PIN, vec![(int(2), int(1))]),
+                        3
+                    ),
+                    int(8)
+                );
+                assert_eq!(session.token(&mut engine, PIN)[0], CTAP2_OK);
+            }
+        }
+    }
+}
+
 #[test]
 fn reset_final_default_publication_commits_only_after_prior_work() {
     for managed in [false, true] {

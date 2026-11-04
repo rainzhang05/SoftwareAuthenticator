@@ -532,11 +532,15 @@ impl Platform {
             );
             if verifying && index == 0 {
                 assert!(self.retries > 0);
-                self.retries -= 1;
                 assert_eq!(
-                    write.state.pin_retries, self.retries,
+                    write.state.pin_retries,
+                    self.retries - 1,
                     "incorrect retry debit"
                 );
+                // The engine adopts a debit only once it is published.
+                if write.outcome.is_some() {
+                    self.retries -= 1;
+                }
             } else if verifying && index == 1 {
                 let matched = correct.unwrap_or(write.state.pin_retries == 8);
                 assert_eq!(

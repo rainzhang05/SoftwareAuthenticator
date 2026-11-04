@@ -43,11 +43,9 @@ fn failed_and_unconfirmed_debits_never_decrypt_compare_or_issue_tokens() {
                     }
                     assert_eq!(client_pin(&mut app, fields), Err(CTAP2_ERR_PROCESSING));
                     assert_eq!(observation::take(), [0, 0, 0]);
-                    assert_eq!(get_pin_retries(&mut app), (7, None));
-                    assert_eq!(
-                        store.pin_state().unwrap().unwrap().pin_retries,
-                        if unconfirmed { 7 } else { 8 }
-                    );
+                    let stored = if unconfirmed { 7 } else { 8 };
+                    assert_eq!(get_pin_retries(&mut app), (stored, None));
+                    assert_eq!(store.pin_state().unwrap().unwrap().pin_retries, stored);
                     store.faults(|f| {
                         f.set_pin_state = false;
                         f.pin_state_unconfirmed_after = None;

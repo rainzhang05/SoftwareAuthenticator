@@ -135,12 +135,12 @@ is tested through the minPinLength extension. Avoid treating a durability
 warning as evidence that the old PIN or policy is still active.
 
 A retry-write processing error gives no verdict on the supplied PIN and issues
-no token. Inspect getPINRetries before further attempts: a failed write can
-conservatively reduce the running budget, and an unconfirmed published debit
-is visible after restart. Restoring storage permits another attempt if retries
-remain. Restart clears the three-mismatch power-cycle block; it does not clear
-persisted retry exhaustion. An unreadable record remains untouched and fails
-closed until an explicit reset.
+no token. Inspect getPINRetries before further attempts: a failed write leaves
+the running budget as stored, while an unconfirmed published debit stays spent
+and is visible after restart. Restoring storage permits another attempt if
+retries remain. Restart clears the three-mismatch power-cycle block; it does
+not clear persisted retry exhaustion. An unreadable record remains untouched
+and fails closed until an explicit reset.
 
 Reset preserves attestation and rotates the credential key before removing
 counters or policy. Earlier errors may leave partial cleanup, but cannot

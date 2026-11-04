@@ -321,7 +321,9 @@ impl PinState {
         self.pin.check_attempt_allowed()
     }
 
-    /// Stage restoration without refunding retries before publication.
+    /// Stage a retry debit or restoration, to adopt once it is published, so
+    /// that a write failing before publication neither spends nor refunds a
+    /// retry.
     pub(crate) fn retry_state(&self) -> PinRetryState {
         self.pin.clone()
     }
@@ -330,6 +332,7 @@ impl PinState {
         self.pin = state;
     }
 
+    #[cfg(test)]
     pub(crate) fn begin_pin_attempt(&mut self) -> Result<PinAttempt, u8> {
         self.pin.begin_attempt()
     }
