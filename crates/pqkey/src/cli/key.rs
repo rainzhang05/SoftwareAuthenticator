@@ -39,7 +39,8 @@ use crate::state::default_state_dir;
 
 /// How long to wait for the running key's device and for access to it.
 const DEVICE_WAIT: Duration = Duration::from_secs(5);
-/// The same for `status`, which only reports what it finds.
+/// The same for `status`, which only reports what it finds, and for the look
+/// `reset` takes at the PIN before it restarts the key.
 const STATUS_WAIT: Duration = Duration::from_secs(1);
 
 /// What re-plugging the key takes, for the messages that ask for it.
@@ -363,9 +364,16 @@ fn set_first_pin<L: ReportLink>(
     }
 }
 
+/// The PIN line of `status`.  For a blocked PIN it says to restart the key
+/// first, which clears a block that came from a PIN state the key could not
+/// read, and only then to reset it, which erases the passkeys.
 fn pin_state(retries: PinRetries) -> String {
     if retries.retries == 0 {
-        "blocked; only `pqkey reset` makes the key usable again".into()
+        format!(
+            "blocked; restart the key ({REPLUG}) and run `pqkey status` again: if it is still \
+             blocked, only `pqkey reset` makes the key usable again, and it erases every passkey \
+             and large blob"
+        )
     } else if retries.power_cycle_needed {
         format!("set; locked after 3 wrong PINs in a row until re-plugged: {REPLUG}")
     } else {
@@ -546,9 +554,12 @@ fn pin_error_message(err: &ClientError, retries: Option<PinRetries>) -> io::Erro
         ),
         CTAP2_ERR_PIN_BLOCKED => (
             PermissionDenied,
-            "the PIN is blocked: it was entered wrongly too often. Only a reset makes the key \
-             usable again (`pqkey reset`), and it erases every passkey and large blob on it"
-                .into(),
+            format!(
+                "the PIN is blocked: it was entered wrongly too often, or the key could not read \
+                 or write its PIN state. Restart the key ({REPLUG}) and try again; if the PIN is \
+                 still blocked, only a reset makes the key usable again (`pqkey reset`), and it \
+                 erases every passkey and large blob on it"
+            ),
         ),
         CTAP2_ERR_PIN_POLICY_VIOLATION => (
             InvalidInput,
@@ -982,9 +993,11 @@ fn matching_passkey<'a>(passkeys: &'a [Passkey], query: &str) -> io::Result<&'a 
 /// the authenticator is waiting for this approval." and, for authenticators
 /// without a display, "the request MUST have come to the authenticator within
 /// 10 seconds of powering up". So the key is plugged in afresh, as one would
-/// a hardware key, and left as it was found afterwards.
+/// a hardware key, and left as it was found afterwards.  Should the restart
+/// unblock the PIN, the user is asked again before anything is erased
+/// ([`restarted_for_reset`]).
 pub fn reset(state_dir: &Path, yes: bool) -> io::Result<()> {
-    let was_running = daemon::running(state_dir)?.is_some();
+    let running = daemon::running(state_dir)?;
     if !yes
         && !confirm(
             "Reset the key? Its passkeys, large blobs and PIN are erased, and signing in with \
@@ -994,16 +1007,81 @@ pub fn reset(state_dir: &Path, yes: bool) -> io::Result<()> {
         errln!("Nothing was reset.");
         return Ok(());
     }
-    let running = daemon::replug(state_dir)?;
-    let result = connect_to(running, DEVICE_WAIT).and_then(|(_, key)| reset_key(key));
-    let restored = if was_running {
+    // A key that could not be restarted is left as the failed restart left
+    // it.
+    let mut restarted = false;
+    let result = restarted_for_reset(
+        yes,
+        &mut || {
+            let (_, link) = open_node(running?, STATUS_WAIT).ok()?;
+            Authenticator::open_within(link, STATUS_WAIT).ok()
+        },
+        &mut || {
+            let running = daemon::replug(state_dir)?;
+            restarted = true;
+            connect_to(running, DEVICE_WAIT).map(|(_, key)| key)
+        },
+        &mut confirm,
+    )
+    .and_then(|key| key.map(reset_key).transpose());
+    let restored = if running.is_some() || !restarted {
         Ok(())
     } else {
         daemon::unplug(state_dir).map(drop)
     };
-    result?;
+    let reset = result?;
     restored?;
+    if reset.is_none() {
+        errln!("Nothing was reset.");
+        return Ok(());
+    }
     outln!("The key is reset: its passkeys, large blobs and PIN are erased.")
+}
+
+/// The key restarted with `replug`, for a reset within 10 seconds of its
+/// start, or `None` if the user decides to keep it after all.
+///
+/// A restart clears a block that came from a PIN state the key could not
+/// read.  So when its PIN was blocked before the restart (`before` reaches
+/// the key as it runs, if it does) and no longer is, the user is told and
+/// asked again before anything is erased; on a yes the key is restarted once
+/// more, since answering can take longer than its reset window lasts.  With
+/// `yes` nothing is checked or asked: the key is restarted for the reset, as
+/// `pqkey reset --yes` always did.
+fn restarted_for_reset<L: ReportLink>(
+    yes: bool,
+    before: &mut dyn FnMut() -> Option<Authenticator<L>>,
+    replug: &mut dyn FnMut() -> io::Result<Authenticator<L>>,
+    confirmation: &mut dyn FnMut(&str) -> io::Result<bool>,
+) -> io::Result<Option<Authenticator<L>>> {
+    let blocked = !yes && before().is_some_and(|mut key| matches!(pin_blocked(&mut key), Ok(true)));
+    let mut key = replug()?;
+    if !blocked {
+        return Ok(Some(key));
+    }
+    let now = match pin_blocked(&mut key) {
+        Ok(true) => return Ok(Some(key)),
+        Ok(false) => "The PIN is no longer blocked now that the key has restarted, and it can \
+                      be used again."
+            .to_owned(),
+        Err(err) => format!(
+            "The key could not say after its restart whether the PIN is still blocked ({err})."
+        ),
+    };
+    if !confirmation(&format!(
+        "{now} Reset the key anyway? Its passkeys, large blobs and PIN are erased, and signing \
+         in with those passkeys stops working. This cannot be undone."
+    ))? {
+        return Ok(None);
+    }
+    drop(key);
+    replug().map(Some)
+}
+
+/// Whether the key has a PIN and it is blocked, as `status` and the PIN
+/// commands tell.
+fn pin_blocked<L: ReportLink>(key: &mut Authenticator<L>) -> Result<bool, ClientError> {
+    Ok(key.info()?.pin_set == Some(true) && key.pin_retries()?.retries == 0)
 }
 
 /// authenticatorReset, which the user approves in a notification; Ctrl-C
@@ -1050,7 +1128,7 @@ mod tests {
     use pqkey_ctap::store::{CredentialStore, FileStore};
 
     use super::*;
-    use crate::client::tests::{discoverable, start};
+    use crate::client::tests::{Daemon, TestLink, discoverable, start};
     use crate::test_support::TempDir;
 
     /// PINs from a script; reading past its end fails.
@@ -1087,6 +1165,110 @@ mod tests {
 
     fn retries<L: ReportLink>(key: &mut Authenticator<L>) -> u64 {
         key.pin_retries().unwrap().retries
+    }
+
+    /// Where `part` starts in `text`, which must contain it.
+    fn at(text: &str, part: &str) -> usize {
+        text.find(part)
+            .unwrap_or_else(|| panic!("{part:?} is not in {text:?}"))
+    }
+
+    /// Block the PIN of `key`, which runs on `dir`, until the key restarts:
+    /// it finds its PIN state corrupt for a moment, as when another program
+    /// has replaced the file, and treats the PIN as blocked from then on,
+    /// while a restart reads the state again, intact.
+    fn block_pin_until_restart<L: ReportLink>(dir: &TempDir, key: &mut Authenticator<L>) {
+        let path = dir.path().join("pin-state");
+        let stored = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"not a PIN state").unwrap();
+        // getInfo reads the PIN state again.
+        assert_eq!(key.info().unwrap().pin_set, Some(true));
+        std::fs::write(&path, stored).unwrap();
+        assert_eq!(retries(key), 0);
+    }
+
+    /// The key on `dir` as `pqkey reset` sees it: restarted by `replug`.
+    struct Replugged<'a> {
+        dir: &'a TempDir,
+        daemon: Option<Daemon>,
+        restarts: usize,
+    }
+
+    impl<'a> Replugged<'a> {
+        fn new(dir: &'a TempDir, daemon: Daemon) -> Self {
+            Self {
+                dir,
+                daemon: Some(daemon),
+                restarts: 0,
+            }
+        }
+
+        fn replug(&mut self) -> io::Result<Authenticator<TestLink>> {
+            // The old key stops before the new one opens the store.
+            self.daemon = None;
+            let (daemon, key) = start(self.dir);
+            self.daemon = Some(daemon);
+            self.restarts += 1;
+            Ok(key)
+        }
+
+        /// [`restarted_for_reset`] with `before` as the key before the
+        /// restart, answering `answer` to every question; with `None`, a
+        /// question fails the test.  Returns the key to reset, and the
+        /// questions.
+        fn reset(
+            &mut self,
+            yes: bool,
+            before: Authenticator<TestLink>,
+            answer: Option<bool>,
+        ) -> (Option<Authenticator<TestLink>>, Vec<String>) {
+            let mut before = Some(before);
+            let mut questions = Vec::new();
+            let key = restarted_for_reset(
+                yes,
+                &mut || {
+                    assert!(!yes, "--yes looks at nothing before the restart");
+                    before.take()
+                },
+                &mut || self.replug(),
+                &mut |question| {
+                    questions.push(question.to_owned());
+                    Ok(answer.unwrap_or_else(|| panic!("asked again: {question}")))
+                },
+            )
+            .unwrap();
+            (key, questions)
+        }
+    }
+
+    /// A running key on `dir` with a PIN and one passkey, its PIN blocked
+    /// until it restarts.
+    fn blocked_key(dir: &TempDir) -> (Replugged<'_>, Authenticator<TestLink>) {
+        FileStore::open(dir.path())
+            .unwrap()
+            .put(&discoverable("example.com", 1, "alice", CoseAlg::ES256))
+            .unwrap();
+        let (daemon, mut key) = start(dir);
+        key.set_pin(b"1234").unwrap();
+        block_pin_until_restart(dir, &mut key);
+        (Replugged::new(dir, daemon), key)
+    }
+
+    /// Check that nothing was erased: the key on `keys`, restarted, still has
+    /// its PIN, with every retry, and its passkey.
+    fn nothing_erased(keys: &mut Replugged<'_>) {
+        let mut key = keys.replug().unwrap();
+        assert_eq!(retries(&mut key), 8);
+        let token = management_token(&mut key, &mut Script::of(&["1234"])).unwrap();
+        assert_eq!(key.passkeys(&token).unwrap().len(), 1);
+    }
+
+    /// Reset `key`, which must accept it, and check it is erased.
+    fn erase<L: ReportLink>(mut key: Authenticator<L>) {
+        key.reset(&mut |_| {}).unwrap();
+        let info = key.info().unwrap();
+        assert_eq!(info.pin_set, Some(false));
+        assert_eq!(info.remaining_discoverable, Some(1000));
     }
 
     #[test]
@@ -1236,6 +1418,62 @@ mod tests {
         assert!(err.to_string().contains(REPLUG), "{err}");
         let err = set_or_change_pin(&mut key, &mut Script::of(&[])).unwrap_err();
         assert!(err.to_string().contains(REPLUG), "{err}");
+    }
+
+    /// A PIN blocked by a PIN state the key could not read: `status` and the
+    /// PIN commands say to restart the key before resetting it, which erases
+    /// every passkey, and the restart does unblock the PIN.
+    #[test]
+    fn a_blocked_pin_is_restarted_before_it_is_reset() {
+        let dir = TempDir::new("cli-blocked-restart");
+        {
+            let (_daemon, mut key) = start(&dir);
+            key.set_pin(b"1234").unwrap();
+            block_pin_until_restart(&dir, &mut key);
+            let line = pin_state(key.pin_retries().unwrap());
+            assert!(at(&line, REPLUG) < at(&line, "`pqkey reset`"), "{line}");
+            assert!(line.contains("erases every passkey"), "{line}");
+            // No PIN is asked for: the script is empty.
+            for err in [
+                management_token(&mut key, &mut Script::of(&[])).unwrap_err(),
+                set_or_change_pin(&mut key, &mut Script::of(&[])).unwrap_err(),
+            ] {
+                let message = err.to_string();
+                assert!(message.starts_with("the PIN is blocked"), "{message}");
+                assert!(
+                    at(&message, REPLUG) < at(&message, "`pqkey reset`"),
+                    "{message}"
+                );
+                assert!(message.contains("erases every passkey"), "{message}");
+            }
+        }
+        let (_daemon, mut key) = start(&dir);
+        assert_eq!(retries(&mut key), 8);
+        assert!(management_token(&mut key, &mut Script::of(&["1234"])).is_ok());
+    }
+
+    /// A PIN check that fails because the key cannot read its PIN state says
+    /// so and names the log; it costs no retry, and the PIN works once the
+    /// state can be read again.
+    #[test]
+    fn a_pin_state_the_key_cannot_read_points_at_the_log() {
+        let dir = TempDir::new("cli-pin-state-unread");
+        let (_daemon, mut key) = start(&dir);
+        key.set_pin(b"1234").unwrap();
+        let path = dir.path().join("pin-state");
+        let stored = std::fs::read(&path).unwrap();
+        // Reading a directory in its place fails with EISDIR, as root too.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let err = management_token(&mut key, &mut Script::of(&["1234"])).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "the key could not read or write its state; `journalctl --user -u pqkey` says why"
+        );
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, stored).unwrap();
+        assert_eq!(retries(&mut key), 8);
+        assert!(management_token(&mut key, &mut Script::of(&["1234"])).is_ok());
     }
 
     #[test]
@@ -1824,6 +2062,151 @@ mod tests {
             }),
             "set (8 retries left)"
         );
+
+        // A blocked PIN: restart the key and look again, and only then reset
+        // it, which erases the passkeys.
+        let blocked = status(CTAP2_ERR_PIN_BLOCKED);
+        let line = pin_state(PinRetries {
+            retries: 0,
+            power_cycle_needed: false,
+        });
+        assert!(line.starts_with("blocked; "), "{line}");
+        assert!(
+            at(&line, REPLUG) < at(&line, "`pqkey status` again"),
+            "{line}"
+        );
+        assert!(blocked.contains("could not read or write its PIN state"));
+        assert!(
+            at(&blocked, REPLUG) < at(&blocked, "try again"),
+            "{blocked}"
+        );
+        for advice in [&line, &blocked] {
+            assert!(at(advice, REPLUG) < at(advice, "`pqkey reset`"), "{advice}");
+            assert!(
+                at(advice, "still blocked") < at(advice, "`pqkey reset`"),
+                "{advice}"
+            );
+            assert!(
+                advice.contains("erases every passkey and large blob"),
+                "{advice}"
+            );
+        }
+
+        // A key that could not read or write its state names the log, for
+        // every command but setPIN, which says more.
+        let processing =
+            "the key could not read or write its state; `journalctl --user -u pqkey` says why";
+        assert_eq!(status(CTAP2_ERR_PROCESSING), processing);
+        assert_eq!(
+            reset_error(ClientError::Status(CTAP2_ERR_PROCESSING)).to_string(),
+            processing
+        );
+        assert_eq!(
+            client_error(ClientError::Status(CTAP2_ERR_PROCESSING)).to_string(),
+            processing
+        );
+    }
+
+    /// A PIN blocked before `pqkey reset` restarts the key, and unblocked by
+    /// the restart: the user is told and asked again.  Keeping the key erases
+    /// nothing; resetting it anyway restarts the key once more, so that the
+    /// reset comes within 10 seconds of its start however long the answer
+    /// took.
+    #[test]
+    fn a_reset_asks_again_when_the_restart_unblocks_the_pin() {
+        for answer in [false, true] {
+            let dir = TempDir::new("cli-reset-unblocked");
+            let (mut keys, key) = blocked_key(&dir);
+            let (restarted, questions) = keys.reset(false, key, Some(answer));
+            let [question] = &questions[..] else {
+                panic!("{questions:?}");
+            };
+            assert!(
+                question.starts_with("The PIN is no longer blocked now that the key has restarted"),
+                "{question}"
+            );
+            assert!(
+                at(question, "no longer blocked") < at(question, "Reset the key anyway?"),
+                "{question}"
+            );
+            assert!(
+                question.contains("passkeys, large blobs and PIN are erased"),
+                "{question}"
+            );
+            if answer {
+                assert_eq!(keys.restarts, 2);
+                erase(restarted.expect("a key to reset"));
+            } else {
+                assert!(restarted.is_none());
+                assert_eq!(keys.restarts, 1);
+                nothing_erased(&mut keys);
+            }
+        }
+    }
+
+    /// A restarted key that cannot say whether its PIN is still blocked, as
+    /// one that cannot read its PIN state: the user is asked again, with
+    /// why, and keeping the key erases nothing.
+    #[test]
+    fn a_reset_asks_again_when_the_restarted_key_cannot_read_its_pin_state() {
+        let dir = TempDir::new("cli-reset-unread");
+        let (mut keys, key) = blocked_key(&dir);
+        let path = dir.path().join("pin-state");
+        let stored = std::fs::read(&path).unwrap();
+        // Reading a directory in its place fails with EISDIR, as root too.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let (restarted, questions) = keys.reset(false, key, Some(false));
+        assert!(restarted.is_none());
+        let [question] = &questions[..] else {
+            panic!("{questions:?}");
+        };
+        assert!(
+            question.starts_with(
+                "The key could not say after its restart whether the PIN is still blocked (the \
+                 key could not read or write its state; `journalctl --user -u pqkey` says why). \
+                 Reset the key anyway?"
+            ),
+            "{question}"
+        );
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, stored).unwrap();
+        nothing_erased(&mut keys);
+    }
+
+    /// `pqkey reset --yes` restarts the key and resets it as it always has,
+    /// without looking at the PIN or asking, even where the restart unblocks
+    /// the PIN.
+    #[test]
+    fn reset_yes_neither_looks_nor_asks() {
+        let dir = TempDir::new("cli-reset-yes");
+        let (mut keys, key) = blocked_key(&dir);
+        let (restarted, _) = keys.reset(true, key, None);
+        assert_eq!(keys.restarts, 1);
+        erase(restarted.expect("a key to reset"));
+    }
+
+    /// A reset is asked about once where the restart does not unblock the
+    /// PIN: one that works, or one that stays blocked.
+    #[test]
+    fn a_reset_asks_once_unless_the_restart_unblocks_the_pin() {
+        for unreadable in [false, true] {
+            let dir = TempDir::new("cli-reset-once");
+            let (daemon, mut key) = start(&dir);
+            key.set_pin(b"1234").unwrap();
+            if unreadable {
+                // A PIN state the key cannot read, before the restart and
+                // after it.
+                std::fs::write(dir.path().join("pin-state"), b"not a PIN state").unwrap();
+            }
+            assert_eq!(pin_blocked(&mut key).unwrap(), unreadable);
+            let mut keys = Replugged::new(&dir, daemon);
+            let (restarted, _) = keys.reset(false, key, None);
+            assert_eq!(keys.restarts, 1);
+            let mut key = restarted.expect("a key to reset");
+            assert_eq!(pin_blocked(&mut key).unwrap(), unreadable);
+            erase(key);
+        }
     }
     #[test]
     fn complexity_confirmation_errors_normalization_restart_and_reset() {

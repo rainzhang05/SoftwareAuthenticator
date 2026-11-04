@@ -255,6 +255,13 @@ for regression coverage and execution limits.
 browser behaviour, see
 [Troubleshooting](docs/development-notes.md#troubleshooting).
 
+If the PIN looks blocked, or the key says it could not read or write its
+state, restart it with `pqkey stop && pqkey start` and run `pqkey status`
+again before you reset it: a restart clears a block that came from a PIN state
+the key could not read, while `pqkey reset` erases every passkey.
+`journalctl --user -u pqkey` says what the key could not read or write, and
+`pqkey reset` asks again if its own restart unblocks the PIN.
+
 ## Uninstall
 
 ```bash

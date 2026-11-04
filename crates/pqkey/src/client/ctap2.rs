@@ -8,6 +8,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 use ciborium::value::{Integer, Value};
 use pqkey_ctap::ClassicPinProtocol;
 use pqkey_ctap::CryptoError;
+use pqkey_ctap::ctap::constants::CTAP2_ERR_PROCESSING;
 use pqkey_ctap::platform::{PlatformKeyAgreement, authenticate, padded_pin, pin_hash};
 use zeroize::Zeroizing;
 
@@ -72,6 +73,11 @@ impl std::fmt::Display for ClientError {
                 "the encoded CTAP2 request is {encoded_bytes} bytes; the limit is {limit} bytes"
             ),
             ClientError::Hid(err) => err.fmt(f),
+            // What the key answers when it cannot read or write what it
+            // stores, which it logs.
+            ClientError::Status(CTAP2_ERR_PROCESSING) => f.write_str(
+                "the key could not read or write its state; `journalctl --user -u pqkey` says why",
+            ),
             ClientError::Status(status) => write!(f, "the key answered CTAP status {status:#04x}"),
             ClientError::Malformed(what) => write!(f, "the key's answer is malformed: {what}"),
             ClientError::Crypto(err) => write!(f, "{err}"),
@@ -1451,5 +1457,19 @@ mod size_tests {
                 .finish()
                 .expect("management worker shut down cleanly");
         }
+    }
+
+    /// CTAP2_ERR_PROCESSING says what the key could not do and where it says
+    /// why; other statuses are shown by their number.
+    #[test]
+    fn a_processing_error_names_the_log() {
+        assert_eq!(
+            ClientError::Status(CTAP2_ERR_PROCESSING).to_string(),
+            "the key could not read or write its state; `journalctl --user -u pqkey` says why"
+        );
+        assert_eq!(
+            ClientError::Status(NO_CREDENTIALS).to_string(),
+            "the key answered CTAP status 0x2e"
+        );
     }
 }
