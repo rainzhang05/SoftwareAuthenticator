@@ -72,6 +72,9 @@
 //! active records rather than risk leaving a matching credential usable.
 //! Unreferenced ciphertext in a managed store is cleanup garbage, even if
 //! corrupt; it cannot be repaired back into membership by a read or reopen.
+//! [`FileStore::inspect`] lists such [`Damage`] without changing anything,
+//! and [`StoreError::damage_hint`] says what an error reporting damage
+//! makes fail and what to do about it.
 //!
 //! # Concurrency
 //!
@@ -89,6 +92,7 @@ use std::path::PathBuf;
 use zeroize::Zeroizing;
 
 mod codec;
+mod damage;
 mod envelope;
 mod file;
 mod fsio;
@@ -104,6 +108,9 @@ pub(crate) use record::SealableKeyMaterial;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use damage::{
+    Damage, Fault, damage_fix, damage_log, damage_summary, damage_unchecked, damage_unchecked_log,
+};
 pub use envelope::SEALED_ID_OVERHEAD;
 pub use file::FileStore;
 pub use keys::{FileKeySource, KeyDomain, KeySource, RootKey};
@@ -365,7 +372,9 @@ pub enum StoreError {
     /// inconsistent. Unlike an unreadable individual credential, this must
     /// never be skipped or mistaken for an empty store.
     CredentialSetUnavailable {
-        /// The metadata object's logical name.
+        /// The file or directory, relative to the state directory: the
+        /// metadata, the directory of either layout, or the record of a
+        /// member that replacement found missing.
         object: String,
         /// Why authority could not be established.
         detail: String,
@@ -380,8 +389,10 @@ pub enum StoreError {
     /// A stored object exists but failed authentication or decoding.  It is
     /// left in place.
     Corrupt {
-        /// The object's logical name, for example `pin-state` or
-        /// `credentials/<64 hex digits>`.
+        /// The object's file, relative to the state directory, for example
+        /// `pin-state` or `credentials/<64 hex digits>`. A legacy record that
+        /// an upgraded store kept is named `credential-set/<64 hex digits>`,
+        /// where it is, rather than by the logical name its envelope binds.
         object: String,
         /// What was wrong with it.
         reason: Corruption,

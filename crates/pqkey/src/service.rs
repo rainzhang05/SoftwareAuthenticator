@@ -8,7 +8,9 @@ use pqkey_ctap::ctap::{
     AttestationMode, Clock, CtapApp, InterruptFlag, RESET_WINDOW_AFTER_POWER_UP,
     presence::{AutoApprove, UserPresence},
 };
-use pqkey_ctap::store::{AttestationRecord, CredentialStore, DirectoryFlush, FileStore};
+use pqkey_ctap::store::{
+    AttestationRecord, CredentialStore, DirectoryFlush, FileStore, damage_log, damage_unchecked_log,
+};
 
 use crate::{
     WaitingForUser,
@@ -372,6 +374,7 @@ pub fn serve_ctap_with_presence<C: Clock + 'static>(
     let interrupt = InterruptFlag::new();
     let waiting = WaitingForUser::new();
     log_if_state_dir_cannot_flush(data.store.state_dir());
+    log_if_store_damaged(&data.store);
     let mut ctap = CtapApp::with_file_store(data.store, presence, &interrupt, data.aaguid);
     ctap.set_clock(clock()?);
     ctap.set_attestation_mode(data.attestation);
@@ -414,6 +417,22 @@ fn log_if_state_dir_cannot_flush(state_dir: &Path) {
              then start the key (`pqkey start`), which checks again; until then use the key only \
              as a security key, without a PIN"
         );
+    }
+}
+
+/// Log what is damaged in `store`'s credential set, and what fails, or
+/// that it cannot be checked, with what to do: what `pqkey status` reports
+/// (`cli::key::store_problem`). The engine logs the same with each
+/// operation the damage fails; this names all of it once, before any
+/// operation, reading every record as one listing does. A legacy
+/// `credentials` directory that opening the store created again is logged
+/// by the store itself ([`FileStore::open`]).
+fn log_if_store_damaged(store: &FileStore) {
+    let state_dir = store.state_dir().display().to_string();
+    match store.inspect() {
+        Ok(damage) if damage.is_empty() => {}
+        Ok(damage) => log::error!("{}", damage_log(&damage, &state_dir)),
+        Err(err) => log::warn!("{}", damage_unchecked_log(&err, &state_dir)),
     }
 }
 

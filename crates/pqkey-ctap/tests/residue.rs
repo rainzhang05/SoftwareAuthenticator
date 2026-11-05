@@ -51,6 +51,10 @@
 //! frame left must be found, as given and reversed, in the stack and in such a
 //! copy, and the control value must not.
 //!
+//! For the store's inspection, which `pqkey status` and the daemon's start-up
+//! run outside any engine request, it stores a passkey with a known P-256
+//! scalar and CredRandom, inspects, and scans for both.
+//!
 //! It does not look for a newly generated private key: a key returned by
 //! value can leave copies in the frames it passes through on its way to the
 //! caller, because Rust moves are copies.  That is a limit of the language
@@ -80,7 +84,7 @@ use p256::elliptic_curve::sec1::ToSec1Point;
 use pqkey_ctap::{
     CoseAlg,
     ctap::{CtapApp, InterruptFlag, presence::AutoApprove},
-    store::{CredentialStore, FileStore},
+    store::{CredentialRecord, CredentialStore, FileStore},
     try_cose_public_key, try_credential_secret_from_bytes, try_sign_challenge,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -895,6 +899,104 @@ fn check_persistent_authority() {
     );
 }
 
+/// The store's inspection, which `pqkey status` and the daemon's start-up
+/// run outside any engine request, decrypts every credential as a listing
+/// does, so it scrubs the stack itself.  Neither a passkey's P-256 scalar nor
+/// its CredRandom, both stored by the test, may be left in the stack, as
+/// given or reversed, after inspecting a healthy store, or one with a
+/// damaged record, where the inspection looks twice, through the open store
+/// and from the state directory alone.
+fn check_inspection() {
+    let dir = std::env::temp_dir().join(format!("pqkey-inspection-stack-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let scalar: [u8; 32] = Sha256::digest(b"an inspected passkey's P-256 scalar").into();
+    let cred_random: [u8; 32] = Sha256::digest(b"an inspected passkey's CredRandom").into();
+    let passkey = |user: u8, scalar: [u8; 32]| CredentialRecord {
+        credential_id: [vec![1], vec![user; 32]].concat(),
+        rp_id: "inspection.example".into(),
+        user_id: vec![user],
+        user_name: None,
+        user_display_name: None,
+        alg: CoseAlg::ES256,
+        private_key: pqkey_ctap::store::PrivateKeyMaterial::P256Scalar { scalar },
+        cred_random_with_uv: cred_random,
+        cred_random_without_uv: cred_random,
+        cred_blob: None,
+        large_blob_key: None,
+        third_party_payment: false,
+        cred_protect: 1,
+        sign_count: 0,
+        created_at: 0,
+    };
+    let mut store = FileStore::open(&dir).expect("store");
+    store
+        .insert_or_replace_discoverable(&passkey(1, scalar))
+        .expect("a passkey");
+    let needles: Vec<(&str, Vec<u8>)> = [("scalar", scalar), ("CredRandom", cred_random)]
+        .into_iter()
+        .flat_map(|(name, bytes)| {
+            [
+                (name, bytes.to_vec()),
+                (name, bytes.iter().rev().copied().collect()),
+            ]
+        })
+        .collect();
+    let records = dir.join("credential-set").join("records");
+    for damaged in [false, true] {
+        let mut expected = Vec::new();
+        if damaged {
+            // A second passkey, whose record is then damaged.
+            let before: Vec<_> = std::fs::read_dir(&records)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            store
+                .insert_or_replace_discoverable(&passkey(2, [0x5A; 32]))
+                .expect("a second passkey");
+            let created = std::fs::read_dir(&records)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| !before.contains(path))
+                .expect("its record");
+            let mut contents = std::fs::read(&created).unwrap();
+            *contents.last_mut().unwrap() ^= 1;
+            std::fs::write(&created, contents).unwrap();
+            expected.push(format!(
+                "credential-set/records/{}",
+                created.file_name().unwrap().to_string_lossy()
+            ));
+        }
+        for open in [true, false] {
+            wipe();
+            let found = if open {
+                store.inspect()
+            } else {
+                FileStore::inspect_in(&dir)
+            };
+            let hits: Vec<_> = needles
+                .iter()
+                .map(|(name, needle)| (*name, scan(needle)))
+                .collect();
+            let files: Vec<_> = found
+                .expect("inspect")
+                .into_iter()
+                .map(|damage| damage.file)
+                .collect();
+            assert_eq!(files, expected, "inspection: damage found");
+            for (name, count) in hits {
+                assert_eq!(
+                    count, 0,
+                    "inspection (damaged: {damaged}, open store: {open}) left the passkey's {name} in the stack"
+                );
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+    println!(
+        "inspection: no stored scalar or CredRandom left in the stack, healthy or damaged, through an open store or the state directory"
+    );
+}
+
 /// Bound into every sealed credential ID, followed by the SHA-256 hash of the
 /// relying party ID, which U2F's application parameter is: the context
 /// `sealed_associated_data` in pqkey-ctap's `ctap/credential_id.rs` binds.
@@ -1111,6 +1213,7 @@ fn main() {
     }
     // And through the engine, for the credential key itself.
     failures.extend(check_u2f());
+    check_inspection();
     for case in &ECDSA_CASES[4..] {
         failures.extend(check_brainpool_failures(case));
     }

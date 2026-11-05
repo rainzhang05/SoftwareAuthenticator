@@ -404,6 +404,15 @@ Missing, corrupt or inconsistent authoritative metadata fails closed; it is
 never rebuilt by scanning leftover records. Individual corrupt records retain
 the existing lookup-error/list-skip behavior, but replacement must read every
 active record successfully to avoid leaving an unknown matching record usable.
+Listing logs a member whose record is missing as it logs a corrupt one. Each
+operation such damage fails logs the file, what fails and what to do; the
+daemon at start-up and `pqkey status` report it from a read-only inspection,
+which looks again before it reports damage so that a concurrent commit's
+cleanup is not taken for it. With neither namespace present, the format
+marker tells which directory is missing: `credential-set/`, or a legacy
+store's `credentials/`. Opening a legacy store creates a missing
+`credentials/` again, empty, as it always has, and logs the loss when the
+credential key shows that the directory existed.
 Explicit reset uses the following order in both store layouts:
 
 1. Determine the layout without authenticating damaged metadata, then rotate

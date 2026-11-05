@@ -202,7 +202,10 @@ impl CtapApp<'_> {
         match self.store.count() {
             Ok(count) => Some(self.store.max_credentials().saturating_sub(count)),
             Err(err) => {
-                log::warn!("cannot count credentials: {err}");
+                log::warn!(
+                    "cannot count credentials: {}",
+                    super::storage::explained(&err)
+                );
                 None
             }
         }

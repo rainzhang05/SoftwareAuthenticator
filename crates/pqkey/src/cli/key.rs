@@ -21,7 +21,7 @@ use pqkey_ctap::ctap::constants::{
     CTAP2_ERR_PIN_INVALID, CTAP2_ERR_PIN_NOT_SET, CTAP2_ERR_PIN_POLICY_VIOLATION,
     CTAP2_ERR_PROCESSING, CTAP2_ERR_PUAT_REQUIRED, CTAP2_ERR_USER_ACTION_TIMEOUT,
 };
-use pqkey_ctap::store::{DirectoryFlush, FileStore};
+use pqkey_ctap::store::{DirectoryFlush, FileStore, damage_fix, damage_summary, damage_unchecked};
 use signal_hook::{consts::SIGINT, flag};
 
 use super::ConfigAction;
@@ -152,6 +152,10 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
         }
     }
     problems.extend(state_dir_problem(state_dir));
+    // Checking the credential store decrypts every credential: keep them out
+    // of core files, and this process out of reach, as the daemon does.
+    platform::disable_core_dumps()?;
+    problems.extend(store_problem(state_dir));
     problems.extend(service_problems(state_dir, running)?);
     if !problems.is_empty() {
         outln!()?;
@@ -191,10 +195,17 @@ fn show_key(running: Running) -> io::Result<()> {
     for line in policy_status(&info) {
         outln!("{line}")?;
     }
-    if let Some(remaining) = info.remaining_discoverable {
-        outln!("Passkeys: room for {remaining} more")?;
+    outln!("{}", passkeys_status(&info))
+}
+
+/// The passkeys line of `status`: the room for more, which the key leaves
+/// out when it cannot count its passkeys, as where its credential store is
+/// damaged.
+fn passkeys_status(info: &Info) -> String {
+    match info.remaining_discoverable {
+        Some(remaining) => format!("Passkeys: room for {remaining} more"),
+        None => "Passkeys: cannot be counted".to_owned(),
     }
-    Ok(())
 }
 
 fn policy_status(info: &Info) -> Vec<&'static str> {
@@ -256,6 +267,19 @@ fn state_dir_problem(state_dir: &Path) -> Option<Problem> {
             state_dir.display()
         ),
     ))
+}
+
+/// A credential store in `state_dir` that is damaged, with what fails, or
+/// that cannot be checked, and what to do: what the key logs as it starts
+/// (`service::log_if_store_damaged`). It is read as it is, while the key may
+/// change it ([`FileStore::inspect`]).
+fn store_problem(state_dir: &Path) -> Option<Problem> {
+    let fix = || damage_fix(&state_dir.display().to_string());
+    match FileStore::inspect_in(state_dir) {
+        Ok(damage) if damage.is_empty() => None,
+        Ok(damage) => Some(Problem::new(damage_summary(&damage), fix())),
+        Err(err) => Some(Problem::new(damage_unchecked(&err), fix())),
+    }
 }
 
 /// What the desktop's notification server says about itself.
@@ -1326,6 +1350,324 @@ mod tests {
         assert!(at("move /proc to a local filesystem") < at("run `pqkey start`"));
         assert!(problem.fix.contains("verify the copy"), "{problem:?}");
         assert!(problem.fix.contains("without a PIN"), "{problem:?}");
+    }
+
+    /// Flip the last byte of `path`, as a media error would.
+    fn damage_file(path: &Path) {
+        let mut contents = std::fs::read(path).unwrap();
+        *contents.last_mut().unwrap() ^= 1;
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// The record file that `insert` adds to `dir`.
+    fn record_added(dir: &Path, insert: impl FnOnce()) -> std::path::PathBuf {
+        let files = || -> Vec<_> {
+            std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries
+                        .map(|entry| entry.unwrap().path())
+                        .filter(|path| path.is_file())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let before = files();
+        insert();
+        let added: Vec<_> = files()
+            .into_iter()
+            .filter(|path| !before.contains(path))
+            .collect();
+        let [added] = added.as_slice() else {
+            panic!("one new record in {}: {added:?}", dir.display());
+        };
+        added.clone()
+    }
+
+    /// A key's store in `dir` with three passkeys, and their records, oldest
+    /// first: in a legacy store all three in `credentials/`; in the managed
+    /// layout, a legacy one the upgrade kept, at `credential-set/<hash>`,
+    /// then two in `credential-set/records/`.
+    fn store_with_passkeys(dir: &Path, managed: bool) -> Vec<std::path::PathBuf> {
+        let mut store = FileStore::open(dir).unwrap();
+        let mut files = Vec::new();
+        for id in 1..=3 {
+            let passkey = discoverable("example.com", id, "user", CoseAlg::ES256);
+            files.push(if managed && id > 1 {
+                record_added(&dir.join("credential-set").join("records"), || {
+                    store.insert_or_replace_discoverable(&passkey).unwrap();
+                })
+            } else {
+                record_added(&dir.join("credentials"), || store.put(&passkey).unwrap())
+            });
+        }
+        if managed {
+            files[0] = dir
+                .join("credential-set")
+                .join(files[0].file_name().unwrap());
+        }
+        files
+    }
+
+    /// What a report says fails after damage of a kind.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Fails {
+        /// Registration and the damaged records' credentials, which the key
+        /// does not count either.
+        Records(u64),
+        /// Registration, use and listing: membership metadata is damaged.
+        Membership,
+        /// The passkeys that were in a legacy store's lost directory.
+        LegacyDirectory,
+        /// The store cannot be checked.
+        Unchecked,
+    }
+
+    /// Damage the store in `dir` with record `files` as `damage` says, and
+    /// return the start of what `status` names, and what fails.
+    fn damage(dir: &Path, damage: &str, files: &[std::path::PathBuf]) -> (String, Fails) {
+        let set = dir.join("credential-set");
+        let relative = |path: &Path| path.strip_prefix(dir).unwrap().display().to_string();
+        let named = |path: &Path, fault: &str| format!("({} {fault}", relative(path));
+        match damage {
+            "record" => {
+                damage_file(&files[2]);
+                (named(&files[2], "is corrupt"), Fails::Records(998))
+            }
+            "removed record" => {
+                std::fs::remove_file(&files[2]).unwrap();
+                (named(&files[2], "is missing"), Fails::Records(998))
+            }
+            "kept record" | "legacy record" => {
+                damage_file(&files[0]);
+                (named(&files[0], "is corrupt"), Fails::Records(998))
+            }
+            "removed kept record" => {
+                std::fs::remove_file(&files[0]).unwrap();
+                (named(&files[0], "is missing"), Fails::Records(998))
+            }
+            "records directory" => {
+                std::fs::remove_dir_all(set.join("records")).unwrap();
+                let first = files[1..].iter().min().unwrap();
+                (named(first, "is missing"), Fails::Records(999))
+            }
+            "manifest" => {
+                damage_file(&set.join("active"));
+                (
+                    "(credential-set/active is corrupt".into(),
+                    Fails::Membership,
+                )
+            }
+            "removed manifest" => {
+                std::fs::remove_file(set.join("active")).unwrap();
+                (
+                    "(credential-set/active is missing".into(),
+                    Fails::Membership,
+                )
+            }
+            "unreadable manifest" => {
+                std::fs::remove_file(set.join("active")).unwrap();
+                std::fs::create_dir(set.join("active")).unwrap();
+                (
+                    "(credential-set/active cannot be read".into(),
+                    Fails::Membership,
+                )
+            }
+            "marker" => {
+                damage_file(&dir.join("credential-format"));
+                ("(credential-format is corrupt".into(), Fails::Membership)
+            }
+            "removed marker" => {
+                std::fs::remove_file(dir.join("credential-format")).unwrap();
+                ("(credential-format is missing".into(), Fails::Membership)
+            }
+            "managed directory" => {
+                std::fs::remove_dir_all(&set).unwrap();
+                ("(credential-set is missing".into(), Fails::Membership)
+            }
+            "legacy directory" => {
+                std::fs::remove_dir_all(dir.join("credentials")).unwrap();
+                ("(credentials is missing".into(), Fails::LegacyDirectory)
+            }
+            "short key" => {
+                std::fs::write(dir.join("keys").join("credential.key"), b"short").unwrap();
+                ("credential root key unavailable".into(), Fails::Unchecked)
+            }
+            _ => unreachable!("{damage}"),
+        }
+    }
+
+    /// The lines the key logged as it started about its credential store
+    /// on `dir`, with their levels: those that tell to keep a copy of it.
+    fn start_up_lines(dir: &TempDir) -> Vec<(log::Level, String)> {
+        crate::test_support::logs::containing(&format!("keep a copy of {}", dir.path().display()))
+    }
+
+    /// For healthy stores `status` shows what it showed, whatever the
+    /// layout: the room for more passkeys and no credential store problem,
+    /// before the key has created its state directory, which `status` does
+    /// not create either, too.  The key logs nothing about the store as it
+    /// starts.
+    #[test]
+    fn status_of_a_healthy_store_is_unchanged() {
+        crate::test_support::logs::install();
+        let dir = TempDir::new("status-healthy");
+        let missing = dir.path().join("missing");
+        assert_eq!(store_problem(&missing), None);
+        assert!(!missing.exists(), "status creates no state directory");
+        let mut store = FileStore::open(dir.path()).unwrap();
+        assert_eq!(store_problem(dir.path()), None, "a new store");
+        store
+            .put(&discoverable("example.com", 1, "alice", CoseAlg::ES256))
+            .unwrap();
+        assert_eq!(store_problem(dir.path()), None, "a legacy store");
+        drop(store);
+        {
+            let (_daemon, mut key) = start(&dir);
+            assert_eq!(
+                passkeys_status(&key.info().unwrap()),
+                "Passkeys: room for 999 more"
+            );
+        }
+        FileStore::open(dir.path())
+            .unwrap()
+            .insert_or_replace_discoverable(&discoverable(
+                "example.com",
+                2,
+                "bob",
+                CoseAlg::MLDSA65,
+            ))
+            .unwrap();
+        let (_daemon, mut key) = start(&dir);
+        assert_eq!(
+            passkeys_status(&key.info().unwrap()),
+            "Passkeys: room for 998 more"
+        );
+        assert_eq!(store_problem(dir.path()), None, "an upgraded store");
+        assert_eq!(start_up_lines(&dir), []);
+    }
+
+    /// `status` reports each kind of damage to the credential store as the
+    /// key logs it when it starts: the same files, what fails, and what to
+    /// do; the key starts all the same.  Where the report says passkeys
+    /// cannot be listed, `pqkey passkeys` cannot list them, and where the key
+    /// cannot count its passkeys, the passkeys line says so.
+    #[test]
+    fn status_and_start_up_report_each_kind_of_damage_alike() {
+        crate::test_support::logs::install();
+        for kind in [
+            "record",
+            "removed record",
+            "kept record",
+            "removed kept record",
+            "legacy record",
+            "records directory",
+            "manifest",
+            "removed manifest",
+            "unreadable manifest",
+            "marker",
+            "removed marker",
+            "managed directory",
+            "legacy directory",
+            "short key",
+        ] {
+            let dir = TempDir::new("status-damage");
+            let legacy = matches!(kind, "legacy record" | "legacy directory");
+            let files = store_with_passkeys(dir.path(), !legacy);
+            let (named, fails) = damage(dir.path(), kind, &files);
+            let problem = store_problem(dir.path()).unwrap_or_else(|| panic!("{kind}: no problem"));
+            let what = match fails {
+                Fails::Unchecked => format!("the credential store cannot be checked: {named}"),
+                _ => format!("the credential store is damaged {named}"),
+            };
+            assert!(problem.what.starts_with(&what), "{kind}: {problem:?}");
+            assert_eq!(
+                problem.fix,
+                format!(
+                    "stop the key with `pqkey stop`, keep a copy of {}, then start it again with \
+                     `pqkey start`; `pqkey reset` erases every passkey, so use it only as a last \
+                     resort",
+                    dir.path().display()
+                ),
+                "{kind}"
+            );
+
+            let (_daemon, mut key) = start(&dir);
+            let level = match fails {
+                Fails::Unchecked => log::Level::Warn,
+                _ => log::Level::Error,
+            };
+            assert_eq!(
+                start_up_lines(&dir),
+                [(level, format!("{}. S{}", problem.what, &problem.fix[1..]))],
+                "{kind}"
+            );
+            let counted = passkeys_status(&key.info().unwrap());
+            match fails {
+                Fails::Records(room) => {
+                    assert_eq!(counted, format!("Passkeys: room for {room} more"), "{kind}");
+                }
+                Fails::Membership => {
+                    assert_eq!(counted, "Passkeys: cannot be counted", "{kind}");
+                    key.set_pin(b"1234").unwrap();
+                    let token = key.management_token(b"1234").unwrap();
+                    assert!(
+                        matches!(
+                            key.passkeys(&token),
+                            Err(ClientError::Status(CTAP2_ERR_PROCESSING))
+                        ),
+                        "{kind}"
+                    );
+                }
+                Fails::LegacyDirectory => {
+                    // Opening the store created the directory again, empty:
+                    // the key counts and lists no passkey, which is why the
+                    // report claims no more than that those in it are lost.
+                    assert_eq!(counted, "Passkeys: room for 1000 more", "{kind}");
+                    key.set_pin(b"1234").unwrap();
+                    let token = key.management_token(b"1234").unwrap();
+                    assert_eq!(key.passkeys(&token).unwrap(), []);
+                    assert_eq!(store_problem(dir.path()), None, "{kind}");
+                }
+                Fails::Unchecked => {
+                    assert_eq!(counted, "Passkeys: cannot be counted", "{kind}");
+                }
+            }
+        }
+    }
+
+    /// A legacy store whose `credentials` directory is lost while the key
+    /// runs: `status` reports it, the key cannot count its passkeys, and it
+    /// logs the loss as `status` reported it when it starts again, which
+    /// creates the directory again, empty.
+    #[test]
+    fn a_legacy_directory_lost_while_the_key_runs_is_reported_alike() {
+        crate::test_support::logs::install();
+        let dir = TempDir::new("status-lost-directory");
+        store_with_passkeys(dir.path(), false);
+        let (daemon, mut key) = start(&dir);
+        std::fs::remove_dir_all(dir.path().join("credentials")).unwrap();
+        let problem = store_problem(dir.path()).expect("a lost directory is a problem");
+        assert!(
+            problem
+                .what
+                .starts_with("the credential store is damaged (credentials is missing)"),
+            "{problem:?}"
+        );
+        assert_eq!(
+            passkeys_status(&key.info().unwrap()),
+            "Passkeys: cannot be counted"
+        );
+        assert_eq!(start_up_lines(&dir), []);
+        drop((daemon, key));
+        let (_daemon, _key) = start(&dir);
+        assert_eq!(
+            start_up_lines(&dir),
+            [(
+                log::Level::Error,
+                format!("{}. S{}", problem.what, &problem.fix[1..])
+            )]
+        );
+        assert_eq!(store_problem(dir.path()), None);
     }
 
     #[test]

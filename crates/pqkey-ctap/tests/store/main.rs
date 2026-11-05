@@ -5,9 +5,12 @@
 //!   tested with cannot drift from the file store it runs with.
 //! * `file_store` covers what only the file store has: persistence, the
 //!   on-disk format, encryption, tamper detection, keys, and permissions.
+//! * `damage` covers damage that operations fail closed on, and what the
+//!   store, the engine and its inspection say about it.
 
 mod common;
 mod conformance;
+mod damage;
 mod file_store;
 // The library's test verifier, which it builds only for its unit tests and
 // the test-support feature.  It names the algorithm as `crate::CoseAlg`.

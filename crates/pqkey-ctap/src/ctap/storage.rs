@@ -4,7 +4,9 @@
 //! Store errors are never mistaken for an empty store.  Reading or writing
 //! fails the command with CTAP2_ERR_PROCESSING (CTAP2_ERR_KEY_STORE_FULL for
 //! a full store), and corrupt individual credentials are skipped by
-//! [`CredentialStore::list`] itself.
+//! [`CredentialStore::list`] itself.  An error that reports damage to the
+//! credential set is logged with the damaged file, what fails and what to do
+//! ([`StoreError::damage_hint`]).
 //! An unreadable large-blob array instead uses its initial value (§6.10.2).
 
 use super::CtapApp;
@@ -28,9 +30,18 @@ pub(super) fn store_status(action: &str, err: StoreError) -> u8 {
             CTAP2_ERR_KEY_STORE_FULL
         }
         err => {
-            log::error!("cannot {action}: {err}");
+            log::error!("cannot {action}: {}", explained(&err));
             CTAP2_ERR_PROCESSING
         }
+    }
+}
+
+/// `err` as the log says it: followed, if it reports damage to the
+/// credential set, by the damaged file, what fails and what to do.
+pub(super) fn explained(err: &StoreError) -> String {
+    match err.damage_hint() {
+        Some(hint) => format!("{err}. {hint}"),
+        None => err.to_string(),
     }
 }
 
@@ -429,7 +440,7 @@ impl CtapApp<'_> {
         match self.store.get(credential_id) {
             Ok(record) => Ok(record),
             Err(err @ StoreError::Corrupt { .. }) => {
-                log::warn!("skipping a corrupt credential: {err}");
+                log::warn!("skipping a corrupt credential: {}", explained(&err));
                 Ok(None)
             }
             Err(err) => Err(store_status("read a credential", err)),

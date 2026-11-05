@@ -374,6 +374,27 @@ fn metadata_damage_fails_closed_without_modifying_policy_or_records() {
             reopened.get(b"new"),
             Err(StoreError::CredentialSetUnavailable { .. })
         ));
+        // The inspection reports the file that operations refuse to go on
+        // without, as they report it.
+        let damaged = match damage {
+            "marker" | "missing-marker" => FORMAT_FILE.to_owned(),
+            "missing-namespace" => MANAGED_DIR.to_owned(),
+            _ => format!("{MANAGED_DIR}/{ACTIVE_FILE}"),
+        };
+        let found = reopened.inspect().unwrap();
+        let [found] = found.as_slice() else {
+            panic!("{damage}: {found:?}");
+        };
+        assert_eq!(found.file, damaged, "{damage}");
+        let summary = crate::store::damage_summary(std::slice::from_ref(found));
+        assert!(
+            summary.ends_with("the key cannot register, use or list passkeys"),
+            "{damage}: {summary}"
+        );
+        let Err(StoreError::CredentialSetUnavailable { object, detail }) = reopened.list() else {
+            panic!("{damage}: membership is unavailable");
+        };
+        assert_eq!((object, detail), (damaged, found.to_string()), "{damage}");
         assert!(reopened.list().is_err());
         assert!(reopened.count().is_err());
         assert!(
@@ -389,6 +410,114 @@ fn metadata_damage_fails_closed_without_modifying_policy_or_records() {
             assert_eq!(reopened.count().unwrap(), 0);
         }
     }
+}
+
+/// Another process can commit between the inspection's reads of the
+/// manifest and of a member: publish a manifest without the member, then
+/// remove its file in cleanup.  That is no damage, and a second look, which
+/// reads the new manifest, does not report it.  A member's file removed
+/// while the manifest still names it is damage.
+#[test]
+fn inspection_does_not_report_a_member_a_concurrent_commit_removed() {
+    let scratch = TempDir::new();
+    let path = scratch.path().join("state");
+    let store = setup(&path, false);
+    let keys = store.credential_keys().unwrap().unwrap();
+    let old = keys.file_name(b"old").unwrap();
+    let managed = store.root.join(MANAGED_DIR);
+    let mut retired = store.active_manifest(&keys).unwrap().unwrap();
+    let location = retired.remove(&old).unwrap();
+    let published = store.prepare_manifest(&keys, &retired, &managed).unwrap();
+    let record = store.record_dir(location).join(&old);
+    let committed = Rc::new(Cell::new(false));
+    let commit = committed.clone();
+    let found = fsio::with_hook(
+        Box::new(move |event, path| {
+            if event == "inspect" && path.ends_with(&old) && !commit.replace(true) {
+                fs::rename(&published, managed.join(ACTIVE_FILE)).unwrap();
+                fs::remove_file(&record).unwrap();
+            }
+            Ok(())
+        }),
+        || store.inspect(),
+    );
+    assert!(committed.get(), "the commit ran between the reads");
+    assert_eq!(found.unwrap(), []);
+    assert_eq!(store.get(b"old").unwrap(), None);
+
+    let duplicate = keys.file_name(b"duplicate").unwrap();
+    let removed = store.record_dir(Location::Managed).join(&duplicate);
+    fs::remove_file(&removed).unwrap();
+    assert_eq!(
+        store.inspect().unwrap(),
+        [Damage::missing(format!(
+            "{MANAGED_DIR}/{RECORDS_DIR}/{duplicate}"
+        ))]
+    );
+}
+
+/// Looks that never agree, as when another process commits during each of
+/// them, report no damage: the inspection fails, saying the store kept
+/// changing.  Two looks in a row that agree are reported, even after one
+/// that did not.
+#[test]
+fn inspection_fails_when_no_two_looks_in_a_row_agree() {
+    let scratch = TempDir::new();
+    let path = scratch.path().join("state");
+    let store = setup(&path, false);
+    let keys = store.credential_keys().unwrap().unwrap();
+    // The members, in the order each look reads them, and their records.
+    let members: Vec<PathBuf> = store
+        .active_manifest(&keys)
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .map(|(name, location)| store.record_dir(location).join(name))
+        .collect();
+    let records: Vec<Vec<u8>> = members.iter().map(|path| fs::read(path).unwrap()).collect();
+    let restore = |members: &[PathBuf], records: &[Vec<u8>]| {
+        for (member, record) in members.iter().zip(records) {
+            fs::write(member, record).unwrap();
+        }
+    };
+    // Each look, as it reaches its first member, finds the records restored
+    // and the member `removed` names for that look missing.
+    let inspect = |removed: [usize; INSPECTIONS]| {
+        let (looked, kept) = (members.clone(), records.clone());
+        let mut removed = removed.into_iter();
+        let found = fsio::with_hook(
+            Box::new(move |event, path| {
+                if event == "inspect" && path == looked[0].as_path() {
+                    restore(&looked, &kept);
+                    fs::remove_file(&looked[removed.next().unwrap()]).unwrap();
+                }
+                Ok(())
+            }),
+            || store.inspect(),
+        );
+        restore(&members, &records);
+        found
+    };
+    let missing = |index: usize| {
+        let member = &members[index];
+        let name = member.file_name().unwrap().to_str().unwrap();
+        Damage::missing(store.relative(member.parent().unwrap(), name))
+    };
+
+    let Err(err) = inspect([0, 1, 2]) else {
+        panic!("three looks that disagree are no report");
+    };
+    assert!(matches!(&err, StoreError::Io { path, .. } if *path == store.root));
+    assert_eq!(
+        crate::store::damage_unchecked(&err),
+        format!(
+            "the credential store cannot be checked: {}: it kept changing while it was checked; \
+             run `pqkey status` again",
+            store.root.display()
+        )
+    );
+    assert_eq!(inspect([0, 1, 1]).unwrap(), [missing(1)]);
+    assert_eq!(store.inspect().unwrap(), []);
 }
 
 #[test]
