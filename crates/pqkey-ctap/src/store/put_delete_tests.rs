@@ -18,8 +18,14 @@
 //! list, count and get agree on exactly the expected records, the untouched
 //! ones unchanged, and a following registration and delete succeed and leave
 //! no ciphertext outside the membership.
+//!
+//! The tests after the sweeps check what the cleanup after a membership
+//! change removes besides retired records: a copy of a member at the
+//! location its manifest entry does not name, but never a member whose only
+//! file is there. Only a regular file at the member's own location makes
+//! the other one a copy, and a failed lookup there keeps both.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 
@@ -429,4 +435,233 @@ fn every_checkpoint_error_in_managed_delete_commits_completely_or_not_at_all() {
 #[test]
 fn process_exit_at_every_checkpoint_of_managed_delete_leaves_a_usable_store() {
     sweep_exits(&DELETES);
+}
+
+/// The record location a manifest entry does not name.
+fn other(location: Location) -> Location {
+    match location {
+        Location::Legacy => Location::Managed,
+        Location::Managed => Location::Legacy,
+    }
+}
+
+const FLUSHED: CredentialCommit = CredentialCommit {
+    durability: CommitDurability::Flushed,
+    cleanup_pending: false,
+};
+
+/// A manifest that places every member at the location without its file, as
+/// a decoder with the two location bytes swapped reads an upgraded store,
+/// hides the records but deletes none of them. Neither its own publication
+/// nor the insert and deletion committed after it remove a record file,
+/// except the deleted credential's, and the true manifest restores them all.
+#[test]
+fn a_manifest_misplacing_every_member_hides_its_records_but_deletes_none() {
+    let scratch = TempDir::new();
+    let mut store = setup(&scratch.path().join("state"));
+    let keys = store.credential_keys().unwrap().unwrap();
+    let before = store.list().unwrap();
+    let manifest = members(&store, "setup");
+    let files = ciphertext(&store);
+    assert_eq!(files, manifest);
+    let misplaced: Manifest = manifest
+        .iter()
+        .map(|(name, &location)| (name.clone(), other(location)))
+        .collect();
+    assert_eq!(store.publish_manifest(&keys, &misplaced).unwrap(), FLUSHED);
+    assert_eq!(store.list().unwrap(), []);
+    // The membership changes such a store still commits: a stored
+    // registration (RSA, Brainpool or payment) and a deletion.
+    let inserted = Operation::Insert.target();
+    store.put(&inserted).unwrap();
+    assert!(store.delete(&inserted.credential_id).unwrap());
+    assert_eq!(members(&store, "misplaced"), misplaced);
+    assert_eq!(ciphertext(&store), files, "every record file is kept");
+    assert_eq!(store.publish_manifest(&keys, &manifest).unwrap(), FLUSHED);
+    assert_holds(&store, &before, "restored");
+    assert_eq!(ciphertext(&store), manifest);
+}
+
+/// A copy of each member at the location its manifest entry does not name,
+/// as moving a record between locations would leave the old one, is
+/// reclaimed by the next membership change, here a replacement, together
+/// with the replaced credential's file. Every member keeps its own file.
+#[test]
+fn a_members_copy_at_the_other_location_is_reclaimed() {
+    let scratch = TempDir::new();
+    let mut store = setup(&scratch.path().join("state"));
+    let before = store.list().unwrap();
+    for (name, &location) in &members(&store, "setup") {
+        fs::copy(
+            store.record_dir(location).join(name),
+            store.record_dir(other(location)).join(name),
+        )
+        .unwrap();
+    }
+    let mut successor = following();
+    successor.user_id.clone_from(&registered().user_id);
+    assert_eq!(
+        store.insert_or_replace_discoverable(&successor).unwrap(),
+        FLUSHED
+    );
+    successor.created_at = next_created_at(&before);
+    let mut expected: Vec<_> = before
+        .into_iter()
+        .filter(|record| record.credential_id != registered().credential_id)
+        .collect();
+    expected.push(successor);
+    assert_holds(&store, &expected, "replaced");
+    assert_eq!(ciphertext(&store), members(&store, "replaced"));
+}
+
+/// If looking for a member's file at its own location fails, its copy at
+/// the other location is kept and cleanup stays pending. The next
+/// membership change reclaims it.
+#[test]
+fn a_failed_lookup_keeps_the_copy_and_leaves_cleanup_pending() {
+    let scratch = TempDir::new();
+    let mut store = setup(&scratch.path().join("state"));
+    let before = store.list().unwrap();
+    let keys = store.credential_keys().unwrap().unwrap();
+    let name = keys.file_name(&stored().credential_id).unwrap();
+    let own = store.record_dir(Location::Managed).join(&name);
+    let copy = store.record_dir(Location::Legacy).join(&name);
+    fs::copy(&own, &copy).unwrap();
+    let commit = fsio::with_hook(
+        Box::new(move |event, path| {
+            if event == "lookup" {
+                assert_eq!(path, own);
+                Err(fsio::io_error(
+                    path,
+                    std::io::Error::other("injected lookup failure"),
+                ))
+            } else {
+                Ok(())
+            }
+        }),
+        || store.insert_or_replace_discoverable(&following()),
+    );
+    assert_eq!(
+        commit.unwrap(),
+        CredentialCommit {
+            durability: CommitDurability::Flushed,
+            cleanup_pending: true,
+        }
+    );
+    assert!(copy.is_file());
+    assert!(store.delete(&following().credential_id).unwrap());
+    assert!(!copy.exists());
+    assert_holds(&store, &before, "retried");
+    assert_eq!(ciphertext(&store), members(&store, "retried"));
+}
+
+/// Move the stored credential's only file from `records/`, where its
+/// manifest entry places it, up to `credential-set/`. Returns where the
+/// manifest looks for it and where it now is.
+fn misplace_stored(store: &FileStore) -> (PathBuf, PathBuf) {
+    let keys = store.credential_keys().unwrap().unwrap();
+    let name = keys.file_name(&stored().credential_id).unwrap();
+    let own = store.record_dir(Location::Managed).join(&name);
+    let misplaced = store.record_dir(Location::Legacy).join(&name);
+    fsio::rename(&own, &misplaced, "rename", "renamed")
+        .unwrap()
+        .unwrap();
+    (own, misplaced)
+}
+
+/// A symbolic link at the member's own location is not a regular file
+/// there, even one to the member's only file elsewhere: that file is kept,
+/// cleanup completes, and the member reads through the link.
+#[test]
+fn a_symbolic_link_at_the_members_location_is_not_its_file() {
+    let scratch = TempDir::new();
+    let store = setup(&scratch.path().join("state"));
+    let keys = store.credential_keys().unwrap().unwrap();
+    let before = store.list().unwrap();
+    let manifest = members(&store, "setup");
+    let (own, misplaced) = misplace_stored(&store);
+    let sealed = fs::read(&misplaced).unwrap();
+    std::os::unix::fs::symlink(&misplaced, &own).unwrap();
+    assert_eq!(store.publish_manifest(&keys, &manifest).unwrap(), FLUSHED);
+    assert!(misplaced.is_file(), "the member's only file is kept");
+    assert_eq!(fs::read(&misplaced).unwrap(), sealed);
+    assert_holds(&store, &before, "linked");
+}
+
+/// Nor is a directory of the member's name: its only file is kept, and
+/// cleanup completes.
+#[test]
+fn a_directory_at_the_members_location_is_not_its_file() {
+    let scratch = TempDir::new();
+    let store = setup(&scratch.path().join("state"));
+    let keys = store.credential_keys().unwrap().unwrap();
+    let before = store.list().unwrap();
+    let manifest = members(&store, "setup");
+    let (own, misplaced) = misplace_stored(&store);
+    let sealed = fs::read(&misplaced).unwrap();
+    fs::create_dir(&own).unwrap();
+    assert_eq!(store.publish_manifest(&keys, &manifest).unwrap(), FLUSHED);
+    assert!(misplaced.is_file(), "the member's only file is kept");
+    assert_eq!(fs::read(&misplaced).unwrap(), sealed);
+    fsio::remove_dir(&own).unwrap();
+    fsio::rename(&misplaced, &own, "rename", "renamed")
+        .unwrap()
+        .unwrap();
+    assert_holds(&store, &before, "moved back");
+}
+
+/// A real lookup error at the member's own location, ENOTDIR from a
+/// `records/` that is briefly a regular file, keeps the member's only file
+/// at the other location and leaves cleanup pending. The hook puts the
+/// directory back when cleanup reaches `records/` itself, so the lookup is
+/// the only thing that fails. The next commit keeps the file again.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the hook moves records/ back with std::fs: the store's wrappers would re-enter it"
+)]
+fn a_real_lookup_error_keeps_a_misplaced_member_and_leaves_cleanup_pending() {
+    let scratch = TempDir::new();
+    let store = setup(&scratch.path().join("state"));
+    let keys = store.credential_keys().unwrap().unwrap();
+    let before = store.list().unwrap();
+    let manifest = members(&store, "setup");
+    let (own, misplaced) = misplace_stored(&store);
+    let records = store.record_dir(Location::Managed);
+    let aside = scratch.path().join("records");
+    fs::rename(&records, &aside).unwrap();
+    fs::write(&records, b"not a directory").unwrap();
+    let lookups = Rc::new(Cell::new(0));
+    let counted = Rc::clone(&lookups);
+    let dir = records.clone();
+    let commit = fsio::with_hook(
+        Box::new(move |event, path| {
+            if event == "lookup" {
+                counted.set(counted.get() + 1);
+            }
+            if event == "cleanup" && path == dir {
+                fs::remove_file(&dir).unwrap();
+                fs::rename(&aside, &dir).unwrap();
+            }
+            Ok(())
+        }),
+        || store.publish_manifest(&keys, &manifest),
+    );
+    assert_eq!(lookups.get(), 1);
+    assert!(misplaced.is_file(), "the member's only file is kept");
+    assert!(records.is_dir());
+    assert_eq!(
+        commit.unwrap(),
+        CredentialCommit {
+            durability: CommitDurability::Flushed,
+            cleanup_pending: true,
+        }
+    );
+    assert_eq!(store.publish_manifest(&keys, &manifest).unwrap(), FLUSHED);
+    assert!(misplaced.is_file());
+    fsio::rename(&misplaced, &own, "rename", "renamed")
+        .unwrap()
+        .unwrap();
+    assert_holds(&store, &before, "moved back");
+    assert_eq!(ciphertext(&store), manifest);
 }

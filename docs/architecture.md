@@ -390,8 +390,13 @@ an explicit committed result after publication: `Flushed` or `Unconfirmed`,
 with a separate pending-cleanup flag. MemoryStore reports `Volatile`.
 `Unconfirmed` means a process restart sees publication, while power loss may
 roll it back. Old ciphertext is retained until publication and its namespace
-have both been flushed successfully. Cleanup failure never changes membership,
-including after restart, further replacement or deletion of the new credential.
+have both been flushed successfully. Cleanup then removes a record file only
+if the manifest does not name it, or names it at the other location and a
+regular file of that name is there; a symbolic link or directory does not
+count. A member whose only file sits at the other location is kept with a
+warning, so a manifest that misplaces members hides their records instead of
+deleting them. Cleanup failure never changes membership, including after
+restart, further replacement or deletion of the new credential.
 A later membership transaction retries cleanup. Managed inserts and deletes
 also return success after publication and log subsequent problems.
 

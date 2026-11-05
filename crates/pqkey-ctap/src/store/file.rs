@@ -234,11 +234,15 @@ const ATTESTATION_FILE: &str = "attestation";
 /// [`CommitDurability::Unconfirmed`] means the new set is visible on process
 /// restart, but publication might roll back after power loss. Cleanup waits
 /// for successful flushes of both publication and namespace directories;
-/// otherwise all preceding records are retained. Cleanup errors set
-/// `cleanup_pending` and are logged. Retired and abandoned records are
-/// excluded permanently by membership, even if removal fails, files reappear,
-/// the store is reopened, or the replacement is subsequently replaced or
-/// deleted. A later committed membership change retries cleanup.
+/// otherwise all preceding records are retained. It removes a credential file
+/// only if membership does not name it, or places that member at the other
+/// location and a regular file of that name is there. A member whose only
+/// file is at the other location is kept with a warning, so membership that
+/// misplaces members hides their records instead of deleting them. Cleanup
+/// errors set `cleanup_pending` and are logged. Retired and abandoned
+/// records are excluded permanently by membership, even if removal fails,
+/// files reappear, the store is reopened, or the replacement is subsequently
+/// replaced or deleted. A later committed membership change retries cleanup.
 ///
 /// Managed-mode `put` inserts and `delete` similarly return success after
 /// publication, logging unconfirmed durability or pending cleanup. Active
@@ -659,6 +663,19 @@ impl<K: KeySource> FileStore<K> {
         }
     }
 
+    /// Remove the credential files that `manifest`, just made durable, no
+    /// longer needs from both record locations. Returns whether cleanup is
+    /// pending.
+    ///
+    /// A file is removed only when its name is not a member, or when the
+    /// member is placed at the other location and that location holds a
+    /// regular file of that name, which makes this one a copy left behind. A
+    /// member's file found only at the location the manifest does not name
+    /// is kept and logged, so that a manifest misplacing its members hides
+    /// records rather than deleting them. If looking at the other location
+    /// fails, the error ends this location's pass as a failed removal does:
+    /// the file, and any retired files not yet reached, stay until a later
+    /// commit retries, and cleanup is pending.
     fn cleanup_retired(&self, manifest: &Manifest) -> bool {
         let mut pending = false;
         for location in [Location::Legacy, Location::Managed] {
@@ -673,7 +690,23 @@ impl<K: KeySource> FileStore<K> {
                     else {
                         continue;
                     };
-                    if manifest.get(name) != Some(&location) {
+                    let reclaim = match manifest.get(name) {
+                        None => true,
+                        Some(&member) if member == location => false,
+                        Some(&member) => {
+                            let held = self.holds_record(member, name)?;
+                            if !held {
+                                log::warn!(
+                                    "credential store: keeping {}: the manifest places it in {}, \
+                                     which holds no such file",
+                                    entry.path().display(),
+                                    self.record_dir(member).display()
+                                );
+                            }
+                            held
+                        }
+                    };
+                    if reclaim {
                         fsio::remove_file_if_present(&entry.path())?;
                     }
                 }
@@ -685,6 +718,19 @@ impl<K: KeySource> FileStore<K> {
             }
         }
         pending
+    }
+
+    /// Whether `location` holds a regular file named `name`. A symbolic link
+    /// or directory there is not a record the store wrote. The checkpoint
+    /// lets tests fail the lookup.
+    fn holds_record(&self, location: Location, name: &str) -> Result<bool, StoreError> {
+        let path = self.record_dir(location).join(name);
+        fsio::checkpoint("lookup", &path)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => Ok(metadata.is_file()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(fsio::io_error(&path, err)),
+        }
     }
 
     fn collision(&self, name: &str) -> Result<bool, StoreError> {

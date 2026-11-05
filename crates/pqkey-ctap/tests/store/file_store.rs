@@ -1313,6 +1313,53 @@ fn unexpected_directory_entries_are_ignored() {
     assert_eq!(store.count().unwrap(), 0);
 }
 
+/// The cleanup after a membership change keeps a member whose only file is
+/// at the location its manifest entry does not name, here a passkey moved
+/// from `credential-set/records/` up to `credential-set/`, with a warning
+/// naming the file and both locations, and the passkey reads again once it
+/// is moved back. A copy of a member at the other location is reclaimed.
+#[test]
+fn cleanup_keeps_a_misplaced_member_and_reclaims_a_copy() {
+    logs::install();
+    let scratch = Scratch::new();
+    let mut store = scratch.open();
+    let legacy = put_and_locate(&scratch, &mut store, &new_record(CoseAlg::ES256));
+    let legacy = legacy.file_name().unwrap();
+    let mut passkey = new_record(CoseAlg::ES256);
+    // The ID of a credential made with "rk" true.
+    passkey.credential_id = [vec![1], random_bytes::<32>().to_vec()].concat();
+    store.insert_or_replace_discoverable(&passkey).unwrap();
+    let set = scratch.state().join("credential-set");
+    let records = set.join("records");
+    let names: Vec<_> = fs::read_dir(&records)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    let [name] = names.as_slice() else {
+        panic!("one record in {}: {names:?}", records.display());
+    };
+    let misplaced = set.join(name);
+    fs::rename(records.join(name), &misplaced).unwrap();
+    fs::copy(set.join(legacy), records.join(legacy)).unwrap();
+
+    store.put(&new_record(CoseAlg::ES256)).unwrap();
+    assert!(misplaced.is_file(), "the misplaced passkey is kept");
+    assert!(set.join(legacy).is_file());
+    assert!(!records.join(legacy).exists(), "the copy is reclaimed");
+    let warnings = logs::warnings_containing(&misplaced.display().to_string());
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains(&records.display().to_string())),
+        "keeping the passkey must log a warning naming both locations: {warnings:?}"
+    );
+    assert_eq!(store.get(&passkey.credential_id).unwrap(), None);
+    fs::rename(&misplaced, records.join(name)).unwrap();
+    let stored = store.get(&passkey.credential_id).unwrap().unwrap();
+    assert_eq!(stored, with_created_at(&passkey, stored.created_at));
+    assert_eq!(store.count().unwrap(), 3);
+}
+
 #[test]
 fn oversized_records_are_rejected() {
     let scratch = Scratch::new();
