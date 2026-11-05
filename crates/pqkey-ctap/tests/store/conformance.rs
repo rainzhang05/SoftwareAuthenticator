@@ -1,5 +1,6 @@
 //! One suite of behavioural cases, run against every `CredentialStore`, and
-//! against the file store in both of its on-disk layouts.
+//! against the file store in both of its on-disk layouts, and after each kind
+//! of repair.
 //!
 //! Each case is a function generic over a [`Backend`].  The
 //! `conformance_suite!` invocation at the bottom instantiates every case once
@@ -90,6 +91,146 @@ impl Backend for ManagedFile {
         assert_eq!(store.count().unwrap(), 0);
         fixture.store = fixture.store.with_max_credentials(max_credentials);
         fixture
+    }
+}
+
+/// A file store in the managed layout that `pqkey repair` repaired: two
+/// passkeys were registered, `damage` damaged the store, given its state
+/// directory and the record file of the second passkey, and what the repair
+/// kept is then deleted.  So the conformance suite runs on what each kind of
+/// repair leaves.
+fn repaired(damage: fn(&std::path::Path, &std::path::Path), legacy: bool) -> Fixture<FileStore> {
+    let mut fixture = File::create(DEFAULT_MAX_CREDENTIALS);
+    let store = &mut fixture.store;
+    let state = store.state_dir().to_owned();
+    let passkey = || {
+        let mut passkey = new_record(CoseAlg::ES256);
+        passkey.credential_id = [vec![1], random_bytes::<32>().to_vec()].concat();
+        passkey
+    };
+    let (first, second) = (passkey(), passkey());
+    let records = if legacy {
+        state.join("credentials")
+    } else {
+        state.join("credential-set").join("records")
+    };
+    let mut add = |record: &CredentialRecord| {
+        if legacy {
+            store.put(record).expect("put");
+        } else {
+            store
+                .insert_or_replace_discoverable(record)
+                .expect("register a passkey");
+        }
+    };
+    add(&first);
+    let before: Vec<_> = std::fs::read_dir(&records)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    add(&second);
+    let file = std::fs::read_dir(&records)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| !before.contains(path))
+        .expect("the second passkey's record");
+    damage(&state, &file);
+    let plan = FileStore::plan_repair_in(&state)
+        .expect("plan")
+        .expect("damage to repair");
+    FileStore::repair_in(&state, &plan).expect("repair");
+    assert_eq!(FileStore::inspect_in(&state).unwrap(), []);
+    let store = &mut fixture.store;
+    for kept in store.list().expect("list") {
+        assert!(store.delete(&kept.credential_id).expect("delete"));
+    }
+    assert!(state.join("credential-format").is_file());
+    assert!(state.join("credential-set").join("active").is_file());
+    assert_eq!(store.count().unwrap(), 0);
+    fixture
+}
+
+/// Flip the last byte of `path`, as a media error would.
+fn flip(path: &std::path::Path) {
+    let mut contents = std::fs::read(path).unwrap();
+    *contents.last_mut().unwrap() ^= 1;
+    std::fs::write(path, contents).unwrap();
+}
+
+/// After a member's record failed authentication, B1.
+pub struct RepairedRecord;
+
+impl Backend for RepairedRecord {
+    type Store = FileStore;
+    fn create(max_credentials: usize) -> Fixture<FileStore> {
+        let fixture = repaired(|_, record| flip(record), false);
+        Fixture {
+            store: fixture.store.with_max_credentials(max_credentials),
+            _dir: fixture._dir,
+        }
+    }
+}
+
+/// After a legacy store's record failed authentication, B2: the repair
+/// moves it to the managed layout.
+pub struct RepairedLegacyRecord;
+
+impl Backend for RepairedLegacyRecord {
+    type Store = FileStore;
+    fn create(max_credentials: usize) -> Fixture<FileStore> {
+        let fixture = repaired(|_, record| flip(record), true);
+        Fixture {
+            store: fixture.store.with_max_credentials(max_credentials),
+            _dir: fixture._dir,
+        }
+    }
+}
+
+/// After the manifest failed authentication, B3: the repair rebuilt it.
+pub struct RepairedManifest;
+
+impl Backend for RepairedManifest {
+    type Store = FileStore;
+    fn create(max_credentials: usize) -> Fixture<FileStore> {
+        let fixture = repaired(
+            |state, _| flip(&state.join("credential-set").join("active")),
+            false,
+        );
+        Fixture {
+            store: fixture.store.with_max_credentials(max_credentials),
+            _dir: fixture._dir,
+        }
+    }
+}
+
+/// After the format marker failed authentication.
+pub struct RepairedMarker;
+
+impl Backend for RepairedMarker {
+    type Store = FileStore;
+    fn create(max_credentials: usize) -> Fixture<FileStore> {
+        let fixture = repaired(|state, _| flip(&state.join("credential-format")), false);
+        Fixture {
+            store: fixture.store.with_max_credentials(max_credentials),
+            _dir: fixture._dir,
+        }
+    }
+}
+
+/// After `credential-set/` was lost: the repair created it again.
+pub struct RepairedNamespace;
+
+impl Backend for RepairedNamespace {
+    type Store = FileStore;
+    fn create(max_credentials: usize) -> Fixture<FileStore> {
+        let fixture = repaired(
+            |state, _| std::fs::remove_dir_all(state.join("credential-set")).unwrap(),
+            false,
+        );
+        Fixture {
+            store: fixture.store.with_max_credentials(max_credentials),
+            _dir: fixture._dir,
+        }
     }
 }
 
@@ -876,6 +1017,51 @@ macro_rules! conformance_suite {
                 #[test]
                 fn $case() {
                     super::$case::<super::ManagedFile>();
+                }
+            )+
+        }
+
+        mod repaired_record {
+            $(
+                #[test]
+                fn $case() {
+                    super::$case::<super::RepairedRecord>();
+                }
+            )+
+        }
+
+        mod repaired_legacy_record {
+            $(
+                #[test]
+                fn $case() {
+                    super::$case::<super::RepairedLegacyRecord>();
+                }
+            )+
+        }
+
+        mod repaired_manifest {
+            $(
+                #[test]
+                fn $case() {
+                    super::$case::<super::RepairedManifest>();
+                }
+            )+
+        }
+
+        mod repaired_marker {
+            $(
+                #[test]
+                fn $case() {
+                    super::$case::<super::RepairedMarker>();
+                }
+            )+
+        }
+
+        mod repaired_namespace {
+            $(
+                #[test]
+                fn $case() {
+                    super::$case::<super::RepairedNamespace>();
                 }
             )+
         }

@@ -19,11 +19,16 @@
 //!    never names a record that is not.
 //! 3. A staged namespace is renamed into place only after it was flushed
 //!    following the last change to its entries.
-//! 4. No cleanup starts and nothing is removed until the directory of
-//!    everything put in place before was flushed, so a power failure cannot
-//!    bring back a manifest that names a removed record, or the old key after
-//!    a reset removed its counter.
+//! 4. No cleanup starts and nothing is removed or replaced until the
+//!    directory of everything put in place before was flushed, so a power
+//!    failure cannot bring back a manifest that names a removed record, or
+//!    the old key after a reset removed its counter, or lose the quarantine
+//!    name of a file that repair replaces or removes.
 //! 5. Every change is flushed before the operation returns.
+//!
+//! A file or directory the store had that repair gives a name in its
+//! quarantine keeps the contents it had, so rules 1 and 3 do not apply to it;
+//! rules 2, 4 and 5 do.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,6 +36,7 @@ use std::ops::Range;
 use std::os::unix::fs::MetadataExt;
 use std::rc::Rc;
 
+use super::repair_tests::Scenario;
 use super::*;
 use crate::CoseAlg;
 use crate::store::{PrivateKeyMaterial, test_support::TempDir};
@@ -55,7 +61,7 @@ type Operation = fn(&mut FileStore);
 
 #[test]
 fn every_persisting_operation_flushes_before_it_publishes_removes_or_returns() {
-    let operations: [(&str, Setup, Operation); 18] = [
+    let operations: [(&str, Setup, Operation); 26] = [
         ("legacy put of a new record", legacy, |store| {
             store.put(&credential(b"new", 4)).unwrap();
         }),
@@ -118,6 +124,46 @@ fn every_persisting_operation_flushes_before_it_publishes_removes_or_returns() {
         ("sealing the first credential ID", fresh, |store| {
             store.seal_credential_id(&[7; 66], RP.as_bytes()).unwrap();
         }),
+        (
+            "repair of a damaged record",
+            |path| damaged(path, Scenario::Record),
+            repair,
+        ),
+        (
+            "repair of a legacy store",
+            |path| damaged(path, Scenario::Legacy),
+            repair,
+        ),
+        (
+            "repair after a failed upgrade",
+            |path| damaged(path, Scenario::FailedUpgrade),
+            repair,
+        ),
+        (
+            "rebuild of a manifest",
+            |path| damaged(path, Scenario::Manifest),
+            repair,
+        ),
+        (
+            "rebuild in place of a directory",
+            |path| damaged(path, Scenario::UnreadableManifest),
+            repair,
+        ),
+        (
+            "rebuild with the marker",
+            |path| damaged(path, Scenario::MarkerAndManifest),
+            repair,
+        ),
+        (
+            "repair of a namespace",
+            |path| damaged(path, Scenario::Namespace),
+            repair,
+        ),
+        (
+            "repair of a legacy directory",
+            |path| damaged(path, Scenario::LegacyDirectory),
+            repair,
+        ),
     ];
     let mut exercised = BTreeSet::new();
     let mut violations = Vec::new();
@@ -156,6 +202,9 @@ struct Event {
     dir: Option<u64>,
     /// At the end of a rename or link, the entry that now has `path`'s name.
     moved: Option<Moved>,
+    /// At the start of a rename, whether it replaces an entry that has
+    /// `path`'s name.
+    replaces: bool,
 }
 
 #[derive(Debug)]
@@ -163,6 +212,9 @@ struct Moved {
     path: PathBuf,
     /// Its inode, if it is a directory.
     dir: Option<u64>,
+    /// Whether it is an entry the store had, which repair gave a name in its
+    /// quarantine, rather than one the operation wrote.
+    existing: bool,
 }
 
 impl Event {
@@ -189,20 +241,35 @@ fn trace(operation: impl FnOnce()) -> Vec<Event> {
     let events = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&events);
     let mut entries = Vec::new();
+    // The entry the last "quarantine" checkpoint named, which is elsewhere.
+    let mut quarantined: Option<PathBuf> = None;
     fsio::with_hook(
         Box::new(move |name, path| {
             let mut moved = None;
+            let mut replaces = false;
             match name {
-                "rename" | "publication" | "link" => entries = inodes(parent(path)),
+                "quarantine" => quarantined = Some(path.to_owned()),
+                "rename" | "publication" | "link" => {
+                    entries = inodes(parent(path));
+                    replaces = fs::symlink_metadata(path).is_ok();
+                }
                 "renamed" | "published" | "linked" => {
                     let target = fs::symlink_metadata(path).unwrap();
-                    let (source, _) = entries
-                        .iter()
-                        .find(|(_, inode)| *inode == target.ino())
-                        .expect("the entry put in place was in the target's directory");
+                    let (source, existing) =
+                        match entries.iter().find(|(_, inode)| *inode == target.ino()) {
+                            Some((source, _)) => (source.clone(), false),
+                            None => (
+                                quarantined.take().expect(
+                                    "the entry put in place was in the target's directory, or \
+                                 repair quarantined it",
+                                ),
+                                true,
+                            ),
+                        };
                     moved = Some(Moved {
-                        path: source.clone(),
+                        path: source,
                         dir: target.is_dir().then_some(target.ino()),
+                        existing,
                     });
                 }
                 _ => {}
@@ -217,6 +284,7 @@ fn trace(operation: impl FnOnce()) -> Vec<Event> {
                 path: path.to_owned(),
                 dir,
                 moved,
+                replaces,
             });
             Ok(())
         }),
@@ -249,7 +317,7 @@ fn check(scratch: &Path, events: &[Event], exercised: &mut BTreeSet<&'static str
         first.entry(rule).or_insert(violation);
     };
     for (at, event) in events.iter().enumerate() {
-        if let Some(moved) = &event.moved {
+        if let Some(moved) = event.moved.as_ref().filter(|moved| !moved.existing) {
             if moved.dir.is_some() {
                 exercised.insert(NAMESPACE_FLUSHED);
                 let changed = events[..at]
@@ -316,6 +384,7 @@ fn check(scratch: &Path, events: &[Event], exercised: &mut BTreeSet<&'static str
         let removal = match event.name.as_str() {
             "cleanup" => Some("cleanup of"),
             "remove" if !temporary(&event.path) => Some("removal of"),
+            _ if event.replaces => Some("replacement of"),
             _ => None,
         };
         if let Some(removal) = removal {
@@ -458,6 +527,20 @@ fn reset(store: &mut FileStore) {
 
 fn fresh(path: &Path) -> FileStore {
     FileStore::open(path).unwrap()
+}
+
+/// A store with the damage of `scenario`, as repair finds it: unopened,
+/// since opening would create a lost legacy directory again.
+fn damaged(path: &Path, scenario: Scenario) -> FileStore {
+    scenario.apply(path);
+    FileStore::unopened(path)
+}
+
+fn repair(store: &mut FileStore) {
+    let plan = store.plan_repair().unwrap().unwrap();
+    let repaired = store.repair(&plan).unwrap();
+    assert_eq!(repaired.durability, CommitDurability::Flushed);
+    assert!(!repaired.cleanup_pending);
 }
 
 /// A store in the legacy layout with two records.

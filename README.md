@@ -138,6 +138,7 @@ not establish physical human presence.
 | `pqkey config force-pin-change` | Requires a different PIN |
 | `pqkey passkeys` | Lists the passkeys stored on the key |
 | `pqkey passkeys delete QUERY` | Deletes the passkey whose site, user or ID contains `QUERY` |
+| `pqkey repair` | Repairs a damaged credential store, with the key stopped |
 | `pqkey reset` | Erases credentials, large blobs and PIN; resets settings |
 | `pqkey stop`, `pqkey start` | Unplugs and plugs in the key |
 
@@ -261,6 +262,47 @@ again before you reset it: a restart clears a block that came from a PIN state
 the key could not read, while `pqkey reset` erases every passkey.
 `journalctl --user -u pqkey` says what the key could not read or write, and
 `pqkey reset` asks again if its own restart unblocks the PIN.
+
+**Damaged credential store.** `pqkey status` and `journalctl --user -u pqkey`
+name damaged files of the credential store in the key's state directory,
+`~/.local/share/pqkey` by default, and what the key cannot do because of
+them. To repair the store:
+
+1. Stop the key with `pqkey stop`, and keep a copy of the whole state
+   directory, `keys/` included: `cp -a ~/.local/share/pqkey ~/pqkey-copy`.
+2. Run `pqkey repair`. It lists the damage and what it will do, and asks
+   before it changes the store. Each file of the store that it replaces or
+   removes, damaged or not, is kept in a new directory in `damaged/` in the
+   state directory.
+3. Start the key again with `pqkey start`.
+
+If the key's list of its credentials, `credential-set/active`, is intact,
+repair takes the credentials whose records are missing or damaged out of the
+list and keeps the rest. If the list itself is missing, damaged or
+unreadable, repair builds a new one from the records in `credential-set/`
+that are intact. A passkey that was deleted or replaced, or whose
+registration failed, can come back that way if its record was left behind,
+alone or beside another passkey of its account; the plan names each account
+that will have more than one passkey. If records of a store in the older
+format, in `credentials/`, are damaged, repair upgrades the store to the
+authenticated membership format without them, as registering a passkey
+would. A damaged `credential-format` is written again. A lost directory
+takes the credentials stored in it with it, and the plan says which
+directory repair creates again, without them. Repair leaves the PIN and the
+keys in `keys/` as they are, so unlike `pqkey reset` it does not end the
+sign-ins of sites that registered the key as a security key, unless the key
+stored their credentials: it stores some, such as those with an RSA or
+Brainpool key or with payment enabled, and older ones.
+
+Delete the copy once the key works again: it holds the keys, so it would keep
+your passkeys readable even after a later reset. Do not edit, delete or
+replace `credential-format` or the files in `credential-set/` or
+`credentials/` by hand: an older `credential-set/active` hides the passkeys
+registered since, and the next change to that list can delete the record
+files it does not name. If `pqkey status` says the store cannot be checked
+because a key file in `keys/` is missing, restore that file from a copy of
+the state directory made since the last reset. `pqkey reset` erases every
+passkey, so use it only as a last resort.
 
 ## Uninstall
 

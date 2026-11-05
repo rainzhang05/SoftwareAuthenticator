@@ -374,19 +374,18 @@ fn metadata_damage_fails_closed_without_modifying_policy_or_records() {
             reopened.get(b"new"),
             Err(StoreError::CredentialSetUnavailable { .. })
         ));
-        // The inspection reports the file that operations refuse to go on
-        // without, as they report it.
-        let damaged = match damage {
-            "marker" | "missing-marker" => FORMAT_FILE.to_owned(),
-            "missing-namespace" => MANAGED_DIR.to_owned(),
-            _ => format!("{MANAGED_DIR}/{ACTIVE_FILE}"),
+        // The inspection reports the files that operations refuse to go on
+        // without, as they report them: without either namespace, both
+        // directories, since nothing tells which one held the records.
+        let damaged: &[String] = &match damage {
+            "marker" | "missing-marker" => vec![FORMAT_FILE.to_owned()],
+            "missing-namespace" => vec![MANAGED_DIR.to_owned(), CREDENTIALS_DIR.to_owned()],
+            _ => vec![format!("{MANAGED_DIR}/{ACTIVE_FILE}")],
         };
         let found = reopened.inspect().unwrap();
-        let [found] = found.as_slice() else {
-            panic!("{damage}: {found:?}");
-        };
-        assert_eq!(found.file, damaged, "{damage}");
-        let summary = crate::store::damage_summary(std::slice::from_ref(found));
+        let files: Vec<_> = found.iter().map(|found| found.file.clone()).collect();
+        assert_eq!(files, damaged, "{damage}");
+        let summary = crate::store::damage_summary(&found);
         assert!(
             summary.ends_with("the key cannot register, use or list passkeys"),
             "{damage}: {summary}"
@@ -394,7 +393,12 @@ fn metadata_damage_fails_closed_without_modifying_policy_or_records() {
         let Err(StoreError::CredentialSetUnavailable { object, detail }) = reopened.list() else {
             panic!("{damage}: membership is unavailable");
         };
-        assert_eq!((object, detail), (damaged, found.to_string()), "{damage}");
+        let named: Vec<_> = found.iter().map(Damage::to_string).collect();
+        assert_eq!(
+            (object, detail),
+            (damaged[0].clone(), named.join("; ")),
+            "{damage}"
+        );
         assert!(reopened.list().is_err());
         assert!(reopened.count().is_err());
         assert!(
@@ -511,8 +515,7 @@ fn inspection_fails_when_no_two_looks_in_a_row_agree() {
     assert_eq!(
         crate::store::damage_unchecked(&err),
         format!(
-            "the credential store cannot be checked: {}: it kept changing while it was checked; \
-             run `pqkey status` again",
+            "the credential store cannot be checked: {}: it kept changing while it was checked",
             store.root.display()
         )
     );

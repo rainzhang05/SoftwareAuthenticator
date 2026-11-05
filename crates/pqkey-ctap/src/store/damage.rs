@@ -3,11 +3,13 @@
 //!
 //! The key's log ([`StoreError::damage_hint`], [`damage_log`],
 //! [`damage_unchecked_log`]) and `pqkey status` ([`damage_summary`],
-//! [`damage_unchecked`], [`damage_fix`]) take all their wording from here, so
-//! that it changes in one place.  Each claim the wording makes about what
-//! fails is tested for every kind of damage it is said of
-//! (`tests/store/damage.rs`, and the `pqkey` crate's status and start-up
-//! tests); it claims nothing about what still works.
+//! [`damage_unchecked`], [`damage_fix`]) take all their wording from here,
+//! and `pqkey repair` its wording of the damage and of what fails
+//! ([`Damage`]'s display, [`damage_consequence`]), so that it changes in one
+//! place.  Each claim the wording makes about what fails is tested for every
+//! kind of damage it is said of (`tests/store/damage.rs`, and the `pqkey`
+//! crate's status and start-up tests); it claims nothing about what still
+//! works.
 
 use core::fmt;
 
@@ -19,8 +21,10 @@ use super::{Corruption, StoreError};
 const NAMED: usize = 3;
 
 /// Why an inspection whose looks never agreed could not check the store.
-pub(super) const UNSETTLED: &str =
-    "it kept changing while it was checked; run `pqkey status` again";
+/// What to do follows it ([`damage_fix`]): `pqkey repair` looks again with
+/// the key stopped, so that none of the key's own changes come between its
+/// looks.
+pub(super) const UNSETTLED: &str = "it kept changing while it was checked";
 
 /// A file or directory of a [`FileStore`](super::FileStore)'s credential set
 /// that is missing or cannot be used, as
@@ -52,6 +56,13 @@ pub enum Fault {
 }
 
 impl Damage {
+    /// Whether the damaged file is a credential's record, rather than
+    /// membership metadata or a directory.
+    #[must_use]
+    pub fn is_record(&self) -> bool {
+        kind(&self.file) == Kind::Record
+    }
+
     pub(super) fn missing(file: impl Into<String>) -> Self {
         Self {
             file: file.into(),
@@ -77,13 +88,22 @@ impl Damage {
             fault,
         }
     }
+}
 
-    /// The error with which operations refuse to go on despite this damage.
-    pub(super) fn unavailable(self) -> StoreError {
-        StoreError::CredentialSetUnavailable {
-            detail: self.to_string(),
-            object: self.file,
-        }
+/// The error with which operations refuse to go on despite `damage`, which
+/// is not empty: unavailable membership, naming the first damaged file, and
+/// in its detail every one.
+pub(super) fn unavailable(damage: &[Damage]) -> StoreError {
+    StoreError::CredentialSetUnavailable {
+        object: damage
+            .first()
+            .map(|first| first.file.clone())
+            .unwrap_or_default(),
+        detail: damage
+            .iter()
+            .map(Damage::to_string)
+            .collect::<Vec<_>>()
+            .join("; "),
     }
 }
 
@@ -123,18 +143,32 @@ fn kind(file: &str) -> Kind {
 /// What fails after damage of `kind` to `files` files: only what fails
 /// whatever else is damaged, and for a legacy store's lost `credentials`
 /// directory only what fails both before and after the key opens the store,
-/// which creates the directory again, empty.  Nothing is said of the PIN:
-/// the inspection does not read the PIN state, which `pqkey status` shows on
-/// a line of its own.
+/// which creates the directory again, empty.  That directory may have held
+/// no passkey at all, as in a new store: a legacy store keeps no list of its
+/// credentials, so nothing tells once the directory is lost.  Nothing is
+/// said of the PIN: the inspection does not read the PIN state, which
+/// `pqkey status` shows on a line of its own.
 fn consequence(kind: Kind, files: usize) -> &'static str {
     match (kind, files) {
         (Kind::Record, 1) => "the key cannot register passkeys, or use the credential in that file",
         (Kind::Record, _) => {
             "the key cannot register passkeys, or use the credentials in those files"
         }
-        (Kind::LegacyDirectory, _) => "the key cannot use the passkeys that were in that directory",
+        (Kind::LegacyDirectory, _) => "the key cannot use any passkeys that were in it",
         (Kind::Membership, _) => "the key cannot register, use or list passkeys",
     }
+}
+
+/// What fails in a credential store found to have `damage`, which is not
+/// empty: what the worst of it costs, as [`damage_summary`] says it.
+#[must_use]
+pub fn damage_consequence(damage: &[Damage]) -> &'static str {
+    let worst = damage
+        .iter()
+        .map(|damage| kind(&damage.file))
+        .max()
+        .unwrap_or(Kind::Record);
+    consequence(worst, damage.len())
 }
 
 /// What `pqkey status` says is wrong with a credential store found to have
@@ -145,15 +179,10 @@ pub fn damage_summary(damage: &[Damage]) -> String {
     if damage.len() > NAMED {
         files.push(format!("and {} more", damage.len() - NAMED));
     }
-    let worst = damage
-        .iter()
-        .map(|damage| kind(&damage.file))
-        .max()
-        .unwrap_or(Kind::Record);
     format!(
         "the credential store is damaged ({}): {}",
         files.join("; "),
-        consequence(worst, damage.len())
+        damage_consequence(damage)
     )
 }
 
@@ -166,12 +195,13 @@ pub fn damage_unchecked(err: &StoreError) -> String {
 
 /// What to do about damage to the credential store in `state_dir`, as
 /// `pqkey status` and the key's log say it: keep a copy of the store with the
-/// key stopped, and reset only as the last resort.
+/// key stopped, repair it, and reset only as the last resort.
 #[must_use]
 pub fn damage_fix(state_dir: &str) -> String {
     format!(
-        "stop the key with `pqkey stop`, keep a copy of {state_dir}, then start it again with \
-         `pqkey start`; `pqkey reset` erases every passkey, so use it only as a last resort"
+        "stop the key with `pqkey stop`, keep a copy of {state_dir}, run `pqkey repair`, then \
+         start the key again with `pqkey start`; `pqkey reset` erases every passkey, so use it \
+         only as a last resort"
     )
 }
 
@@ -233,23 +263,25 @@ mod tests {
 
     const RECORD: &str =
         "credential-set/records/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const FIX: &str = "stop the key with `pqkey stop`, keep a copy of /state, then start it \
-                       again with `pqkey start`; `pqkey reset` erases every passkey, so use it \
-                       only as a last resort";
+    const FIX: &str = "stop the key with `pqkey stop`, keep a copy of /state, run `pqkey \
+                       repair`, then start the key again with `pqkey start`; `pqkey reset` \
+                       erases every passkey, so use it only as a last resort";
 
     /// The advice keeps a copy of the store with the key stopped before
-    /// anything else, and names reset once, last, as what erases every
-    /// passkey.
+    /// anything else, then repairs it and starts the key, and names reset
+    /// once, last, as what erases every passkey.
     fn assert_reset_is_the_last_resort(text: &str) {
         let at = |part: &str| {
             text.find(part)
                 .unwrap_or_else(|| panic!("{part:?} is not in {text:?}"))
         };
         assert!(at("top the key with `pqkey stop`") < at("keep a copy of"));
-        assert!(at("keep a copy of") < at("then start it again with `pqkey start`"));
+        assert!(at("keep a copy of") < at("run `pqkey repair`"));
+        assert!(at("run `pqkey repair`") < at("then start the key again with `pqkey start`"));
         assert!(at("`pqkey start`") < at("`pqkey reset` erases every passkey"));
         assert!(text.ends_with("use it only as a last resort"), "{text}");
         assert_eq!(text.matches("pqkey reset").count(), 1, "{text}");
+        assert_eq!(text.matches("pqkey repair").count(), 1, "{text}");
     }
 
     #[test]
@@ -303,21 +335,33 @@ mod tests {
             "credential-set",
         ] {
             assert_eq!(kind(membership), Kind::Membership, "{membership}");
+            assert!(!Damage::missing(membership).is_record(), "{membership}");
         }
         assert_eq!(kind("credentials"), Kind::LegacyDirectory);
+        assert!(!Damage::missing("credentials").is_record());
+        assert!(Damage::missing(RECORD).is_record());
     }
 
     /// Operations refuse damage as the store always has: as unavailable
-    /// membership, naming the file.
+    /// membership, naming the file, or the first of several and each in the
+    /// detail.
     #[test]
     fn damage_refuses_operations_as_unavailable_membership() {
         let StoreError::CredentialSetUnavailable { object, detail } =
-            Damage::missing(RECORD).unavailable()
+            unavailable(&[Damage::missing(RECORD)])
         else {
             panic!("not unavailable membership");
         };
         assert_eq!(object, RECORD);
         assert_eq!(detail, format!("{RECORD} is missing"));
+        let StoreError::CredentialSetUnavailable { object, detail } = unavailable(&[
+            Damage::missing("credential-set"),
+            Damage::missing(CREDENTIALS_DIR),
+        ]) else {
+            panic!("not unavailable membership");
+        };
+        assert_eq!(object, "credential-set");
+        assert_eq!(detail, "credential-set is missing; credentials is missing");
     }
 
     /// The whole of each summary: the files, and what fails, for each kind
@@ -354,8 +398,22 @@ mod tests {
         }
         assert_eq!(
             damage_summary(&[Damage::missing("credentials")]),
-            "the credential store is damaged (credentials is missing): the key cannot use the \
-             passkeys that were in that directory"
+            "the credential store is damaged (credentials is missing): the key cannot use any \
+             passkeys that were in it"
+        );
+        // A store whose format marker shows the managed layout, and that has
+        // lost the directories of both layouts.
+        assert_eq!(
+            damage_summary(&[
+                Damage::missing("credential-set"),
+                Damage::missing("credentials")
+            ]),
+            "the credential store is damaged (credential-set is missing; credentials is \
+             missing): the key cannot register, use or list passkeys"
+        );
+        assert_eq!(
+            damage_consequence(&[Damage::missing(RECORD)]),
+            "the key cannot register passkeys, or use the credential in that file"
         );
     }
 
@@ -399,20 +457,23 @@ mod tests {
     /// none.
     #[test]
     fn hints_follow_errors_that_report_damage() {
-        let fix = "Stop the key with `pqkey stop`, keep a copy of the state directory, then \
-                   start it again with `pqkey start`; `pqkey reset` erases every passkey, so use \
-                   it only as a last resort";
+        let fix = "Stop the key with `pqkey stop`, keep a copy of the state directory, run \
+                   `pqkey repair`, then start the key again with `pqkey start`; `pqkey reset` \
+                   erases every passkey, so use it only as a last resort";
         for (error, hint) in [
             (
-                Damage::corrupt("credential-set/active", Corruption::Authentication).unavailable(),
+                unavailable(&[Damage::corrupt(
+                    "credential-set/active",
+                    Corruption::Authentication,
+                )]),
                 "The credential store is damaged at credential-set/active: the key cannot \
                  register, use or list passkeys."
                     .to_owned(),
             ),
             (
-                Damage::missing("credentials").unavailable(),
-                "The credential store is damaged at credentials: the key cannot use the passkeys \
-                 that were in that directory."
+                unavailable(&[Damage::missing("credentials")]),
+                "The credential store is damaged at credentials: the key cannot use any passkeys \
+                 that were in it."
                     .to_owned(),
             ),
             (
@@ -426,7 +487,7 @@ mod tests {
                 ),
             ),
             (
-                Damage::missing(RECORD).unavailable(),
+                unavailable(&[Damage::missing(RECORD)]),
                 format!(
                     "The credential store is damaged at {RECORD}: the key cannot register \
                      passkeys, or use the credential in that file."

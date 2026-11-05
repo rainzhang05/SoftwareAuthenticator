@@ -885,19 +885,31 @@ const SHORT_ID_DIGITS: usize = 16;
 /// The relying party, as safe to print: websites choose these, and must not
 /// get escape sequences onto the terminal.
 fn site(passkey: &Passkey) -> String {
-    sanitise(&passkey.rp_id, MAX_COLUMN_CHARS, Keep::End).unwrap_or_else(|| "-".into())
+    shown_site(&passkey.rp_id).unwrap_or_else(|| "-".into())
 }
 
 /// The user's name and display name, as safe to print.
 fn user(passkey: &Passkey) -> String {
+    shown_user(&passkey.user_name, &passkey.user_display_name).unwrap_or_else(|| "-".into())
+}
+
+/// The RP ID `rp_id`, as safe to print, or `None` if nothing printable is
+/// left of it.
+pub(super) fn shown_site(rp_id: &str) -> Option<String> {
+    sanitise(rp_id, MAX_COLUMN_CHARS, Keep::End)
+}
+
+/// A user's `name` and `display` name, as safe to print, or `None` if
+/// nothing printable is left of either.
+pub(super) fn shown_user(name: &Option<String>, display: &Option<String>) -> Option<String> {
     let clean = |name: &Option<String>| {
         name.as_deref()
             .and_then(|name| sanitise(name, MAX_COLUMN_CHARS, Keep::Start))
     };
-    match (clean(&passkey.user_name), clean(&passkey.user_display_name)) {
-        (Some(name), Some(display)) if name != display => format!("{name} ({display})"),
-        (Some(name), _) | (None, Some(name)) => name,
-        (None, None) => "-".into(),
+    match (clean(name), clean(display)) {
+        (Some(name), Some(display)) if name != display => Some(format!("{name} ({display})")),
+        (Some(name), _) | (None, Some(name)) => Some(name),
+        (None, None) => None,
     }
 }
 
@@ -1583,9 +1595,9 @@ mod tests {
             assert_eq!(
                 problem.fix,
                 format!(
-                    "stop the key with `pqkey stop`, keep a copy of {}, then start it again with \
-                     `pqkey start`; `pqkey reset` erases every passkey, so use it only as a last \
-                     resort",
+                    "stop the key with `pqkey stop`, keep a copy of {}, run `pqkey repair`, then \
+                     start the key again with `pqkey start`; `pqkey reset` erases every passkey, \
+                     so use it only as a last resort",
                     dir.path().display()
                 ),
                 "{kind}"

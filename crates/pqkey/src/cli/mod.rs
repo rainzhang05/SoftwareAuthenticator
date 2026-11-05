@@ -8,21 +8,24 @@
 //! pqkey pin                   set the PIN, or change it
 //! pqkey config [COMMAND]      show or change the key's UV and PIN settings
 //! pqkey passkeys [delete Q]   list the passkeys stored on the key, or delete one
+//! pqkey repair [--yes]        repair a damaged credential store, with the key stopped
 //! pqkey reset [--yes]         erase passkeys, large blobs and the PIN
 //! ```
 //!
 //! While the key runs, `pin`, `config`, `passkeys` and `reset` talk over CTAP,
 //! through its platform client link, as a key's management application does
 //! ([`crate::client`]): the key itself checks the PIN, counts retries and asks
-//! the user to approve a reset.  The hidden `run` command is the daemon
-//! itself, for the user service and for test rigs, with the options only they
-//! need.
+//! the user to approve a reset.  `repair` is the one that needs the key
+//! stopped: it works on the state directory itself.  The hidden `run` command
+//! is the daemon itself, for the user service and for test rigs, with the
+//! options only they need.
 
 pub(crate) mod checks;
 mod daemon;
 pub(crate) mod daemon_info;
 pub(crate) mod key;
 pub mod output;
+mod repair;
 mod setup;
 
 use std::{ffi::OsString, io, path::PathBuf, process::ExitCode, time::Duration};
@@ -109,6 +112,17 @@ enum Command {
     Passkeys {
         #[clap(subcommand)]
         action: Option<PasskeysAction>,
+    },
+    /// Repair a damaged credential store: stop the key first, and keep a
+    /// copy of its state directory
+    ///
+    /// It lists the damage and what it will do, and asks before it changes
+    /// the store. Each file of the store that it replaces or removes is kept
+    /// in a new directory under `damaged` in the state directory.
+    Repair {
+        /// Do not ask for confirmation on the terminal
+        #[clap(long)]
+        yes: bool,
     },
     /// Erase every passkey, large blob and the PIN, and reset configuration:
     /// the key restarts, then asks you to approve in a notification
@@ -456,6 +470,7 @@ pub fn run_cli() -> io::Result<()> {
         Command::Passkeys {
             action: Some(PasskeysAction::Delete { query, yes }),
         } => key::delete_passkey(&state_dir, &query, yes),
+        Command::Repair { yes } => repair::repair(&state_dir, yes),
         Command::Reset { yes } => key::reset(&state_dir, yes),
         Command::Setup {
             uninstall: false,
@@ -486,7 +501,7 @@ mod tests {
     fn help_lists_the_commands_of_a_security_key() {
         let help = Cli::command().render_help().to_string();
         for command in [
-            "setup", "start", "stop", "status", "pin", "config", "passkeys", "reset",
+            "setup", "start", "stop", "status", "pin", "config", "passkeys", "repair", "reset",
         ] {
             assert!(
                 help.contains(&format!("  {command} ")),

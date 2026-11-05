@@ -345,7 +345,8 @@ pqkey's crate version does not change per commit.
 ├── credentials/<hash>      one file per stored credential, named by an HMAC of its ID
 ├── pin-state               the PIN hash, retries and configuration
 ├── large-blobs             the serialized large-blob array
-└── signature-counter       the counter that sealed credentials share
+├── signature-counter       the counter that sealed credentials share
+└── damaged/<UTC time>/     what `pqkey repair` moved out of the store
 ```
 
 Every file above except the root keys is encrypted and authenticated with
@@ -400,19 +401,80 @@ restart, further replacement or deletion of the new credential.
 A later membership transaction retries cleanup. Managed inserts and deletes
 also return success after publication and log subsequent problems.
 
-Missing, corrupt or inconsistent authoritative metadata fails closed; it is
-never rebuilt by scanning leftover records. Individual corrupt records retain
-the existing lookup-error/list-skip behavior, but replacement must read every
-active record successfully to avoid leaving an unknown matching record usable.
+Missing, corrupt or inconsistent authoritative metadata fails closed; no
+operation rebuilds it by scanning leftover records, and only an explicit
+`pqkey repair` does (below). Individual corrupt records retain the existing
+lookup-error/list-skip behavior, but replacement must read every active
+record successfully to avoid leaving an unknown matching record usable.
 Listing logs a member whose record is missing as it logs a corrupt one. Each
-operation such damage fails logs the file, what fails and what to do; the
-daemon at start-up and `pqkey status` report it from a read-only inspection,
-which looks again before it reports damage so that a concurrent commit's
-cleanup is not taken for it. With neither namespace present, the format
-marker tells which directory is missing: `credential-set/`, or a legacy
-store's `credentials/`. Opening a legacy store creates a missing
+operation that such damage makes fail logs the file, what fails and what to
+do; a lookup of a member whose record is missing finds no credential, as for
+one never stored, and logs nothing. The daemon at start-up and `pqkey status`
+report damage from a read-only inspection, which looks again before it
+reports damage so that a concurrent commit's cleanup is not taken for it.
+With neither namespace present, a legacy store reports its missing
+`credentials/`; a store whose format marker shows the managed layout reports
+both `credential-set/` and `credentials/`, since nothing tells whether it had
+upgraded or was upgrading. Opening a legacy store creates a missing
 `credentials/` again, empty, as it always has, and logs the loss when the
 credential key shows that the directory existed.
+
+`pqkey repair` repairs such damage, with the key stopped: it refuses while
+the daemon holds the state lock. It plans without changing anything, takes
+the lock, plans again, prints the damage and each step, and asks (`--yes`
+does not). The repair itself plans once more and refuses a store that
+changed since the plan it printed. A store with nothing to repair is left as
+it is.
+
+- If the manifest authenticates, repair drops the members whose records are
+  missing or fail authentication or decoding.
+- A legacy store's records that fail are left out of the list it gets: it
+  moves to the managed layout through the first commit's protocol, without a
+  new record.
+- If the manifest is missing or cannot be used, repair builds a new one from
+  the records in `credential-set/` that authenticate under the current key,
+  discoverable or not. Only the lost manifest said which of them were
+  members, and creation orders cannot stand in for it: an insert's order is
+  one above the members it sees, so orders are reused after deletions, and a
+  staged record that never published has one too. So a passkey that was
+  deleted or replaced, or whose registration failed, can come back if its
+  record was left behind, alone or beside another passkey of its account.
+  The plan names each account, by RP ID and user handle, that the new list
+  holds more than one passkey of. The store lists each of them, a deletion
+  removes one, and the account's next discoverable registration replaces
+  them all. Of two authentic copies of one record name, in both record
+  directories, only one can be a member, and repair keeps the one with the
+  higher signature counter. The new list may hold more credentials than the
+  store's limit; the plan then says so, and a registration that adds a
+  credential is refused until the store holds fewer than its limit.
+- A manifest that authenticates is used even if the format marker does not;
+  a damaged marker, or a missing one of a store in the managed layout, is
+  written again after the list, since it decides whether the list is used at
+  all.
+- A missing namespace is created again, empty: `credential-set/` with an
+  empty manifest when the format marker shows the managed layout, or else a
+  legacy store's `credentials/`. Its records went with it. The keys, the PIN
+  state and the shared signature counter stay as they are, so sealed
+  credential IDs still open.
+
+Every file of the store that repair replaces or removes, damaged metadata,
+the replaced manifest, a failed upgrade's prepared manifest and staged
+records, and each record file that the new list does not name, first gets a
+name in a new `damaged/<UTC time>/`, at its path relative to the state
+directory: a hard link for a file and a rename for anything else, flushed
+before anything replaces or removes the original. No cleanup, inspection or
+reset touches that directory. Membership is then published through the same
+atomic publication, flush and cleanup as every commit, and cleanup removes
+the old names of the records left out. An error or a crash at any checkpoint
+leaves the store serving the credentials it served before or those of the
+repaired list, and every file of the store in place, in `credential-set/`
+after a legacy store's rename, or in the quarantine; repairing again
+finishes. Only a store that served no credential before can meanwhile show
+another fault of that kind: a moved non-file metadata entry, or a recreated
+namespace that awaits its manifest. Repair leaves the shared signature
+counter, the PIN state, the large-blob array, the attestation record and the
+keys as they are, and rewrites no record, so each keeps its own counter.
+
 Explicit reset uses the following order in both store layouts:
 
 1. Determine the layout without authenticating damaged metadata, then rotate
@@ -601,6 +663,10 @@ to "Register a security key" for a non-discoverable credential.
   hidraw node, as a security key's management app does. The key's own PIN
   checks and approvals therefore apply to them too.
 - `reset` restarts the key first, because of the 10-second window.
+- `repair` works on the state directory itself, so it needs the key stopped:
+  it refuses while the daemon holds the state lock, takes the lock itself
+  before it asks, and never stops or starts the key, since the advice that
+  leads to it keeps a copy of the directory first.
 - `setup`, which `install.sh` runs, does three things:
   - It installs the udev rules and loads uhid at boot, with sudo after it
     lists what it changes.

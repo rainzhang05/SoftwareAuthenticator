@@ -6,6 +6,10 @@
 //! fail.  That passkeys cannot be listed through credential management where
 //! the report says so is tested through the daemon in the `pqkey` crate
 //! (`cli::key::tests`).
+//!
+//! Then each is repaired, as `pqkey repair` does, and every passkey whose
+//! record is intact works again; and what the README's "Damaged credential
+//! store" says of copies, hand edits and reset holds.
 
 #![expect(
     clippy::disallowed_methods,
@@ -24,8 +28,8 @@ use pqkey_ctap::ctap::constants::{
 };
 use pqkey_ctap::ctap::{CtapApp, InterruptFlag, presence::AutoApprove};
 use pqkey_ctap::store::{
-    Corruption, CredentialRecord, CredentialStore, Damage, Fault, FileStore, StoreError,
-    damage_log, damage_summary, damage_unchecked,
+    Corruption, CredentialRecord, CredentialStore, Damage, Fault, FileStore, Membership,
+    PinStateRecord, StoreError, damage_log, damage_summary, damage_unchecked,
 };
 
 use crate::common::{TempDir, ids, logs, new_record, random_bytes};
@@ -39,11 +43,11 @@ const RECORDS: &str = "the key cannot register passkeys, or use the credentials 
 /// that holds it.
 const MEMBERSHIP: &str = "the key cannot register, use or list passkeys";
 /// What it says after a legacy store's `credentials` directory is lost.
-const LEGACY_DIRECTORY: &str = "the key cannot use the passkeys that were in that directory";
+const LEGACY_DIRECTORY: &str = "the key cannot use any passkeys that were in it";
 /// The advice the engine's hint ends with.
-const FIX: &str = "Stop the key with `pqkey stop`, keep a copy of the state directory, then start \
-                   it again with `pqkey start`; `pqkey reset` erases every passkey, so use it only \
-                   as a last resort";
+const FIX: &str = "Stop the key with `pqkey stop`, keep a copy of the state directory, run `pqkey \
+                   repair`, then start the key again with `pqkey start`; `pqkey reset` erases \
+                   every passkey, so use it only as a last resort";
 
 /// A discoverable credential: its ID is shaped like one made with "rk" true.
 fn passkey() -> CredentialRecord {
@@ -304,7 +308,9 @@ enum Damaged {
     Marker,
     /// `credential-format` is removed.
     RemovedMarker,
-    /// `credential-set/` is removed, and every record with it.
+    /// `credential-set/` is removed, and every record with it.  The marker
+    /// stays, so the inspection names the directories of both layouts: it
+    /// cannot tell this from an upgrade that failed and lost `credentials/`.
     ManagedDirectory,
 }
 
@@ -398,7 +404,13 @@ impl Damaged {
             }
             Self::ManagedDirectory => {
                 fs::remove_dir_all(&set).unwrap();
-                metadata("credential-set", Fault::Missing)
+                (
+                    vec![
+                        ("credential-set".to_owned(), Fault::Missing),
+                        ("credentials".to_owned(), Fault::Missing),
+                    ],
+                    records,
+                )
             }
         }
     }
@@ -439,12 +451,18 @@ fn each_kind_of_damage_is_named_and_fails_what_its_summary_says() {
             "{damaged:?}"
         );
 
-        // Listing: it skips damaged records, warning about each, or fails.
+        // Listing: it skips damaged records, warning about each, or fails,
+        // naming the first damaged file, and in its detail every one.
+        let detail = named.join("; ");
         if damaged.membership() {
-            let Err(StoreError::CredentialSetUnavailable { object, detail }) = store.list() else {
+            let Err(StoreError::CredentialSetUnavailable {
+                object,
+                detail: listed,
+            }) = store.list()
+            else {
                 panic!("{damaged:?}: listing works");
             };
-            assert_eq!((object, detail), (expected[0].0.clone(), named[0].clone()));
+            assert_eq!((object, listed), (expected[0].0.clone(), detail.clone()));
             assert!(store.count().is_err(), "{damaged:?}");
         } else {
             let (listed, warnings) =
@@ -478,7 +496,12 @@ fn each_kind_of_damage_is_named_and_fails_what_its_summary_says() {
         let (status, logged) = logging(&hint, || register(&mut app));
         assert_eq!(status, CTAP2_ERR_PROCESSING, "{damaged:?}");
         // Missing files and membership refuse as unavailable membership.
-        let error = if damaged.membership() || expected[0].1 == Fault::Missing {
+        let error = if damaged.membership() {
+            format!(
+                "credential-set authority {} unavailable: {detail}",
+                expected[0].0
+            )
+        } else if expected[0].1 == Fault::Missing {
             format!(
                 "credential-set authority {} unavailable: {}",
                 expected[0].0, named[0]
@@ -503,11 +526,15 @@ fn each_kind_of_damage_is_named_and_fails_what_its_summary_says() {
             CTAP2_ERR_NO_CREDENTIALS
         };
         for record in &lost {
-            assert_eq!(
-                sign_in(&mut app, Some(&record.credential_id)),
-                refused,
-                "{damaged:?}"
-            );
+            let (status, logged) = logging(&expected[0].0, || {
+                sign_in(&mut app, Some(&record.credential_id))
+            });
+            assert_eq!(status, refused, "{damaged:?}");
+            // A sign-in naming a member whose record is missing finds no
+            // credential, as for one never stored, and logs nothing.
+            if !damaged.membership() && expected[0].1 == Fault::Missing {
+                assert_eq!(logged, [] as [String; 0], "{damaged:?}");
+            }
         }
         if damaged.membership() {
             assert_eq!(sign_in(&mut app, None), CTAP2_ERR_PROCESSING, "{damaged:?}");
@@ -516,9 +543,9 @@ fn each_kind_of_damage_is_named_and_fails_what_its_summary_says() {
             assert_eq!(
                 logged,
                 [format!(
-                    "cannot count credentials: credential-set authority {} unavailable: {}. \
-                     {hint}",
-                    expected[0].0, named[0]
+                    "cannot count credentials: credential-set authority {} unavailable: \
+                     {detail}. {hint}",
+                    expected[0].0
                 )]
             );
         } else {
@@ -698,4 +725,334 @@ fn healthy_stores_have_no_damage() {
             "{messages:?}"
         );
     }
+}
+
+/// A copy of `from`, every file and directory, at `to`.
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let target = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy_tree(&path, &target);
+        } else {
+            fs::copy(&path, &target).unwrap();
+        }
+    }
+}
+
+/// Plan the repair of the store in `state`, which must need one, check
+/// that the plan names the inspection's damage first, and carry it out.
+/// Returns the plan and the quarantine.
+#[track_caller]
+fn repair(state: &Path) -> (pqkey_ctap::store::RepairPlan, Option<PathBuf>) {
+    let found = FileStore::inspect_in(state).unwrap();
+    let plan = FileStore::plan_repair_in(state)
+        .unwrap()
+        .expect("damage to repair");
+    assert_eq!(plan.damage[..found.len()], found[..]);
+    let repaired = FileStore::repair_in(state, &plan).unwrap();
+    assert_eq!(FileStore::inspect_in(state).unwrap(), [], "nothing is left");
+    assert_eq!(FileStore::plan_repair_in(state).unwrap(), None);
+    (plan, repaired.quarantine)
+}
+
+/// makeCredential for a security key, "rk" false, on example.com: its
+/// credential ID, which carries the credential sealed under the store's
+/// key.
+fn register_security_key(app: &mut CtapApp<'static>) -> Vec<u8> {
+    let user = Value::Map(vec![(text("id"), Value::Bytes(vec![9; 16]))]);
+    let algorithms = Value::Array(vec![Value::Map(vec![
+        (text("alg"), int(-7)),
+        (text("type"), text("public-key")),
+    ])]);
+    let response = app.call(&request(
+        CTAP_CMD_MAKE_CREDENTIAL,
+        vec![
+            (int(1), Value::Bytes(vec![0x11; 32])),
+            (int(2), Value::Map(vec![(text("id"), text("example.com"))])),
+            (int(3), user),
+            (int(4), algorithms),
+        ],
+    ));
+    assert_eq!(response[0], CTAP2_OK);
+    let Value::Map(fields) = ciborium::de::from_reader(&response[1..]).unwrap() else {
+        panic!("makeCredential returns a map");
+    };
+    let Some((_, Value::Bytes(data))) = fields.into_iter().find(|(key, _)| *key == int(2)) else {
+        panic!("no authenticator data");
+    };
+    let length = usize::from(u16::from_be_bytes([data[53], data[54]]));
+    data[55..55 + length].to_vec()
+}
+
+/// Each kind of damage, repaired: every passkey whose record is intact signs
+/// in again, the key registers and counts passkeys again, and each file
+/// repair moved is in its quarantine, byte for byte.  Records a lost
+/// directory took with it do not come back.
+#[test]
+fn each_kind_of_damage_is_repaired_keeping_every_authentic_credential() {
+    for damaged in Damaged::ALL {
+        let scratch = TempDir::new();
+        let state = scratch.path().join("state");
+        let passkeys = passkeys_in(&state, !matches!(damaged, Damaged::LegacyRecord));
+        let (_, lost) = damaged.apply(&state, &passkeys);
+        // Damaged membership hides records that are intact; damage to a
+        // record leaves it out; a lost directory takes its records with it.
+        let intact: Vec<&CredentialRecord> = passkeys
+            .iter()
+            .filter(|(record, path)| {
+                path.is_file() && (damaged.membership() || !lost.contains(record))
+            })
+            .map(|(record, _)| record)
+            .collect();
+        let before = snapshot(&state);
+        let (plan, quarantine) = repair(&state);
+        let expected = match damaged {
+            Damaged::Manifest | Damaged::RemovedManifest | Damaged::UnreadableManifest => {
+                Membership::Rebuilt
+            }
+            Damaged::ManagedDirectory => Membership::Created("credential-set".into()),
+            Damaged::LegacyRecord => Membership::Listed,
+            _ => Membership::Kept,
+        };
+        assert_eq!(plan.membership, expected, "{damaged:?}");
+        assert_eq!(plan.passkeys, intact.len(), "{damaged:?}");
+        // A lost directory is there again, without the records it held.
+        if matches!(
+            damaged,
+            Damaged::RecordsDirectory | Damaged::ManagedDirectory
+        ) {
+            let records = state.join("credential-set").join("records");
+            assert!(records.is_dir(), "{damaged:?}");
+            assert_eq!(files_in(&records), BTreeSet::new(), "{damaged:?}");
+        }
+        for moved in &plan.moved {
+            let held = quarantine.as_ref().unwrap().join(moved);
+            match &before[&state.join(moved)] {
+                Some(contents) => assert_eq!(&fs::read(&held).unwrap(), contents, "{moved}"),
+                None => assert!(held.is_dir(), "{damaged:?}: {moved}"),
+            }
+        }
+        let mut app = engine(&state);
+        for (record, _) in &passkeys {
+            let expected = if intact.contains(&record) {
+                CTAP2_OK
+            } else {
+                CTAP2_ERR_NO_CREDENTIALS
+            };
+            assert_eq!(
+                sign_in(&mut app, Some(&record.credential_id)),
+                expected,
+                "{damaged:?}"
+            );
+        }
+        assert_eq!(register(&mut app), CTAP2_OK, "{damaged:?}");
+        assert!(counts(&mut app), "{damaged:?}");
+    }
+}
+
+/// A legacy store's lost `credentials` directory: repair creates it again,
+/// empty, as opening the store would, and registration works; the passkeys
+/// that were in it are gone.
+#[test]
+fn repair_creates_a_lost_legacy_directory_again() {
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    let passkeys = passkeys_in(&state, false);
+    fs::remove_dir_all(state.join("credentials")).unwrap();
+    let (plan, quarantine) = repair(&state);
+    assert_eq!(plan.membership, Membership::Created("credentials".into()));
+    assert_eq!((plan.moved.len(), quarantine), (0, None));
+    assert!(state.join("credentials").is_dir());
+    let mut app = engine(&state);
+    for (record, _) in &passkeys {
+        assert_eq!(
+            sign_in(&mut app, Some(&record.credential_id)),
+            CTAP2_ERR_NO_CREDENTIALS
+        );
+    }
+    assert_eq!(register(&mut app), CTAP2_OK);
+}
+
+/// U2F registration for `application`: the key handle, which carries the
+/// credential sealed under the store's key.
+fn register_u2f(app: &mut CtapApp<'static>, application: [u8; 32]) -> Vec<u8> {
+    let mut apdu = vec![0x00, 0x01, 0x00, 0x00, 64];
+    apdu.extend_from_slice(&[0x33; 32]);
+    apdu.extend_from_slice(&application);
+    let response = app.call_u2f(&apdu);
+    assert_eq!(response[response.len() - 2..], [0x90, 0x00]);
+    assert_eq!(response[0], 0x05, "a registration response");
+    let length = usize::from(response[66]);
+    response[67..67 + length].to_vec()
+}
+
+/// U2F authentication with `handle` for `application`, with presence: the
+/// status word.
+fn authenticate_u2f(app: &mut CtapApp<'static>, application: [u8; 32], handle: &[u8]) -> [u8; 2] {
+    let mut data = vec![0x44; 32];
+    data.extend_from_slice(&application);
+    data.push(u8::try_from(handle.len()).unwrap());
+    data.extend_from_slice(handle);
+    let mut apdu = vec![0x00, 0x02, 0x03, 0x00, u8::try_from(data.len()).unwrap()];
+    apdu.extend_from_slice(&data);
+    let response = app.call_u2f(&apdu);
+    [response[response.len() - 2], response[response.len() - 1]]
+}
+
+/// A lost `credential-set` takes its passkeys with it, but repair keeps what
+/// a reset would end: the PIN, and the sign-ins of sites that registered
+/// the key as a security key, over CTAP 2 or U2F, whose credentials the
+/// store's key seals into their IDs.
+#[test]
+fn repair_of_a_lost_namespace_keeps_the_pin_and_security_key_sign_ins() {
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    let passkeys = passkeys_in(&state, true);
+    let mut app = engine(&state);
+    let sealed = register_security_key(&mut app);
+    let application = [0x55; 32];
+    let handle = register_u2f(&mut app, application);
+    drop(app);
+    let pin = PinStateRecord {
+        pin_hash: Some(random_bytes()),
+        min_pin_length_rp_ids: Vec::new(),
+        persistent_tokens: [None, None],
+        ..PinStateRecord::default()
+    };
+    FileStore::open(&state)
+        .unwrap()
+        .set_pin_state(&pin)
+        .unwrap();
+    fs::remove_dir_all(state.join("credential-set")).unwrap();
+    repair(&state);
+    let store = FileStore::open(&state).unwrap();
+    assert_eq!(store.pin_state().unwrap(), Some(pin));
+    let mut app = CtapApp::with_file_store(store, AutoApprove, &INTERRUPT, [0; 16]);
+    assert_eq!(sign_in(&mut app, Some(&sealed)), CTAP2_OK);
+    assert_eq!(
+        authenticate_u2f(&mut app, application, &handle),
+        [0x90, 0x00]
+    );
+    for (record, _) in &passkeys {
+        assert_eq!(
+            sign_in(&mut app, Some(&record.credential_id)),
+            CTAP2_ERR_NO_CREDENTIALS
+        );
+    }
+}
+
+/// A rebuild brings back a passkey that was deleted, if its record was left
+/// behind, as a copy restored over the store leaves it: here alone, since
+/// its account had no other passkey, so the plan names no account, and the
+/// passkey signs in again.  Deleting it again works.
+#[test]
+fn a_deleted_passkey_whose_record_was_left_behind_comes_back_in_a_rebuild() {
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    let passkeys = passkeys_in(&state, true);
+    let (deleted, file) = &passkeys[1];
+    let contents = fs::read(file).unwrap();
+    let mut store = FileStore::open(&state).unwrap();
+    assert!(store.delete(&deleted.credential_id).unwrap());
+    assert!(!file.exists(), "cleanup removed it");
+    fs::write(file, &contents).unwrap();
+    assert_eq!(store.get(&deleted.credential_id).unwrap(), None);
+    flip_last_byte(&state.join("credential-set").join("active"));
+    let (plan, _) = repair(&state);
+    assert_eq!(plan.membership, Membership::Rebuilt);
+    assert!(plan.shared.is_empty(), "{:?}", plan.shared);
+    let accounts: Vec<_> = store
+        .list()
+        .unwrap()
+        .into_iter()
+        .filter(|record| record.user_id == deleted.user_id)
+        .map(|record| record.credential_id.clone())
+        .collect();
+    assert_eq!(
+        accounts,
+        std::slice::from_ref(&deleted.credential_id),
+        "alone"
+    );
+    let mut app = engine(&state);
+    assert_eq!(sign_in(&mut app, Some(&deleted.credential_id)), CTAP2_OK);
+    drop(app);
+    assert!(store.delete(&deleted.credential_id).unwrap());
+    assert_eq!(store.get(&deleted.credential_id).unwrap(), None);
+}
+
+/// Why the README says not to restore `credential-set/active` by hand: an
+/// older copy hides the passkeys registered since, and the next change to
+/// that list deletes their records, which it does not name.
+#[test]
+fn an_older_list_hides_newer_passkeys_and_the_next_change_deletes_their_records() {
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    passkeys_in(&state, true);
+    let active = state.join("credential-set").join("active");
+    let older = fs::read(&active).unwrap();
+    let mut store = FileStore::open(&state).unwrap();
+    let newer = passkey();
+    let records = state.join("credential-set").join("records");
+    let file = store_and_locate(&records, || {
+        store.insert_or_replace_discoverable(&newer).unwrap();
+    });
+    fs::write(&active, older).unwrap();
+    assert_eq!(store.get(&newer.credential_id).unwrap(), None);
+    assert!(!ids(&store.list().unwrap()).contains(&newer.credential_id));
+    assert!(file.is_file(), "hidden, not yet deleted");
+    store.insert_or_replace_discoverable(&passkey()).unwrap();
+    assert!(!file.exists(), "the next change deleted it");
+}
+
+/// Why the README says to delete the copy of the state directory once the
+/// key works again: it holds the keys, so its passkeys stay readable after
+/// the key is reset.
+#[test]
+fn a_copy_of_the_state_directory_keeps_its_passkeys_readable_after_a_reset() {
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    let passkeys = passkeys_in(&state, true);
+    let copy = scratch.path().join("copy");
+    copy_tree(&state, &copy);
+    FileStore::open(&state).unwrap().clear().unwrap();
+    assert_eq!(FileStore::open(&state).unwrap().count().unwrap(), 0);
+    let kept: BTreeSet<Vec<u8>> = ids(&FileStore::open(&copy).unwrap().list().unwrap())
+        .into_iter()
+        .collect();
+    let stored: BTreeSet<Vec<u8>> = passkeys
+        .iter()
+        .map(|(record, _)| record.credential_id.clone())
+        .collect();
+    assert_eq!(kept, stored);
+}
+
+/// A missing key file makes the store one that cannot be checked, and its
+/// error says to restore it from a copy made since the last reset; such a
+/// copy brings every passkey back, and one made before it does not.
+#[test]
+fn a_key_file_restored_from_a_copy_made_since_the_last_reset_brings_the_store_back() {
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    passkeys_in(&state, true);
+    let key = state.join("keys").join("credential.key");
+    let copied = fs::read(&key).unwrap();
+    fs::remove_file(&key).unwrap();
+    let err = FileStore::inspect_in(&state).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "credential root key unavailable: the key is missing but data encrypted under it \
+         exists; restore the key file from a copy of the state directory made since the last \
+         reset"
+    );
+    fs::write(&key, &copied).unwrap();
+    assert_eq!(FileStore::inspect_in(&state).unwrap(), []);
+    assert_eq!(FileStore::open(&state).unwrap().count().unwrap(), 3);
+
+    let mut store = FileStore::open(&state).unwrap();
+    store.clear().unwrap();
+    store.insert_or_replace_discoverable(&passkey()).unwrap();
+    fs::write(&key, &copied).unwrap();
+    assert_ne!(FileStore::inspect_in(&state).unwrap(), []);
 }

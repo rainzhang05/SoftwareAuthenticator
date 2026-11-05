@@ -67,14 +67,18 @@
 //! cannot hide the others.  It stays on disk until it is overwritten, deleted
 //! with [`CredentialStore::delete`], or removed by [`CredentialStore::clear`].
 //! Authoritative membership metadata is different: missing or corrupt
-//! metadata returns [`StoreError::CredentialSetUnavailable`], and cannot be
-//! skipped or rebuilt from records. Atomic replacement refuses unreadable
-//! active records rather than risk leaving a matching credential usable.
-//! Unreferenced ciphertext in a managed store is cleanup garbage, even if
-//! corrupt; it cannot be repaired back into membership by a read or reopen.
-//! [`FileStore::inspect`] lists such [`Damage`] without changing anything,
-//! and [`StoreError::damage_hint`] says what an error reporting damage
-//! makes fail and what to do about it.
+//! metadata returns [`StoreError::CredentialSetUnavailable`], and no
+//! operation skips it or rebuilds it from records. Atomic replacement
+//! refuses unreadable active records rather than risk leaving a matching
+//! credential usable. Unreferenced ciphertext in a managed store is cleanup
+//! garbage, even if corrupt; it cannot be repaired back into membership by a
+//! read or reopen. [`FileStore::inspect`] lists such [`Damage`] without
+//! changing anything, and [`StoreError::damage_hint`] says what an error
+//! reporting damage makes fail and what to do about it.  Only an explicit
+//! [`FileStore::repair`], which `pqkey repair` runs with the key stopped,
+//! changes damaged membership: it drops lost members, or builds new
+//! membership from the records that authenticate, and keeps every file it
+//! replaces or removes in a quarantine directory.
 //!
 //! # Concurrency
 //!
@@ -109,10 +113,11 @@ pub(crate) use record::SealableKeyMaterial;
 pub(crate) mod test_support;
 
 pub use damage::{
-    Damage, Fault, damage_fix, damage_log, damage_summary, damage_unchecked, damage_unchecked_log,
+    Damage, Fault, damage_consequence, damage_fix, damage_log, damage_summary, damage_unchecked,
+    damage_unchecked_log,
 };
 pub use envelope::SEALED_ID_OVERHEAD;
-pub use file::FileStore;
+pub use file::{Account, FileStore, Membership, RepairPlan, Repaired};
 pub use keys::{FileKeySource, KeyDomain, KeySource, RootKey};
 pub(crate) use large_blobs::validate_large_blob_array;
 pub use large_blobs::{INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY};
@@ -399,8 +404,9 @@ pub enum StoreError {
     },
     /// A root key exists but cannot be used, or is missing although data
     /// encrypted under it exists.  Keys are never regenerated implicitly,
-    /// because that would orphan every record they protect; restore the key or
-    /// reset the store.
+    /// because that would orphan every record they protect: the key file of
+    /// a copy made since the last reset, the only operation that replaces a
+    /// key, decrypts them again, while a reset erases them.
     KeyUnavailable {
         /// The key domain concerned.
         domain: KeyDomain,

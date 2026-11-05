@@ -53,7 +53,8 @@
 //!
 //! For the store's inspection, which `pqkey status` and the daemon's start-up
 //! run outside any engine request, it stores a passkey with a known P-256
-//! scalar and CredRandom, inspects, and scans for both.
+//! scalar and CredRandom, inspects, and scans for both; and the same for
+//! `pqkey repair`'s planning and repair of a damaged manifest.
 //!
 //! It does not look for a newly generated private key: a key returned by
 //! value can leave copies in the frames it passes through on its way to the
@@ -997,6 +998,85 @@ fn check_inspection() {
     );
 }
 
+/// `pqkey repair` plans and repairs outside any engine request, decrypting
+/// every record each time, as the inspection does; with a damaged manifest
+/// it reads every record file to rebuild the list.  Neither a passkey's
+/// P-256 scalar nor its CredRandom may be left in the stack, as given or
+/// reversed, after planning or after repairing.
+fn check_repair() {
+    let dir = std::env::temp_dir().join(format!("pqkey-repair-stack-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let scalar: [u8; 32] = Sha256::digest(b"a repaired passkey's P-256 scalar").into();
+    let cred_random: [u8; 32] = Sha256::digest(b"a repaired passkey's CredRandom").into();
+    let passkey = |user: u8| CredentialRecord {
+        credential_id: [vec![1], vec![user; 32]].concat(),
+        rp_id: "repair.example".into(),
+        user_id: vec![user],
+        user_name: None,
+        user_display_name: None,
+        alg: CoseAlg::ES256,
+        private_key: pqkey_ctap::store::PrivateKeyMaterial::P256Scalar { scalar },
+        cred_random_with_uv: cred_random,
+        cred_random_without_uv: cred_random,
+        cred_blob: None,
+        large_blob_key: None,
+        third_party_payment: false,
+        cred_protect: 1,
+        sign_count: 0,
+        created_at: 0,
+    };
+    let mut store = FileStore::open(&dir).expect("store");
+    for user in [1, 2] {
+        store
+            .insert_or_replace_discoverable(&passkey(user))
+            .expect("a passkey");
+    }
+    let active = dir.join("credential-set").join("active");
+    let mut contents = std::fs::read(&active).unwrap();
+    *contents.last_mut().unwrap() ^= 1;
+    std::fs::write(&active, contents).unwrap();
+    let needles: Vec<(&str, Vec<u8>)> = [("scalar", scalar), ("CredRandom", cred_random)]
+        .into_iter()
+        .flat_map(|(name, bytes)| {
+            [
+                (name, bytes.to_vec()),
+                (name, bytes.iter().rev().copied().collect()),
+            ]
+        })
+        .collect();
+    wipe();
+    let plan = FileStore::plan_repair_in(&dir);
+    let planning: Vec<_> = needles
+        .iter()
+        .map(|(name, needle)| (*name, scan(needle)))
+        .collect();
+    let plan = plan.expect("plan").expect("a damaged manifest to rebuild");
+    wipe();
+    let repaired = FileStore::repair_in(&dir, &plan);
+    let repairing: Vec<_> = needles
+        .iter()
+        .map(|(name, needle)| (*name, scan(needle)))
+        .collect();
+    repaired.expect("repair");
+    for (phase, hits) in [("planning", planning), ("repairing", repairing)] {
+        for (name, count) in hits {
+            assert_eq!(
+                count, 0,
+                "repair ({phase}) left the passkey's {name} in the stack"
+            );
+        }
+    }
+    assert_eq!(
+        store.count().expect("count"),
+        2,
+        "repair: both passkeys kept"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+    println!(
+        "repair: no stored scalar or CredRandom left in the stack after planning or rebuilding a damaged manifest"
+    );
+}
+
 /// Bound into every sealed credential ID, followed by the SHA-256 hash of the
 /// relying party ID, which U2F's application parameter is: the context
 /// `sealed_associated_data` in pqkey-ctap's `ctap/credential_id.rs` binds.
@@ -1214,6 +1294,7 @@ fn main() {
     // And through the engine, for the credential key itself.
     failures.extend(check_u2f());
     check_inspection();
+    check_repair();
     for case in &ECDSA_CASES[4..] {
         failures.extend(check_brainpool_failures(case));
     }

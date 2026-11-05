@@ -79,6 +79,33 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Create the private directory `dir` and flush its parent, or return
+/// `false` if `dir` already exists, leaving it as it is.
+pub(crate) fn create_private_dir(dir: &Path) -> Result<bool, StoreError> {
+    match DirBuilder::new().mode(DIR_MODE).create(dir) {
+        Ok(()) => sync_dir(parent_of(dir)).map(|()| true),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(err) => Err(io_error(dir, err)),
+    }
+}
+
+/// Give the existing entry `from` the new name `to`, which must not exist,
+/// leaving its contents as they are: a hard link for a regular file, so that
+/// `from` stays in place until whatever replaces or removes it, and a
+/// rename for anything else, which cannot be linked.  The caller flushes the
+/// directory of `to`.
+///
+/// The checkpoint names `from`, which the link and rename checkpoints do not.
+pub(crate) fn quarantine(from: &Path, to: &Path) -> Result<(), StoreError> {
+    checkpoint("quarantine", from)?;
+    let metadata = fs::symlink_metadata(from).map_err(|err| io_error(from, err))?;
+    if metadata.is_file() {
+        hard_link(from, to)
+    } else {
+        rename(from, to, "rename", "renamed")?
+    }
+}
+
 /// Flush a directory, making the creation, renaming, and removal of entries in
 /// it durable.  A filesystem that does not support directory flushes (see
 /// [`flush_unsupported`]) counts as flushed.
@@ -798,6 +825,29 @@ mod tests {
         fs::write(&path, b"0123456789").unwrap();
         assert_eq!(read_file(&path, 64).unwrap().unwrap(), b"0123456789");
         assert_eq!(read_file(&path, 4).unwrap().unwrap(), b"01234");
+    }
+
+    /// A regular file gets a second name and keeps its first; a directory,
+    /// which cannot be linked, moves. Neither may take an existing name.
+    #[test]
+    fn quarantine_links_files_and_moves_directories() {
+        let scratch = scratch_dir();
+        let file = scratch.path().join("file");
+        fs::write(&file, b"damaged").unwrap();
+        let held = scratch.path().join("held");
+        assert!(create_private_dir(&held).unwrap());
+        assert!(!create_private_dir(&held).unwrap(), "it exists");
+        assert_eq!(mode(&held), 0o700);
+        quarantine(&file, &held.join("file")).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"damaged");
+        assert_eq!(fs::read(held.join("file")).unwrap(), b"damaged");
+        let dir = scratch.path().join("dir");
+        fs::create_dir_all(dir.join("inside")).unwrap();
+        quarantine(&dir, &held.join("dir")).unwrap();
+        assert!(!dir.exists());
+        assert!(held.join("dir").join("inside").is_dir());
+        assert!(quarantine(&file, &held.join("file")).is_err());
+        assert!(quarantine(&scratch.path().join("missing"), &held.join("missing")).is_err());
     }
 
     #[test]

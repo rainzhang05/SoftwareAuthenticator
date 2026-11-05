@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 use super::codec;
+use super::damage::unavailable;
 use super::envelope::{self, MAX_ENVELOPE_LEN, RecordType};
 use super::fsio;
 use super::keys::{
@@ -22,6 +23,10 @@ use super::{
     PinStateRecord, StoreError, next_created_at, sort_newest_first, validate_attestation,
     validate_credential,
 };
+
+#[path = "repair.rs"]
+mod repair;
+pub use repair::{Account, Membership, RepairPlan, Repaired};
 
 /// The legacy layout's credential directory.
 pub(super) const CREDENTIALS_DIR: &str = "credentials";
@@ -253,12 +258,17 @@ const INSPECTIONS: usize = 3;
 /// same-ID updates retain their existing per-record write/error semantics.
 /// Missing or corrupt authority returns
 /// [`StoreError::CredentialSetUnavailable`], not an empty listing or an
-/// individual-record error. Neither opening nor reads reconstruct authority
-/// from files. The format marker distinguishes a missing managed namespace
-/// from a legacy store; a failed migration still has its usable legacy
-/// directory. Explicit reset rotates the key and establishes empty authority.
-/// [`inspect`](Self::inspect) reports such damage, and members whose
-/// records are missing or corrupt, without changing anything.
+/// individual-record error. Neither opening nor reads nor writes reconstruct
+/// authority from files. The format marker distinguishes a missing managed
+/// namespace from a legacy store; a failed migration still has its usable
+/// legacy directory. Explicit reset rotates the key and establishes empty
+/// authority. [`inspect`](Self::inspect) reports such damage, and members
+/// whose records are missing or corrupt, without changing anything.
+/// Explicit [`repair`](Self::repair) drops the members whose records are
+/// missing or corrupt, or builds new membership from the records that
+/// authenticate under the current key, and first gives every file it
+/// replaces or removes a name in `damaged/<UTC time>/`, which no cleanup or
+/// reset touches.
 ///
 /// Upgrade is forward-only: old binaries do not understand this namespace.
 /// Back up the whole store before upgrading; do not run an old binary on an
@@ -314,6 +324,24 @@ impl FileStore<FileKeySource> {
     /// which would create the directory and its keys. A store that does not
     /// exist has no damage.
     pub fn inspect_in(state_dir: &Path) -> Result<Vec<Damage>, StoreError> {
+        Self::unopened(state_dir).inspect()
+    }
+
+    /// [`Self::plan_repair`] of the store in `state_dir`, without opening it,
+    /// which would create the directory and its keys, and a lost legacy
+    /// `credentials` directory.
+    pub fn plan_repair_in(state_dir: &Path) -> Result<Option<RepairPlan>, StoreError> {
+        Self::unopened(state_dir).plan_repair()
+    }
+
+    /// [`Self::repair`] of the store in `state_dir`, without opening it.
+    pub fn repair_in(state_dir: &Path, plan: &RepairPlan) -> Result<Repaired, StoreError> {
+        Self::unopened(state_dir).repair(plan)
+    }
+
+    /// The store in `state_dir`, with its keys in `state_dir/keys`, as it
+    /// is: unlike [`Self::open`], this creates and logs nothing.
+    fn unopened(state_dir: &Path) -> Self {
         let root = state_dir.to_path_buf();
         Self {
             credentials_dir: root.join(CREDENTIALS_DIR),
@@ -321,7 +349,6 @@ impl FileStore<FileKeySource> {
             root,
             max_credentials: DEFAULT_MAX_CREDENTIALS,
         }
-        .inspect()
     }
 }
 
@@ -453,7 +480,7 @@ impl<K: KeySource> FileStore<K> {
             return Ok(Vec::new());
         };
         let (members, managed): (Vec<(String, Location)>, bool) = match self.membership(&keys)? {
-            Err(damage) => return Ok(vec![damage]),
+            Err(damage) => return Ok(damage),
             Ok(Some(manifest)) => (manifest.into_iter().collect(), true),
             Ok(None) => (
                 self.credential_file_names()?
@@ -659,7 +686,7 @@ impl<K: KeySource> FileStore<K> {
             };
             let record = self
                 .read_credential_in(keys, &name, &dir, location)?
-                .ok_or_else(|| Damage::missing(self.relative(&dir, &name)).unavailable())?;
+                .ok_or_else(|| unavailable(&[Damage::missing(self.relative(&dir, &name))]))?;
             records.push(record);
         }
         Ok(records)
@@ -669,28 +696,41 @@ impl<K: KeySource> FileStore<K> {
     /// switch and the persistent format marker distinguish legacy stores
     /// from damaged upgraded stores, including an empty upgraded store.
     fn active_manifest(&self, keys: &CredentialKeys) -> Result<Option<Manifest>, StoreError> {
-        self.membership(keys)?.map_err(Damage::unavailable)
+        self.membership(keys)?
+            .map_err(|damage| unavailable(&damage))
     }
 
     /// The manifest, `None` for a legacy store, or the membership metadata
-    /// that is missing or cannot be read: without either namespace, the
-    /// directory of the layout the format marker shows. An error is a
-    /// failure to look at the namespaces at all.
+    /// that is missing or cannot be read. Without either namespace that is
+    /// the legacy `credentials` directory, or, if the format marker shows
+    /// that the store moved to the managed layout, or was moving to it,
+    /// `credential-set` and `credentials`: nothing tells which of the two
+    /// held the records. An error is a failure to look at the namespaces at
+    /// all.
     fn membership(
         &self,
         keys: &CredentialKeys,
-    ) -> Result<Result<Option<Manifest>, Damage>, StoreError> {
+    ) -> Result<Result<Option<Manifest>, Vec<Damage>>, StoreError> {
         if !exists(&self.root.join(MANAGED_DIR))? {
             if exists(&self.credentials_dir)? {
                 return Ok(Ok(None));
             }
-            let namespace = if exists(&self.root.join(FORMAT_FILE))? {
-                MANAGED_DIR
-            } else {
-                CREDENTIALS_DIR
-            };
-            return Ok(Err(Damage::missing(namespace)));
+            let mut missing = Vec::new();
+            if exists(&self.root.join(FORMAT_FILE))? {
+                missing.push(Damage::missing(MANAGED_DIR));
+            }
+            missing.push(Damage::missing(CREDENTIALS_DIR));
+            return Ok(Err(missing));
         }
+        if let Err(damage) = self.format_marker(keys) {
+            return Ok(Err(vec![damage]));
+        }
+        Ok(self.manifest(keys).map(Some).map_err(|damage| vec![damage]))
+    }
+
+    /// Whether the format marker is there and authentic, or what is wrong
+    /// with it.
+    fn format_marker(&self, keys: &CredentialKeys) -> Result<(), Damage> {
         let marker = self.read_object(
             &keys.record,
             RecordType::CredentialFormat,
@@ -704,23 +744,25 @@ impl<K: KeySource> FileStore<K> {
             },
         );
         match marker {
-            Ok(Some(())) => {}
-            Ok(None) => return Ok(Err(Damage::missing(FORMAT_FILE))),
-            Err(err) => return Ok(Err(Damage::unreadable(FORMAT_FILE, err))),
+            Ok(Some(())) => Ok(()),
+            Ok(None) => Err(Damage::missing(FORMAT_FILE)),
+            Err(err) => Err(Damage::unreadable(FORMAT_FILE, err)),
         }
+    }
+
+    /// The manifest, `credential-set/active`, or what is wrong with it.
+    fn manifest(&self, keys: &CredentialKeys) -> Result<Manifest, Damage> {
         let name = format!("{MANAGED_DIR}/{ACTIVE_FILE}");
-        Ok(
-            match self.read_object(
-                &keys.record,
-                RecordType::CredentialSet,
-                &name,
-                manifest::decode,
-            ) {
-                Ok(Some(manifest)) => Ok(Some(manifest)),
-                Ok(None) => Err(Damage::missing(name)),
-                Err(err) => Err(Damage::unreadable(name, err)),
-            },
-        )
+        match self.read_object(
+            &keys.record,
+            RecordType::CredentialSet,
+            &name,
+            manifest::decode,
+        ) {
+            Ok(Some(manifest)) => Ok(manifest),
+            Ok(None) => Err(Damage::missing(name)),
+            Err(err) => Err(Damage::unreadable(name, err)),
+        }
     }
 
     fn write_candidate(
@@ -785,6 +827,45 @@ impl<K: KeySource> FileStore<K> {
         }
     }
 
+    /// Write the format marker, and flush it, before a legacy store's first
+    /// commit. It does not change membership: an interrupted preparation
+    /// still has the legacy namespace and all its preceding records.
+    fn write_format_marker(&self, keys: &CredentialKeys) -> Result<(), StoreError> {
+        let sealed = envelope::seal(
+            &keys.record,
+            RecordType::CredentialFormat,
+            FORMAT_FILE,
+            FORMAT,
+        )?;
+        fsio::replace_file(&self.root, FORMAT_FILE, &sealed)?;
+        fsio::sync_dir_strict(&self.root)
+    }
+
+    /// A legacy store's first commit: prepare `manifest` in the legacy
+    /// namespace, which lookup ignores, flush it, and publish it by renaming
+    /// `credentials/` to `credential-set/`. The format marker must be in
+    /// place already ([`Self::write_format_marker`]).
+    fn publish_migration(
+        &self,
+        keys: &CredentialKeys,
+        manifest: &Manifest,
+    ) -> Result<CredentialCommit, StoreError> {
+        let namespace = &self.credentials_dir;
+        let temp = self.prepare_manifest(keys, manifest, namespace)?;
+        let active = namespace.join(ACTIVE_FILE);
+        match fsio::rename(&temp, &active, "rename", "renamed") {
+            Ok(renamed) => renamed?,
+            Err(err) => {
+                let _ = fsio::remove_file_if_present(&temp);
+                return Err(err);
+            }
+        }
+        fsio::sync_dir_strict(namespace)?;
+        let managed = self.root.join(MANAGED_DIR);
+        let published = fsio::rename(namespace, &managed, "publication", "published")?;
+        Ok(self.finish_commit(manifest, &self.root, published))
+    }
+
     /// `published` is the outcome of the checkpoint after the publishing
     /// rename.
     fn finish_commit(
@@ -846,24 +927,17 @@ impl<K: KeySource> FileStore<K> {
                     else {
                         continue;
                     };
-                    let reclaim = match manifest.get(name) {
-                        None => true,
-                        Some(&member) if member == location => false,
-                        Some(&member) => {
-                            let held = self.holds_record(member, name)?;
-                            if !held {
-                                log::warn!(
-                                    "credential store: keeping {}: the manifest places it in {}, \
-                                     which holds no such file",
-                                    entry.path().display(),
-                                    self.record_dir(member).display()
-                                );
-                            }
-                            held
-                        }
-                    };
-                    if reclaim {
+                    if self.reclaimable(manifest, location, name)? {
                         fsio::remove_file_if_present(&entry.path())?;
+                    } else if let Some(&member) = manifest.get(name)
+                        && member != location
+                    {
+                        log::warn!(
+                            "credential store: keeping {}: the manifest places it in {}, which \
+                             holds no such file",
+                            entry.path().display(),
+                            self.record_dir(member).display()
+                        );
                     }
                 }
                 fsio::sync_dir_strict(&dir)
@@ -874,6 +948,22 @@ impl<K: KeySource> FileStore<K> {
             }
         }
         pending
+    }
+
+    /// Whether cleanup after `manifest` removes the credential file `name`
+    /// from `location`: when `name` is no member, or a member at the other
+    /// location, which holds a regular file of that name.
+    fn reclaimable(
+        &self,
+        manifest: &Manifest,
+        location: Location,
+        name: &str,
+    ) -> Result<bool, StoreError> {
+        match manifest.get(name) {
+            None => Ok(true),
+            Some(&member) if member == location => Ok(false),
+            Some(&member) => self.holds_record(member, name),
+        }
     }
 
     /// Whether `location` holds a regular file named `name`. A symbolic link
@@ -1121,34 +1211,13 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
             self.root.join(MANAGED_DIR)
         };
         if migrating {
-            let sealed = envelope::seal(
-                &keys.record,
-                RecordType::CredentialFormat,
-                FORMAT_FILE,
-                FORMAT,
-            )?;
-            // This marker does not change membership. An interrupted prepare
-            // still has the legacy namespace and all its preceding records.
-            fsio::replace_file(&self.root, FORMAT_FILE, &sealed)?;
-            fsio::sync_dir_strict(&self.root)?;
+            self.write_format_marker(&keys)?;
         }
         self.write_candidate(&keys, record, next_created_at(&current), &namespace)?;
         if !migrating {
             return self.publish_manifest(&keys, &manifest);
         }
-        let temp = self.prepare_manifest(&keys, &manifest, &namespace)?;
-        let active = namespace.join(ACTIVE_FILE);
-        match fsio::rename(&temp, &active, "rename", "renamed") {
-            Ok(renamed) => renamed?,
-            Err(err) => {
-                let _ = fsio::remove_file_if_present(&temp);
-                return Err(err);
-            }
-        }
-        fsio::sync_dir_strict(&namespace)?;
-        let managed = self.root.join(MANAGED_DIR);
-        let published = fsio::rename(&namespace, &managed, "publication", "published")?;
-        Ok(self.finish_commit(&manifest, &self.root, published))
+        self.publish_migration(&keys, &manifest)
     }
 
     fn delete(&mut self, credential_id: &[u8]) -> Result<bool, StoreError> {
@@ -1408,11 +1477,14 @@ fn corrupt(object: &str, reason: Corruption) -> StoreError {
     }
 }
 
+/// Only a reset replaces a key, so the key file of a copy of the state
+/// directory made since the last reset decrypts that data again, while a
+/// reset, which `pqkey` names only as the last resort, erases it.
 fn missing_key(domain: KeyDomain) -> StoreError {
     StoreError::KeyUnavailable {
         domain,
-        detail: "the key is missing but data encrypted under it exists; \
-                 restore the key or reset the store"
+        detail: "the key is missing but data encrypted under it exists; restore the key file \
+                 from a copy of the state directory made since the last reset"
             .into(),
     }
 }
@@ -1440,6 +1512,10 @@ mod durability_tests;
 #[cfg(test)]
 #[path = "put_delete_tests.rs"]
 mod put_delete_tests;
+
+#[cfg(test)]
+#[path = "repair_tests.rs"]
+mod repair_tests;
 
 #[cfg(test)]
 mod tests {
