@@ -105,8 +105,14 @@ credentials created after that backup will be absent.
 > included. The rules give it to the `plugdev` group, and the installer adds
 > you to that group if you are not in it yet (on Ubuntu you already are).
 > An ACL grants this user immediate access while the current session and user
-> service manager still have their old groups. The key's hidraw device uses
-> the active local desktop session's `uaccess` permissions.
+> service manager still have their old groups. The key's hidraw device is
+> open to the user of the session that is active on the seat (`uaccess`).
+> After you switch users, that is the other user, and a program they start
+> can keep the device open until the key stops. Run `pqkey stop` before you
+> switch users, and `pqkey start` when you are back. If you did not, run
+> `pqkey stop` and `pqkey start` when you are back: that cuts off such a
+> program but does not undo what they did; see
+> [SECURITY.md](SECURITY.md#other-users-sessions).
 
 ## Usage
 

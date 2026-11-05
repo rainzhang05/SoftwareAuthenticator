@@ -2,24 +2,28 @@
 //! CTAP status, keepalive signalling and cancellation.
 
 use super::dispatch::call;
+use super::large_blobs::write_request;
 use super::support::{
-    NEVER_INTERRUPTED, PresenceEvent, PresenceLog, SeenRequest, TestRng, TestStore, scripted_app,
-    scripted_app_with_interrupt,
+    NEVER_INTERRUPTED, PresenceEvent, PresenceLog, SeenRequest, TestRng, TestStore, credential,
+    encode, get_pin_uv_auth_token, insert, int, padded_pin, scripted_app,
+    scripted_app_with_interrupt, set_pin_padded, token_pin_auth,
 };
 use super::support::{TestApp, stored};
-use crate::CoseAlg;
-use crate::ctap::cbor::canonical_map;
+use crate::ctap::cbor::{canonical_map, map_get};
+use crate::ctap::pin::permissions::{PIN_PERMISSION_ACFG, PIN_PERMISSION_CM, PIN_PERMISSION_LBW};
 use crate::ctap::presence::{
     AutoApprove, Cancellation, DEFAULT_PRESENCE_TIMEOUT, PresenceOperation, PresenceOutcome,
     PresenceRequest, UserPresence, presence_status,
 };
 use crate::ctap::{CtapApp, InterruptFlag};
+use crate::{ClassicPinProtocol, CoseAlg};
 
 use ciborium::{
     de::from_reader,
     ser::into_writer,
     value::{Integer, Value},
 };
+use sha2::{Digest, Sha256};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
@@ -504,4 +508,101 @@ fn make_credential_shows_the_relying_party_name() {
             ..register_request()
         })
     );
+}
+
+/// Whoever can open the device of a key without a PIN, as another user whose
+/// session is active can (SECURITY.md, "Another user's active session"),
+/// sets a PIN without anyone being asked.  A token for that PIN then lists a
+/// passkey's user name, changes configuration, replaces the large-blob array
+/// and deletes the passkey, none of which asks either; the owner cannot set
+/// a PIN of their own afterwards.
+#[test]
+fn a_pin_set_through_the_device_unlocks_management_without_presence() {
+    let (mut app, log) = scripted_app([0x2D; 16], [PresenceOutcome::Denied; 8]);
+    let mut passkey = credential(RP_ID, &[0x01], &[0xD1], CoseAlg::ES256);
+    passkey.user_name = Some("alice".into());
+    passkey.cred_protect = 3;
+    insert(&mut app, &passkey);
+
+    let protocol = ClassicPinProtocol::V2;
+    let pin = b"4321";
+    assert_eq!(
+        set_pin_padded(&mut app, protocol, &padded_pin(pin)),
+        Ok(vec![CTAP2_OK])
+    );
+    let permissions = PIN_PERMISSION_CM | PIN_PERMISSION_LBW | PIN_PERMISSION_ACFG;
+    let token = get_pin_uv_auth_token(&mut app, protocol, pin, permissions.into(), None)
+        .expect("a token for the new PIN");
+    let authenticate = |message: &[u8]| Value::Bytes(token_pin_auth(protocol, &token, message));
+    // authenticatorCredentialManagement with subCommandParams (CTAP 2.3 §6.8).
+    let management = |subcommand: u8, params: Value| {
+        let message = [vec![subcommand], encode(&params)].concat();
+        let request = canonical_map(vec![
+            (int(1), int(subcommand.into())),
+            (int(2), params),
+            (int(3), int(protocol.identifier().into())),
+            (int(4), authenticate(&message)),
+        ]);
+        [vec![CTAP_CMD_CREDENTIAL_MANAGEMENT], encode(&request)].concat()
+    };
+
+    // enumerateCredentialsBegin names the account, credProtect 3 or not.
+    let rp_id_hash = canonical_map(vec![(int(1), Value::Bytes(Sha256::digest(RP_ID).to_vec()))]);
+    let response = call(&mut app, &management(0x04, rp_id_hash));
+    assert_eq!(response[0], CTAP2_OK);
+    let Value::Map(entries) = from_reader(&response[1..]).expect("decode the credential") else {
+        panic!("a map");
+    };
+    let Some(Value::Map(user)) = map_get(&entries, int(6)) else {
+        panic!("the user member");
+    };
+    assert_eq!(
+        map_get(user, Value::Text("name".into())),
+        Some(&Value::Text("alice".into()))
+    );
+
+    // toggleAlwaysUv (§6.11.2).
+    let message = [vec![0xff; 32], vec![CTAP_CMD_AUTHENTICATOR_CONFIG, 0x02]].concat();
+    let config = canonical_map(vec![
+        (int(1), int(0x02)),
+        (int(3), int(protocol.identifier().into())),
+        (int(4), authenticate(&message)),
+    ]);
+    let request = [vec![CTAP_CMD_AUTHENTICATOR_CONFIG], encode(&config)].concat();
+    assert_eq!(call(&mut app, &request), [CTAP2_OK]);
+    assert!(app.pin_state.persistent().always_uv);
+
+    // A whole serialized large-blob array in one fragment (§6.10.2).
+    let mut array = b"replaced".to_vec();
+    array.extend_from_slice(&Sha256::digest(&array)[..16]);
+    let request = write_request(0, Some(array.len()), &array, Some((protocol, &token)));
+    assert_eq!(call(&mut app, &request), [CTAP2_OK]);
+    let read = canonical_map(vec![(int(1), int(array.len() as i64)), (int(3), int(0))]);
+    let request = [vec![CTAP_CMD_LARGE_BLOBS], encode(&read)].concat();
+    let response = call(&mut app, &request);
+    assert_eq!(response[0], CTAP2_OK);
+    let Value::Map(entries) = from_reader(&response[1..]).expect("decode the array") else {
+        panic!("a map");
+    };
+    assert_eq!(map_get(&entries, int(1)), Some(&Value::Bytes(array)));
+
+    // deleteCredential (§6.8.5).
+    let descriptor = canonical_map(vec![(
+        int(2),
+        canonical_map(vec![
+            (Value::Text("type".into()), Value::Text("public-key".into())),
+            (
+                Value::Text("id".into()),
+                Value::Bytes(passkey.credential_id.clone()),
+            ),
+        ]),
+    )]);
+    assert_eq!(call(&mut app, &management(0x06, descriptor)), [CTAP2_OK]);
+    assert!(stored(&app).is_empty());
+
+    assert_eq!(
+        set_pin_padded(&mut app, protocol, &padded_pin(b"1234")),
+        Err(CTAP2_ERR_PIN_AUTH_INVALID)
+    );
+    assert!(log.take().is_empty(), "nothing asked the user");
 }

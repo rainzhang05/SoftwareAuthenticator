@@ -23,8 +23,10 @@ sensor software cannot press.
   reset asks for your approval in a desktop notification. If the notification
   cannot be shown, the request is denied, never approved.
 - **Other users on the computer.** The state directory is `0700`, its files
-  are `0600`, and udev gives the key's device only to the user of the active
-  local session.
+  are `0600`, and udev gives the key's device to the user of the session that
+  is active on the seat, not to remote users. That can be another user's
+  session, though, and a program they start there can keep the device open
+  until the key stops; see [Other users' sessions](#other-users-sessions).
 - **Copies of the files without the keys.** The credential, PIN, counter and
   large-blob files in `~/.local/share/pqkey` are encrypted and authenticated
   with XChaCha20-Poly1305 under keys derived from two root keys in `keys/`. A
@@ -52,6 +54,11 @@ sensor software cannot press.
   require their encrypted records as well.
 - **Offline PIN guessing by such an attacker.** The stored PIN hash is an
   unsalted, truncated SHA-256.
+- **Another user's active session.** While another user's session is active
+  on the seat, they can use your running key as any program can without your
+  approval, and a program they start can keep that access until the key
+  stops, even after you return. [Other users' sessions](#other-users-sessions)
+  says what that gives them and what to do.
 - **Rolling files back.** Integrity is per file, so an older copy of
   `pin-state` restores PIN retries, and deleting it removes the PIN.
 - **Clones.** A copy of the state directory works as well as the original.
@@ -89,8 +96,9 @@ sensor software cannot press.
   request. They are cleaned of control and invisible characters, but a lying
   local program can still claim any site. Browsers check the site; other
   programs need not.
-- **Some requests need no prompt.** As CTAP allows, a sign-in may ask for no
-  user presence, and the signed data then says so. PIN changes and passkey
+- **Some requests need no prompt.** As CTAP allows, an assertion may ask for
+  no user presence. The signed data then says so, and sites that check it, as
+  WebAuthn requires, do not accept it as a sign-in. PIN changes and passkey
   management are protected by the PIN instead. On a key without a PIN, any
   program that can open the device can set one.
 - **Some registrations need no PIN.** A site may register a non-discoverable
@@ -126,6 +134,74 @@ The key's own device is mode `0600` and goes to the active session's user. The
 rules also tag it for the Firefox and Chromium snaps, which their sandbox
 otherwise refuses. Other rules may grant access too, as they do for hardware
 keys: on Ubuntu, sssd's rules give the `sssd` user every security token.
+
+### Other users' sessions
+
+udev gives the key's device to the user of the session that is active on the
+seat. Your key keeps running when you switch users, and can keep running after
+you log out, so another user whose session is active can open the device. A
+program that opens it can keep it open until the key stops, even after you
+return.
+
+By default, the key asks for approval only on your own desktop, so their
+requests that need it are rejected unless you approve them. A program that
+keeps the device open can still send such requests while you are there,
+naming any site.
+
+What needs no approval works for them as for any program of yours:
+
+- Silent assertions (`up` false), even with always-UV. They do not sign in at
+  sites that check the presence flag, as WebAuthn requires, but they probe
+  your accounts. For any site the other user names, the key answers with your
+  passkeys of credProtect level 1, the level when a registration asks for
+  none, and returns each one's user ID and, if asked, its credBlob and its
+  large-blob key, which decrypts its large blob. Given a credential's ID and
+  site, any credential below level 3 answers, including non-discoverable ones.
+- getInfo (whether a PIN is set, its policy, always-UV and the free passkey
+  slots), the PIN retries left and the large-blob array.
+- PIN guesses: three in a row, after which your PIN is refused too until the
+  key restarts. A restart, or the key accepting your PIN, starts the count
+  again, so a program that keeps the device open can guess twice after each
+  PIN entry of yours that the key accepts, without locking the key. Eight
+  wrong PINs with none accepted between them block the PIN until a reset,
+  which erases every passkey.
+- On a key without a PIN: configuration changes, large-blob writes and setting
+  a PIN. You do not know that PIN, and it gives them what a PIN guards:
+  listing, renaming and deleting your passkeys, every passkey's large-blob key
+  and so every large blob, and verified silent assertions, credProtect 3
+  included.
+
+A program that keeps the device open also receives a copy of everything the
+key sends, its answers to your browser and to `pqkey` included: credential
+IDs, user IDs and names, credBlobs, large-blob keys and, when `pqkey passkeys`
+runs, every site you have a passkey at. Your PIN never reaches it, and
+PIN tokens and hmac-secret outputs stay encrypted for the program that asked.
+It can also keep the key busy and make your requests fail, even with your
+correct PIN.
+
+With `--presence auto-approve`, which is for tests only, their requests that
+need approval are approved too. They can then sign in with your credentials
+wherever neither the site nor the key requires the PIN, and anywhere on a key
+without a PIN, once they set one. They can also reset the key, which erases
+every passkey, within 10 seconds of its start, or at any time with the test
+option `--allow-late-reset`.
+
+To keep them out:
+
+- Run `pqkey stop` before you switch users or log out, and `pqkey start` when
+  you are back.
+- If the key kept running while another user's session was active, run
+  `pqkey stop` and then `pqkey start` when you are back. That cuts off any
+  program that kept the device open, and udev gives the new device to you. It
+  does not undo what they did: `pqkey status` shows whether a PIN is set and
+  the retries left, `pqkey config` the settings, and, with your PIN,
+  `pqkey passkeys` your passkeys.
+- Deny any prompt you did not start.
+- Keep a PIN set: it closes everything listed above for a key without one.
+- Locking the screen does not stop the key. Logging out stops the key's user
+  service when systemd stops your user services, by default 10 seconds after
+  your last session has ended. With lingering (`loginctl enable-linger`), they
+  run from boot and are never stopped by a logout.
 
 ### Privacy
 
