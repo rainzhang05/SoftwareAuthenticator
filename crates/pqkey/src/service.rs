@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     io,
     path::{Path, PathBuf},
     time::Duration,
@@ -21,6 +22,7 @@ use crate::{
         PresenceMode, Unanswered,
         notification::{NotificationPresence, PROMPT_FILE},
     },
+    seat::{Seat, SeatDevice, SeatSource, Unwatched, is_unplugged},
     shutdown::{ShutdownSignal, is_shutdown, ok_if_shutdown},
     transport::{HidDevice, HidDeviceDescriptor, exec_with_identifier},
 };
@@ -250,7 +252,18 @@ mod provisioning_tests {
 
 /// Run the authenticator until the device fails or `shutdown` is requested.
 /// A requested shutdown returns `Ok(())`. `on_ready` runs once the virtual
-/// device exists.
+/// device exists, or once the key first keeps it unplugged because another
+/// user's session is active on its seat or the key cannot tell from the
+/// seat's record who is.
+///
+/// The device exists while the session logind records as active on its
+/// seat is one of this user's, or no session is active there (see
+/// [`crate::seat`]). The key removes it while another user's session is the
+/// active one, or the record cannot be read or understood, or has gone
+/// since the key saw it, and creates a new one when the seat is free again.
+/// It also replaces the device whenever logind saves the record, even when
+/// that leaves this user active, so that a switch away and back cannot go
+/// unseen.
 ///
 /// The caller holds the state lock.
 pub fn run(
@@ -299,8 +312,18 @@ pub fn run(
         allow_late_reset,
     };
 
-    let result =
-        create_device(descriptor).and_then(|device| serve_ctap(device, data, shutdown, on_ready));
+    let seat = Seat::new(
+        platform::SeatWatch::new(&descriptor.uniq),
+        nix::unistd::getuid().as_raw(),
+    );
+    let result = serve_ctap_plugged(
+        || create_device(descriptor.clone()),
+        seat,
+        data,
+        BootTimeClock::new,
+        shutdown,
+        on_ready,
+    );
     if result.as_ref().is_err_and(is_shutdown) {
         log::info!("shutdown requested; the virtual authenticator has been removed");
     }
@@ -329,27 +352,52 @@ pub(crate) fn serve_ctap_with_clock<C: Clock + 'static>(
     shutdown: ShutdownSignal,
     on_ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
+    let seat = Seat::new(Unwatched, 0);
+    serve_ctap_plugged(once(device), seat, data, clock, shutdown, on_ready)
+}
+
+/// The device factory of a single device.
+fn once<D>(device: D) -> impl FnMut() -> io::Result<D> {
+    let mut device = Some(device);
+    move || {
+        device
+            .take()
+            .ok_or_else(|| io::Error::other("this device can be plugged in only once"))
+    }
+}
+
+/// [`serve_ctap_with_clock`] on the devices `devices` creates, one at a time,
+/// whenever `seat` lets one exist. The CTAP app is built once and serves
+/// every device: a new device is not a new power-up.
+pub(crate) fn serve_ctap_plugged<D: HidDevice, S: SeatSource, C: Clock + 'static>(
+    devices: impl FnMut() -> io::Result<D>,
+    seat: Seat<S>,
+    data: AppData,
+    clock: impl FnOnce() -> io::Result<C>,
+    shutdown: ShutdownSignal,
+    on_ready: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     match data.presence {
         PresenceMode::Notify => {
             log::info!("asking for user presence with desktop notifications");
             let mut presence = NotificationPresence::new(platform::notifications()?)
                 .with_prompt_record(data.state_dir.join(PROMPT_FILE));
             presence.withdraw_stale_prompt();
-            serve_ctap_with_presence(device, data, presence, clock, shutdown, on_ready)
+            serve_plugged_with_presence(devices, seat, data, presence, clock, shutdown, on_ready)
         }
         PresenceMode::AutoApprove => {
             log::warn!(
                 "--presence auto-approve: approving every registration, sign-in and reset without asking; \
                  anything running as this user can use the passkeys unnoticed. Use this for tests only"
             );
-            serve_ctap_with_presence(device, data, AutoApprove, clock, shutdown, on_ready)
+            serve_plugged_with_presence(devices, seat, data, AutoApprove, clock, shutdown, on_ready)
         }
         PresenceMode::Unanswered => {
             log::warn!(
                 "--presence unanswered: no presence request is ever approved; every request waits \
                  until it is cancelled or times out. Use this for tests only"
             );
-            serve_ctap_with_presence(device, data, Unanswered, clock, shutdown, on_ready)
+            serve_plugged_with_presence(devices, seat, data, Unanswered, clock, shutdown, on_ready)
         }
     }
 }
@@ -364,6 +412,37 @@ pub(crate) fn serve_ctap_with_clock<C: Clock + 'static>(
 /// [`Cancellation`](pqkey_ctap::ctap::presence::Cancellation).
 pub fn serve_ctap_with_presence<C: Clock + 'static>(
     device: impl HidDevice,
+    data: AppData,
+    presence: impl UserPresence + Send + 'static,
+    clock: impl FnOnce() -> io::Result<C>,
+    shutdown: ShutdownSignal,
+    on_ready: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let seat = Seat::new(Unwatched, 0);
+    serve_plugged_with_presence(
+        once(device),
+        seat,
+        data,
+        presence,
+        clock,
+        shutdown,
+        on_ready,
+    )
+}
+
+/// [`serve_ctap_with_presence`] on the devices `devices` creates, whenever
+/// `seat` lets one exist.
+///
+/// Each device is served as a [`SeatDevice`], so a report that arrives once
+/// `seat` says the device must go is neither handled nor answered. The
+/// transport then ends: it cancels the request the app is working on, a
+/// presence prompt included, destroys the device, which ends every file
+/// opened on it, and drops its CTAPHID channels. The app, its clock and its
+/// PIN state stay: the reset window and the run of wrong PINs go on counting
+/// from when the app was built.
+pub(crate) fn serve_plugged_with_presence<D: HidDevice, S: SeatSource, C: Clock + 'static>(
+    mut devices: impl FnMut() -> io::Result<D>,
+    seat: Seat<S>,
     data: AppData,
     presence: impl UserPresence + Send + 'static,
     clock: impl FnOnce() -> io::Result<C>,
@@ -392,14 +471,25 @@ pub fn serve_ctap_with_presence<C: Clock + 'static>(
     let app_waiting = waiting.clone();
     ctap.set_keepalive_callback(move |waiting| app_waiting.set(waiting));
     let identity = device_uniq(std::process::id());
-    exec_with_identifier(
-        device,
-        &mut ctap,
-        &waiting,
-        shutdown,
-        on_ready,
-        move |deadline| platform::identify(&identity, deadline),
-    )
+    let seat = RefCell::new(seat);
+    let mut on_ready = Some(on_ready);
+    let mut ready = || on_ready.take().map_or(Ok(()), |on_ready| on_ready());
+    loop {
+        seat.borrow_mut().wait_for_turn(&shutdown, &mut ready)?;
+        let device = SeatDevice::new(devices()?, &seat);
+        seat.borrow_mut().plugged();
+        let result = exec_with_identifier(
+            device,
+            &mut ctap,
+            &waiting,
+            shutdown.clone(),
+            &mut ready,
+            |deadline| platform::identify(&identity, deadline),
+        );
+        if !result.as_ref().is_err_and(is_unplugged) {
+            return result;
+        }
+    }
 }
 
 /// Log that the key cannot use a PIN or save passkeys in `state_dir`, if
@@ -1327,5 +1417,374 @@ mod tests {
         prompt.wait_until_asked();
         shut_down(&host, &shutdown, result);
         assert_eq!(prompt.outcome(), PresenceOutcome::Cancelled);
+    }
+
+    // The key's device comes and goes with the session that is active on
+    // its seat.
+
+    use crate::client::{
+        ctap2::{Authenticator, ClientError, PinRetries},
+        ctaphid::{Report, ReportLink},
+    };
+    use crate::seat::{Active, scripted::ScriptedSeat};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    const OWNER: u32 = 1000;
+    const ERR_INVALID_CHANNEL: u8 = 0x0b;
+    const CTAP2_ERR_NOT_ALLOWED: u8 = 0x30;
+    const CTAP2_ERR_PIN_INVALID: u8 = 0x31;
+    const CTAP2_ERR_PIN_AUTH_BLOCKED: u8 = 0x34;
+
+    fn owner() -> Active {
+        Active::Session {
+            id: "2".into(),
+            uid: OWNER,
+        }
+    }
+
+    fn other() -> Active {
+        Active::Session {
+            id: "5".into(),
+            uid: 1001,
+        }
+    }
+
+    /// GDM's login screen runs as a user of its own.
+    fn greeter() -> Active {
+        Active::Session {
+            id: "c1".into(),
+            uid: 120,
+        }
+    }
+
+    /// What a daemon loop serving plugged devices produced.
+    struct Plugged {
+        /// The host side of each device the loop created.
+        devices: mpsc::Receiver<DevicePeer>,
+        ready: mpsc::Receiver<()>,
+        result: mpsc::Receiver<io::Result<()>>,
+    }
+
+    impl Plugged {
+        fn next_device(&self) -> DevicePeer {
+            self.devices
+                .recv_timeout(TIMEOUT)
+                .expect("no device was plugged in")
+        }
+
+        fn assert_no_device(&self) {
+            assert!(
+                self.devices.recv_timeout(QUIET).is_err(),
+                "a device was plugged in"
+            );
+        }
+    }
+
+    /// Serve the CTAP app, asking `presence` and running on `clock`, on
+    /// devices plugged in while `script` lets one exist, for a key that
+    /// runs as [`OWNER`].
+    fn start_plugged<C: Clock + 'static>(
+        dir: &TempDir,
+        presence: impl UserPresence + Send + 'static,
+        clock: impl FnOnce() -> io::Result<C> + Send + 'static,
+        script: &ScriptedSeat,
+        shutdown: &ShutdownSignal,
+    ) -> Plugged {
+        let data = app_data(dir);
+        let seat = Seat::new(script.clone(), OWNER);
+        let shutdown = shutdown.clone();
+        let (device_sender, devices) = mpsc::channel();
+        let (ready_sender, ready) = mpsc::channel();
+        let (result_sender, result) = mpsc::channel();
+        thread::spawn(move || {
+            let plug = move || {
+                let (device, peer) = socket_device();
+                device_sender.send(peer).map_err(io::Error::other)?;
+                Ok(device)
+            };
+            let result = serve_plugged_with_presence(
+                plug,
+                seat,
+                data,
+                presence,
+                clock,
+                shutdown,
+                move || {
+                    let _ = ready_sender.send(());
+                    Ok(())
+                },
+            );
+            if let Err(err) = &result
+                && !is_shutdown(err)
+            {
+                eprintln!("the loop failed: {err}");
+            }
+            let _ = result_sender.send(result);
+        });
+        Plugged {
+            devices,
+            ready,
+            result,
+        }
+    }
+
+    /// The next event on `host` is its device's destruction.
+    fn assert_destroyed(host: &Host) {
+        match host.next(TIMEOUT).expect("the device was not destroyed") {
+            Event::Destroyed => {}
+            event => panic!("unexpected {event:?}"),
+        }
+    }
+
+    /// While another user's session or a login screen is active on the
+    /// seat, the key runs without a device; the owner's session brings one,
+    /// and so does a seat with no active session. Another user's session
+    /// becoming active as a request arrives leaves the request unanswered
+    /// and removes the device. A new record that leaves nobody else active
+    /// replaces the device.
+    #[test]
+    fn the_device_exists_only_while_no_other_users_session_is_active() {
+        let dir = TempDir::new("seat-plug");
+        let script = ScriptedSeat::new(other());
+        let shutdown = ShutdownSignal::new();
+        let plugged = start_plugged(
+            &dir,
+            AutoApprove,
+            crate::test_support::clock,
+            &script,
+            &shutdown,
+        );
+        plugged
+            .ready
+            .recv_timeout(TIMEOUT)
+            .expect("the key never said it runs");
+        plugged.assert_no_device();
+        script.switch(&[greeter()]);
+        plugged.assert_no_device();
+
+        script.switch(&[owner()]);
+        let mut host = Host::new(plugged.next_device());
+        let cid = host.init();
+        host.send(cid, CTAPHID_PING, b"owner");
+        assert_eq!(host.receive(cid), (CTAPHID_PING, b"owner".to_vec()));
+
+        script.switch_at_next_report(&[other()]);
+        host.send(cid, CTAPHID_PING, b"theirs");
+        assert_destroyed(&host);
+        plugged.assert_no_device();
+
+        script.switch(&[Active::Nobody]);
+        let mut host = Host::new(plugged.next_device());
+        let cid = host.init();
+        host.send(cid, CTAPHID_PING, b"nobody");
+        assert_eq!(host.receive(cid), (CTAPHID_PING, b"nobody".to_vec()));
+
+        // Every save of the record replaces the device, also one that leaves
+        // nobody else active.
+        script.switch(&[Active::Nobody]);
+        assert_destroyed(&host);
+        let mut host = Host::new(plugged.next_device());
+        let cid = host.init();
+        host.send(cid, CTAPHID_PING, b"replaced");
+        assert_eq!(host.receive(cid), (CTAPHID_PING, b"replaced".to_vec()));
+        plugged.assert_no_device();
+        shut_down(&host, &shutdown, plugged.result);
+    }
+
+    /// A switch to another user and back between two looks replaces the
+    /// device, although the owner is active at both. The new device knows
+    /// none of the old one's channels.
+    #[test]
+    fn a_switch_away_and_back_between_two_looks_replaces_the_device() {
+        let dir = TempDir::new("seat-replug");
+        let script = ScriptedSeat::new(owner());
+        let shutdown = ShutdownSignal::new();
+        let plugged = start_plugged(
+            &dir,
+            AutoApprove,
+            crate::test_support::clock,
+            &script,
+            &shutdown,
+        );
+        let mut host = Host::new(plugged.next_device());
+        let cid = host.init();
+        host.send(cid, CTAPHID_PING, b"before");
+        assert_eq!(host.receive(cid), (CTAPHID_PING, b"before".to_vec()));
+
+        for away in [other(), greeter()] {
+            script.switch(&[away, owner()]);
+            assert_destroyed(&host);
+            host = Host::new(plugged.next_device());
+            // Resynchronising the old channel is refused: it was never
+            // allocated on this device.
+            host.send(cid, CTAPHID_INIT, &[9; 8]);
+            assert_eq!(
+                host.receive(cid),
+                (CTAPHID_ERROR, vec![ERR_INVALID_CHANNEL])
+            );
+            let cid = host.init();
+            host.send(cid, CTAPHID_PING, b"after");
+            assert_eq!(host.receive(cid), (CTAPHID_PING, b"after".to_vec()));
+        }
+        plugged.assert_no_device();
+        shut_down(&host, &shutdown, plugged.result);
+    }
+
+    /// Another user's session becoming active while the owner is asked to
+    /// approve cancels the prompt: nothing is approved, the request is not
+    /// answered, and the device goes. The engine carries on on the next
+    /// device.
+    #[test]
+    fn unplugging_cancels_the_prompt_and_answers_nothing() {
+        let dir = TempDir::new("seat-prompt");
+        let (asked_sender, asked) = mpsc::channel();
+        let (answer_sender, answers) = mpsc::channel();
+        let (outcome_sender, outcomes) = mpsc::channel();
+        let prompt = Prompt {
+            asked: asked_sender,
+            answers,
+            outcomes: outcome_sender,
+        };
+        let handle = PromptHandle {
+            asked,
+            answers: answer_sender,
+            outcomes,
+        };
+        let script = ScriptedSeat::new(owner());
+        let shutdown = ShutdownSignal::new();
+        let plugged = start_plugged(&dir, prompt, crate::test_support::clock, &script, &shutdown);
+        let mut host = Host::new(plugged.next_device());
+        let cid = host.init();
+        host.send(cid, CTAPHID_CBOR, &[CTAP_RESET]);
+        handle.wait_until_asked();
+
+        script.switch(&[other()]);
+        assert_eq!(handle.outcome(), PresenceOutcome::Cancelled);
+        loop {
+            match host.next(TIMEOUT).expect("the device was not destroyed") {
+                Event::Destroyed => break,
+                Event::Message(_, channel, CTAPHID_KEEPALIVE, _) if channel == cid => {}
+                event => panic!("unexpected {event:?}"),
+            }
+        }
+        plugged.assert_no_device();
+
+        script.switch(&[owner()]);
+        let mut host = Host::new(plugged.next_device());
+        let cid = host.init();
+        host.send(cid, CTAPHID_CBOR, &[CTAP_GET_INFO]);
+        let (command, payload) = host.receive(cid);
+        assert_eq!((command, payload[0]), (CTAPHID_CBOR, CTAP2_OK));
+        host.assert_quiet();
+        shut_down(&host, &shutdown, plugged.result);
+    }
+
+    /// A clock the test sets.
+    struct ManualClock(Arc<AtomicU64>);
+
+    impl Clock for ManualClock {
+        fn now(&self) -> Duration {
+            Duration::from_millis(self.0.load(Ordering::SeqCst))
+        }
+    }
+
+    /// The command line's client on a device's host side.
+    struct Link(DevicePeer);
+
+    impl ReportLink for Link {
+        fn send(&mut self, report: &Report) -> io::Result<()> {
+            self.0.send(report)
+        }
+
+        fn receive(&mut self, timeout: Duration) -> io::Result<Option<Report>> {
+            self.0.receive(timeout)
+        }
+    }
+
+    /// A new device is not a new power-up: three wrong PINs in a row still
+    /// block PIN checks on it, and the reset window still counts from when
+    /// the key started.
+    #[test]
+    fn a_new_device_is_not_a_power_up() {
+        let dir = TempDir::new("seat-power");
+        let millis = Arc::new(AtomicU64::new(0));
+        let clock = {
+            let millis = Arc::clone(&millis);
+            move || Ok(ManualClock(millis))
+        };
+        let script = ScriptedSeat::new(owner());
+        let shutdown = ShutdownSignal::new();
+        let plugged = start_plugged(&dir, AutoApprove, clock, &script, &shutdown);
+        let mut key = Authenticator::open(Link(plugged.next_device())).unwrap();
+        // Within the window a reset works.
+        key.reset(&mut |_| {}).unwrap();
+        key.set_pin(b"1234").unwrap();
+        for status in [
+            CTAP2_ERR_PIN_INVALID,
+            CTAP2_ERR_PIN_INVALID,
+            CTAP2_ERR_PIN_AUTH_BLOCKED,
+        ] {
+            let attempt = key.management_token(b"0000");
+            assert!(
+                matches!(attempt, Err(ClientError::Status(code)) if code == status),
+                "{attempt:?}"
+            );
+        }
+        let blocked = PinRetries {
+            retries: 5,
+            power_cycle_needed: true,
+        };
+        assert_eq!(key.pin_retries().unwrap(), blocked);
+        millis.store(11_000, Ordering::SeqCst);
+
+        script.switch(&[other(), owner()]);
+        let mut key = Authenticator::open(Link(plugged.next_device())).unwrap();
+        assert_eq!(key.pin_retries().unwrap(), blocked);
+        let attempt = key.management_token(b"1234");
+        assert!(
+            matches!(
+                attempt,
+                Err(ClientError::Status(CTAP2_ERR_PIN_AUTH_BLOCKED))
+            ),
+            "{attempt:?}"
+        );
+        let reset = key.reset(&mut |_| {});
+        assert!(
+            matches!(reset, Err(ClientError::Status(CTAP2_ERR_NOT_ALLOWED))),
+            "{reset:?}"
+        );
+        shutdown.request();
+        let result = plugged
+            .result
+            .recv_timeout(TIMEOUT)
+            .expect("the loop did not return after shutdown was requested");
+        assert!(is_shutdown(&result.unwrap_err()));
+    }
+
+    /// Shutdown is honoured while the key waits for the seat, without a
+    /// device ever being created.
+    #[test]
+    fn shutdown_while_the_device_waits_for_the_seat() {
+        let dir = TempDir::new("seat-shutdown");
+        let script = ScriptedSeat::new(greeter());
+        let shutdown = ShutdownSignal::new();
+        let plugged = start_plugged(
+            &dir,
+            AutoApprove,
+            crate::test_support::clock,
+            &script,
+            &shutdown,
+        );
+        plugged.ready.recv_timeout(TIMEOUT).unwrap();
+        shutdown.request();
+        let result = plugged
+            .result
+            .recv_timeout(TIMEOUT)
+            .expect("the loop did not return after shutdown was requested");
+        assert!(is_shutdown(&result.unwrap_err()));
+        plugged.assert_no_device();
     }
 }

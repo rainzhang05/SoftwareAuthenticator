@@ -75,7 +75,9 @@ fn starting_or_stopping() -> io::Error {
 
 /// `pqkey run`: the key itself, in the foreground until it is told to stop,
 /// holding the state directory's lock throughout.  The pid file is published
-/// once the virtual device exists and removed on the way out.
+/// once the virtual device exists, or once the key first keeps it unplugged
+/// because another user's session is active on its seat or the key cannot
+/// tell from the seat's record who is, and removed on the way out.
 pub fn run(state_dir: PathBuf, args: &DaemonArgs) -> io::Result<()> {
     state::ensure_state_dir(&state_dir)?;
     let config = args

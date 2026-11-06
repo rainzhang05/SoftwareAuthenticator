@@ -14,6 +14,7 @@ use nix::{
     poll::{PollFd, PollFlags, PollTimeout, poll},
 };
 
+use super::seat::Held;
 use crate::client::ctaphid::{Report, ReportLink};
 use crate::transport::CTAPHID_FRAME_LEN;
 
@@ -121,7 +122,7 @@ fn open_node(uniq: &str, wait: Duration) -> io::Result<(PathBuf, Hidraw)> {
             None if waited => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("the key runs (pid {pid}), but its device is missing"),
+                    missing_device(pid, seat0_held()),
                 ));
             }
             None => {}
@@ -133,6 +134,57 @@ fn open_node(uniq: &str, wait: Duration) -> io::Result<(PathBuf, Hidraw)> {
 /// Open the daemon's client device, returning its display label and reports.
 pub fn open_client(uniq: &str, wait: Duration) -> io::Result<(String, Hidraw)> {
     open_node(uniq, wait).map(|(path, link)| (path.display().to_string(), link))
+}
+
+/// Why logind's record of seat0, where the key's device is unless udev put it
+/// on another seat, may keep the device unplugged.
+fn seat0_held() -> Option<Held> {
+    super::seat::seat0_held(nix::unistd::getuid().as_raw())
+}
+
+/// That the key `pid` runs without a device, and why that may be.
+fn missing_device(pid: impl std::fmt::Display, held: Option<Held>) -> String {
+    match held {
+        Some(Held::ByAnotherUser) => format!(
+            "the key runs (pid {pid}), but its device is missing, and another user's session is \
+             active on seat0: the key keeps its device unplugged while one is active on its seat"
+        ),
+        Some(Held::Unreadable) => format!(
+            "the key runs (pid {pid}), but its device is missing, and logind's record of seat0 \
+             cannot be read or understood: the key keeps its device unplugged until it can tell \
+             whose session is active there"
+        ),
+        Some(Held::Missing) => format!(
+            "the key runs (pid {pid}), but its device is missing, and logind's record of seat0 is \
+             missing: a key that has seen the record since it started keeps its device \
+             unplugged until the record is back"
+        ),
+        None => format!("the key runs (pid {pid}), but its device is missing"),
+    }
+}
+
+/// What to do about a missing device. A restart does not help while the
+/// seat holds the device back, since the restarted key waits too; nor while
+/// the record is missing, as a restarted key takes that for a seat that no
+/// one is active on.
+fn missing_device_fix(held: Option<Held>) -> &'static str {
+    match held {
+        Some(Held::ByAnotherUser) => {
+            "use the key from your own session, where it plugs its device in again; if it is \
+             still missing there, run `pqkey stop && pqkey start`"
+        }
+        Some(Held::Unreadable) => {
+            "once logind saves seat0's record again, as when a session on the seat starts or \
+             ends, the key plugs its device in while your session, or none, is active"
+        }
+        Some(Held::Missing) => {
+            "if /run is full (`df /run`), free space there; once logind saves seat0's record \
+             again, as when a session on the seat starts or ends, the key plugs its device in \
+             while your session, or none, is active. Do not restart the key for this: a key that \
+             starts without the record takes the seat for one that no one is active on"
+        }
+        None => "run `pqkey stop && pqkey start`",
+    }
 }
 
 pub(crate) fn device_problems(
@@ -149,10 +201,13 @@ pub(crate) fn device_problems(
             Ok(Some(node)) => {
                 problems.extend(super::checks::browser_problems(system, &node, &Err(err)));
             }
-            _ => problems.push(Problem {
-                what: format!("the key runs (pid {}), but its device is missing", pid),
-                fix: "run `pqkey stop && pqkey start`".into(),
-            }),
+            _ => {
+                let held = seat0_held();
+                problems.push(Problem {
+                    what: missing_device(pid, held),
+                    fix: missing_device_fix(held).into(),
+                });
+            }
         },
     }
     problems
@@ -199,6 +254,44 @@ mod tests {
         key.join().unwrap();
         signal_hook::low_level::unregister(handler);
         assert_eq!(report.unwrap(), Some([0x42; CTAPHID_FRAME_LEN]));
+    }
+
+    /// A missing device is explained by another user's session on seat0,
+    /// when there is one, or by a record of seat0 the key cannot read, or by
+    /// a missing one, and then a restart is not the advice.
+    #[test]
+    fn a_missing_device_names_another_users_session() {
+        assert_eq!(
+            missing_device(42, None),
+            "the key runs (pid 42), but its device is missing"
+        );
+        assert_eq!(missing_device_fix(None), "run `pqkey stop && pqkey start`");
+        let explained = missing_device(42, Some(Held::ByAnotherUser));
+        assert!(
+            explained.starts_with("the key runs (pid 42), but its device is missing, and another user's session is active on seat0"),
+            "{explained}"
+        );
+        assert!(
+            missing_device_fix(Some(Held::ByAnotherUser))
+                .starts_with("use the key from your own session")
+        );
+        let unreadable = missing_device(42, Some(Held::Unreadable));
+        assert!(
+            unreadable.starts_with("the key runs (pid 42), but its device is missing, and logind's record of seat0 cannot be read or understood"),
+            "{unreadable}"
+        );
+        assert!(!unreadable.contains("another user"), "{unreadable}");
+        let fix = missing_device_fix(Some(Held::Unreadable));
+        assert!(!fix.contains("pqkey stop"), "{fix}");
+        let missing = missing_device(42, Some(Held::Missing));
+        assert!(
+            missing.starts_with("the key runs (pid 42), but its device is missing, and logind's record of seat0 is missing: a key that has seen the record since it started"),
+            "{missing}"
+        );
+        let fix = missing_device_fix(Some(Held::Missing));
+        assert!(fix.contains("df /run"), "{fix}");
+        assert!(fix.contains("Do not restart the key"), "{fix}");
+        assert!(!fix.contains("pqkey stop"), "{fix}");
     }
 
     #[test]

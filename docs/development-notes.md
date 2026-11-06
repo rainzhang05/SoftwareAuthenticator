@@ -230,6 +230,44 @@ On macOS, test the portable crates natively and use a Linux environment,
 such as Docker, for daemon and fuzz checks. Container unit tests can use
 socket-backed devices; real HID E2E tests require access to `/dev/uhid`.
 
+## Checking another user's session by hand
+
+Unit tests script logind's record of the seat and use a temporary seats
+directory, and E2E runners have no logged-in seat (see
+[e2e.yml](../.github/workflows/e2e.yml)), so nothing automated switches
+users. Check it by hand on a desktop with two accounts: A runs the key, B is
+another user, and you switch with your desktop's "Switch User" or
+`loginctl activate SESSION`.
+
+1. As A, `pqkey status` names the device, say `/dev/hidraw3`. `getfacl
+   /dev/hidraw3` lists `user:A:rw-`, and `journalctl --user -u pqkey` has
+   "watching /run/systemd/seats". Keep a file open on the device in a
+   terminal: `exec 3<>/dev/hidraw3`.
+2. Switch to B. `grep ACTIVE_UID /run/systemd/seats/seat0` shows B's uid.
+   As B, `fido2-token -L` lists no device with vendor `0x1209` and product
+   `0x0001`, if B runs no key of their own, and `fido2-token -I
+   /dev/hidraw3` fails, unless another device has taken that node.
+3. Switch back to A. A's journal has "removing the key's device" and "the
+   key plugs its device in again". `pqkey status` names a device again,
+   perhaps another node, and `getfacl` on it lists `user:A:rw-` but not B.
+   In the terminal of step 1, `cat <&3 >/dev/null` ends with an input/output
+   error: the file opened on the old device no longer works.
+4. Still as A, end B's session without switching to it: `sudo loginctl
+   terminate-session SESSION`, with B's session from `loginctl
+   list-sessions`. A's journal has "logind rewrote seat0's record", and
+   `pqkey status` names a device again: a save of the record that leaves A
+   active replaces the device too.
+5. Still as A, on a test desktop, remove the record as systemd 257 and older
+   do when they cannot save it: `sudo rm /run/systemd/seats/seat0`. A's
+   journal has "cannot tell whose session is active on seat0", and
+   `pqkey status` says that logind's record of seat0 is missing. Switch to a
+   text console where nobody is logged in, and back: each switch saves the
+   record, and `pqkey status` names a device again.
+
+With systemd 257 and older, or elogind, B can still open the device in the
+moment of the switch (see [SECURITY.md](../SECURITY.md#other-users-sessions));
+these steps do not race for it.
+
 ## Installer regression checks
 
 Run `scripts/install-tests.sh` with Docker running. It sends the installer and

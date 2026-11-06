@@ -18,8 +18,8 @@ pub(crate) use linux::{
     warn_device_access,
 };
 pub use linux::{
-    ClientLink, Device, Notifications, System, UserService, default_state_dir, notifications,
-    open_client,
+    ClientLink, Device, Notifications, SeatWatch, System, UserService, default_state_dir,
+    notifications, open_client,
 };
 
 /// Create the Linux virtual device. Drop removes it.

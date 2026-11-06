@@ -24,9 +24,10 @@ sensor software cannot press.
   cannot be shown, the request is denied, never approved.
 - **Other users on the computer.** The state directory is `0700`, its files
   are `0600`, and udev gives the key's device to the user of the session that
-  is active on the seat, not to remote users. That can be another user's
-  session, though, and a program they start there can keep the device open
-  until the key stops; see [Other users' sessions](#other-users-sessions).
+  is active on the seat, not to remote users. When that becomes another
+  user's session, a login screen's included, the key removes its device,
+  which also cuts off any program that had it open; see
+  [Other users' sessions](#other-users-sessions) for what remains.
 - **Copies of the files without the keys.** The credential, PIN, counter and
   large-blob files in `~/.local/share/pqkey` are encrypted and authenticated
   with XChaCha20-Poly1305 under keys derived from two root keys in `keys/`. A
@@ -54,11 +55,13 @@ sensor software cannot press.
   require their encrypted records as well.
 - **Offline PIN guessing by such an attacker.** The stored PIN hash is an
   unsalted, truncated SHA-256.
-- **Another user's active session.** While another user's session is active
-  on the seat, they can use your running key as any program can without your
-  approval, and a program they start can keep that access until the key
-  stops, even after you return. [Other users' sessions](#other-users-sessions)
-  says what that gives them and what to do.
+- **The moment another user's session becomes active.** With systemd 257 and
+  older, and with elogind, they get the key's device a moment before logind
+  changes its record of the seat, where the key looks for the switch. A
+  program of theirs that opens the device in that moment can use the key as
+  any program can without your approval, until the key sees the record
+  change and removes the device. [Other users' sessions](#other-users-sessions)
+  says what that gives them, what else remains and what to do.
 - **Rolling files back.** Integrity is per file, so an older copy of
   `pin-state` restores PIN retries, and deleting it removes the PIN.
 - **Clones.** A copy of the state directory works as well as the original.
@@ -133,75 +136,154 @@ first user is in `plugdev` already.
 The key's own device is mode `0600` and goes to the active session's user. The
 rules also tag it for the Firefox and Chromium snaps, which their sandbox
 otherwise refuses. Other rules may grant access too, as they do for hardware
-keys: on Ubuntu, sssd's rules give the `sssd` user every security token.
+keys: on Ubuntu, sssd's rules give the `sssd` user every security token. From
+systemd 260, a rule that tags the device `xaccess-<name>` also gives it to
+every session granted that extra device access, active or not, which the key
+does not watch for; no rule that systemd or pqkey ships tags a security key
+so. A program with such access can send the key requests while you are at
+your desktop, naming any site, so deny any prompt you did not start. With
+`--presence auto-approve`, which is for tests only, the key approves such
+requests itself.
 
 ### Other users' sessions
 
-udev gives the key's device to the user of the session that is active on the
-seat. Your key keeps running when you switch users, and can keep running after
-you log out, so another user whose session is active can open the device. A
-program that opens it can keep it open until the key stops, even after you
-return.
+udev's `uaccess` rule gives the key's device to the user of the session that
+logind's record of the device's seat, in `/run/systemd/seats`, names as
+active. With systemd 257 and older, and with elogind, logind also moves the
+device to the new user itself at each switch, just before it saves that
+record. A program that opened the device keeps it open after that changes.
 
-By default, the key asks for approval only on your own desktop, so their
-requests that need it are rejected unless you approve them. A program that
-keeps the device open can still send such requests while you are there,
-naming any site.
+So the key watches the record. As soon as it sees another user's session
+become the active one, a login screen's included, it answers no further
+request and removes its device. That ends every file opened on the device.
+When the record names your session, or none, as active again, the key
+creates a new device, and udev gives it to the active session's user, as it
+gave the first.
 
-What needs no approval works for them as for any program of yours:
+The key also keeps no device while it cannot read the record or understand
+it, and while a record that it has seen since it started is missing: it has
+seen one once it has read it, or, while it watches with inotify, once a
+notification has named it. systemd 257 and older, and elogind, remove a
+seat's record when they fail to save it, as when `/run` is full, and still
+move the device to each new user, and logind removes the record of a seat
+that goes away. The key then reads the record every 100 ms until it is back.
+A record it has never seen counts as a seat that logind does not have, to
+whose devices udev gives no user: without logind, in the empty
+`/run/systemd/seats` that systemd-tmpfiles makes at boot where logind does
+not run, or on a seat that does not exist yet.
+
+logind writes each state of the seat to a new file, so the key keeps its
+device only while the record is the file it created the device under, or, if
+the seat had no record then, while it still has none. It tells files apart by
+inode number, which `/run`, a tmpfs, gives each file created there in turn,
+whoever creates it, coming back to one only after some four billion others
+(or, mounted with `inode64`, practically never). Any other file retires the
+device, even one that names your session. A switch to another user and back
+that falls between two of the key's looks leaves another file, so it replaces
+the device too. The cost: the key replaces its device whenever logind saves
+the record, also when you stay active, as when another session on the seat
+starts or ends, and a program using the key at that moment sees it unplugged
+and plugged in again.
+
+This holds whether the key's user service runs from your login or, with
+lingering (`loginctl enable-linger`), from boot and after you log out. While
+the record names no active session, no session's user gets the device, and
+the key keeps a device. So it does where it has never seen a record of the
+seat, as without logind, since udev's `uaccess` rule then gives the device to
+no one.
+
+Removing the device is not a restart: a reset is still possible only within
+10 seconds of the key's start, and after three wrong PINs in a row the key
+still refuses PIN checks until it restarts. While the device is absent,
+`pqkey` commands cannot reach the key either; `pqkey status` says when
+another user's session is active on seat0, or when seat0's record cannot be
+read or is missing from `/run/systemd/seats`.
+
+If the key cannot watch the record with inotify, it says so in a warning, when
+it starts or when `/run/systemd/seats` appears later: in the user service's
+journal (`journalctl --user -u pqkey`), or in `authenticator.log` in the state
+directory for a key that `pqkey start` ran without the service; `pqkey status`
+does not show it. It then reads the record at every check instead: before
+each report it handles or sends, and every 10 ms or so while idle. It compares
+files the same way, but cannot see a record that appears and goes again
+between two reads, which it then has not seen.
+
+What the key has not seen, it cannot judge. A record already missing when
+the key starts, or when it starts watching another seat, counts as a seat
+that logind does not have, and so does one that appears and goes again
+between two of the polled fallback's reads. With systemd 257 and older, and
+with elogind, such a record may have gone in a failed save; for one missing
+at the start, that save failed before the key started, as when `/run` was
+already full. While saves keep failing, switches on that seat then leave
+nothing for the key to see. A program of the new user's can then open the
+device and keep it until the key next removes its device, and for all that
+time do what the list below says, receive what the key sends, and send
+requests that ask for your approval, naming any site: deny any prompt you did
+not start. With `--presence auto-approve` the key approves them itself. So,
+with those versions, do not restart the key while `/run` is full.
+
+The key's device is on a seat other than seat0 only if a udev rule your
+administrator added puts it there. When such a seat goes away, logind removes
+its record, and the key keeps no device until the seat comes back or the key
+restarts; while the seat is gone, udev gives its devices to no one, so no one
+could use the key's device then anyway. If udev has not recorded the device's
+seat within 10 seconds of the key creating it, the key keeps watching the
+seat it watched before, seat0 at first.
+
+Apart from those cases, and from rules that grant the device otherwise (see
+Device access above), what remains is the moment of a switch. With systemd
+258 and later, logind saves the record naming the other user before it has
+udev give them the device, and the kernel has queued the notification of that
+save by the time the save returns. So their first report already finds
+another file, and the key answers none of their requests. Only udev handling
+an event of the key's device, as when the key has just created it, in the
+instant between the new file appearing and that notification, with logind
+then stalled there, could let a program of theirs in before the key sees the
+save. With systemd 257 and older, and with elogind, they get the device a
+moment before logind saves the record, or removes it. A program of theirs
+that opens the device in that moment can, until the key sees the record
+change, do what any program of yours can without your approval, including:
 
 - Silent assertions (`up` false), even with always-UV. They do not sign in at
   sites that check the presence flag, as WebAuthn requires, but they probe
-  your accounts. For any site the other user names, the key answers with your
-  passkeys of credProtect level 1, the level when a registration asks for
-  none, and returns each one's user ID and, if asked, its credBlob and its
-  large-blob key, which decrypts its large blob. Given a credential's ID and
-  site, any credential below level 3 answers, including non-discoverable ones.
+  your accounts. For any site they name, the key answers with your passkeys
+  of credProtect level 1, the level when a registration asks for none, and
+  returns each one's user ID and, if asked, its credBlob and its large-blob
+  key, which decrypts its large blob. Given a credential's ID and site, any
+  credential below level 3 answers, including non-discoverable ones.
 - getInfo (whether a PIN is set, its policy, always-UV and the free passkey
   slots), the PIN retries left and the large-blob array.
 - PIN guesses: three in a row, after which your PIN is refused too until the
   key restarts. A restart, or the key accepting your PIN, starts the count
-  again, so a program that keeps the device open can guess twice after each
-  PIN entry of yours that the key accepts, without locking the key. Eight
-  wrong PINs with none accepted between them block the PIN until a reset,
-  which erases every passkey.
+  again. Eight wrong PINs with none accepted between them block the PIN until
+  a reset, which erases every passkey.
 - On a key without a PIN: configuration changes, large-blob writes and setting
-  a PIN. You do not know that PIN, and it gives them what a PIN guards:
-  listing, renaming and deleting your passkeys, every passkey's large-blob key
-  and so every large blob, and verified silent assertions, credProtect 3
-  included.
+  a PIN. You do not know that PIN, and with it, in that moment or a later
+  one, a program of theirs can list, rename and delete your passkeys, read
+  every passkey's large-blob key and so every large blob, and make verified
+  silent assertions, credProtect 3 included. `pqkey reset` removes such a PIN
+  but erases every passkey; deleting `pin-state` with the key stopped removes
+  it too (see "Rolling files back" above).
 
-A program that keeps the device open also receives a copy of everything the
-key sends, its answers to your browser and to `pqkey` included: credential
-IDs, user IDs and names, credBlobs, large-blob keys and, when `pqkey passkeys`
-runs, every site you have a passkey at. Your PIN never reaches it, and
-PIN tokens and hmac-secret outputs stay encrypted for the program that asked.
-It can also keep the key busy and make your requests fail, even with your
-correct PIN.
+That program also receives a copy of what the key sends in that moment.
+Requests that need your approval are not approved: the key withdraws any
+prompt for them when it removes the device. With `--presence auto-approve`,
+which is for tests only, they are approved too.
 
-With `--presence auto-approve`, which is for tests only, their requests that
-need approval are approved too. They can then sign in with your credentials
-wherever neither the site nor the key requires the PIN, and anywhere on a key
-without a PIN, once they set one. They can also reset the key, which erases
-every passkey, within 10 seconds of its start, or at any time with the test
-option `--allow-late-reset`.
-
-To keep them out:
-
-- Run `pqkey stop` before you switch users or log out, and `pqkey start` when
-  you are back.
-- If the key kept running while another user's session was active, run
-  `pqkey stop` and then `pqkey start` when you are back. That cuts off any
-  program that kept the device open, and udev gives the new device to you. It
-  does not undo what they did: `pqkey status` shows whether a PIN is set and
-  the retries left, `pqkey config` the settings, and, with your PIN,
-  `pqkey passkeys` your passkeys.
-- Deny any prompt you did not start.
-- Keep a PIN set: it closes everything listed above for a key without one.
-- Locking the screen does not stop the key. Logging out stops the key's user
-  service when systemd stops your user services, by default 10 seconds after
-  your last session has ended. With lingering (`loginctl enable-linger`), they
-  run from boot and are never stopped by a logout.
+Keep a PIN set: it limits what that moment allows, since a program then
+cannot change the configuration, write the large-blob array or set a PIN
+without it. To close the moment, with systemd 257 and older or elogind, run
+`pqkey stop` before you switch users or log out, and `pqkey start` when you
+are back. Logging out stops the key only when systemd stops your user
+services: by default 10 seconds after your last session has ended, and not
+while a program of yours keeps that session closing. With lingering, the key
+also keeps running after you log out, and starts at boot, before you log in.
+While it runs without you, it has its device whenever logind records no
+active session, so another user's session or a login screen becoming active
+then is a switch like any other. Unless you need lingering, turn it off with
+`loginctl disable-linger`. If you need it, `systemctl --user disable pqkey`
+keeps the key from starting at boot or at login, until `pqkey setup` enables
+it again, and `pqkey start` starts it when you are back.
 
 ### Privacy
 

@@ -107,12 +107,16 @@ credentials created after that backup will be absent.
 > An ACL grants this user immediate access while the current session and user
 > service manager still have their old groups. The key's hidraw device is
 > open to the user of the session that is active on the seat (`uaccess`).
-> After you switch users, that is the other user, and a program they start
-> can keep the device open until the key stops. Run `pqkey stop` before you
-> switch users, and `pqkey start` when you are back. If you did not, run
-> `pqkey stop` and `pqkey start` when you are back: that cuts off such a
-> program but does not undo what they did; see
-> [SECURITY.md](SECURITY.md#other-users-sessions).
+> When logind's record of the seat names another user's session, or a login
+> screen, the key removes its device, and it creates a new one once the
+> record names your session, or none, again. It keeps no device while it
+> cannot tell from the record who is active. So that it cannot miss a switch
+> away and back, it also replaces its device whenever logind saves the
+> record, even when you stay active, as when another session on the seat
+> starts or ends. With systemd 257 and older, or elogind, the other user can
+> still reach the key in the moment they switch in;
+> [SECURITY.md](SECURITY.md#other-users-sessions) says what that allows,
+> what else remains and how to close it.
 
 ## Usage
 

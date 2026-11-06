@@ -20,6 +20,8 @@ pub mod platform;
 #[cfg(target_os = "linux")]
 pub mod presence;
 #[cfg(target_os = "linux")]
+pub mod seat;
+#[cfg(target_os = "linux")]
 pub mod service;
 #[cfg(target_os = "linux")]
 pub mod shutdown;

@@ -6,6 +6,7 @@ pub mod hidraw;
 pub mod notification;
 pub mod permissions;
 pub(crate) mod runtime;
+pub(crate) mod seat;
 pub(crate) mod setup;
 pub mod state;
 pub mod uhid;
@@ -15,6 +16,7 @@ pub use self::{
     daemon::UserService,
     dbus::SessionBus as Notifications,
     hidraw::{Hidraw as ClientLink, open_client},
+    seat::SeatWatch,
     state::default_state_dir,
     uhid::UhidDevice as Device,
 };

@@ -510,12 +510,13 @@ fn make_credential_shows_the_relying_party_name() {
     );
 }
 
-/// Whoever can open the device of a key without a PIN, as another user whose
-/// session is active can (SECURITY.md, "Another user's active session"),
-/// sets a PIN without anyone being asked.  A token for that PIN then lists a
-/// passkey's user name, changes configuration, replaces the large-blob array
-/// and deletes the passkey, none of which asks either; the owner cannot set
-/// a PIN of their own afterwards.
+/// Whoever can open the device of a key without a PIN, as a program of
+/// another user can in the moment their session becomes active (SECURITY.md,
+/// "The moment another user's session becomes active"), can set a PIN without
+/// anyone being asked.  A token for that PIN then lists a passkey's user
+/// name, changes configuration, replaces the large-blob array and deletes the
+/// passkey, none of which asks either; the owner cannot set a PIN of their
+/// own afterwards.
 #[test]
 fn a_pin_set_through_the_device_unlocks_management_without_presence() {
     let (mut app, log) = scripted_app([0x2D; 16], [PresenceOutcome::Denied; 8]);

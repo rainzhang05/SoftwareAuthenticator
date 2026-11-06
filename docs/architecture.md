@@ -31,6 +31,25 @@ The daemon, which the systemd user service starts, creates a virtual USB HID
 device through `/dev/uhid`. Browsers open its hidraw node as they would any
 security key.
 
+The daemon keeps that device only while the session logind records as active
+on the device's seat is its own user's, or no session is active there
+(`crates/pqkey/src/seat.rs`). It asks before the transport handles or sends
+each report. logind writes each state of a seat to a new file, which it
+renames, or for a seat's first record may link, into place as the seat's
+record. So a device serves only while the record is the file it was created
+under, or, if the seat had no record then that the key had seen since it
+started, while it still has none. Once the record names another user's
+session, cannot be read or understood, has gone since the key saw it, or is
+another file, the transport ends, which destroys the device, cancels the
+engine's request and drops the CTAPHID channels. A switch away and back
+between two looks therefore ends it too, and so does any other save of the
+record, even one that leaves the daemon's user active, as when another
+session on the seat starts or ends. The daemon waits until the record names
+its user, or no one, as active, reading it again every 100 ms while it
+cannot tell, then creates a new device for the same engine, under the record
+it read last: its clock and PIN state carry on, so a new device is not a new
+power-up.
+
 The binary's allocator wipes every heap block before returning it to the
 system allocator. Reallocation allocates a replacement, copies the retained
 prefix, and wipes the old block, including any discarded tail.
@@ -160,6 +179,24 @@ The Linux backend exposes these interfaces:
   format native failures. Prompt text, sanitization, deadlines,
   cancellation and stale-prompt policy stay in presence policy. Linux
   records the bus, owner and notification ID.
+- `SeatWatch::new(uniq)`, implementing `SeatSource`: `changed(report)`,
+  `look`, `wait(timeout)` and `plugged`. It reads logind's record of the
+  device's seat in `/run/systemd/seats` as sd_seat_get_active(3) does, and
+  watches the directory with inotify as sd_login_monitor_new(3) does; an
+  event only says that a look is due, and without inotify every check looks.
+  The seat is the node's `ID_SEAT` in udev's database, or seat0, looked up
+  until it is found or 10 seconds have passed since the device was created.
+  A look says who is active and which record it read: the open file's device
+  and inode number, or, without a record it has seen, a number that changes
+  whenever events are lost, the watch is lost or regained, or the seat
+  changes, so not, when polled, for a record that came and went between two
+  reads. A record missing after the key has read it, or seen it named in a
+  notification, since it started is a failed look instead: logind removes a
+  record it wrote only when its seat goes away or, with systemd 257 and older
+  and with elogind, when a save fails. A look keeps the file it read open
+  until the next look has opened the record, so that a filesystem that reuses
+  the numbers of freed inodes cannot give them to a later record. The
+  decision stays in `seat`.
 - `default_state_dir`, `disable_core_dumps`,
   `current_executable_identity` and `BootTimeClock::new`. Identity is the
   executable's device and inode; `DaemonInfo` owns its format and validation.
@@ -169,15 +206,16 @@ The Linux backend exposes these interfaces:
 
 Services, system preparation and runtime helpers are concrete Linux
 implementations. Traits are used where tests need substitutes: the device,
-client report link, notification server and the engine's existing clock.
+client report link, notification server, seat source and the engine's
+existing clock.
 There is no trait for an entire platform.
 
-Tests inject devices, report links, clocks and executable identity. The
-Linux socket peer checks uhid encoding and destruction. A queued test
-device checks that the transport handles pending reports, worker wakeups,
-timeouts and shutdown through its device interface. Presence tests script
-a notification server. CLI and kernel tests run on Linux; the real HID E2E
-suite requires `/dev/uhid`.
+Tests inject devices, report links, clocks, seat sources and executable
+identity. The Linux socket peer checks uhid encoding and destruction. A
+queued test device checks that the transport handles pending reports, worker
+wakeups, timeouts and shutdown through its device interface. Presence tests
+script a notification server. CLI and kernel tests run on Linux; the real
+HID E2E suite requires `/dev/uhid`.
 
 ## What the key supports
 

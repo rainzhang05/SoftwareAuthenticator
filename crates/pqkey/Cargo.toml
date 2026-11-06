@@ -15,8 +15,9 @@ workspace = true
 
 [dependencies]
 # pthread: only the tests use it, to interrupt one of their threads with a
-# signal; a dev-dependency of its own would declare nix twice.
-nix = { version = "0.31", default-features = false, features = ["fs", "poll", "process", "pthread", "resource", "signal", "term", "time", "user"] }
+# signal; a dev-dependency of its own would declare nix twice. inotify: the
+# daemon watches logind's seat records, as sd_login_monitor_new(3) does.
+nix = { version = "0.31", default-features = false, features = ["fs", "inotify", "poll", "process", "pthread", "resource", "signal", "term", "time", "user"] }
 signal-hook = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive", "env"] }
 clap-num = "1.0"
