@@ -70,10 +70,21 @@ class MainTest(unittest.TestCase):
         lock = lockfile(sha2="0.11.0")
         self.assertEqual(self.check(lock, lock), (0, "no version changes", ""))
 
-    def test_compatible_updates_and_new_packages_pass(self):
-        status, out, _ = self.check(lockfile(sha2="0.11.0"), lockfile(sha2="0.11.1", zeroize="1.8.0"))
+    def test_compatible_updates_pass(self):
+        status, out, _ = self.check(lockfile(sha2="0.11.0"), lockfile(sha2="0.11.1"))
         self.assertEqual(status, 0)
-        self.assertEqual(out, "sha2 0.11.0 -> 0.11.1; +zeroize 1.8.0")
+        self.assertEqual(out, "sha2 0.11.0 -> 0.11.1")
+
+    def test_new_packages_need_review(self):
+        # However compatible the update that pulled them in.
+        self.assertEqual(
+            self.check(lockfile(sha2="0.11.0"), lockfile(sha2="0.11.1", zeroize="1.8.0")),
+            (3, "+zeroize 1.8.0", ""),
+        )
+        self.assertEqual(
+            self.check(lockfile(sha2="0.11.0"), lockfile(cmov="0.5.4", sha2="0.11.0", zeroize="1.8.0")),
+            (3, "+cmov 0.5.4, +zeroize 1.8.0", ""),
+        )
 
     def test_an_incompatible_update_fails(self):
         status, _, err = self.check(lockfile(ctaphid_app="0.1.3"), lockfile(ctaphid_app="0.2.0"))
@@ -269,6 +280,13 @@ class AutomergeScriptTest(unittest.TestCase):
             {"tools/Cargo.lock@head": lockfile(sha2="0.11.1")},
         )
         self.assert_skips(out, "tools/Cargo.lock could not be read on main")
+
+    def test_a_new_package_is_not_merged(self):
+        out, _ = self.run_script(
+            ["Cargo.lock"],
+            {"Cargo.lock@base": lockfile(sha2="0.11.0"), "Cargo.lock@head": lockfile(sha2="0.11.1", zeroize="1.8.0")},
+        )
+        self.assert_skips(out, "Cargo.lock adds +zeroize 1.8.0; a new package needs review")
 
     def test_other_files_are_not_merged(self):
         out, _ = self.run_script(

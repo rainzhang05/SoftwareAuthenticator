@@ -195,9 +195,11 @@ GitHub Actions runs these workflows:
 - **Fuzz** runs each target for 30 seconds on changes and for 30 minutes
   every week.
 
-Dependabot proposes updates every week. Cargo updates that are
-semver-compatible and pass every workflow are merged automatically. Commit
-changes to `Cargo.lock` and `fuzz/Cargo.lock` together.
+Dependabot proposes updates every week; for Cargo, only to releases at least
+seven days old. Cargo updates that are semver-compatible, add no package and
+pass every workflow are merged automatically. Commit changes to `Cargo.lock`
+and `fuzz/Cargo.lock` together. When Security fails on an advisory, update the
+crate by hand rather than wait for Dependabot.
 
 `main` is the development branch, and its commits are tested after they are
 pushed. `stable` follows the newest commit on main that passed CI, E2E and

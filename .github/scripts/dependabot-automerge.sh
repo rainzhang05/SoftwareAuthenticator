@@ -14,6 +14,9 @@
 #     Cargo-semver compatible (see cargo_semver_check.py; Dependabot's own
 #     update-type calls 0.12 -> 0.13 "minor", but for Cargo a 0.x minor bump is
 #     breaking)
+#   - no Cargo.lock it changes gains a package name that the lockfile on main
+#     lacks: a new package needs review, however compatible the update that
+#     pulled it in (a new version of a package already there is judged as above)
 #   - the PR changes nothing except Cargo.toml / Cargo.lock files
 #
 # Set DRY_RUN=1 to print the decision without merging (usable locally with gh auth).
@@ -70,10 +73,14 @@ while IFS= read -r lockfile; do
   gh api -H "Accept: application/vnd.github.raw+json" "repos/$REPO/contents/$lockfile?ref=$HEAD_SHA" \
     > "$workdir/$index.head.lock" \
     || skip "$lockfile could not be read at $HEAD_SHA"
-  if ! changes=$(python3 "$script_dir/cargo_semver_check.py" "$workdir/$index.base.lock" "$workdir/$index.head.lock"); then
-    skip "$lockfile has semver-incompatible version changes; they need review"
-  fi
-  echo "$lockfile: compatible changes: $changes"
+  verdict=0
+  changes=$(python3 "$script_dir/cargo_semver_check.py" "$workdir/$index.base.lock" "$workdir/$index.head.lock") \
+    || verdict=$?
+  case $verdict in
+    0) echo "$lockfile: compatible changes: $changes" ;;
+    3) skip "$lockfile adds $changes; a new package needs review" ;;
+    *) skip "$lockfile has semver-incompatible version changes; they need review" ;;
+  esac
 done <<<"$lockfiles"
 
 unexpected=$(jq -r '.files[].path | select(test("(^|/)Cargo\\.(toml|lock)$") | not)' <<<"$pr_json")

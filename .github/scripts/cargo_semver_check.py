@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Compare two Cargo.lock files and fail on Cargo-semver-incompatible changes.
+"""Compare two Cargo.lock files and fail on changes that need review.
 
 Usage: cargo_semver_check.py BASE_LOCK HEAD_LOCK
 
-Prints a one-line summary of compatible changes on stdout. Exits 1 and lists the
-incompatible changes on stderr if any package gained a version that is not
-Cargo-compatible with a version it already had.
+Exits 1 and lists the incompatible changes on stderr if any package gained a
+version that is not Cargo-compatible with a version it already had. Otherwise
+exits 3 and lists the new packages on stdout if HEAD_LOCK has a package name
+BASE_LOCK does not: a new package needs review, however compatible the update
+that pulled it in. Otherwise prints a one-line summary of the compatible
+changes on stdout and exits 0. (Python itself exits 1 on an uncaught error,
+and 2 when it cannot run the script.)
 
 Cargo's rule is that the leftmost non-zero component must match, so
 0.12.4 -> 0.13.0 is breaking even though generic semver tooling (including
@@ -44,20 +48,23 @@ def versions(path):
 
 def main(base_path, head_path):
     before, after = versions(base_path), versions(head_path)
-    changes, breaking = [], []
+    changes, added, breaking = [], [], []
     for name in sorted(after):
         old = before.get(name)
         for new in sorted(after[name] - (old or set())):
             if not old:
-                changes.append(f"+{name} {new}")
+                added.append(f"+{name} {new}")
             elif any(compatible(o, new) for o in old):
                 changes.append(f"{name} {'/'.join(sorted(old))} -> {new}")
             else:
                 breaking.append(f"{name} {'/'.join(sorted(old))} -> {new}")
-    print("; ".join(changes) or "no version changes")
     if breaking:
         print("incompatible: " + "; ".join(breaking), file=sys.stderr)
         return 1
+    if added:
+        print(", ".join(added))
+        return 3
+    print("; ".join(changes) or "no version changes")
     return 0
 
 

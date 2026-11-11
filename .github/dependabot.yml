@@ -24,9 +24,18 @@ updates:
       day: monday
       time: "05:00"
       timezone: Etc/UTC
-    # Ahead of the Monday 06:17 UTC scheduled security scan, so a fresh advisory
-    # and its fix tend to show up in the same window.
+    # Ahead of the Monday 06:17 UTC scheduled security scan, so an advisory and
+    # its fix tend to show up in the same window once the fix is past the
+    # cooldown.
     open-pull-requests-limit: 5
+    # Dependabot waits until a release is 7 days old before updating to it (3
+    # days without this setting): .github/scripts/dependabot-automerge.sh can
+    # merge these PRs without review, and users install from `stable`, which
+    # follows main, so the wait gives a compromised or broken release time to
+    # be noticed first. It does not hold back the newer versions Cargo may pick
+    # for packages already in the lockfile that an update needs.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "deps"
     groups:
@@ -38,9 +47,9 @@ updates:
           - patch
 
   # The fuzz crate (fuzz/) is a workspace of its own with its own lockfile,
-  # which the entry above never touches. Same schedule and grouping. Its PRs
-  # are auto-merged under the same rules once the Fuzz workflow, the only one
-  # that builds this lockfile, has built and run every target with it.
+  # which the entry above never touches. Same schedule, grouping and cooldown.
+  # Its PRs are auto-merged under the same rules once the Fuzz workflow, the
+  # only one that builds this lockfile, has built and run every target with it.
   - package-ecosystem: cargo
     directory: "/fuzz"
     schedule:
@@ -49,6 +58,8 @@ updates:
       time: "05:00"
       timezone: Etc/UTC
     open-pull-requests-limit: 2
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "deps(fuzz)"
     groups:
