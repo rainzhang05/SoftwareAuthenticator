@@ -64,6 +64,8 @@ trait SetupHost {
     fn blockers(&mut self) -> io::Result<Vec<checks::Problem>>;
     fn start(&mut self, state: &Path, binary: &Path) -> io::Result<Running>;
     fn problems(&self, state: &Path, running: Running) -> io::Result<Vec<checks::Problem>>;
+    /// What setup shows without failing on it.
+    fn warning(&self, state: &Path, running: Running) -> io::Result<Option<checks::Problem>>;
     fn pin(&mut self, running: Running, interactive: bool) -> io::Result<()>;
     fn verify(&self, state: &Path, binary: &Path, running: Running) -> io::Result<()>;
 }
@@ -84,6 +86,9 @@ impl SetupHost for System {
     }
     fn problems(&self, state: &Path, running: Running) -> io::Result<Vec<checks::Problem>> {
         key::running_problems(state, self, running, Duration::from_secs(5))
+    }
+    fn warning(&self, state: &Path, running: Running) -> io::Result<Option<checks::Problem>> {
+        key::presence_warning(state, running)
     }
     fn pin(&mut self, running: Running, interactive: bool) -> io::Result<()> {
         key::ensure_pin(running, interactive)
@@ -114,8 +119,29 @@ fn start_service(state_dir: &Path, binary: &Path) -> io::Result<Running> {
     if let Some(Running::Daemon(pid)) = before
         && !super::daemon_args_of(state_dir, pid)?.are_defaults()
     {
+        // One path whether or not the user service is installed yet: once
+        // the key is stopped, setup installs and starts the service; options
+        // the key still needs, never --presence auto-approve, then go into
+        // the service and apply when `pqkey stop && pqkey setup` starts it
+        // anew, as setup does not restart a running one for them (below).
+        let refusal = "the running key was started by hand with options of its own";
         return Err(io::Error::other(
-            "the running key has custom options; configure them in the user service before running setup (see `systemctl --user edit pqkey`)",
+            match key::presence_warning(state_dir, Running::Daemon(pid))? {
+                Some(warning) => {
+                    output::problem(
+                        warning.what,
+                        "run `pqkey stop` and rerun `pqkey setup`; if the key still needs other \
+                         options, add them with `systemctl --user edit pqkey`, never --presence \
+                         auto-approve, then run `pqkey stop && pqkey setup`",
+                    )?;
+                    format!("{refusal}; fix the above")
+                }
+                None => format!(
+                    "{refusal}; run `pqkey stop` and rerun `pqkey setup`; if it still needs some \
+                     of them, add them with `systemctl --user edit pqkey`, then run `pqkey stop && \
+                     pqkey setup`"
+                ),
+            },
         ));
     }
     let changed = UserService::install(binary)?;
@@ -196,7 +222,10 @@ fn run_setup(
     host.verify(state, binary, running)?;
     let mut problems = host.problems(state, running)?;
     problems.extend(path_problem(binary, path));
+    // A key that approves without asking works: shown, but setup goes on.
+    let warning = host.warning(state, running)?;
     output::problems(&problems)?;
+    output::problems(warning.as_slice())?;
     // Keep the final PIN interaction even when a separate repair is needed.
     host.pin(running, interactive)?;
     if !problems.is_empty() {
@@ -205,14 +234,20 @@ fn run_setup(
         ));
     }
     host.verify(state, binary, running)?;
-    finish()
+    finish(warning.is_none())
 }
 
-/// Only reached after every readiness check has passed.
-fn finish() -> io::Result<()> {
+/// Only reached after every readiness check has passed. `asks` is false for a
+/// key that approves requests without asking, which setup has warned about.
+fn finish(asks: bool) -> io::Result<()> {
     outln!()?;
     outln!(
-        "pqkey is ready. Use it on sites supporting passkeys or security keys; approve requests with the configured presence provider."
+        "pqkey is ready. Use it on sites supporting passkeys or security keys; {}.",
+        if asks {
+            "approve requests with the configured presence provider"
+        } else {
+            "it approves requests without asking until you fix the above"
+        }
     )?;
     outln!()?;
     for (command, what) in [
@@ -337,8 +372,13 @@ mod tests {
                 Vec::new()
             })
         }
-        fn start(&mut self, _: &Path, _: &Path) -> io::Result<Running> {
+        fn start(&mut self, state: &Path, binary: &Path) -> io::Result<Running> {
             self.effect("service")?;
+            if self.scenario.starts_with("hand-started") {
+                // The real start, which refuses a key started by hand with
+                // options before it installs anything.
+                return start_service(state, binary);
+            }
             Ok(Running::Service(unistd::Pid::this()))
         }
         fn problems(&self, _: &Path, _: Running) -> io::Result<Vec<checks::Problem>> {
@@ -353,6 +393,10 @@ mod tests {
                     Vec::new()
                 },
             )
+        }
+        fn warning(&self, state: &Path, running: Running) -> io::Result<Option<checks::Problem>> {
+            self.effect("warning")?;
+            key::presence_warning(state, running)
         }
         fn pin(&mut self, _: Running, interactive: bool) -> io::Result<()> {
             self.effect("pin")?;
@@ -383,6 +427,27 @@ mod tests {
         fs::write(&binary, "fixture").unwrap();
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        // The key setup finds running is this process, run with --presence
+        // auto-approve in the scenarios about that, and with an option of
+        // its own in `hand-started-options`.
+        let lock = crate::state_lock::StateLock::try_acquire(dir.path())
+            .unwrap()
+            .unwrap();
+        let args = match scenario.as_str() {
+            "auto-approve" | "hand-started" => crate::cli::DaemonArgs {
+                presence: crate::cli::PresenceArg::AutoApprove,
+                ..Default::default()
+            },
+            "hand-started-options" => crate::cli::DaemonArgs {
+                presence_timeout: Some(60),
+                ..Default::default()
+            },
+            _ => crate::cli::DaemonArgs::default(),
+        };
+        crate::test_support::daemon_info(&args)
+            .publish(dir.path(), &lock)
+            .unwrap();
+        crate::state_lock::write_pid_file(dir.path(), &lock).unwrap();
         let mut host = Fixture {
             scenario: scenario.clone(),
             trace: Default::default(),
@@ -426,9 +491,16 @@ mod tests {
 
     #[test]
     fn setup_completion_cancellation_and_failure_statuses() {
+        // Whatever a scenario's start does, it finds no systemctl, and its
+        // user units would go to a directory of the test's own.
+        let home = TempDir::new("setup-scenarios");
+        let mut traces = std::collections::HashMap::new();
         for scenario in [
             "fresh",
             "configured",
+            "auto-approve",
+            "hand-started",
+            "hand-started-options",
             "cancel",
             "approval",
             "prepare",
@@ -451,11 +523,13 @@ mod tests {
                     "--nocapture",
                 ])
                 .env("PQKEY_SETUP_SCENARIO", scenario)
+                .env("PATH", home.path())
+                .env("XDG_CONFIG_HOME", home.path())
                 .output()
                 .unwrap();
             let stdout = String::from_utf8_lossy(&result.stdout);
             let stderr = String::from_utf8_lossy(&result.stderr);
-            let ready = ["fresh", "configured"].contains(&scenario);
+            let ready = ["fresh", "configured", "auto-approve"].contains(&scenario);
             let success = ready || scenario == "cancel";
             assert_eq!(
                 result.status.code(),
@@ -483,6 +557,109 @@ mod tests {
             if !success {
                 assert!(!stderr.trim().is_empty(), "{scenario}");
             }
+            // A key that approves without asking is named with the fix for
+            // how it runs, and setup ends as it did: ready with the service,
+            // refused for a key started by hand with options. The refusal
+            // and the warning give one path, whether or not the service is
+            // installed yet: stop the key and rerun setup, then add the
+            // options it still needs, never --presence auto-approve, and run
+            // `pqkey stop && pqkey setup`.
+            let warning = |fix: &str| {
+                format!(
+                    "  ! the key runs with --presence auto-approve: it approves every \
+                     registration, sign-in and reset without asking, so anything running as you \
+                     can use your passkeys unnoticed\n    Fix: {fix}\n"
+                )
+            };
+            let service = warning(
+                "remove --presence auto-approve from the ExecStart= line that `systemctl --user \
+                 cat pqkey` shows, in the unit or drop-in file named above it, then run `pqkey \
+                 stop && pqkey setup`",
+            );
+            let by_hand = warning(
+                "run `pqkey stop` and rerun `pqkey setup`; if the key still needs other options, \
+                 add them with `systemctl --user edit pqkey`, never --presence auto-approve, then \
+                 run `pqkey stop && pqkey setup`",
+            );
+            assert_eq!(
+                stdout.contains(&service),
+                scenario == "auto-approve",
+                "{scenario}: {stdout}"
+            );
+            assert_eq!(
+                stdout.contains(&by_hand),
+                scenario == "hand-started",
+                "{scenario}: {stdout}"
+            );
+            // Status's other path for a key started by hand is not setup's.
+            assert!(
+                !stdout.contains("`pqkey start` without"),
+                "{scenario}: {stdout}"
+            );
+            let refusal = "pqkey: the running key was started by hand with options of its own; ";
+            for (case, ending) in [
+                ("hand-started", "fix the above\n"),
+                (
+                    "hand-started-options",
+                    "run `pqkey stop` and rerun `pqkey setup`; if it still needs some of them, add \
+                     them with `systemctl --user edit pqkey`, then run `pqkey stop && pqkey \
+                     setup`\n",
+                ),
+            ] {
+                assert_eq!(
+                    stderr.contains(&format!("{refusal}{ending}")),
+                    scenario == case,
+                    "{scenario}: {stderr}"
+                );
+            }
+            assert_eq!(
+                stdout.matches("--presence auto-approve:").count(),
+                usize::from(["auto-approve", "hand-started"].contains(&scenario)),
+                "{scenario}: {stdout}"
+            );
+            if !["auto-approve", "hand-started"].contains(&scenario) {
+                assert!(
+                    !format!("{stdout}{stderr}").contains("auto-approve"),
+                    "{scenario}: {stdout}{stderr}"
+                );
+            }
+            if ready {
+                let asks = scenario != "auto-approve";
+                for (ending, shown) in [
+                    (
+                        "approve requests with the configured presence provider.\n",
+                        asks,
+                    ),
+                    (
+                        "it approves requests without asking until you fix the above.\n",
+                        !asks,
+                    ),
+                ] {
+                    assert_eq!(
+                        stdout.contains(&format!(
+                            "pqkey is ready. Use it on sites supporting passkeys or security keys; \
+                             {ending}"
+                        )),
+                        shown,
+                        "{scenario}: {stdout}"
+                    );
+                }
+            }
+            let trace = stdout
+                .find("TRACE:")
+                .and_then(|at| stdout[at..].lines().next())
+                .unwrap_or_else(|| panic!("{scenario}: {stdout}"));
+            traces.insert(scenario, trace.to_owned());
+        }
+        // The same steps with a key that approves without asking, and none
+        // after the refusal of one started by hand.
+        assert_eq!(traces["auto-approve"], traces["fresh"]);
+        assert_eq!(
+            traces["fresh"],
+            "TRACE:prepare,root,refresh,service,verify,client,warning,pin,verify"
+        );
+        for scenario in ["hand-started", "hand-started-options"] {
+            assert_eq!(traces[scenario], "TRACE:prepare,root,refresh,service");
         }
     }
 

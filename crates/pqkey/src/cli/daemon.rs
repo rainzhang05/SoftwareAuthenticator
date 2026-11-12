@@ -90,8 +90,8 @@ pub fn run(state_dir: PathBuf, args: &DaemonArgs) -> io::Result<()> {
     state_lock::remove_info_file(&state_dir, &lock)?;
     let info = DaemonInfo::current(args)?;
     platform::warn_device_access()?;
-    // Without RUST_LOG, warnings too: that --presence auto-approve asks
-    // nobody, for example, is only ever logged.
+    // Without RUST_LOG, warnings too: the daemon reports that --presence
+    // auto-approve asks nobody, for example, only in its log.
     let _ = env_logger::try_init_from_env(env_logger::Env::default().default_filter_or("warn"));
     let shutdown = ShutdownSignal::new();
     shutdown.install_signal_handlers()?;

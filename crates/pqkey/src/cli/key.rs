@@ -149,6 +149,7 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
             }
             show_key(running)?;
             problems.extend(running_problems(state_dir, &system, running, STATUS_WAIT)?);
+            problems.extend(presence_warning(state_dir, running)?);
         }
     }
     problems.extend(state_dir_problem(state_dir));
@@ -243,9 +244,36 @@ pub fn running_problems(
             "the configured presence provider never answers requests",
             "configure the service to use --presence notify, then run `pqkey setup`",
         )),
+        // Nothing keeps browsers from using it; `presence_warning` names it.
         super::PresenceArg::AutoApprove => {}
     }
     Ok(problems)
+}
+
+/// A key `running` that approves every request without asking, as `--presence
+/// auto-approve` makes it, and how to make it ask: a problem for `status`, and
+/// a warning for `setup`, which does not fail on it. Setup installs no such
+/// option, so the service has it from ExecStart= in its unit or a drop-in, and
+/// the fix removes only the option.
+pub fn presence_warning(state_dir: &Path, running: Running) -> io::Result<Option<Problem>> {
+    let args = super::daemon_args_of(state_dir, running.pid())?;
+    if args.presence != super::PresenceArg::AutoApprove {
+        return Ok(None);
+    }
+    Ok(Some(Problem::new(
+        "the key runs with --presence auto-approve: it approves every registration, sign-in and \
+         reset without asking, so anything running as you can use your passkeys unnoticed",
+        match running {
+            Running::Service(_) => {
+                "remove --presence auto-approve from the ExecStart= line that `systemctl --user \
+                 cat pqkey` shows, in the unit or drop-in file named above it, then run `pqkey \
+                 stop && pqkey setup`"
+            }
+            Running::Daemon(_) => {
+                "run `pqkey stop`, then `pqkey start` without --presence auto-approve"
+            }
+        },
+    )))
 }
 
 /// A state directory whose filesystem does not support flushing directories,
@@ -1362,6 +1390,220 @@ mod tests {
         assert!(at("move /proc to a local filesystem") < at("run `pqkey start`"));
         assert!(problem.fix.contains("verify the copy"), "{problem:?}");
         assert!(problem.fix.contains("without a PIN"), "{problem:?}");
+    }
+
+    /// What `status` and `setup` say about a key run with --presence
+    /// auto-approve, and their fixes for the service and for a key started
+    /// by hand.
+    const AUTO_APPROVE: &str = "the key runs with --presence auto-approve: it approves every \
+        registration, sign-in and reset without asking, so anything running as you can use your \
+        passkeys unnoticed";
+    const SERVICE_FIX: &str = "remove --presence auto-approve from the ExecStart= line that \
+        `systemctl --user cat pqkey` shows, in the unit or drop-in file named above it, then run \
+        `pqkey stop && pqkey setup`";
+    const BY_HAND_FIX: &str =
+        "run `pqkey stop`, then `pqkey start` without --presence auto-approve";
+
+    /// Publish this process as the key running on `state_dir` with
+    /// `presence`, as a daemon does once it serves. It runs while the
+    /// returned lock is held.
+    fn run_as_key(
+        state_dir: &Path,
+        presence: crate::cli::PresenceArg,
+    ) -> crate::state_lock::StateLock {
+        let lock = crate::state_lock::StateLock::try_acquire(state_dir)
+            .unwrap()
+            .unwrap();
+        let args = crate::cli::DaemonArgs {
+            presence,
+            ..Default::default()
+        };
+        crate::test_support::daemon_info(&args)
+            .publish(state_dir, &lock)
+            .unwrap();
+        crate::state_lock::write_pid_file(state_dir, &lock).unwrap();
+        lock
+    }
+
+    /// Only a key that approves without asking gets the presence warning,
+    /// with the fix for how it runs, and the warning stays out of
+    /// `running_problems`, which setup fails on. A key that never answers
+    /// keeps its problem. (Notify's problem asks the session bus: see
+    /// `status_names_a_key_that_approves_without_asking`.)
+    #[test]
+    fn only_a_key_that_approves_without_asking_gets_the_presence_warning() {
+        use crate::cli::PresenceArg;
+        let me = nix::unistd::Pid::this();
+        let system = System::real().unwrap();
+        for presence in [
+            PresenceArg::Notify,
+            PresenceArg::AutoApprove,
+            PresenceArg::Unanswered,
+        ] {
+            let dir = TempDir::new("presence-warning");
+            let _key = run_as_key(dir.path(), presence);
+            let warnings = [Running::Service(me), Running::Daemon(me)]
+                .map(|running| presence_warning(dir.path(), running).unwrap());
+            let mut expected = system.device_problems(me, Duration::ZERO).unwrap();
+            match presence {
+                PresenceArg::Notify => {
+                    assert_eq!(warnings, [None, None]);
+                    continue;
+                }
+                PresenceArg::AutoApprove => assert_eq!(
+                    warnings,
+                    [
+                        Some(Problem::new(AUTO_APPROVE, SERVICE_FIX)),
+                        Some(Problem::new(AUTO_APPROVE, BY_HAND_FIX))
+                    ]
+                ),
+                PresenceArg::Unanswered => {
+                    assert_eq!(warnings, [None, None]);
+                    expected.push(Problem::new(
+                        "the configured presence provider never answers requests",
+                        "configure the service to use --presence notify, then run `pqkey setup`",
+                    ));
+                }
+            }
+            for running in [Running::Service(me), Running::Daemon(me)] {
+                assert_eq!(
+                    running_problems(dir.path(), &system, running, Duration::ZERO).unwrap(),
+                    expected,
+                    "{presence:?}"
+                );
+            }
+        }
+    }
+
+    /// The child of `status_names_a_key_that_approves_without_asking`: this
+    /// process plays a key on the default state directory, run with the
+    /// presence `PQKEY_STATUS_CHILD` names, and runs `pqkey status`.
+    #[test]
+    fn status_child() {
+        use crate::cli::PresenceArg;
+        let Ok(name) = std::env::var("PQKEY_STATUS_CHILD") else {
+            return;
+        };
+        let presence = [
+            PresenceArg::Notify,
+            PresenceArg::AutoApprove,
+            PresenceArg::Unanswered,
+        ]
+        .into_iter()
+        .find(|presence| presence.name() == name)
+        .unwrap();
+        let state_dir = default_state_dir();
+        crate::state::ensure_state_dir(&state_dir).unwrap();
+        let _key = run_as_key(&state_dir, presence);
+        let result = status(&state_dir);
+        if let Err(err) = &result {
+            errln!("pqkey: {err}");
+        }
+        std::process::exit(i32::from(crate::cli::exit_status(&result)));
+    }
+
+    /// `status` names a key that approves every request without asking, with
+    /// the fix for how it runs: as the user service, or started by hand. It
+    /// still exits with status 0. A key that asks, or that never answers,
+    /// keeps its own problem and gets no such warning. Each child plays the
+    /// key itself; a fake systemctl says the service is installed, and that
+    /// the child is its main process, or, for a key started by hand, that
+    /// it has none.
+    #[test]
+    fn status_names_a_key_that_approves_without_asking() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        let dir = TempDir::new("status-presence");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let systemctl = bin.join("systemctl");
+        std::fs::write(
+            &systemctl,
+            r#"#!/bin/sh
+case "$*" in
+*LoadState*) echo loaded ;;
+*MainPID*) if [ "$PQKEY_STATUS_RUNS" = service ]; then echo "$PPID"; else echo 0; fi ;;
+*) exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let children: Vec<_> = [
+            ("auto-approve", "service"),
+            ("auto-approve", "by-hand"),
+            ("unanswered", "service"),
+            ("notify", "service"),
+        ]
+        .into_iter()
+        .map(|(presence, runs)| {
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
+                .env("PQKEY_STATUS_CHILD", presence)
+                .env("PQKEY_STATUS_RUNS", runs)
+                .env("PATH", &bin)
+                .env(
+                    "XDG_DATA_HOME",
+                    dir.path().join(format!("{presence}-{runs}")),
+                )
+                // No session bus there: a key that asks cannot.
+                .env(
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    format!("unix:path={}", dir.path().join("no-bus").display()),
+                )
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            (presence, runs, child.id(), child)
+        })
+        .collect();
+        for (presence, runs, pid, child) in children {
+            let output = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let context = format!("{presence} {runs}: {stdout}{stderr}");
+            assert_eq!(output.status.code(), Some(0), "{context}");
+            let named =
+                |fix: &str| stdout.contains(&format!("  ! {AUTO_APPROVE}\n    Fix: {fix}\n"));
+            match (presence, runs) {
+                ("auto-approve", "service") => {
+                    assert!(
+                        stdout.contains(&format!(
+                            "Key:      running (pid {pid}, systemd user service pqkey.service)\n"
+                        )),
+                        "{context}"
+                    );
+                    assert!(named(SERVICE_FIX), "{context}");
+                }
+                ("auto-approve", _) => {
+                    assert!(
+                        stdout.contains(&format!("Key:      running (pid {pid})\n")),
+                        "{context}"
+                    );
+                    assert!(named(BY_HAND_FIX), "{context}");
+                    // Its other problem, as before.
+                    assert!(
+                        stdout.contains(&format!("  ! the key (pid {pid}) was started by hand")),
+                        "{context}"
+                    );
+                }
+                ("unanswered", _) => assert!(
+                    stdout.contains(
+                        "  ! the configured presence provider never answers requests\n    Fix: \
+                         configure the service to use --presence notify, then run `pqkey setup`\n"
+                    ),
+                    "{context}"
+                ),
+                _ => assert!(
+                    stdout.contains("  ! there is no D-Bus session bus ("),
+                    "{context}"
+                ),
+            }
+            if presence != "auto-approve" {
+                assert!(!stdout.contains("auto-approve"), "{context}");
+            }
+        }
     }
 
     /// Flip the last byte of `path`, as a media error would.
