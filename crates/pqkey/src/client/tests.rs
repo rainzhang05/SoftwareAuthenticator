@@ -17,20 +17,41 @@ use crate::shutdown::{ShutdownSignal, ok_if_shutdown};
 use crate::test_support::TempDir;
 
 /// Reports through the test peer of the selected device.
-pub(crate) struct TestLink(Peer);
+///
+/// Dropping it closes the peer, which ends a running daemon with an EOF on
+/// its device, and waits until the daemon has stopped. So the daemon has
+/// always read that EOF before the test goes on, and [`Daemon::finish`] after
+/// the drop fails every time, not only when the daemon wins the race against
+/// its request to stop.
+pub(crate) struct TestLink {
+    peer: Peer,
+    /// Dropped after `peer`, as fields drop in order.
+    _stopped: Stopped,
+}
+
+/// Waits, when dropped, until the daemon's thread has sent its result and
+/// dropped the sender.
+struct Stopped(mpsc::Receiver<()>);
+
+impl Drop for Stopped {
+    fn drop(&mut self) {
+        let _ = self.0.recv_timeout(Duration::from_secs(10));
+    }
+}
 
 impl ReportLink for TestLink {
     fn send(&mut self, report: &Report) -> io::Result<()> {
-        self.0.send(report)
+        self.peer.send(report)
     }
 
     fn receive(&mut self, timeout: Duration) -> io::Result<Option<Report>> {
-        self.0.receive(timeout)
+        self.peer.receive(timeout)
     }
 }
 
 /// A running daemon over `dir`'s store, approving every presence request,
-/// and a client of it.  The daemon stops when the returned guard drops.
+/// and a client of it.  The daemon stops when the returned guard drops, or
+/// earlier when the client does (see [`TestLink`]).
 pub(crate) struct Daemon {
     shutdown: ShutdownSignal,
     done: mpsc::Receiver<io::Result<()>>,
@@ -74,6 +95,7 @@ pub(crate) fn start_with(
     let shutdown = ShutdownSignal::new();
     let (ready_sender, ready) = mpsc::channel();
     let (done_sender, done) = mpsc::channel();
+    let (stopped_sender, stopped) = mpsc::channel();
     let loop_shutdown = shutdown.clone();
     thread::spawn(move || {
         let result = crate::test_support::serve_ctap(device, data, loop_shutdown, move || {
@@ -81,11 +103,16 @@ pub(crate) fn start_with(
             Ok(())
         });
         let _ = done_sender.send(ok_if_shutdown(result));
+        drop(stopped_sender);
     });
     ready
         .recv_timeout(Duration::from_secs(10))
         .expect("the daemon started");
-    let client = Authenticator::open(TestLink(kernel)).expect("CTAPHID_INIT");
+    let client = Authenticator::open(TestLink {
+        peer: kernel,
+        _stopped: Stopped(stopped),
+    })
+    .expect("CTAPHID_INIT");
     (Daemon { shutdown, done }, client)
 }
 
@@ -97,6 +124,7 @@ pub(crate) fn start_management_transport(dir: &TempDir) -> (Daemon, Authenticato
     let shutdown = ShutdownSignal::new();
     let (ready_sender, ready) = mpsc::channel();
     let (done_sender, done) = mpsc::channel();
+    let (stopped_sender, stopped) = mpsc::channel();
     let loop_shutdown = shutdown.clone();
     thread::spawn(move || {
         let interrupt = pqkey_ctap::ctap::InterruptFlag::new();
@@ -119,9 +147,14 @@ pub(crate) fn start_management_transport(dir: &TempDir) -> (Daemon, Authenticato
             |_| Ok(()),
         );
         let _ = done_sender.send(ok_if_shutdown(result));
+        drop(stopped_sender);
     });
     ready.recv_timeout(Duration::from_secs(10)).unwrap();
-    let key = Authenticator::open(TestLink(peer)).unwrap();
+    let key = Authenticator::open(TestLink {
+        peer,
+        _stopped: Stopped(stopped),
+    })
+    .unwrap();
     (Daemon { shutdown, done }, key)
 }
 
@@ -551,8 +584,8 @@ fn persistent_listing_tokens_survive_daemon_restart_and_need_writable_deletion()
             .read_only_management_token_with_protocol(b"1234", protocol)
             .unwrap();
         assert_eq!(key.passkeys(&repeated).unwrap(), first);
-        drop(key);
         daemon.finish().unwrap();
+        drop(key);
         let (daemon, mut key) = start(&dir);
         assert_eq!(key.passkeys(&token).unwrap(), first);
         let writable = key
@@ -587,14 +620,14 @@ fn persistent_listing_tokens_survive_daemon_restart_and_need_writable_deletion()
             key.passkeys(&token),
             Err(ClientError::Status(0x33))
         ));
-        drop(key);
         daemon.finish().unwrap();
+        drop(key);
         let (daemon, mut key) = start(&dir);
         assert!(matches!(
             key.passkeys(&token),
             Err(ClientError::Status(0x33))
         ));
-        drop(key);
         daemon.finish().unwrap();
+        drop(key);
     }
 }
