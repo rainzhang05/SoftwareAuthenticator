@@ -48,7 +48,7 @@
 //!   state it holds when that or the credential count cannot be read, an
 //!   enumeration continuation answers CTAP2_ERR_NOT_ALLOWED when the PIN
 //!   state cannot be read, a corrupt credential is skipped as a listing skips
-//!   it, and an unreadable large-blob array is served as the initial one;
+//!   it, and a corrupt large-blob array is served as the initial one;
 //! * a PIN-state read that fails with an I/O error changes nothing, except
 //!   the one reconciling a failed reset, after which the engine answers from
 //!   a closed state (PIN set and blocked, alwaysUv) until a read succeeds; a
@@ -319,7 +319,7 @@ struct Live {
 /// `command` (`None` for a U2F APDU), if one failed.  The engine tolerates
 /// some: getInfo answers from the PIN state it holds, a credential count that
 /// fails only leaves remainingDiscoverableCredentials out of getInfo, a
-/// corrupt credential is skipped as a listing skips it, and an unreadable
+/// corrupt credential is skipped as a listing skips it, and a corrupt
 /// large-blob array is served as the initial one (§6.10.2).
 fn failed_call(command: Option<u8>, events: &[Event]) -> Option<usize> {
     events
@@ -327,7 +327,7 @@ fn failed_call(command: Option<u8>, events: &[Event]) -> Option<usize> {
         .position(|event| match (event.call, event.fault) {
             (_, None) | (Call::PinWrite, _) => false,
             (Call::PinRead, _) => command != Some(CTAP_CMD_GET_INFO),
-            (Call::Count | Call::BlobRead, _) | (Call::Get, Some(Fault::Corrupt)) => false,
+            (Call::Count, _) | (Call::Get | Call::BlobRead, Some(Fault::Corrupt)) => false,
             _ => true,
         })
 }
@@ -1001,10 +1001,10 @@ impl Platform {
 
     /// Model the protocol's volatile counters separately from the engine.
     /// Only accepted fragments can change the committed array; reads compare
-    /// against that model even after a partial transfer was discarded.  An
-    /// array that cannot be read is served as the initial one (§6.10.2), and
-    /// a commit that fails leaves the complete array staged, so an empty
-    /// fragment at its end commits it again.
+    /// against that model even after a partial transfer was discarded.  A
+    /// corrupt array is served as the initial one (§6.10.2), and a commit
+    /// that fails leaves the complete array staged, so an empty fragment at
+    /// its end commits it again.
     fn observe_array(&mut self, request: &[u8], response: &[u8], events: &[Event]) {
         let now = self.engine.clock().now();
         if request.first() != Some(&CTAP_CMD_LARGE_BLOBS)
@@ -1049,10 +1049,9 @@ impl Platform {
                 let count = unsigned(Some(get)).expect("get is unsigned") as usize;
                 let offset = offset.expect("offset is required") as usize;
                 assert!(count <= 1_704, "oversized get accepted");
-                let served: &[u8] = if events
-                    .iter()
-                    .any(|event| event.call == Call::BlobRead && event.fault.is_some())
-                {
+                let served: &[u8] = if events.iter().any(|event| {
+                    event.call == Call::BlobRead && event.fault == Some(Fault::Corrupt)
+                }) {
                     &INITIAL_LARGE_BLOB_ARRAY
                 } else {
                     &self.committed
@@ -1110,7 +1109,8 @@ impl Platform {
             return;
         }
         assert!(offset + fragment.len() as u64 <= self.pending.length);
-        let protected = self.pin.is_some() || self.always_uv;
+        let live = self.live();
+        let protected = live.pin_set || live.always_uv;
         if protected {
             assert!(
                 get_int(&parameters, 5).is_some(),
@@ -3717,6 +3717,8 @@ fn fault_cases() -> Vec<Vec<Op>> {
         },
         get(),
     ]);
+    // A corrupt array reads as the initial one, and an I/O error fails the
+    // read and only it.
     cases.push(vec![
         write(),
         fault(BLOB_READ, CORRUPT),
@@ -4379,7 +4381,7 @@ mod tests {
             [make(ok), assertion(failed), info, assertion(ok)]
         );
         assert_eq!(traces[14], [blobs(failed), blobs(ok), blobs(ok)]);
-        assert_eq!(traces[15], [blobs(ok), blobs(ok), blobs(ok), blobs(ok)]);
+        assert_eq!(traces[15], [blobs(ok), blobs(ok), blobs(failed), blobs(ok)]);
     }
 
     /// After a PIN-state read error the token issued before it still works.

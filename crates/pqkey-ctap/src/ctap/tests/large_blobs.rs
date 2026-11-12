@@ -8,7 +8,10 @@ use crate::ctap::constants::*;
 use crate::ctap::large_blobs::MAX_FRAGMENT_LENGTH;
 use crate::ctap::pin::permissions::{PIN_PERMISSION_LBW, PIN_PERMISSION_MC};
 use crate::ctap::pin::token::ManualClock;
-use crate::store::{CredentialStore, INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY};
+use crate::store::{
+    CredentialStore, INITIAL_LARGE_BLOB_ARRAY, KeyDomain, MAX_SERIALIZED_LARGE_BLOB_ARRAY,
+    StoreError,
+};
 use ciborium::{de::from_reader, value::Value};
 use core::time::Duration;
 use sha2::{Digest, Sha256};
@@ -708,6 +711,39 @@ fn read_and_write_failures_and_reset_preserve_their_contracts() {
         [CTAP1_ERR_INVALID_SEQ]
     );
     assert_eq!(read(&mut restarted, 0, 1704), INITIAL_LARGE_BLOB_ARRAY);
+}
+
+/// Only a corrupt array is served as the initial one (§6.10.2).  A read that
+/// fails otherwise, as the file store's does with an I/O error or an unusable
+/// root key, answers CTAP2_ERR_PROCESSING and no array, which a platform
+/// cannot take for an empty one and replace with its own entry alone.  The
+/// next read serves the stored array.
+#[test]
+fn a_failed_read_serves_no_array() {
+    let store = TestStore::new();
+    let mut app = new_app(store.clone(), [0x81; 16]);
+    let bytes = array(33);
+    commit(&mut app, &bytes, None);
+    for err in [
+        StoreError::Io {
+            path: "large-blobs".into(),
+            source: std::io::Error::other("injected failure"),
+        },
+        StoreError::KeyUnavailable {
+            domain: KeyDomain::Credential,
+            detail: "injected failure".into(),
+        },
+    ] {
+        let name = err.to_string();
+        store.faults(|faults| faults.large_blob_array_errors.push_back(err));
+        assert_eq!(
+            app.call(&request(vec![(int(1), int(1704)), (int(3), int(0))])),
+            [CTAP2_ERR_PROCESSING],
+            "{name}"
+        );
+        store.faults(|faults| assert!(faults.large_blob_array_errors.is_empty(), "{name}"));
+        assert_eq!(read(&mut app, 0, 1704), bytes, "{name}");
+    }
 }
 
 #[test]

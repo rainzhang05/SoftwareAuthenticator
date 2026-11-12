@@ -119,8 +119,9 @@ failures and committed-but-unconfirmed outcomes, tracks live and published
 retry budgets, and reconstructs engines over the same published store. It also
 schedules I/O and corruption faults into PIN-state, credential, credential-set,
 signature-counter and large-blob reads and writes, and checks that each one
-fails only its command. Every fuzzed engine logs at Info into a discarding
-logger, so the request-log payload decode runs under fuzzing. Seeds
+fails only its command, or none where the engine tolerates it, such as a
+corrupt credential or large-blob array. Every fuzzed engine logs at Info into a
+discarding logger, so the request-log payload decode runs under fuzzing. Seeds
 cover these outcomes, retry recovery, protocol crossings and U2F disabled by
 always-UV. Fault controls exist only in unit tests and the fuzz harness.
 Large-blob tests cover fragmented writes, interrupted staging and restart

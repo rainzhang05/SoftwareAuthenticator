@@ -270,7 +270,10 @@ pub(super) struct Faults {
     /// `signature_counter` reports the record as corrupt.
     pub(super) signature_counter: bool,
     pub(super) set_signature_counter: bool,
+    /// `large_blob_array` reports the array as corrupt.
     pub(super) large_blob_array: bool,
+    /// The next `large_blob_array` reads fail with these errors, oldest first.
+    pub(super) large_blob_array_errors: VecDeque<StoreError>,
     pub(super) set_large_blob_array: bool,
 }
 
@@ -470,6 +473,10 @@ impl CredentialStore for TestStore {
     }
 
     fn large_blob_array(&self) -> Result<Vec<u8>, StoreError> {
+        let injected = self.lock().faults.large_blob_array_errors.pop_front();
+        if let Some(err) = injected {
+            return Err(err);
+        }
         if self.lock().faults.large_blob_array {
             return Err(StoreError::Corrupt {
                 object: "large-blobs".into(),

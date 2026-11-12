@@ -35,8 +35,9 @@ sensor software cannot press.
   File names are HMACs, so they reveal neither credentials nor sites.
   Discoverable credentials' optional large-blob keys receive the same
   encryption and erasure protections as their private keys.
-  An unreadable large-blob array is logged and served as its initial value;
-  it is replaced only by a committed write or a reset.
+  A corrupt large-blob array is logged and served as its initial value; it
+  is replaced only by a committed write or a reset. An array that cannot be
+  read fails the read instead.
 - **Old data after a reset.** A reset replaces the credential root key, so
   leftover copies of files, and the credential IDs that sites hold, can no
   longer be decrypted. It erases credential large-blob keys and restores the

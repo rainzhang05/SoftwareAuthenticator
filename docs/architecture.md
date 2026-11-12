@@ -611,8 +611,10 @@ flushes rely on filesystem and hardware guarantees. Unsupported directory
 flushes abort credential transaction preparation or produce `Unconfirmed`
 after publication. Authentication provides no trusted anti-rollback counter;
 whole-store snapshot restoration or removal of all format evidence cannot be
-distinguished reliably from older state. A missing or unreadable large-blob
+distinguished reliably from older state. A missing or corrupt large-blob
 array is served as the initial array; its next committed write replaces it.
+Any other error reading it answers CTAP2_ERR_PROCESSING: a platform that took
+it for empty would write back its own entry alone, erasing every other.
 [SECURITY.md](../SECURITY.md) describes the encryption-at-rest threat model.
 
 Discoverable credential IDs are `0x01` and 32 random bytes. Sealed IDs are

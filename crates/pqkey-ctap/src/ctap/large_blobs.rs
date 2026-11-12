@@ -6,7 +6,7 @@ use super::get_info::MAX_MSG_SIZE;
 use super::pin::permissions::PIN_PERMISSION_LBW;
 use super::pin::protocol::parse_required_pin_uv_auth_protocol;
 use super::storage::store_status;
-use crate::store::{INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY};
+use crate::store::{INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY, StoreError};
 
 use ciborium::{ser::into_writer, value::Value};
 use core::time::Duration;
@@ -89,10 +89,19 @@ impl CtapApp<'_> {
             if get > MAX_FRAGMENT_LENGTH {
                 return Err(CTAP1_ERR_INVALID_LENGTH);
             }
-            let array = self.store.large_blob_array().unwrap_or_else(|err| {
-                log::warn!("cannot read the large-blob array ({err}); using the initial array");
-                INITIAL_LARGE_BLOB_ARRAY.to_vec()
-            });
+            let array = match self.store.large_blob_array() {
+                Ok(array) => array,
+                // §6.10.2 lets an invalid stored array be reset to the initial
+                // one.  It is served instead, until a committed write replaces it.
+                Err(err @ StoreError::Corrupt { .. }) => {
+                    log::warn!("cannot read the large-blob array ({err}); using the initial array");
+                    INITIAL_LARGE_BLOB_ARRAY.to_vec()
+                }
+                // A failed read says nothing about the array.  Served the initial
+                // one, a platform would write back its own entry alone, erasing
+                // every other.
+                Err(err) => return Err(store_status("read the large-blob array", err)),
+            };
             if offset > array.len() as u64 {
                 return Err(CTAP1_ERR_INVALID_PARAMETER);
             }

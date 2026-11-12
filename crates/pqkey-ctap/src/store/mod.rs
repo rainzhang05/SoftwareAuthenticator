@@ -287,7 +287,9 @@ pub trait CredentialStore {
     ///
     /// Returns [`INITIAL_LARGE_BLOB_ARRAY`] when none has been written. An
     /// unreadable or invalid stored array returns an error and remains in
-    /// place; the engine logs the error and serves the initial array.
+    /// place. The engine logs the error and serves the initial array only for
+    /// an invalid one, [`StoreError::Corrupt`] (§6.10.2); any other error
+    /// fails the command with CTAP2_ERR_PROCESSING.
     fn large_blob_array(&self) -> Result<Vec<u8>, StoreError>;
 
     /// Atomically replace the serialized large-blob array.

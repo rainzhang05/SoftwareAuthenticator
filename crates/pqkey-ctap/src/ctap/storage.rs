@@ -7,7 +7,7 @@
 //! [`CredentialStore::list`] itself.  An error that reports damage to the
 //! credential set is logged with the damaged file, what fails and what to do
 //! ([`StoreError::damage_hint`]).
-//! An unreadable large-blob array instead uses its initial value (§6.10.2).
+//! A corrupt large-blob array instead uses its initial value (§6.10.2).
 
 use super::CtapApp;
 use super::pin::state::{PersistentPinState, PinState};
