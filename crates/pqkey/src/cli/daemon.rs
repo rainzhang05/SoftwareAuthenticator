@@ -160,6 +160,12 @@ pub fn start(state_dir: &Path, args: &DaemonArgs) -> io::Result<()> {
 pub fn plug_in(state_dir: &Path, args: &DaemonArgs) -> io::Result<Running> {
     state::ensure_state_dir(state_dir)?;
     if args.are_defaults() && uses_service(state_dir)? {
+        // Once the service has been started too often in a short time
+        // (StartLimitBurst=), systemd refuses to start it for a while, unless
+        // its failed state is reset first. Resetting a service that systemd
+        // has unloaded, as it does one that is inactive and not enabled,
+        // fails, but there is nothing to reset then.
+        let _ = UserService::action(ServiceAction::ResetFailed);
         UserService::action(ServiceAction::Start)?;
         let pid = wait_for_pid(state_dir, |_| true)?;
         return Ok(Running::Service(pid));

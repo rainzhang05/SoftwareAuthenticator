@@ -319,21 +319,18 @@ fn notification_server() -> Result<ServerInfo, ConnectError> {
 }
 
 /// Whether the installed user service runs the key on the default state
-/// directory, as `pqkey setup` arranges.
+/// directory, as `pqkey setup` arranges, and starts it with the session.
 fn service_problems(state_dir: &Path, running: Option<Running>) -> io::Result<Vec<Problem>> {
     if state_dir != default_state_dir() {
         return Ok(Vec::new());
     }
-    if !daemon::uses_service(state_dir)? {
-        return Ok(vec![Problem::new(
-            "the key does not start with your session",
-            "run `pqkey setup`",
-        )]);
+    let mut problems = UserService::problems(running.is_some())?;
+    if let Some(Running::Daemon(pid)) = running
+        && daemon::uses_service(state_dir)?
+    {
+        problems.push(UserService::manual_start_problem(pid)?);
     }
-    Ok(match running {
-        Some(Running::Daemon(pid)) => vec![UserService::manual_start_problem(pid)?],
-        _ => Vec::new(),
-    })
+    Ok(problems)
 }
 
 /// How often `pqkey setup` asks for a new PIN that was mistyped.
@@ -1506,9 +1503,9 @@ mod tests {
     /// the fix for how it runs: as the user service, or started by hand. It
     /// still exits with status 0. A key that asks, or that never answers,
     /// keeps its own problem and gets no such warning. Each child plays the
-    /// key itself; a fake systemctl says the service is installed, and that
-    /// the child is its main process, or, for a key started by hand, that
-    /// it has none.
+    /// key itself; a fake systemctl says the service is installed and
+    /// enabled, and that the child is its main process, or, for a key
+    /// started by hand, that it has none.
     #[test]
     fn status_names_a_key_that_approves_without_asking() {
         use std::os::unix::fs::PermissionsExt;
@@ -1521,6 +1518,7 @@ mod tests {
             &systemctl,
             r#"#!/bin/sh
 case "$*" in
+*LoadState,*) printf 'LoadState=loaded\nUnitFileState=enabled\n' ;;
 *LoadState*) echo loaded ;;
 *MainPID*) if [ "$PQKEY_STATUS_RUNS" = service ]; then echo "$PPID"; else echo 0; fi ;;
 *) exit 1 ;;
