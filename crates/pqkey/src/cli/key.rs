@@ -21,7 +21,9 @@ use pqkey_ctap::ctap::constants::{
     CTAP2_ERR_PIN_INVALID, CTAP2_ERR_PIN_NOT_SET, CTAP2_ERR_PIN_POLICY_VIOLATION,
     CTAP2_ERR_PROCESSING, CTAP2_ERR_PUAT_REQUIRED, CTAP2_ERR_USER_ACTION_TIMEOUT,
 };
-use pqkey_ctap::store::{DirectoryFlush, FileStore, damage_fix, damage_summary, damage_unchecked};
+use pqkey_ctap::store::{
+    DirectoryFlush, FileStore, StoreError, damage_fix, damage_summary, damage_unchecked,
+};
 use signal_hook::{consts::SIGINT, flag};
 
 use super::ConfigAction;
@@ -36,7 +38,7 @@ use crate::platform::{self, ClientLink};
 use crate::platform::{System, UserService};
 use crate::presence::notification::{ConnectError, Keep, NotificationServer, ServerInfo, sanitise};
 use crate::service;
-use crate::state::default_state_dir;
+use crate::state::{Room, default_state_dir};
 
 /// How long to wait for the running key's device and for access to it.
 const DEVICE_WAIT: Duration = Duration::from_secs(5);
@@ -128,7 +130,16 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
         Err(err) if err.kind() == io::ErrorKind::ResourceBusy => {
             return outln!("Key:      starting or stopping");
         }
-        result => result?,
+        // A state directory that cannot be looked into for the key's lock and
+        // pid: the problem, which status cannot list without the key's state.
+        Err(err) => {
+            let problem = unchecked_state_dir(state_dir, &err, false);
+            return Err(io::Error::new(
+                err.kind(),
+                format!("{}; {}", problem.what, problem.fix),
+            ));
+        }
+        Ok(running) => running,
     };
     match running {
         None => {
@@ -165,7 +176,7 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
             problems.extend(presence_problem(&info.1, running));
         }
     }
-    problems.extend(state_dir_problem(state_dir));
+    problems.extend(state_dir_problem(state_dir, running.is_some()));
     // Checking the credential store decrypts every credential: keep them out
     // of core files, and this process out of reach, as the daemon does.
     platform::disable_core_dumps()?;
@@ -318,11 +329,43 @@ fn presence_problem(args: &super::DaemonArgs, running: Running) -> Option<Proble
     ))
 }
 
-/// A state directory whose filesystem does not support flushing directories,
-/// where the key refuses to set or check a PIN and cannot save passkeys.
-fn state_dir_problem(state_dir: &Path) -> Option<Problem> {
-    let DirectoryFlush::Unsupported(err) = FileStore::directory_flush_in(state_dir) else {
-        return None;
+/// The room the key needs on the filesystem of its state directory, in bytes.
+/// Its largest write is a registration in a store of the earlier layout
+/// ([`FileStore`]): the format marker, the records directory, the credential
+/// record and the list of credentials, at most 33,054 bytes for the 1,000 the
+/// key holds; 12 blocks of 4 KiB, or 4 of 64 KiB, which is 256 KiB. 1 MiB,
+/// the most any one file of the store may take, leaves room to spare.
+const ROOM_BYTES: u64 = 1 << 20;
+/// The files and directories that write creates.
+const ROOM_FILES: u64 = 4;
+
+/// Where the key writes, which a full or read-only state filesystem stops.
+const WRITES: &str =
+    "but the key writes there as it starts and with every registration, sign-in and PIN entry";
+
+/// What keeps the key from using the filesystem of its state directory:
+/// [`state_fs_problem`] of what statvfs(3) says of it or, failing that, a
+/// filesystem that does not support flushing directories, where the key
+/// refuses to set or check a PIN and cannot save passkeys, or a flush that
+/// fails. It writes and creates nothing; the flush, of a directory that
+/// exists, changes nothing. A fix starts the key that is not `running`.
+fn state_dir_problem(state_dir: &Path, running: bool) -> Option<Problem> {
+    if let Some(problem) = state_fs_problem(state_dir, crate::state::room(state_dir), running) {
+        return Some(problem);
+    }
+    let err = match FileStore::directory_flush_in(state_dir) {
+        DirectoryFlush::Supported => return None,
+        DirectoryFlush::Unsupported(err) => err,
+        DirectoryFlush::Failed(err) => {
+            return match &err {
+                // A state directory the key has not created yet.
+                StoreError::Io { source, .. } if source.kind() == io::ErrorKind::NotFound => None,
+                StoreError::Io { source, .. } => {
+                    Some(unchecked_state_dir(state_dir, source, running))
+                }
+                err => Some(unchecked_state_dir(state_dir, err, running)),
+            };
+        }
     };
     Some(Problem::new(
         format!(
@@ -337,6 +380,84 @@ fn state_dir_problem(state_dir: &Path) -> Option<Problem> {
             state_dir.display()
         ),
     ))
+}
+
+/// The problem with a state directory whose filesystem has `room`: one that
+/// is read-only, or full, with less room than the key's largest write
+/// ([`ROOM_BYTES`], [`ROOM_FILES`]), or one that cannot be checked. A size the
+/// filesystem does not report is none. A fix starts the key that is not
+/// `running`.
+fn state_fs_problem(state_dir: &Path, room: io::Result<Room>, running: bool) -> Option<Problem> {
+    let room = match room {
+        Ok(room) => room,
+        Err(err) => return Some(unchecked_state_dir(state_dir, &err, running)),
+    };
+    let dir = state_dir.display();
+    let start = then_start(running);
+    if room.read_only {
+        return Some(Problem::new(
+            format!("the state directory {dir} is on a read-only filesystem, {WRITES}"),
+            format!(
+                "remount that filesystem read-write (one the kernel made read-only after an \
+                 error needs `fsck` first){start}"
+            ),
+        ));
+    }
+    let bytes = room.bytes.filter(|&bytes| bytes < ROOM_BYTES).map(|bytes| {
+        if bytes < 1024 {
+            format!("{bytes} B left")
+        } else {
+            format!("{} KiB left", bytes / 1024)
+        }
+    });
+    let files = room
+        .files
+        .filter(|&files| files < ROOM_FILES)
+        .map(|files| match files {
+            1 => "room for 1 more file".to_owned(),
+            _ => format!("room for {files} more files"),
+        });
+    let left: Vec<String> = bytes.into_iter().chain(files).collect();
+    if left.is_empty() {
+        return None;
+    }
+    Some(Problem::new(
+        format!(
+            "the state directory {dir} is on a full filesystem ({}), {WRITES}",
+            left.join(", ")
+        ),
+        format!(
+            "free some space on that filesystem (`df -h` and `df -i` show what each one has \
+             left){start}"
+        ),
+    ))
+}
+
+/// A state directory that `status` cannot check, with `err`. A fix starts
+/// the key that is not `running`.
+fn unchecked_state_dir(state_dir: &Path, err: &dyn std::fmt::Display, running: bool) -> Problem {
+    Problem::new(
+        format!(
+            "the state directory {} cannot be checked ({err}), and the key may not be able to \
+             use it either",
+            state_dir.display()
+        ),
+        format!(
+            "check that it is a directory of yours that you can read, under directories you can \
+             enter (`ls -ld` shows each one's owner and mode), and look in `journalctl -k` for \
+             disk errors{}",
+            then_start(running)
+        ),
+    )
+}
+
+/// The end of a fix that the key needs started again, unless it is `running`.
+fn then_start(running: bool) -> &'static str {
+    if running {
+        ""
+    } else {
+        ", then run `pqkey start`"
+    }
 }
 
 /// A credential store in `state_dir` that is damaged, with what fails, or
@@ -1414,9 +1535,10 @@ mod tests {
     #[test]
     fn status_reports_a_state_directory_that_cannot_keep_a_pin() {
         let dir = TempDir::new("status-flush");
-        assert_eq!(state_dir_problem(dir.path()), None);
-        assert_eq!(state_dir_problem(&dir.path().join("missing")), None);
-        let problem = state_dir_problem(Path::new("/proc")).expect("procfs cannot be flushed");
+        assert_eq!(state_dir_problem(dir.path(), false), None);
+        assert_eq!(state_dir_problem(&dir.path().join("missing"), false), None);
+        let problem =
+            state_dir_problem(Path::new("/proc"), false).expect("procfs cannot be flushed");
         assert!(problem.what.contains("cannot use a PIN"), "{problem:?}");
         assert!(problem.what.contains("(/proc: "), "{problem:?}");
         // The key is stopped before its directory moves, and started after.
@@ -1430,6 +1552,139 @@ mod tests {
         assert!(at("move /proc to a local filesystem") < at("run `pqkey start`"));
         assert!(problem.fix.contains("verify the copy"), "{problem:?}");
         assert!(problem.fix.contains("without a PIN"), "{problem:?}");
+    }
+
+    /// `status` names a state directory on a full filesystem, one with less
+    /// room than the key's largest write in bytes or in files, and on a
+    /// read-only one, whatever its room, with the fix, which starts a key
+    /// that does not run; and one it cannot check, with the error. Room
+    /// enough, or a size the filesystem does not report, is no problem.
+    #[test]
+    fn status_names_a_full_or_read_only_state_filesystem_with_its_fix() {
+        let dir = Path::new("/home/u/.local/share/pqkey");
+        let room = |bytes, files, read_only| {
+            Ok(Room {
+                bytes,
+                files,
+                read_only,
+            })
+        };
+        let writes = "but the key writes there as it starts and with every registration, sign-in \
+                      and PIN entry";
+        let start = ", then run `pqkey start`";
+        for (bytes, files) in [
+            (Some(ROOM_BYTES), Some(ROOM_FILES)),
+            (Some(u64::MAX), Some(u64::MAX)),
+            (None, None),
+            (None, Some(ROOM_FILES)),
+            (Some(ROOM_BYTES), None),
+        ] {
+            for running in [false, true] {
+                assert_eq!(
+                    state_fs_problem(dir, room(bytes, files, false), running),
+                    None,
+                    "{bytes:?} {files:?}"
+                );
+            }
+        }
+        let free = "free some space on that filesystem (`df -h` and `df -i` show what each one \
+                    has left)";
+        for (bytes, files, left) in [
+            (Some(0), Some(u64::MAX), "0 B left"),
+            (Some(1023), None, "1023 B left"),
+            (Some(1024), Some(ROOM_FILES), "1 KiB left"),
+            (Some(ROOM_BYTES - 1), None, "1023 KiB left"),
+            (
+                Some(ROOM_BYTES),
+                Some(ROOM_FILES - 1),
+                "room for 3 more files",
+            ),
+            (None, Some(0), "room for 0 more files"),
+            (Some(4096), Some(1), "4 KiB left, room for 1 more file"),
+        ] {
+            let what = format!(
+                "the state directory /home/u/.local/share/pqkey is on a full filesystem ({left}), \
+                 {writes}"
+            );
+            assert_eq!(
+                state_fs_problem(dir, room(bytes, files, false), false),
+                Some(Problem::new(&what, format!("{free}{start}"))),
+                "{left}"
+            );
+            assert_eq!(
+                state_fs_problem(dir, room(bytes, files, false), true),
+                Some(Problem::new(&what, free)),
+                "{left}"
+            );
+        }
+        let read_only = format!(
+            "the state directory /home/u/.local/share/pqkey is on a read-only filesystem, {writes}"
+        );
+        let remount = "remount that filesystem read-write (one the kernel made read-only after an \
+                       error needs `fsck` first)";
+        for (bytes, files) in [
+            (Some(u64::MAX), Some(u64::MAX)),
+            (Some(0), Some(0)),
+            (None, None),
+        ] {
+            assert_eq!(
+                state_fs_problem(dir, room(bytes, files, true), false),
+                Some(Problem::new(&read_only, format!("{remount}{start}"))),
+                "{bytes:?} {files:?}"
+            );
+            assert_eq!(
+                state_fs_problem(dir, room(bytes, files, true), true),
+                Some(Problem::new(&read_only, remount)),
+                "{bytes:?} {files:?}"
+            );
+        }
+        let unchecked = "the state directory /home/u/.local/share/pqkey cannot be checked \
+                         (Input/output error (os error 5)), and the key may not be able to use it \
+                         either";
+        let check = "check that it is a directory of yours that you can read, under directories \
+                     you can enter (`ls -ld` shows each one's owner and mode), and look in \
+                     `journalctl -k` for disk errors";
+        let failed = || Err(io::Error::from(nix::errno::Errno::EIO));
+        assert_eq!(
+            state_fs_problem(dir, failed(), false),
+            Some(Problem::new(unchecked, format!("{check}{start}")))
+        );
+        assert_eq!(
+            state_fs_problem(dir, failed(), true),
+            Some(Problem::new(unchecked, check))
+        );
+    }
+
+    /// The problem with a state directory that cannot be checked: under a
+    /// file, where statvfs(3) fails, or a socket, which statvfs(3) can check,
+    /// but which cannot be opened to be flushed; the fix starts the key.
+    /// (`status` itself stops before it lists problems for these two, where
+    /// it cannot open the key's lock in them: see `failed_service.rs`.)
+    #[test]
+    fn status_names_a_state_directory_it_cannot_check() {
+        let dir = TempDir::new("status-unchecked");
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        let socket = dir.path().join("socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        for (state_dir, err) in [
+            (file.join("pqkey"), "Not a directory (os error 20)"),
+            (socket, "No such device or address (os error 6)"),
+        ] {
+            let problem = state_dir_problem(&state_dir, false).expect("a problem");
+            assert_eq!(
+                problem.what,
+                format!(
+                    "the state directory {} cannot be checked ({err}), and the key may not be \
+                     able to use it either",
+                    state_dir.display()
+                )
+            );
+            assert!(
+                problem.fix.ends_with("disk errors, then run `pqkey start`"),
+                "{problem:?}"
+            );
+        }
     }
 
     /// What `status` and `setup` say about a key run with --presence

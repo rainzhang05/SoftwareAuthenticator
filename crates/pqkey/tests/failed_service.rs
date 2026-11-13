@@ -2,16 +2,18 @@
 //! `systemctl` in the place of the user manager: `pqkey status` names a
 //! service that systemd gave up restarting, where the cause is logged and
 //! the fix, after one `systemctl show`, and exits with status 0 even when its
-//! reader goes away; `pqkey start` resets the failed state before it starts
-//! the service, which systemd refuses for a while once it has given up, and
-//! starts a service whose reset fails, as where systemd has unloaded it.
+//! reader goes away, changes nothing in the state directory, and names one
+//! it cannot look into, with the fix; `pqkey start` resets the failed state
+//! before it starts the service, which systemd refuses for a while once it
+//! has given up, and starts a service whose reset fails, as where systemd
+//! has unloaded it.
 #![cfg(target_os = "linux")]
 
 use std::{
     env, fs,
     io::Read,
-    os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     thread,
     time::Duration,
@@ -195,6 +197,90 @@ fn status_names_a_service_that_systemd_gave_up_on() {
     );
     assert!(out.contains(GAVE_UP_PROBLEM), "{out}");
     assert_eq!(home.calls(), [STATUS_CALL]);
+}
+
+/// Every file and directory under `dir`, with what writing, replacing or
+/// removing it, creating or removing an entry in it, or changing its mode
+/// changes: its inode, mode, size, and modification and change times.
+fn listing(dir: &Path) -> Vec<(PathBuf, [i64; 7])> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let meta = fs::symlink_metadata(&path).unwrap();
+        if meta.is_dir() {
+            found.extend(listing(&path));
+        }
+        let [ino, mode, size] = [meta.ino(), meta.mode().into(), meta.size()]
+            .map(|value| i64::try_from(value).unwrap());
+        found.push((
+            path,
+            [
+                ino,
+                mode,
+                size,
+                meta.mtime(),
+                meta.mtime_nsec(),
+                meta.ctime(),
+                meta.ctime_nsec(),
+            ],
+        ));
+    }
+    found.sort();
+    found
+}
+
+/// `pqkey status` writes, creates and removes nothing in the key's state
+/// directory, or in the directory above it: not where the key left its
+/// state, store and lock, its log and its pid file, and not where it has not
+/// created its state directory yet.
+#[test]
+fn status_changes_nothing_in_the_state_directory() {
+    let home = Home::new("unchanged", GAVE_UP);
+    let state = home.state_dir();
+    pqkey_ctap::store::FileStore::open(&state).unwrap();
+    drop(StateLock::try_acquire(&state).unwrap().unwrap());
+    fs::write(state.join("authenticator.log"), "logged\n").unwrap();
+    fs::write(state.join("authenticator.pid"), "4242\n").unwrap();
+    let data = home.0.join("data");
+    let before = listing(&data);
+    assert!(before.len() > 6, "{before:?}");
+    let status = home.pqkey(&["status"]).output().unwrap();
+    assert_eq!(status.status.code(), Some(0), "{status:?}");
+    assert!(text(&status.stdout).contains(GAVE_UP_PROBLEM), "{status:?}");
+    assert_eq!(listing(&data), before);
+
+    fs::remove_dir_all(&state).unwrap();
+    let before = listing(&data);
+    let status = home.pqkey(&["status"]).output().unwrap();
+    assert_eq!(status.status.code(), Some(0), "{status:?}");
+    assert_eq!(listing(&data), before);
+    assert!(!state.exists());
+}
+
+/// `pqkey status` on a state directory it cannot look into for the key's
+/// lock, here a file, fails with that problem and its fix, before it asks
+/// systemd anything.
+#[test]
+fn status_names_a_state_directory_it_cannot_look_into() {
+    let home = Home::new("unreadable", GAVE_UP);
+    let state = home.state_dir();
+    fs::remove_dir(&state).unwrap();
+    fs::write(&state, "").unwrap();
+    let status = home.pqkey(&["status"]).output().unwrap();
+    assert_eq!(status.status.code(), Some(1), "{status:?}");
+    assert_eq!(text(&status.stdout), "");
+    assert_eq!(
+        text(&status.stderr),
+        format!(
+            "pqkey: the state directory {state} cannot be checked (cannot open \
+             {state}/authenticator.lock: Not a directory (os error 20)), and the key may not be \
+             able to use it either; check that it is a directory of yours that you can read, \
+             under directories you can enter (`ls -ld` shows each one's owner and mode), and \
+             look in `journalctl -k` for disk errors, then run `pqkey start`\n",
+            state = state.display()
+        )
+    );
+    assert_eq!(home.calls(), Vec::<String>::new());
 }
 
 /// `pqkey status` still exits with status 0, and says nothing, when its

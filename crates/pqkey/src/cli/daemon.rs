@@ -24,6 +24,7 @@ use nix::{
     sys::signal::{self, Signal},
     unistd::{self, Pid},
 };
+use pqkey_ctap::store::StoreError;
 
 use crate::cli::output::{errln, outln};
 use crate::cli::{DaemonArgs, daemon_info::DaemonInfo};
@@ -73,12 +74,41 @@ fn starting_or_stopping() -> io::Error {
     )
 }
 
+/// `err`, which kept the key from starting or stopped it, with the fix where
+/// a full or read-only filesystem caused it: make room, or make it writable,
+/// then start the key again. Any other error is returned as it is.
+fn with_fix(err: io::Error) -> io::Error {
+    // The credential store's own errors name their file, and keep the cause.
+    let kind = match err
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<StoreError>())
+    {
+        Some(StoreError::Io { source, .. }) => source.kind(),
+        _ => err.kind(),
+    };
+    let fix = match kind {
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => {
+            "free some space on its filesystem"
+        }
+        io::ErrorKind::ReadOnlyFilesystem => "make its filesystem writable",
+        _ => return err,
+    };
+    io::Error::new(err.kind(), format!("{err}; {fix}, then run `pqkey start`"))
+}
+
 /// `pqkey run`: the key itself, in the foreground until it is told to stop,
 /// holding the state directory's lock throughout.  The pid file is published
 /// once the virtual device exists, or once the key first keeps it unplugged
 /// because another user's session is active on its seat or the key cannot
-/// tell from the seat's record who is, and removed on the way out.
+/// tell from the seat's record who is, and removed on the way out.  An error
+/// from a full or read-only filesystem says what to do ([`with_fix`]): it is
+/// what the user service's log shows after systemd gave up restarting it.
 pub fn run(state_dir: PathBuf, args: &DaemonArgs) -> io::Result<()> {
+    run_key(state_dir, args).map_err(with_fix)
+}
+
+/// [`run`], with errors that name what failed.
+fn run_key(state_dir: PathBuf, args: &DaemonArgs) -> io::Result<()> {
     state::ensure_state_dir(&state_dir)?;
     let config = args
         .to_runner_config(state_dir.clone())
@@ -145,7 +175,7 @@ pub fn start(state_dir: &Path, args: &DaemonArgs) -> io::Result<()> {
     if state_lock::daemon_state(state_dir)? != DaemonState::Stopped {
         return Err(already_running(state_dir));
     }
-    let how = plug_in(state_dir, args)?;
+    let how = plug_in(state_dir, args).map_err(with_fix)?;
     match how {
         Running::Service(pid) => outln!("Key started (pid {pid}, {})", UserService::DESCRIPTION),
         Running::Daemon(pid) => outln!(
@@ -269,7 +299,8 @@ fn spawn_daemon(state_dir: &Path, args: &DaemonArgs) -> io::Result<Pid> {
         .create(true)
         .append(true)
         .mode(0o600)
-        .open(&log_path)?;
+        .open(&log_path)
+        .map_err(|err| state::path_error(err, "open the log", &log_path))?;
     let log_offset = log.metadata()?.len();
 
     let mut command = ProcessCommand::new(env::current_exe()?);
@@ -336,4 +367,91 @@ fn read_log_from(path: &Path, offset: u64) -> String {
 /// Whether this state directory is the installed user's service.
 pub fn uses_service(state_dir: &Path) -> io::Result<bool> {
     Ok(state_dir == default_state_dir() && UserService::installed()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TempDir;
+
+    /// An error from a full or read-only filesystem, the state files' and
+    /// the credential store's, which name their file, gets its fix: make room
+    /// or make it writable, then start the key. Any other error is returned
+    /// as it is, so a key that runs already still exits with status 3.
+    #[test]
+    fn a_full_or_read_only_filesystem_gets_its_fix() {
+        let path = Path::new("/home/u/.local/share/pqkey/authenticator.info");
+        for (errno, fix) in [
+            (Errno::ENOSPC, "free some space on its filesystem"),
+            (Errno::EDQUOT, "free some space on its filesystem"),
+            (Errno::EROFS, "make its filesystem writable"),
+        ] {
+            let cause = io::Error::from(errno);
+            let err = state::path_error(io::Error::from(errno), "write", path);
+            let fixed = with_fix(err);
+            assert_eq!(fixed.kind(), cause.kind());
+            assert_eq!(
+                fixed.to_string(),
+                format!(
+                    "cannot write {}: {cause}; {fix}, then run `pqkey start`",
+                    path.display()
+                )
+            );
+            let store = io::Error::other(StoreError::Io {
+                path: path.to_owned(),
+                source: io::Error::from(errno),
+            });
+            assert_eq!(
+                with_fix(store).to_string(),
+                format!("{}: {cause}; {fix}, then run `pqkey start`", path.display())
+            );
+        }
+        let denied = state::path_error(io::Error::from(Errno::EACCES), "write", path);
+        let message = denied.to_string();
+        assert_eq!(with_fix(denied).to_string(), message);
+        let store = io::Error::other(StoreError::Io {
+            path: path.to_owned(),
+            source: io::Error::from(Errno::EIO),
+        });
+        let message = store.to_string();
+        assert_eq!(with_fix(store).to_string(), message);
+        let dir = TempDir::new("daemon-fix");
+        let running = with_fix(already_running(dir.path()));
+        assert_eq!(
+            crate::cli::exit_status(&Err(running)),
+            crate::cli::EXIT_ALREADY_RUNNING
+        );
+    }
+
+    /// `pqkey start` names the log it cannot open for a key it would run in
+    /// the background, before it runs one.
+    #[test]
+    fn start_names_a_log_it_cannot_open() {
+        let dir = TempDir::new("daemon-start-log");
+        std::fs::create_dir(log_path(dir.path())).unwrap();
+        let err = start(dir.path(), &DaemonArgs::default()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "cannot open the log {}: Is a directory (os error 21)",
+                log_path(dir.path()).display()
+            )
+        );
+    }
+
+    /// `pqkey run` on a state directory that cannot be created names it.
+    #[test]
+    fn run_names_a_state_directory_it_cannot_create() {
+        let dir = TempDir::new("daemon-run-file");
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        let err = run(file.join("pqkey"), &DaemonArgs::default()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "cannot create the state directory {}: File exists (os error 17)",
+                file.join("pqkey").display()
+            )
+        );
+    }
 }

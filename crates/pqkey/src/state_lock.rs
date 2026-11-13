@@ -25,6 +25,8 @@ use nix::{
     unistd::Pid,
 };
 
+use crate::state::path_error;
+
 pub const LOCK_FILE: &str = "authenticator.lock";
 pub const PID_FILE: &str = "authenticator.pid";
 pub const INFO_FILE: &str = "authenticator.info";
@@ -41,15 +43,18 @@ pub struct StateLock {
 }
 
 impl StateLock {
-    /// Take the lock, or return `None` if another process holds it.
+    /// Take the lock, or return `None` if another process holds it. An error
+    /// names the lock file.
     pub fn try_acquire(state_dir: &Path) -> io::Result<Option<Self>> {
+        let path = state_dir.join(LOCK_FILE);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .mode(0o600)
-            .open(state_dir.join(LOCK_FILE))?;
+            .open(&path)
+            .map_err(|err| path_error(err, "open", &path))?;
         let deadline = Instant::now() + ACQUIRE_PATIENCE;
         // `Flock::lock` takes the file by value and hands it back with the
         // error, so each retry locks the file it just got back.
@@ -63,18 +68,20 @@ impl StateLock {
                 }
                 Err((_, Errno::EWOULDBLOCK)) => return Ok(None),
                 Err((returned, Errno::EINTR)) => file = returned,
-                Err((_, err)) => return Err(err.into()),
+                Err((_, err)) => return Err(path_error(err.into(), "lock", &path)),
             }
         }
     }
 }
 
-/// Whether another process holds the lock on `state_dir`.
+/// Whether another process holds the lock on `state_dir`. An error names the
+/// lock file.
 pub fn is_locked(state_dir: &Path) -> io::Result<bool> {
-    let file = match File::open(state_dir.join(LOCK_FILE)) {
+    let path = state_dir.join(LOCK_FILE);
+    let file = match File::open(&path) {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(err),
+        Err(err) => return Err(path_error(err, "open", &path)),
     };
     let mut file = file;
     loop {
@@ -84,7 +91,7 @@ pub fn is_locked(state_dir: &Path) -> io::Result<bool> {
             Ok(_flock) => return Ok(false),
             Err((_, Errno::EWOULDBLOCK)) => return Ok(true),
             Err((returned, Errno::EINTR)) => file = returned,
-            Err((_, err)) => return Err(err.into()),
+            Err((_, err)) => return Err(path_error(err.into(), "lock", &path)),
         }
     }
 }
@@ -113,9 +120,11 @@ pub fn daemon_state(state_dir: &Path) -> io::Result<DaemonState> {
 
 /// Read the pid file. Content that does not parse counts as no pid, and so
 /// does a pid that no daemon can have: 0, 1 (init), or a negative number,
-/// which kill(2) would take for a process group or for every process.
+/// which kill(2) would take for a process group or for every process. An
+/// error names the pid file.
 pub fn read_pid(state_dir: &Path) -> io::Result<Option<Pid>> {
-    match fs::read_to_string(state_dir.join(PID_FILE)) {
+    let path = state_dir.join(PID_FILE);
+    match fs::read_to_string(&path) {
         Ok(contents) => Ok(contents
             .trim()
             .parse::<i32>()
@@ -123,7 +132,7 @@ pub fn read_pid(state_dir: &Path) -> io::Result<Option<Pid>> {
             .filter(|&pid| pid > 1)
             .map(Pid::from_raw)),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err),
+        Err(err) => Err(path_error(err, "read", &path)),
     }
 }
 
@@ -142,17 +151,20 @@ pub fn write_info_file(state_dir: &Path, _lock: &StateLock, bytes: &[u8]) -> io:
     write_file(state_dir, INFO_FILE, bytes)
 }
 
+/// Replace `state_dir/name` with `bytes`. An error names that file.
 fn write_file(state_dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let path = state_dir.join(name);
+    let failed = |err| path_error(err, "write", &path);
     let temporary = state_dir.join(format!("{name}.{}.tmp", process::id()));
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(&temporary)?;
-    file.write_all(bytes)?;
-    fs::rename(&temporary, path)
+        .open(&temporary)
+        .map_err(failed)?;
+    file.write_all(bytes).map_err(failed)?;
+    fs::rename(&temporary, &path).map_err(failed)
 }
 
 /// Remove the pid file. Only the holder of the lock may do this.
@@ -165,9 +177,11 @@ pub fn remove_info_file(state_dir: &Path, _lock: &StateLock) -> io::Result<()> {
     remove_file(state_dir, INFO_FILE)
 }
 
+/// Remove `state_dir/name`, if it exists. An error names that file.
 fn remove_file(state_dir: &Path, name: &str) -> io::Result<()> {
-    match fs::remove_file(state_dir.join(name)) {
-        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+    let path = state_dir.join(name);
+    match fs::remove_file(&path) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(path_error(err, "remove", &path)),
         _ => Ok(()),
     }
 }
@@ -238,6 +252,67 @@ mod tests {
         remove_pid_file(dir.path(), &lock).unwrap();
         remove_pid_file(dir.path(), &lock).unwrap();
         assert_eq!(read_pid(dir.path()).unwrap(), None);
+    }
+
+    /// A failed write of the pid file or of the daemon's information names
+    /// the file, here on a full disk as /dev/full plays one: the temporary
+    /// file each is written to first is a link to it. So does a lock file
+    /// that cannot be opened, to take the lock or to look at it, a pid file
+    /// that cannot be read, and a file that cannot be removed.
+    #[test]
+    fn a_state_file_that_fails_is_named() {
+        let dir = TempDir::new("lock-dev-full");
+        let lock = StateLock::try_acquire(dir.path()).unwrap().unwrap();
+        for name in [PID_FILE, INFO_FILE] {
+            let temporary = dir.path().join(format!("{name}.{}.tmp", process::id()));
+            std::os::unix::fs::symlink("/dev/full", temporary).unwrap();
+        }
+        for (result, name) in [
+            (write_pid_file(dir.path(), &lock), PID_FILE),
+            (write_info_file(dir.path(), &lock, b"info"), INFO_FILE),
+        ] {
+            let err = result.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::StorageFull);
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "cannot write {}: No space left on device (os error 28)",
+                    dir.path().join(name).display()
+                )
+            );
+        }
+        let missing = dir.path().join("missing");
+        assert_eq!(
+            StateLock::try_acquire(&missing).unwrap_err().to_string(),
+            format!(
+                "cannot open {}: No such file or directory (os error 2)",
+                missing.join(LOCK_FILE).display()
+            )
+        );
+        let file = dir.path().join("file");
+        fs::write(&file, b"").unwrap();
+        assert_eq!(
+            is_locked(&file).unwrap_err().to_string(),
+            format!(
+                "cannot open {}: Not a directory (os error 20)",
+                file.join(LOCK_FILE).display()
+            )
+        );
+        fs::create_dir(dir.path().join(PID_FILE)).unwrap();
+        assert_eq!(
+            read_pid(dir.path()).unwrap_err().to_string(),
+            format!(
+                "cannot read {}: Is a directory (os error 21)",
+                dir.path().join(PID_FILE).display()
+            )
+        );
+        assert_eq!(
+            remove_pid_file(dir.path(), &lock).unwrap_err().to_string(),
+            format!(
+                "cannot remove {}: Is a directory (os error 21)",
+                dir.path().join(PID_FILE).display()
+            )
+        );
     }
 
     #[test]
