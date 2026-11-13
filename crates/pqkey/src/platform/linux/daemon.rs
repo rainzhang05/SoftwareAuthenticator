@@ -232,6 +232,43 @@ pub fn systemctl(args: &[&str]) -> io::Result<String> {
     }
 }
 
+/// A value as `systemctl --user show-environment` prints it: as it is, or,
+/// where a shell would read it otherwise, as one with `;` or a space, quoted
+/// as `$'…'`, with `\` and `'` escaped by a backslash and control characters
+/// as C escapes (systemd 249, 252 and 255).
+fn shown_value(shown: &str) -> String {
+    let Some(quoted) = shown
+        .strip_prefix("$'")
+        .and_then(|rest| rest.strip_suffix('\''))
+    else {
+        return shown.to_owned();
+    };
+    let mut value = Vec::with_capacity(quoted.len());
+    let mut bytes = quoted.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte != b'\\' {
+            value.push(byte);
+            continue;
+        }
+        value.push(match bytes.next().unwrap_or(b'\\') {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 0x0b,
+            b'f' => 0x0c,
+            b'r' => b'\r',
+            // Three octal digits.
+            first @ b'0'..=b'7' => bytes.by_ref().take(2).fold(first - b'0', |byte, digit| {
+                byte.wrapping_mul(8).wrapping_add(digit.wrapping_sub(b'0'))
+            }),
+            // `\\` and `\'`.
+            escaped => escaped,
+        });
+    }
+    String::from_utf8_lossy(&value).into_owned()
+}
+
 /// Whether systemd-logind keeps the user's service manager running from
 /// boot and after logout (`loginctl enable-linger`), as its `Linger`
 /// property says. `None` where it cannot say, as for a user it does not
@@ -321,22 +358,27 @@ impl UserService {
         Ok((!super::dbus::is_tcp_address(&address)).then_some(address))
     }
 
-    /// Whether the user manager gives the services it starts `address` as
-    /// their session bus.
-    fn gives_bus(address: &str) -> io::Result<bool> {
-        let wanted = format!("DBUS_SESSION_BUS_ADDRESS={address}");
+    /// The DBUS_SESSION_BUS_ADDRESS in the user manager's environment block,
+    /// which the services it starts inherit, if it has one.
+    fn given_bus() -> io::Result<Option<String>> {
         Ok(systemctl(&["show-environment"])?
             .lines()
-            .any(|line| line == wanted))
+            .find_map(|line| line.strip_prefix("DBUS_SESSION_BUS_ADDRESS="))
+            .map(shown_value))
     }
 
-    /// Whether the user manager gives the services it starts this shell's
-    /// session bus, as [`Self::prepare_session`] arranges.
-    pub fn gives_shell_bus() -> io::Result<bool> {
-        match Self::shell_bus()? {
-            Some(address) => Self::gives_bus(&address),
-            None => Ok(false),
-        }
+    /// The session bus a service started with the bus `given` uses: that one,
+    /// or without one the per-user bus, unless it is a bus over TCP, which
+    /// the service cannot use.
+    fn service_bus_of(given: Option<String>) -> Option<String> {
+        let bus = super::dbus::session_bus_address(given.as_deref().map(std::ffi::OsStr::new));
+        (!super::dbus::is_tcp_address(&bus)).then_some(bus)
+    }
+
+    /// The session bus the user manager gives the services it starts, the
+    /// daemon among them, unless that is a bus over TCP.
+    pub fn service_bus() -> io::Result<Option<String>> {
+        Ok(Self::service_bus_of(Self::given_bus()?))
     }
 
     /// Have the user manager give the services it starts, the daemon among
@@ -344,22 +386,21 @@ impl UserService {
     /// a notification server there that can ask for approval. A bus that
     /// fails that check, as one left over from an earlier login, is not
     /// handed on: every user service started afterwards would inherit it.
-    /// Returns whether the manager gives services this shell's bus now.
-    pub fn prepare_session(can_ask: impl FnOnce(&str) -> bool) -> io::Result<bool> {
-        let Some(address) = Self::shell_bus()? else {
-            return Ok(false);
-        };
-        if Self::gives_bus(&address)? {
-            return Ok(true);
+    /// Returns the bus services get now, as [`Self::service_bus`] says.
+    pub fn prepare_session(can_ask: impl FnOnce(&str) -> bool) -> io::Result<Option<String>> {
+        let shell = Self::shell_bus()?;
+        let given = Self::given_bus()?;
+        if let Some(address) = shell
+            && given.as_deref() != Some(address.as_str())
+            && can_ask(&address)
+        {
+            systemctl(&[
+                "set-environment",
+                &format!("DBUS_SESSION_BUS_ADDRESS={address}"),
+            ])?;
+            return Ok(Some(address));
         }
-        if !can_ask(&address) {
-            return Ok(false);
-        }
-        systemctl(&[
-            "set-environment",
-            &format!("DBUS_SESSION_BUS_ADDRESS={address}"),
-        ])?;
-        Ok(true)
+        Ok(Self::service_bus_of(given))
     }
     pub fn action(action: ServiceAction) -> io::Result<()> {
         let action = match action {
@@ -648,6 +689,31 @@ exit 0
         assert!(!managed_unit(&format!(
             "{earlier}\nEnvironment=CUSTOM=yes\n"
         )));
+    }
+
+    /// Values as `systemctl --user show-environment` printed them on systemd
+    /// 249, 252 and 255, after `set-environment` set them, read back as set.
+    #[test]
+    fn environment_values_systemctl_quotes_are_read_back_as_set() {
+        for (shown, value) in [
+            (
+                "unix:path=/run/user/1000/bus",
+                "unix:path=/run/user/1000/bus",
+            ),
+            ("a,b=c:d/e-f_g.h%20#~{}", "a,b=c:d/e-f_g.h%20#~{}"),
+            ("é", "é"),
+            (
+                "$'unix:path=/tmp/a;unix:path=/tmp/b'",
+                "unix:path=/tmp/a;unix:path=/tmp/b",
+            ),
+            ("$'unix:path=/tmp/q x/bus'", "unix:path=/tmp/q x/bus"),
+            ("$'*?[!()$\"'", "*?[!()$\""),
+            (r"$'a\'b\\c'", r"a'b\c"),
+            (r"$'\a\b\t\n\v\f\r'", "\x07\x08\t\n\x0b\x0c\r"),
+            (r"$'a\001b\033c\177'", "a\x01b\x1bc\x7f"),
+        ] {
+            assert_eq!(shown_value(shown), value, "{shown}");
+        }
     }
 
     /// Setup replaces an installed unit only if, apart from `ExecStart=`, it

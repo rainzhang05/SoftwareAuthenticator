@@ -142,7 +142,10 @@ impl DaemonInfo {
         })
     }
 
-    /// The provider checked by setup must be the one the daemon can reach.
+    /// Whether the daemon's DBUS_SESSION_BUS_ADDRESS is this process's. Setup
+    /// compares the daemon's bus with the user manager's instead
+    /// ([`Self::session_bus_address`]).
+    #[cfg(test)]
     pub fn session_bus_matches(&self) -> bool {
         self.session_bus
             == std::env::var_os("DBUS_SESSION_BUS_ADDRESS")

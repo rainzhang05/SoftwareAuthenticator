@@ -271,10 +271,13 @@ fn running_problems_of(
             None => system.notification_problem(&notification_server())?,
         }),
         // Setup does not restart a running key for a changed drop-in: the
-        // key is stopped first, as for --presence auto-approve.
+        // key is stopped first, as for --presence auto-approve. A key started
+        // by hand has the option from its own command line; the service then
+        // has nothing to change unless its ExecStart= has it too.
         super::PresenceArg::Unanswered => problems.push(Problem::new(
             "the configured presence provider never answers requests",
-            "configure the service to use --presence notify, then run `pqkey stop && pqkey setup`",
+            "configure the service to use --presence notify where `systemctl --user cat pqkey` \
+             shows --presence unanswered, then run `pqkey stop && pqkey setup`",
         )),
         // Nothing keeps browsers from using it; `presence_warning` names it.
         super::PresenceArg::AutoApprove => {}
@@ -1547,8 +1550,9 @@ esac
                     assert_eq!(warnings, [None, None]);
                     expected.push(Problem::new(
                         "the configured presence provider never answers requests",
-                        "configure the service to use --presence notify, then run `pqkey stop && \
-                         pqkey setup`",
+                        "configure the service to use --presence notify where `systemctl --user \
+                         cat pqkey` shows --presence unanswered, then run `pqkey stop && pqkey \
+                         setup`",
                     ));
                 }
             }
@@ -1682,8 +1686,9 @@ esac
                 ("unanswered", _) => assert!(
                     stdout.contains(
                         "  ! the configured presence provider never answers requests\n    Fix: \
-                         configure the service to use --presence notify, then run `pqkey stop && \
-                         pqkey setup`\n"
+                         configure the service to use --presence notify where `systemctl --user \
+                         cat pqkey` shows --presence unanswered, then run `pqkey stop && pqkey \
+                         setup`\n"
                     ),
                     "{context}"
                 ),
