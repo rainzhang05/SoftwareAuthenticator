@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # The state of pqkey on this computer, for when something does not work: the
-# installed binary against this clone, the key, its service, its devices and
-# its recent log. It changes nothing.
+# installed binary against this clone, the key, its service, unit and session
+# buses, its devices and its recent log. It changes nothing and writes no file.
 #
 #   scripts/diagnose.sh
 set -uo pipefail
+# No log (lib.sh): a no_log of this script's own, not exported.
+declare +x no_log=1
 . "$(dirname "$0")/lib.sh"
 
 indent() { sed 's/^/  /'; }
@@ -18,7 +20,7 @@ else
   echo "  Binary:   not installed; run ./install.sh"
 fi
 echo "  Clone:    $(git log -1 --format='%h %s (%cs)' 2>/dev/null)"
-changes=$(git status --porcelain 2>/dev/null | wc -l)
+changes=$(git --no-optional-locks status --porcelain 2>/dev/null | wc -l)
 [ "$changes" = 0 ] || echo "            $changes uncommitted change(s)"
 
 if [ -n "${binary:-}" ]; then
@@ -30,6 +32,40 @@ heading "Service"
 echo "  pqkey.service: $(systemctl --user is-enabled pqkey 2>&1), $(systemctl --user is-active pqkey 2>&1)"
 exec_start=$(systemctl --user show -p ExecStart --value pqkey 2>/dev/null | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
 [ -z "$exec_start" ] || echo "  Runs:          $exec_start"
+echo "  Last run:      $(systemctl --user show -p Result -p ExecMainStatus -p NRestarts pqkey 2>&1 | paste -sd ' ' -)"
+unit=$(systemctl --user show -p FragmentPath --value pqkey 2>/dev/null)
+if [ -z "$unit" ]; then
+  echo "  Unit file:     none"
+elif cmp -s <(grep -v '^ExecStart=' "$unit") <(grep -v '^ExecStart=' contrib/systemd/user/pqkey.service); then
+  echo "  Unit file:     $unit, as in this clone but for ExecStart="
+else
+  echo "  Unit file:     $unit, not as in this clone"
+fi
+drop_ins=$(systemctl --user show -p DropInPaths --value pqkey 2>/dev/null)
+echo "  Drop-ins:      ${drop_ins:-none}"
+# The session bus the running key published (authenticator.info: version, pid,
+# device, inode, then the bus in hex after an x, or - for none), against this
+# shell's and the one the user manager gives the services it starts.
+info=${XDG_DATA_HOME:-$HOME/.local/share}/pqkey/authenticator.info
+key_bus="none published"
+if [ -r "$info" ] && read -r version pid _ _ bus <"$info"; then
+  if [ "$version" = pqkey-daemon-v2 ]; then
+    case $bus in
+      x*) key_bus=$(printf '%b' "$(printf %s "${bus#x}" | sed 's/../\\x&/g')") ;;
+      *) key_bus="none, so unix:path=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus" ;;
+    esac
+    [ -d "/proc/$pid" ] || key_bus="$key_bus (published by pid $pid, which is not running)"
+  else
+    key_bus="unknown: authenticator.info is ${version:-empty}, not pqkey-daemon-v2"
+  fi
+fi
+echo "  Key's bus:     $key_bus"
+echo "  Shell's bus:   ${DBUS_SESSION_BUS_ADDRESS:-none}"
+manager_bus=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p')
+echo "  Manager's bus: ${manager_bus:-none}"
+
+heading "Unit (systemctl --user cat pqkey)"
+systemctl --user cat --no-pager pqkey 2>&1 | indent
 
 heading "Devices"
 if [ -e /sys/class/misc/uhid ]; then

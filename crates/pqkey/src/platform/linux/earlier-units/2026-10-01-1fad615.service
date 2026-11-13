@@ -1,0 +1,100 @@
+# systemd user unit for pqkey, the ML-DSA software authenticator.
+#
+# The authenticator is a security key for your own desktop session: your
+# browser uses it, and its credentials live in your home directory, so it runs
+# under your user service manager rather than as a system service. It uses the
+# same state directory as the pqkey CLI does by default, $XDG_DATA_HOME/pqkey,
+# or ~/.local/share/pqkey when XDG_DATA_HOME is unset. If you set
+# XDG_DATA_HOME in your shell, set it for the user manager as well (see
+# environment.d(5)), or the two will use different directories.
+#
+# Setup: "pqkey setup" installs this unit, with ExecStart naming the pqkey
+# binary it runs from, and starts it. By hand:
+#   1. Install contrib/udev/70-pqkey.rules as described in that file, add
+#      yourself to its group, and log in again.
+#   2. Install the binary where this unit expects it:
+#        install -D -m 755 target/release/pqkey ~/.local/bin/pqkey
+#   3. Install and start the unit:
+#        install -D -m 644 pqkey.service ~/.config/systemd/user/pqkey.service
+#        systemctl --user daemon-reload
+#        systemctl --user enable --now pqkey.service
+#
+# User presence: every registration, sign-in and reset shows a desktop
+# notification with Approve and Deny buttons, sent to the notification server
+# of your desktop over the D-Bus session bus. The service needs nothing extra
+# for that:
+#   - It finds the session bus through DBUS_SESSION_BUS_ADDRESS, which the user
+#     service manager passes to its services where the session bus is the
+#     per-user bus at $XDG_RUNTIME_DIR/bus (dbus-user-session or dbus-broker,
+#     the default on current distributions), and without it at
+#     $XDG_RUNTIME_DIR/bus itself. Where the desktop instead starts a bus of
+#     its own per login (dbus-launch), import its address into the user
+#     manager from the desktop session, before a request comes in:
+#        systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS
+#   - It connects anew for each request, so it may start before the desktop
+#     does and keeps working across logging out and in again.
+#   - The notification server must support action buttons, as GNOME Shell,
+#     KDE Plasma and dunst do.
+# Without a session bus or a suitable notification server every request is
+# denied, never approved, and the log says why:
+#   journalctl --user -u pqkey
+# Do not add --presence auto-approve here: it approves everything without
+# asking, so any program running as you could use your passkeys unnoticed.
+#
+# Once the unit is installed, "pqkey start" and "pqkey stop" start and stop
+# it, "pqkey status" reports it, and "pqkey pin", "pqkey passkeys" and
+# "pqkey reset" manage the running key over CTAP.
+
+[Unit]
+Description=pqkey ML-DSA software authenticator (virtual FIDO security key)
+Documentation=https://github.com/rainzhang05/SoftwareAuthenticator
+# Give up after 5 failed starts within a minute instead of retrying forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/pqkey run
+Environment=RUST_LOG=info
+# On SIGTERM the daemon removes the virtual device and exits with status 0, so
+# stopping the service is not a failure and does not trigger a restart.
+Restart=on-failure
+RestartSec=5s
+# Status 3: a key started by hand ("pqkey start" with other options, or
+# "pqkey run") holds the state directory. Restarting cannot change that, so
+# the unit stays failed until it is started again; "pqkey status" says why.
+RestartPreventExitStatus=3
+
+# Sandboxing. A user service manager has no privileges, so this uses only
+# settings enforced with prctl() and seccomp, which need none:
+NoNewPrivileges=yes
+# No sockets other than AF_UNIX, which the D-Bus session bus uses and NSS may
+# use to look up group names.
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+#
+# Deliberately not used:
+#  - ProtectSystem=, ProtectHome=, ReadWritePaths=, PrivateTmp=,
+#    PrivateNetwork=, ProtectKernelTunables=, ProtectKernelModules=,
+#    ProtectKernelLogs=, ProtectClock=, ProtectHostname=,
+#    CapabilityBoundingSet=: these need mount or other namespaces, which a
+#    user manager can only set up inside a user namespace, so systemd has to
+#    add PrivateUsers= to use them. Where unprivileged user namespaces are
+#    restricted, as on Ubuntu 24.04 by default, the service may then fail to
+#    start. A user service has no capabilities to drop anyway.
+#  - PrivateDevices=: the same, and its private /dev would not contain
+#    /dev/uhid.
+#  - DeviceAllow=, DevicePolicy=, IPAddressDeny=: enforced with cgroup BPF
+#    programs, which only the system service manager can install.
+#  - ProtectControlGroups=, ProtectProc=: system services only.
+#  - SystemCallFilter=@system-service: probably fine, but not yet tested; a
+#    system call missing from the set would kill the daemon.
+
+[Install]
+WantedBy=default.target

@@ -24,7 +24,7 @@ use super::daemon::{UNIT_TEMPLATE, unit_file};
 use crate::state::default_state_dir;
 
 /// `text` as one shell word.
-fn shell_quote(text: &str) -> String {
+pub(super) fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 

@@ -161,6 +161,8 @@ fn start_service(
         ));
     }
     let changed = UserService::install(binary)?;
+    // Shown, but setup goes on with the user's own unit.
+    output::problems(UserService::kept_unit().as_slice())?;
     UserService::action(ServiceAction::Enable)?;
     UserService::action(ServiceAction::ResetFailed)?;
     let service_bus = UserService::prepare_session(can_ask)?;
@@ -1468,5 +1470,52 @@ esac
         let (after, _, presence) = manager.key();
         assert_ne!(after, pid);
         assert_eq!(presence, PresenceArg::Notify);
+    }
+
+    /// Setup names a unit of the user's own where it installs the unit,
+    /// which it keeps as it is and goes on with. One of 2026-10-01, as setup
+    /// then wrote it, and an empty one, as a write that never reached the
+    /// disk leaves, it replaces with this version's unit, without a word.
+    /// (Which units setup keeps: `platform::linux::daemon`'s tests.)
+    #[test]
+    fn setup_names_a_unit_of_the_users_own_and_replaces_an_earlier_or_empty_one() {
+        let manager = Manager::new("setup-kept-unit");
+        let unit = manager.file("config/systemd/user/pqkey.service");
+        fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        let own = "[Service]\nExecStart=/usr/local/bin/pqkey run --presence unanswered\n";
+        fs::write(&unit, own).unwrap();
+        let stdout = manager.setup(None, None).unwrap();
+        assert!(
+            stdout.contains(&format!(
+                "  ! pqkey setup keeps your own unit {0} as it is, instead of the unit this \
+                 version installs\n    Fix: if you need its changes, put them in a drop-in with \
+                 `systemctl --user edit pqkey`; then delete {0} and run `pqkey setup`\n  ✓ Key \
+                 started; it starts with your session\n",
+                unit.display()
+            )),
+            "{stdout}"
+        );
+        assert_eq!(fs::read_to_string(&unit).unwrap(), own);
+        // As setup wrote it for /usr/local/bin/pqkey: as shipped.
+        let earlier = include_str!("../platform/linux/earlier-units/2026-10-01-c591936.service");
+        for (installed, context) in [(earlier, "c591936"), ("", "empty")] {
+            assert!(
+                manager.run("stop", None, None).status.success(),
+                "{context}"
+            );
+            fs::write(&unit, installed).unwrap();
+            let stdout = manager.setup(None, None).unwrap();
+            assert!(
+                !stdout.contains("keeps your own unit"),
+                "{context}: {stdout}"
+            );
+            assert!(stdout.contains("✓ Key started;"), "{context}: {stdout}");
+            let written = fs::read_to_string(&unit).unwrap();
+            assert!(
+                written.contains("\nLimitCORE=0\n")
+                    && written.contains("\nSystemCallFilter=@system-service\n"),
+                "{context}: {written}"
+            );
+        }
     }
 }

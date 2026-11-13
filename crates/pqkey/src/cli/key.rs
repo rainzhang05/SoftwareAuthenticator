@@ -483,12 +483,14 @@ fn notification_server() -> Result<ServerInfo, ConnectError> {
 }
 
 /// Whether the installed user service runs the key on the default state
-/// directory, as `pqkey setup` arranges, and starts it with the session.
+/// directory, as `pqkey setup` arranges, and starts it with the session, with
+/// the unit setup installs.
 fn service_problems(state_dir: &Path, running: Option<Running>) -> io::Result<Vec<Problem>> {
     if state_dir != default_state_dir() {
         return Ok(Vec::new());
     }
     let mut problems = UserService::problems(running.is_some())?;
+    problems.extend(UserService::kept_unit());
     if let Some(Running::Daemon(pid)) = running
         && daemon::uses_service(state_dir)?
     {
@@ -1958,6 +1960,52 @@ esac
             if presence != "auto-approve" {
                 assert!(!stdout.contains("auto-approve"), "{context}");
             }
+        }
+    }
+
+    /// `status` names a unit file of the user's own where setup installs the
+    /// unit, which setup keeps as it is, with a fix that keeps its changes in
+    /// a drop-in; no unit file there, it does not. (Which units setup keeps:
+    /// `platform::linux::daemon`'s tests.)
+    #[test]
+    fn status_names_a_unit_of_the_users_own_that_setup_keeps() {
+        use std::process::Command;
+        let dir = TempDir::new("status-kept-unit");
+        let bin = fake_systemctl(dir.path());
+        let unit = dir.path().join("config/systemd/user/pqkey.service");
+        std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        let kept = format!(
+            "  ! pqkey setup keeps your own unit {0} as it is, instead of the unit this version \
+             installs\n    Fix: if you need its changes, put them in a drop-in with `systemctl \
+             --user edit pqkey`; then delete {0} and run `pqkey setup`\n",
+            unit.display()
+        );
+        for own in [true, false] {
+            if own {
+                std::fs::write(
+                    &unit,
+                    "[Service]\nExecStart=/usr/local/bin/pqkey run --presence unanswered\n",
+                )
+                .unwrap();
+            } else {
+                std::fs::remove_file(&unit).unwrap();
+            }
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
+                .env("PQKEY_STATUS_CHILD", "notify")
+                .env("PQKEY_STATUS_RUNS", "service")
+                .env("PATH", &bin)
+                .env("XDG_CONFIG_HOME", dir.path().join("config"))
+                .env("XDG_DATA_HOME", dir.path().join(format!("data-{own}")))
+                .env(
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    format!("unix:path={}", dir.path().join("no-bus").display()),
+                )
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(output.status.code(), Some(0), "{own}: {output:?}");
+            assert_eq!(stdout.contains(&kept), own, "{own}: {stdout}");
         }
     }
 

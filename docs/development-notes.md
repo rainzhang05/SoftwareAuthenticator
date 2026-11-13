@@ -26,8 +26,10 @@ systems before creating logs, installing tools or changing system setup.
 | `scripts/diagnose.sh` | Shows the state of the key on this computer: binary, service, devices and log. |
 | `scripts/browser.sh` | Starts a local relying party for testing in real browsers ([details](../tests/browser/README.md)). |
 
-Each script prints one line per step and keeps the full output in
-`target/scripts/`. The top of each script says what it needs.
+Each script above but `install-tests.sh` and `diagnose.sh` prints one line per
+step and keeps the full output of its steps in `target/scripts/`;
+`install-tests.sh` only shows its tests' output, and `diagnose.sh` only prints,
+writing no file. The top of each script says what it needs.
 
 `scripts/check.sh --quick` runs formatting; actionlint and shellcheck; a
 check that `fuzz/Cargo.lock` is up to date; the installer regression checks;

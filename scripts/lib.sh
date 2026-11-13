@@ -13,10 +13,16 @@ else
   bold='' green='' yellow='' red='' reset=''
 fi
 
-# The log of this script: target/scripts/<script>.log.
-log="$root/target/scripts/$(basename "$0" .sh).log"
-mkdir -p "$(dirname "$log")"
-: >"$log"
+# The log of this script: target/scripts/<script>.log. A script that runs no
+# step and writes no file asks for none with a no_log=1 of its own, not
+# exported, before it sources this one: a no_log it inherits from the
+# environment is exported, and does not count.
+# shellcheck disable=SC2154 # no_log is the sourcing script's, if it has one
+if [[ $(declare -p no_log 2>/dev/null) != 'declare -- no_log="1"' ]]; then
+  log="$root/target/scripts/$(basename "$0" .sh).log"
+  mkdir -p "$(dirname "$log")"
+  : >"$log"
+fi
 
 failed=()
 

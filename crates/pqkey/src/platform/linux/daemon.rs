@@ -3,6 +3,7 @@ use super::permissions;
 use crate::{
     cli::{checks::Problem, output::errln},
     platform::ServiceAction,
+    state::path_error,
 };
 use nix::unistd::{self, Group, Pid};
 use std::{
@@ -20,8 +21,20 @@ const UNIT: &str = "pqkey.service";
 pub(crate) const UNIT_TEMPLATE: &str =
     include_str!("../../../../../contrib/systemd/user/pqkey.service");
 /// Units earlier versions shipped, which setup replaces as it does its own:
-/// the one from 2026-10-05 until system calls were filtered.
-const EARLIER_UNITS: [&str; 1] = [include_str!("earlier-units/2026-10-05.service")];
+/// `contrib/systemd/user/pqkey.service` as of the commit each name gives, and
+/// from 2026-10-05 until system calls were filtered. The README had users
+/// install the first two by hand; setup wrote the others over any unit
+/// until 9e91509 (2026-10-10), after which it keeps units it does not know.
+/// Older units run `pqkey attach`, which pqkey no longer has, so
+/// [`managed_unit`] keeps them as the user's own.
+const EARLIER_UNITS: [&str; 6] = [
+    include_str!("earlier-units/2026-10-01-341a669.service"),
+    include_str!("earlier-units/2026-10-01-cf4da2d.service"),
+    include_str!("earlier-units/2026-10-01-1fad615.service"),
+    include_str!("earlier-units/2026-10-01-7be4862.service"),
+    include_str!("earlier-units/2026-10-01-c591936.service"),
+    include_str!("earlier-units/2026-10-05.service"),
+];
 /// The properties of the unit that [`UserService::problems`] reads.
 const UNIT_STATE: &str = "LoadState,UnitFileState,ActiveState,SubState,Result,ExecMainStatus";
 /// The fix for a service that failed. Its log says why, and `pqkey start`
@@ -56,6 +69,47 @@ fn unit_dir() -> PathBuf {
     .join("systemd/user")
 }
 
+/// Whether systemd splits a command line such as `ExecStart=`'s at `c`,
+/// outside quotes: at its WHITESPACE, ASCII space, tab, newline and
+/// carriage return, and at no other white space, such as U+00A0 or U+3000
+/// (`extract_first_word()`, which config_parse_exec() calls without
+/// separators of its own).
+fn splits_exec(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r')
+}
+
+/// The words systemd reads in `line`, a command line such as `ExecStart=`'s,
+/// as config_parse_exec() splits it (`extract_first_word()` with
+/// EXTRACT_UNQUOTE): a word ends at [`splits_exec`] outside quotes, and a
+/// single or double quote anywhere in it keeps everything up to the
+/// matching one in the word, and is removed. `None` for a quote left open,
+/// and for a backslash, which starts a C escape that setup never writes.
+fn exec_words(line: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut chars = line.chars().peekable();
+    loop {
+        while chars.next_if(|&c| splits_exec(c)).is_some() {}
+        if chars.peek().is_none() {
+            return Some(words);
+        }
+        let mut word = String::new();
+        let mut quote = None;
+        for c in chars.by_ref() {
+            match (quote, c) {
+                (_, '\\') => return None,
+                (Some(open), c) if c == open => quote = None,
+                (None, '\'' | '"') => quote = Some(c),
+                (None, c) if splits_exec(c) => break,
+                (_, c) => word.push(c),
+            }
+        }
+        if quote.is_some() {
+            return None;
+        }
+        words.push(word);
+    }
+}
+
 /// The unit, running `binary`.
 pub(crate) fn unit_file(binary: &Path) -> io::Result<String> {
     let path = binary.to_str().ok_or_else(|| {
@@ -64,17 +118,21 @@ pub(crate) fn unit_file(binary: &Path) -> io::Result<String> {
             format!("{} is not valid UTF-8", binary.display()),
         )
     })?;
+    // systemd refuses an executable whose name holds a quote, a backslash
+    // or a control character, however it is quoted (`string_is_safe()`).
     if path
         .chars()
-        .any(|c| c.is_control() || c == '"' || c == '\\')
+        .any(|c| c.is_control() || matches!(c, '"' | '\'' | '\\'))
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("the unit cannot run {path:?}; install pqkey somewhere else"),
         ));
     }
-    // systemd expands % specifiers in ExecStart, and splits it at spaces
-    // outside quotes.
+    // systemd expands % specifiers in ExecStart, and splits it at white
+    // space outside quotes ([`exec_words`]): a program with white space goes
+    // in double quotes, in which nothing it may hold is special, so systemd
+    // reads it back as written.
     let escaped = path.replace('%', "%%");
     let state = crate::state::default_state_dir();
     let state = state
@@ -93,7 +151,7 @@ pub(crate) fn unit_file(binary: &Path) -> io::Result<String> {
         return Err(io::Error::other("service paths must not contain '$'"));
     }
     let state = state.replace('%', "%%");
-    let exec = if escaped.contains(' ') {
+    let exec = if escaped.contains(splits_exec) {
         format!("ExecStart=\"{escaped}\" --state-dir \"{state}\" run")
     } else {
         format!("ExecStart={escaped} --state-dir \"{state}\" run")
@@ -111,55 +169,106 @@ pub(crate) fn unit_file(binary: &Path) -> io::Result<String> {
 }
 
 /// Install the unit for `binary` and have systemd read it, unless it is
-/// installed as it is. Returns whether it changed.
+/// installed as it is, or [`InstalledUnit::kept`]. Returns whether it changed.
 fn install_unit(binary: &Path) -> io::Result<bool> {
     let unit = unit_file(binary)?;
     let dir = unit_dir();
     let path = dir.join(UNIT);
-    let installed = match fs::read_to_string(&path) {
-        Ok(installed) => Some(installed),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
-        Err(err) => return Err(err),
+    let changed = match InstalledUnit::read(&path)? {
+        // Keep custom arguments and policy, as `UserService::kept_unit` says.
+        // Setup verifies the resulting daemon's identity and readiness rather
+        // than replacing them. Never this version's unit: `managed_unit`
+        // reads its `ExecStart=` back as written.
+        Some(installed) if installed.kept() => false,
+        // A prior write may have succeeded while daemon-reload failed.
+        Some(installed) if installed.text == unit => false,
+        _ => {
+            write_unit(&dir, &path, &unit)?;
+            true
+        }
     };
-    if let Some(installed) = installed {
-        if installed == unit {
-            // A prior write may have succeeded while daemon-reload failed.
-            systemctl(&[
-                "link",
-                path.to_str()
-                    .ok_or_else(|| io::Error::other("unit path is not UTF-8"))?,
-            ])?;
-            systemctl(&["daemon-reload"])?;
-            return Ok(false);
-        }
-        if !managed_unit(&installed) {
-            // Keep custom arguments and policy. Setup verifies the resulting
-            // daemon's identity and readiness rather than replacing them.
-            systemctl(&[
-                "link",
-                path.to_str()
-                    .ok_or_else(|| io::Error::other("unit path is not UTF-8"))?,
-            ])?;
-            systemctl(&["daemon-reload"])?;
-            return Ok(false);
-        }
-    }
-    fs::create_dir_all(&dir)?;
-    let temporary = dir.join(format!(".{UNIT}.{}", std::process::id()));
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .open(&temporary)?
-        .write_all(unit.as_bytes())?;
-    fs::rename(&temporary, &path)?;
     systemctl(&[
         "link",
         path.to_str()
             .ok_or_else(|| io::Error::other("unit path is not UTF-8"))?,
     ])?;
     drop(systemctl(&["daemon-reload"])?);
-    Ok(true)
+    Ok(changed)
+}
+
+/// Replace the unit file `path` in `dir` with `unit` as the credential store
+/// replaces its files: through a new file in the same directory, flushed
+/// before it is renamed into place, and the directory flushed after that, so
+/// that a crash leaves either the old file or the whole new one, never an
+/// empty one. A filesystem that cannot flush a directory counts as flushed,
+/// as for the store. An error names the file or directory.
+fn write_unit(dir: &Path, path: &Path, unit: &str) -> io::Result<()> {
+    fs::create_dir_all(dir).map_err(|err| path_error(err, "create", dir))?;
+    let temporary = dir.join(format!(".{UNIT}.{}", std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&temporary)
+        .map_err(|err| path_error(err, "create", &temporary))?;
+    let written = file
+        .write_all(unit.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::rename(&temporary, path));
+    if let Err(err) = written {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(path_error(err, "write", path));
+    }
+    match fs::File::open(dir).and_then(|dir| dir.sync_all()) {
+        Err(err)
+            if !matches!(
+                err.kind(),
+                io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+            ) =>
+        {
+            Err(path_error(err, "flush", dir))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A unit file where setup installs the unit.
+struct InstalledUnit {
+    /// Its text, with any bytes that are not UTF-8 replaced.
+    text: String,
+    /// Whether it is a regular file that holds nothing but NUL bytes and
+    /// white space, as a write that never reached the disk leaves it:
+    /// nothing of the user's. systemd masks the unit for an empty file, and
+    /// finds no `ExecStart=` in any other unless a drop-in has one.
+    blank: bool,
+}
+
+impl InstalledUnit {
+    /// The unit file at `path`, or `None` where there is none. Through a
+    /// symbolic link it reads the target, but a link, as one to /dev/null,
+    /// which masks the unit, is never blank: it is the user's to remove. An
+    /// error names the file.
+    fn read(path: &Path) -> io::Result<Option<Self>> {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(path_error(err, "read", path)),
+        };
+        Ok(Some(Self {
+            blank: bytes
+                .iter()
+                .all(|&byte| byte == 0 || byte.is_ascii_whitespace())
+                && fs::symlink_metadata(path).is_ok_and(|file| file.is_file()),
+            text: String::from_utf8_lossy(&bytes).into_owned(),
+        }))
+    }
+
+    /// Whether setup keeps this unit as the user's own rather than replace
+    /// it: one that is not [`managed_unit`] and not blank.
+    fn kept(&self) -> bool {
+        !self.blank && !managed_unit(&self.text)
+    }
 }
 
 /// Only units matching the shipped template or one an earlier version
@@ -172,38 +281,45 @@ fn managed_unit(unit: &str) -> bool {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let one_word = |word: &str| {
-        if let Some(inner) = word
-            .strip_prefix('"')
-            .and_then(|word| word.strip_suffix('"'))
-        {
-            !inner.contains('"')
-        } else {
-            !word.is_empty() && !word.chars().any(char::is_whitespace)
-        }
-    };
-    let exec = unit
-        .lines()
-        .find_map(|line| line.strip_prefix("ExecStart="))
-        .and_then(|line| line.strip_suffix(" run"));
     let default_state = crate::state::default_state_dir();
     let default_state = default_state.to_str().map(|path| path.replace('%', "%%"));
-    let ordinary_exec = exec.is_some_and(|exec| match exec.split_once(" --state-dir ") {
-        Some((binary, state)) => {
-            one_word(binary)
-                && one_word(state)
-                && default_state.as_deref().is_some_and(|default| {
-                    state == default
-                        || state
-                            .strip_prefix('"')
-                            .and_then(|state| state.strip_suffix('"'))
-                            == Some(default)
-                })
-        }
-        None => one_word(exec),
-    });
+    let exec = unit
+        .lines()
+        .find_map(|line| line.strip_prefix("ExecStart="));
+    // The words systemd runs: a program and `run`, with the default state
+    // directory or none, as setup writes them.
+    let ordinary_exec = exec
+        .and_then(exec_words)
+        .is_some_and(|words| match words.as_slice() {
+            [_program, run] => run == "run",
+            [_program, option, state, run] => {
+                option == "--state-dir"
+                    && default_state.as_deref() == Some(state.as_str())
+                    && run == "run"
+            }
+            _ => false,
+        });
+    // Setup used to write a program with a single quote in its path as it
+    // is, a line systemd cannot read ("Unbalanced quoting"); now it refuses
+    // such a program, as systemd refuses a quote in an executable's name.
+    // Such a line is setup's too.
+    let unquoted_by_earlier_setup =
+        exec.and_then(|exec| exec.strip_suffix(" run"))
+            .is_some_and(|exec| {
+                let (program, state) = match exec.split_once(" --state-dir ") {
+                    Some((program, state)) => (program, Some(state)),
+                    None => (exec, None),
+                };
+                program.contains('\'')
+                    && !program.contains(|c| splits_exec(c) || c == '"' || c == '\\')
+                    && state.is_none_or(|state| {
+                        default_state
+                            .as_deref()
+                            .is_some_and(|default| state == format!("\"{default}\""))
+                    })
+            });
     let body = without_exec(unit);
-    ordinary_exec
+    (ordinary_exec || unquoted_by_earlier_setup)
         && std::iter::once(UNIT_TEMPLATE)
             .chain(EARLIER_UNITS)
             .any(|template| without_exec(template) == body)
@@ -425,6 +541,29 @@ impl UserService {
         drop(systemctl(&["daemon-reload"])?);
         Ok(Some(path))
     }
+    /// What status and setup say of the unit file where setup installs the
+    /// unit, if setup keeps it as the user's own ([`InstalledUnit::kept`]):
+    /// a regular file, or a link to one, but no mask. One that cannot be
+    /// read is left to systemd's report.
+    pub(crate) fn kept_unit() -> Option<Problem> {
+        let path = unit_dir().join(UNIT);
+        let kept = fs::metadata(&path).is_ok_and(|file| file.is_file())
+            && InstalledUnit::read(&path).is_ok_and(|unit| unit.is_some_and(|unit| unit.kept()));
+        kept.then(|| {
+            Problem::new(
+                format!(
+                    "pqkey setup keeps your own unit {} as it is, instead of the unit this \
+                     version installs",
+                    path.display()
+                ),
+                format!(
+                    "if you need its changes, put them in a drop-in with `systemctl --user edit \
+                     pqkey`; then delete {} and run `pqkey setup`",
+                    path.display()
+                ),
+            )
+        })
+    }
     pub(crate) fn manual_start_problem(pid: Pid) -> io::Result<Problem> {
         Ok(Problem {
             what: format!(
@@ -435,10 +574,11 @@ impl UserService {
     }
     /// What keeps the service from starting the key with the session, or
     /// from running it, as `systemctl --user show` reports its unit: not
-    /// installed, masked or not enabled, unless the user's service manager
-    /// lingers, and, while the key does not run, failed, or failed and about
-    /// to be restarted. A key started by hand has
-    /// [`Self::manual_start_problem`] instead of the service's failure.
+    /// installed, or not found where setup installed it, masked, or not
+    /// enabled unless the user's service manager lingers, and, while the key
+    /// does not run, failed, or failed and about to be restarted. A key
+    /// started by hand has [`Self::manual_start_problem`] instead of the
+    /// service's failure.
     pub(crate) fn problems(running: bool) -> io::Result<Vec<Problem>> {
         // As for `installed`, a query that fails finds no service.
         let shown = systemctl(&["show", "--property", UNIT_STATE, UNIT]).unwrap_or_default();
@@ -466,11 +606,45 @@ impl UserService {
                     fix,
                 )]);
             }
-            _ => {
-                return Ok(vec![Problem::new(
-                    "the key does not start with your session",
-                    "run `pqkey setup`",
-                )]);
+            // Not installed, or not where systemd looks. A unit file where
+            // setup installs it that systemd does not find is not linked from
+            // systemd's own directory: setup links it there, and SECURITY.md's
+            // `systemctl --user disable pqkey` removes that link too. Linking
+            // it again gives a unit that `pqkey start` starts and that is not
+            // enabled, as SECURITY.md advises where the user lingers.
+            load => {
+                let not_started = "the key does not start with your session";
+                let path = unit_dir().join(UNIT);
+                if load != "not-found"
+                    || !fs::symlink_metadata(&path).is_ok_and(|file| file.is_file())
+                {
+                    return Ok(vec![Problem::new(not_started, "run `pqkey setup`")]);
+                }
+                let link = format!(
+                    "`systemctl --user link {}`",
+                    super::setup::shell_quote(&path.to_string_lossy())
+                );
+                return Ok(vec![match lingering() {
+                    Some(false) => Problem::new(not_started, "run `pqkey setup`"),
+                    Some(true) => Problem::new(
+                        format!(
+                            "the {} is not found, so `pqkey start` starts the key by hand \
+                             instead of through it",
+                            Self::DESCRIPTION
+                        ),
+                        format!(
+                            "run {link}, which does not enable it, as SECURITY.md advises with \
+                             lingering"
+                        ),
+                    ),
+                    None => Problem::new(
+                        not_started,
+                        format!(
+                            "run `pqkey setup`; but if lingering is on (`loginctl enable-linger`) \
+                             and you disabled it as SECURITY.md advises, run {link} instead"
+                        ),
+                    ),
+                }]);
             }
         }
         let mut problems = Vec::new();
@@ -544,8 +718,13 @@ mod setup_tests {
                 assert!(UserService::main_pid()?.is_none());
                 return Ok(());
             }
-            let changed = UserService::install(Path::new("/usr/local/bin/pqkey"))?;
+            let binary = env::var_os("PQKEY_SERVICE_BINARY")
+                .map_or_else(|| PathBuf::from("/usr/local/bin/pqkey"), PathBuf::from);
+            let changed = UserService::install(&binary)?;
             println!("CHANGED:{changed}");
+            if let Some(kept) = UserService::kept_unit() {
+                println!("KEPT:{}\t{}", kept.what, kept.fix);
+            }
             // A bus that passes setup's check; cli::setup's tests check it.
             UserService::prepare_session(|_| true)?;
             UserService::action(ServiceAction::Enable)
@@ -601,6 +780,7 @@ exit 0
         let repaired = child("");
         assert!(repaired.status.success(), "{repaired:?}");
         assert!(String::from_utf8_lossy(&repaired.stdout).contains("CHANGED:false"));
+        assert!(!String::from_utf8_lossy(&repaired.stdout).contains("KEPT:"));
         let commands = fs::read_to_string(&trace).unwrap();
         assert!(commands.contains("--user link"));
         assert!(commands.contains(
@@ -608,46 +788,117 @@ exit 0
         ));
         assert!(commands.contains("--user enable pqkey.service:unset"));
         let managed = fs::read_to_string(&unit).unwrap();
-        // An update replaces the unit an earlier version installed.
+        // Setup replaces `installed` with this version's unit, and names
+        // nothing, or keeps it and names it.
+        let replaced = |installed: &[u8], context: &str| {
+            fs::write(&unit, installed).unwrap();
+            let output = child("");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{context}: {output:?}");
+            assert!(stdout.contains("CHANGED:true"), "{context}: {stdout}");
+            assert!(!stdout.contains("KEPT:"), "{context}: {stdout}");
+            assert_eq!(fs::read_to_string(&unit).unwrap(), managed, "{context}");
+        };
+        let kept_unit = format!(
+            "KEPT:pqkey setup keeps your own unit {0} as it is, instead of the unit this \
+             version installs\tif you need its changes, put them in a drop-in with \
+             `systemctl --user edit pqkey`; then delete {0} and run `pqkey setup`\n",
+            unit.display()
+        );
+        let kept = |installed: &[u8], context: &str| {
+            fs::write(&unit, installed).unwrap();
+            let output = child("");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{context}: {output:?}");
+            assert!(stdout.contains("CHANGED:false"), "{context}: {stdout}");
+            assert!(stdout.contains(&kept_unit), "{context}: {stdout}");
+            assert_eq!(fs::read(&unit).unwrap(), installed, "{context}");
+        };
+        // An update replaces every unit an earlier version installed, the
+        // one setup wrote from 2026-10-01 (c591936) among them: with
+        // `ExecStart=` as setup writes it now, as setup wrote it before it
+        // named the state directory, and as shipped, which the README and the
+        // unit's comments had users install by hand.
         let exec = managed
             .lines()
             .find(|line| line.starts_with("ExecStart="))
             .unwrap();
-        let [earlier] = EARLIER_UNITS;
-        let earlier: String = earlier
-            .lines()
-            .map(|line| {
-                if line.starts_with("ExecStart=") {
-                    exec
-                } else {
-                    line
-                }
-            })
-            .flat_map(|line| [line, "\n"])
-            .collect();
-        fs::write(&unit, &earlier).unwrap();
-        let updated = child("");
-        assert!(updated.status.success(), "{updated:?}");
-        assert!(String::from_utf8_lossy(&updated.stdout).contains("CHANGED:true"));
-        assert_eq!(fs::read_to_string(&unit).unwrap(), managed);
+        assert!(EARLIER_UNITS.contains(&include_str!("earlier-units/2026-10-01-c591936.service")));
+        for (index, earlier) in EARLIER_UNITS.into_iter().enumerate() {
+            for exec in [exec, "ExecStart=/usr/local/bin/pqkey run"] {
+                let installed: String = earlier
+                    .lines()
+                    .map(|line| {
+                        if line.starts_with("ExecStart=") {
+                            exec
+                        } else {
+                            line
+                        }
+                    })
+                    .flat_map(|line| [line, "\n"])
+                    .collect();
+                replaced(
+                    installed.as_bytes(),
+                    &format!("EARLIER_UNITS[{index}], {exec}"),
+                );
+            }
+            replaced(
+                earlier.as_bytes(),
+                &format!("EARLIER_UNITS[{index}] as shipped"),
+            );
+        }
+        // What a write that never reached the disk leaves: nothing, NUL
+        // bytes, white space.
+        for (blank, context) in [
+            (&b""[..], "an empty file"),
+            (&[0; 3647][..], "3647 NUL bytes"),
+            (&b"\n  \t\r\n"[..], "white space"),
+        ] {
+            replaced(blank, context);
+        }
+        // A link there, as to /dev/null, which masks the unit, stays: it is
+        // the user's to remove, and `systemctl --user unmask pqkey` does.
+        fs::remove_file(&unit).unwrap();
+        std::os::unix::fs::symlink("/dev/null", &unit).unwrap();
+        let masked = child("");
+        assert!(masked.status.success(), "{masked:?}");
+        assert!(String::from_utf8_lossy(&masked.stdout).contains("CHANGED:false"));
+        assert!(!String::from_utf8_lossy(&masked.stdout).contains("KEPT:"));
+        assert_eq!(fs::read_link(&unit).unwrap(), Path::new("/dev/null"));
+        fs::remove_file(&unit).unwrap();
+        // No temporary file is left behind.
+        replaced(b"", "after the link");
+        assert_eq!(fs::read_dir(unit.parent().unwrap()).unwrap().count(), 1);
         let custom_state = UNIT_TEMPLATE.replace(
             "ExecStart=/usr/local/bin/pqkey run",
             "ExecStart=/usr/local/bin/pqkey --state-dir \"/retained/custom state\" run",
         );
-        fs::write(&unit, &custom_state).unwrap();
-        assert!(child("").status.success());
-        assert_eq!(fs::read_to_string(&unit).unwrap(), custom_state);
-        fs::write(&unit, managed).unwrap();
-        let custom = fs::read_to_string(&unit)
-            .unwrap()
-            .replace(" run\n", " run --presence unanswered\n");
-        fs::write(&unit, &custom).unwrap();
-        assert!(child("").status.success());
-        assert_eq!(fs::read_to_string(&unit).unwrap(), custom);
+        kept(custom_state.as_bytes(), "custom state");
+        // An edited copy of this version's unit, and one that is not UTF-8.
+        kept(
+            format!("# my unit\n{managed}").as_bytes(),
+            "an edited copy of this version's unit",
+        );
+        kept(
+            &[&b"# caf\xe9\n"[..], managed.as_bytes()].concat(),
+            "a unit that is not UTF-8",
+        );
+        let custom = managed.replace(" run\n", " run --presence unanswered\n");
+        kept(custom.as_bytes(), "custom options");
         for action in ["link", "enable", "set-environment"] {
             assert_eq!(child(action).status.code(), Some(1), "{action}");
             assert_eq!(fs::read_to_string(&unit).unwrap(), custom);
         }
+        // A unit file setup cannot read is named.
+        fs::remove_file(&unit).unwrap();
+        fs::create_dir(&unit).unwrap();
+        let unreadable = child("");
+        assert_eq!(unreadable.status.code(), Some(1), "{unreadable:?}");
+        assert!(
+            String::from_utf8_lossy(&unreadable.stderr)
+                .contains(&format!("cannot read {}: ", unit.display())),
+            "{unreadable:?}"
+        );
         let probe = ProcessCommand::new(env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -663,6 +914,108 @@ exit 0
             .output()
             .unwrap();
         assert!(probe.status.success(), "{probe:?}");
+    }
+
+    /// `service_install_child` for `binary` in `dir`, whose `config` is the
+    /// user's configuration directory, with a systemctl that succeeds and,
+    /// with `limited`, files limited to one block (`ulimit -f 1`) and
+    /// SIGXFSZ ignored, so that writing the unit fails with EFBIG.
+    fn install_in(dir: &Path, binary: &str, limited: bool) -> std::process::Output {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("systemctl"), "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(bin.join("systemctl"), fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = ProcessCommand::new("/bin/sh");
+        child
+            .arg("-c")
+            .arg(if limited {
+                "trap '' XFSZ; ulimit -f 1; exec \"$0\" \"$@\""
+            } else {
+                "exec \"$0\" \"$@\""
+            })
+            .arg(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::linux::daemon::setup_tests::service_install_child",
+                "--nocapture",
+            ])
+            .env("PQKEY_SERVICE_CHILD", "1")
+            .env("PQKEY_SERVICE_BINARY", binary)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("XDG_CONFIG_HOME", dir.join("config"))
+            .env("XDG_DATA_HOME", dir.join("data"))
+            .env_remove("DBUS_SESSION_BUS_ADDRESS");
+        child.output().unwrap()
+    }
+
+    /// A program whose path holds white space other than ASCII's, which
+    /// systemd does not split at, such as U+00A0 or U+3000, or an ASCII space,
+    /// which it does, gets this version's unit, and setup neither rewrites it
+    /// on the next run nor names it as the user's.
+    #[test]
+    fn a_program_under_unusual_white_space_gets_its_unit_without_the_kept_line() {
+        use crate::test_support::TempDir;
+        for program in [
+            "/opt/a\u{a0}b/pqkey",
+            "/home/x\u{3000}y/pqkey",
+            "/opt/a b/pqkey",
+        ] {
+            let dir = TempDir::new("service-unusual-path");
+            for changed in ["CHANGED:true", "CHANGED:false"] {
+                let output = install_in(dir.path(), program, false);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(output.status.success(), "{program:?}: {output:?}");
+                assert!(stdout.contains(changed), "{program:?}: {stdout}");
+                assert!(!stdout.contains("KEPT:"), "{program:?}: {stdout}");
+            }
+            let unit =
+                fs::read_to_string(dir.path().join("config/systemd/user/pqkey.service")).unwrap();
+            assert_eq!(unit, unit_file_in(dir.path(), program), "{program:?}");
+        }
+    }
+
+    /// This version's unit for `program` where the user's data directory
+    /// (XDG_DATA_HOME) is `dir/data`, as `install_in` writes it.
+    fn unit_file_in(dir: &Path, program: &str) -> String {
+        let state = dir.join("data/pqkey").to_str().unwrap().replace('%', "%%");
+        let exec = if program.contains(' ') {
+            format!("\"{program}\"")
+        } else {
+            program.to_owned()
+        };
+        UNIT_TEMPLATE
+            .lines()
+            .map(|line| {
+                if line.starts_with("ExecStart=") {
+                    format!("ExecStart={exec} --state-dir \"{state}\" run\n")
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect()
+    }
+
+    /// A unit write that fails, as when the file would grow past the limit
+    /// on file sizes, is named with the unit file, and leaves neither its
+    /// temporary file nor a unit behind.
+    #[test]
+    fn a_failed_unit_write_is_named_and_leaves_no_temporary_file() {
+        use crate::test_support::TempDir;
+        let dir = TempDir::new("service-write-fails");
+        let unit = dir.path().join("config/systemd/user/pqkey.service");
+        let output = install_in(dir.path(), "/usr/local/bin/pqkey", true);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(
+            stderr.contains(&format!("cannot write {}: File too large", unit.display())),
+            "{stderr}"
+        );
+        let left: Vec<_> = fs::read_dir(unit.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     #[test]
@@ -683,12 +1036,126 @@ exit 0
         assert!(!managed_unit(
             &old.replace("Restart=on-failure", "Restart=no")
         ));
-        let [earlier] = EARLIER_UNITS;
-        assert!(!earlier.contains("\nSystemCallFilter="));
-        assert!(managed_unit(earlier));
-        assert!(!managed_unit(&format!(
-            "{earlier}\nEnvironment=CUSTOM=yes\n"
+        for earlier in EARLIER_UNITS {
+            assert!(!earlier.contains("\nSystemCallFilter="));
+            assert!(managed_unit(earlier));
+            assert!(!managed_unit(&format!(
+                "{earlier}\nEnvironment=CUSTOM=yes\n"
+            )));
+        }
+        // The units before 2026-10-01 run `pqkey attach --foreground`.
+        assert!(!managed_unit(&old.replace(
+            "ExecStart=/home/a/.cargo/bin/pqkey run",
+            "ExecStart=%h/.local/bin/pqkey attach --foreground",
         )));
+        assert!(!managed_unit(&old.replace(
+            "ExecStart=/home/a/.cargo/bin/pqkey run",
+            "ExecStart=/home/a/.cargo/bin/pqkey start",
+        )));
+        // As setup wrote a program with a single quote in its path before
+        // it refused one, which systemd cannot read: setup's, so replaced.
+        let state = crate::state::default_state_dir()
+            .to_str()
+            .unwrap()
+            .replace('%', "%%");
+        for exec in [
+            "/home/o'brien/pqkey run".to_owned(),
+            format!("/home/o'brien/pqkey --state-dir \"{state}\" run"),
+        ] {
+            assert_eq!(exec_words(&exec), None, "{exec}");
+            let unit = old.replace("/home/a/.cargo/bin/pqkey run", &exec);
+            assert!(managed_unit(&unit), "{exec}");
+            assert!(!managed_unit(
+                &unit.replace(" run\n", " run --presence unanswered\n")
+            ));
+        }
+        for exec in [
+            "/home/o'brien/pqkey --state-dir \"/retained\" run",
+            "/home/o'brien/my pqkey run",
+        ] {
+            assert!(
+                !managed_unit(&old.replace("/home/a/.cargo/bin/pqkey run", exec)),
+                "{exec}"
+            );
+        }
+    }
+
+    /// Command lines as systemd 249, 252 and 255 split them into the words
+    /// they run (`systemctl --user show -p ExecStart` and the program's own
+    /// arguments): at ASCII white space only, with quotes anywhere in a
+    /// word, removed; a quote left open, or a backslash, is no word setup
+    /// writes.
+    #[test]
+    fn exec_words_split_command_lines_as_systemd_does() {
+        for (line, words) in [
+            (
+                "/usr/local/bin/pqkey run",
+                &["/usr/local/bin/pqkey", "run"][..],
+            ),
+            ("  a\tb\nc\rd  e ", &["a", "b", "c", "d", "e"]),
+            ("/opt/a\u{a0}b/pqkey run", &["/opt/a\u{a0}b/pqkey", "run"]),
+            (
+                "/home/x\u{3000}y/pqkey run",
+                &["/home/x\u{3000}y/pqkey", "run"],
+            ),
+            ("\"/opt/a b/pqkey\" run", &["/opt/a b/pqkey", "run"]),
+            ("'/opt/a b/pqkey' run", &["/opt/a b/pqkey", "run"]),
+            ("a'b c'd e", &["ab cd", "e"]),
+            ("\"it's\" 'a\"b'", &["it's", "a\"b"]),
+            ("", &[]),
+        ] {
+            let words = words.iter().map(|word| (*word).to_owned()).collect();
+            assert_eq!(exec_words(line), Some(words), "{line:?}");
+        }
+        for line in ["a 'b", "a \"b c", "a\\ b", "'a\\'"] {
+            assert_eq!(exec_words(line), None, "{line:?}");
+        }
+    }
+
+    /// Setup reads its own unit back as written, whatever white space the
+    /// program's path holds, which systemd splits at or not, so it never
+    /// keeps or names its own unit as the user's. A quote there it refuses,
+    /// as systemd does in an executable's name.
+    #[test]
+    fn setup_reads_its_own_unit_back_as_written() {
+        let state = crate::state::default_state_dir()
+            .to_str()
+            .unwrap()
+            .replace('%', "%%");
+        for (program, exec) in [
+            ("/usr/local/bin/pqkey", "/usr/local/bin/pqkey"),
+            ("/opt/a b/pqkey", "\"/opt/a b/pqkey\""),
+            ("/opt/a\u{a0}b/pqkey", "/opt/a\u{a0}b/pqkey"),
+            ("/home/x\u{3000}y/pqkey", "/home/x\u{3000}y/pqkey"),
+            (
+                "/opt/x --state-dir y/pqkey",
+                "\"/opt/x --state-dir y/pqkey\"",
+            ),
+            ("/opt/x run/pqkey", "\"/opt/x run/pqkey\""),
+            ("/opt/50%/pqkey", "/opt/50%%/pqkey"),
+            ("/opt/a;b/pqkey", "/opt/a;b/pqkey"),
+            ("/opt/a\u{2028}b/pqkey", "/opt/a\u{2028}b/pqkey"),
+        ] {
+            let unit = unit_file(Path::new(program)).unwrap();
+            let line = unit
+                .lines()
+                .find_map(|line| line.strip_prefix("ExecStart="))
+                .unwrap();
+            assert_eq!(line, format!("{exec} --state-dir \"{state}\" run"));
+            let escaped = program.replace('%', "%%");
+            assert_eq!(
+                exec_words(line).unwrap(),
+                [escaped.as_str(), "--state-dir", state.as_str(), "run"],
+                "{program:?}"
+            );
+            assert!(managed_unit(&unit), "{program:?}");
+        }
+        let refused = unit_file(Path::new("/home/o'brien/pqkey")).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            refused.to_string(),
+            "the unit cannot run \"/home/o'brien/pqkey\"; install pqkey somewhere else"
+        );
     }
 
     /// Values as `systemctl --user show-environment` printed them on systemd
@@ -734,8 +1201,9 @@ exit 0
             "contrib/systemd/user/pqkey.service changed, and setup upgrades only installed units \
              that match it or an entry of EARLIER_UNITS. Copy its previous version to \
              crates/pqkey/src/platform/linux/earlier-units/<date it first shipped>.service, like \
-             2026-10-05.service, add that file to EARLIER_UNITS, then replace the SHA-256 in \
-             this test with the new one (left)"
+             2026-10-05.service, or to <date>-<commit>.service where that date has more than \
+             one, like 2026-10-01-c591936.service; add that file to EARLIER_UNITS, then replace \
+             the SHA-256 in this test with the new one (left)"
         );
     }
 
@@ -756,15 +1224,26 @@ exit 0
     /// for a unit that `systemctl --user show` reports as `shown`, or with a
     /// query that fails for `None`, and for a user whose `Linger` property
     /// `loginctl show-user` reports as `linger`, or cannot for `None`; with
-    /// the calls it made.
+    /// the calls it made. No unit file is where setup installs it.
     fn problems_with(
         shown: Option<&str>,
         linger: Option<&str>,
         running: bool,
     ) -> (Vec<Problem>, Vec<String>) {
         use crate::test_support::TempDir;
-        use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new("service-problems");
+        problems_in(dir.path(), shown, linger, running)
+    }
+
+    /// [`problems_with`] in `dir`, where the user's configuration directory
+    /// (XDG_CONFIG_HOME) is `dir/config`.
+    fn problems_in(
+        dir: &Path,
+        shown: Option<&str>,
+        linger: Option<&str>,
+        running: bool,
+    ) -> (Vec<Problem>, Vec<String>) {
+        use std::os::unix::fs::PermissionsExt;
         for (name, script) in [
             (
                 "systemctl",
@@ -783,11 +1262,12 @@ printf '%s\n' "$LINGER"
 "#,
             ),
         ] {
-            let path = dir.path().join(name);
+            let path = dir.join(name);
             fs::write(&path, script).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let trace = dir.path().join("trace");
+        let trace = dir.join("trace");
+        let _ = fs::remove_file(&trace);
         let mut child = ProcessCommand::new(env::current_exe().unwrap());
         child
             .args([
@@ -799,7 +1279,8 @@ printf '%s\n' "$LINGER"
                 "PQKEY_PROBLEMS_CHILD",
                 if running { "running" } else { "stopped" },
             )
-            .env("PATH", dir.path())
+            .env("PATH", dir)
+            .env("XDG_CONFIG_HOME", dir.join("config"))
             .env("COMMAND_TRACE", &trace)
             .env_remove("UNIT_SHOWN")
             .env_remove("LINGER");
@@ -1062,5 +1543,85 @@ printf '%s\n' "$LINGER"
         for running in [false, true] {
             assert_eq!(problems_of(None, running), missing);
         }
+    }
+
+    /// A unit file where setup installs the unit that systemd does not find
+    /// has lost the link setup made to it, as `systemctl --user disable
+    /// pqkey`, SECURITY.md's advice where the user lingers, removes it for a
+    /// unit outside systemd's own directory. `pqkey start` then starts the
+    /// key by hand. Where the user lingers, the fix links it again, which
+    /// does not enable it; where that is not known, the fix says so; and
+    /// otherwise it is `pqkey setup`, as for a unit that is not installed.
+    /// Only for a regular file: systemd links no other, and loginctl is not
+    /// asked for any other unit that is not loaded.
+    #[test]
+    fn status_names_a_unit_systemd_does_not_find_with_link_where_the_user_lingers() {
+        use crate::test_support::TempDir;
+        let dir = TempDir::new("service-unlinked");
+        let path = dir.path().join("config/systemd/user/pqkey.service");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, UNIT_TEMPLATE).unwrap();
+        let link = format!("`systemctl --user link '{}'`", path.display());
+        let what = "the key does not start with your session";
+        let not_found = shown("not-found", "", "inactive", "dead", "success", "0");
+        let linger_call = format!(
+            "loginctl show-user {} --property=Linger --value",
+            unistd::getuid()
+        );
+        for running in [false, true] {
+            for (linger, problem) in [
+                (Some("no"), Problem::new(what, "run `pqkey setup`")),
+                (
+                    Some("yes"),
+                    Problem::new(
+                        "the systemd user service pqkey.service is not found, so `pqkey start` \
+                         starts the key by hand instead of through it",
+                        format!(
+                            "run {link}, which does not enable it, as SECURITY.md advises with \
+                             lingering"
+                        ),
+                    ),
+                ),
+                (
+                    None,
+                    Problem::new(
+                        what,
+                        format!(
+                            "run `pqkey setup`; but if lingering is on (`loginctl \
+                             enable-linger`) and you disabled it as SECURITY.md advises, run \
+                             {link} instead"
+                        ),
+                    ),
+                ),
+                (
+                    Some(""),
+                    Problem::new(
+                        what,
+                        format!(
+                            "run `pqkey setup`; but if lingering is on (`loginctl \
+                             enable-linger`) and you disabled it as SECURITY.md advises, run \
+                             {link} instead"
+                        ),
+                    ),
+                ),
+            ] {
+                let (problems, calls) = problems_in(dir.path(), Some(&not_found), linger, running);
+                assert_eq!(problems, [problem], "{linger:?} {running}");
+                assert_eq!(calls, [show_call(), linger_call.clone()], "{linger:?}");
+            }
+        }
+        // A unit systemd cannot load, a failed query, or a link where setup
+        // installs the unit: `pqkey setup`, without asking loginctl.
+        let bad = shown("bad-setting", "", "inactive", "dead", "success", "0");
+        for query in [Some(bad.as_str()), None] {
+            let (problems, calls) = problems_in(dir.path(), query, Some("yes"), false);
+            assert_eq!(problems, [Problem::new(what, "run `pqkey setup`")]);
+            assert_eq!(calls, [show_call()]);
+        }
+        fs::rename(&path, dir.path().join("elsewhere.service")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("elsewhere.service"), &path).unwrap();
+        let (problems, calls) = problems_in(dir.path(), Some(&not_found), Some("yes"), false);
+        assert_eq!(problems, [Problem::new(what, "run `pqkey setup`")]);
+        assert_eq!(calls, [show_call()]);
     }
 }
