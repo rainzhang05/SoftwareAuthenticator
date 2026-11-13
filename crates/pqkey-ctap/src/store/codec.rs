@@ -782,8 +782,8 @@ mod tests {
     fn persistent_token_encoding_migration_redaction_and_corruption() {
         let mut record = pin_state();
         let legacy = encode_pin_state(&record).unwrap();
-        for index in 0..2 {
-            record.persistent_tokens[index] = Some(PersistentTokenRecord {
+        for (index, token) in record.persistent_tokens.iter_mut().enumerate() {
+            *token = Some(PersistentTokenRecord {
                 secret: [0x61 + index as u8; 32],
                 granted: true,
             });
