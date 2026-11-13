@@ -82,7 +82,7 @@ impl SetupHost for System {
         self.start_problems()
     }
     fn start(&mut self, state: &Path, binary: &Path) -> io::Result<Running> {
-        start_service(state, binary)
+        start_service(state, binary, System::can_ask_at)
     }
     fn problems(&self, state: &Path, running: Running) -> io::Result<Vec<checks::Problem>> {
         key::running_problems(state, self, running, Duration::from_secs(5))
@@ -105,7 +105,14 @@ impl SetupHost for System {
             ));
         }
         let info = super::daemon_info::DaemonInfo::read(state, running.pid())?;
-        if info.args()?.presence == super::PresenceArg::Notify && !info.session_bus_matches() {
+        // Setup restarts a service that started before the user manager gave
+        // services this shell's bus (`start_service`), so one that still uses
+        // another bus gets it from its unit or a drop-in. Without this shell's
+        // bus in the manager, the readiness check tests the key's own.
+        if info.args()?.presence == super::PresenceArg::Notify
+            && !info.session_bus_matches()
+            && UserService::gives_shell_bus()?
+        {
             return Err(io::Error::other(
                 "the service uses another notification session; remove its DBUS_SESSION_BUS_ADDRESS override and rerun `pqkey setup`",
             ));
@@ -114,7 +121,14 @@ impl SetupHost for System {
     }
 }
 
-fn start_service(state_dir: &Path, binary: &Path) -> io::Result<Running> {
+/// Install, enable and start the user service, or restart it where it runs
+/// with an older unit, binary or session bus. `can_ask` checks this shell's
+/// session bus before the user manager is given it.
+fn start_service(
+    state_dir: &Path,
+    binary: &Path,
+    can_ask: impl FnOnce(&str) -> bool,
+) -> io::Result<Running> {
     let before = daemon::running(state_dir)?;
     if let Some(Running::Daemon(pid)) = before
         && !super::daemon_args_of(state_dir, pid)?.are_defaults()
@@ -147,7 +161,7 @@ fn start_service(state_dir: &Path, binary: &Path) -> io::Result<Running> {
     let changed = UserService::install(binary)?;
     UserService::action(ServiceAction::Enable)?;
     UserService::action(ServiceAction::ResetFailed)?;
-    let session_changed = UserService::prepare_session()?;
+    let shell_bus = UserService::prepare_session(can_ask)?;
     let running = match daemon::running(state_dir)? {
         Some(Running::Daemon(_)) => {
             daemon::unplug(state_dir)?;
@@ -156,8 +170,13 @@ fn start_service(state_dir: &Path, binary: &Path) -> io::Result<Running> {
         running => running,
     };
     let (running, how) = match running {
+        // A running service keeps the environment it started with, so one
+        // started before the user manager had this shell's bus, or before a
+        // drop-in's DBUS_SESSION_BUS_ADDRESS was removed, needs a restart.
         Some(Running::Service(pid))
-            if changed || session_changed || runs_another_binary(state_dir, pid, binary) =>
+            if changed
+                || runs_another_binary(state_dir, pid, binary)
+                || (shell_bus && !runs_on_shell_bus(state_dir, pid)) =>
         {
             (daemon::replug(state_dir)?, "restarted")
         }
@@ -269,6 +288,13 @@ fn runs_another_binary(state_dir: &Path, pid: unistd::Pid, binary: &Path) -> boo
         .unwrap_or(false)
 }
 
+/// Whether the daemon uses this shell's session bus. A daemon whose bus is
+/// unknown does not, so that setup restarts it.
+fn runs_on_shell_bus(state_dir: &Path, pid: unistd::Pid) -> bool {
+    crate::cli::daemon_info::DaemonInfo::read(state_dir, pid)
+        .is_ok_and(|info| info.session_bus_matches())
+}
+
 /// Whether `pqkey`, run from the shell, is `binary`, as the README's
 /// commands assume: an older pqkey earlier on the PATH would run instead.
 fn path_problem(binary: &Path, path: Option<&OsStr>) -> Option<checks::Problem> {
@@ -377,7 +403,7 @@ mod tests {
             if self.scenario.starts_with("hand-started") {
                 // The real start, which refuses a key started by hand with
                 // options before it installs anything.
-                return start_service(state, binary);
+                return start_service(state, binary, System::can_ask_at);
             }
             Ok(Running::Service(unistd::Pid::this()))
         }
@@ -723,5 +749,464 @@ mod tests {
             unistd::Pid::from_raw(i32::MAX),
             &env::current_exe().unwrap()
         ));
+    }
+
+    /// A user manager for `start_service`, played by a fake systemctl: it
+    /// keeps the manager's environment block in the file `environment`,
+    /// records each call in `trace`, and runs `service_key_child` as the
+    /// service. The key gets the session bus that block gives it, or the one
+    /// in the file `override`, as from a drop-in's `Environment=`, and the
+    /// presence in the file `presence`, as from a drop-in's `ExecStart=`.
+    struct Manager {
+        dir: TempDir,
+    }
+
+    const FAKE_SYSTEMCTL: &str = r#"#!/bin/sh
+PATH=/usr/bin:/bin
+printf '%s\n' "$*" >> "$FIXTURE/trace"
+run_key() {
+    if [ -e "$FIXTURE/override" ]; then
+        set -- env DBUS_SESSION_BUS_ADDRESS="$(cat "$FIXTURE/override")"
+    elif bus=$(sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' "$FIXTURE/environment") && [ -n "$bus" ]; then
+        set -- env DBUS_SESSION_BUS_ADDRESS="$bus"
+    else
+        set -- env -u DBUS_SESSION_BUS_ADDRESS
+    fi
+    "$@" PQKEY_SERVICE_KEY="$(cat "$FIXTURE/presence" 2>/dev/null)" "$KEY" --exact \
+        cli::setup::tests::service_key_child --nocapture </dev/null >/dev/null 2>&1 &
+    echo $! > "$FIXTURE/main-pid"
+}
+stop_key() {
+    pid=$(cat "$FIXTURE/main-pid" 2>/dev/null)
+    [ "${pid:-0}" -gt 0 ] && kill "$pid"
+    echo 0 > "$FIXTURE/main-pid"
+}
+case "$*" in
+"--user show-environment") cat "$FIXTURE/environment" ;;
+"--user set-environment "*)
+    grep -v "^${3%%=*}=" "$FIXTURE/environment" > "$FIXTURE/environment.new"
+    printf '%s\n' "$3" >> "$FIXTURE/environment.new"
+    mv "$FIXTURE/environment.new" "$FIXTURE/environment" ;;
+*LoadState*) echo loaded ;;
+*MainPID*) cat "$FIXTURE/main-pid" 2>/dev/null || echo 0 ;;
+"--user start pqkey.service") run_key ;;
+"--user restart pqkey.service") stop_key; run_key ;;
+"--user stop pqkey.service") stop_key ;;
+esac
+"#;
+
+    impl Manager {
+        /// A manager whose environment block is empty.
+        fn new(label: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = TempDir::new(label);
+            let bin = dir.path().join("bin");
+            fs::create_dir(&bin).unwrap();
+            fs::write(bin.join("systemctl"), FAKE_SYSTEMCTL).unwrap();
+            fs::set_permissions(bin.join("systemctl"), fs::Permissions::from_mode(0o755)).unwrap();
+            fs::write(dir.path().join("environment"), "").unwrap();
+            Self { dir }
+        }
+
+        fn file(&self, name: &str) -> PathBuf {
+            self.dir.path().join(name)
+        }
+
+        /// The address of a bus at `name` in this manager's directory.
+        fn bus(&self, name: &str) -> String {
+            format!("unix:path={}", self.file(name).display())
+        }
+
+        fn environment(&self) -> String {
+            fs::read_to_string(self.file("environment")).unwrap()
+        }
+
+        /// The manager's environment block from now on, as after
+        /// `systemctl --user import-environment`.
+        fn set_environment(&self, block: &str) {
+            fs::write(self.file("environment"), block).unwrap();
+        }
+
+        /// The calls to systemctl so far, each without `--user`, and none
+        /// from now on.
+        fn calls(&self) -> Vec<String> {
+            let calls = fs::read_to_string(self.file("trace")).unwrap_or_default();
+            fs::remove_file(self.file("trace")).ok();
+            calls
+                .lines()
+                .map(|call| call.trim_start_matches("--user ").to_owned())
+                .collect()
+        }
+
+        /// `service_child` with `step` and this shell's session bus
+        /// `shell_bus`; `can_ask` is the one bus where a notification server
+        /// can ask, or `None` for the check setup makes.
+        fn run(
+            &self,
+            step: &str,
+            shell_bus: Option<&str>,
+            can_ask: Option<&str>,
+        ) -> std::process::Output {
+            let mut child = std::process::Command::new(env::current_exe().unwrap());
+            child
+                .args(["--exact", "cli::setup::tests::service_child", "--nocapture"])
+                .env("PQKEY_SERVICE_CHILD", step)
+                .env("PATH", self.file("bin"))
+                .env("XDG_CONFIG_HOME", self.file("config"))
+                .env("XDG_DATA_HOME", self.file("data"))
+                .env("FIXTURE", self.dir.path())
+                .env("KEY", env::current_exe().unwrap())
+                .env_remove("DBUS_SESSION_BUS_ADDRESS")
+                .env_remove("PQKEY_CAN_ASK");
+            if let Some(bus) = shell_bus {
+                child.env("DBUS_SESSION_BUS_ADDRESS", bus);
+            }
+            if let Some(bus) = can_ask {
+                child.env("PQKEY_CAN_ASK", bus);
+            }
+            child.output().unwrap()
+        }
+
+        /// `pqkey setup`'s start of the service and its check of it, from a
+        /// shell on `shell_bus`; its standard output, or its error.
+        fn setup(&self, shell_bus: Option<&str>, can_ask: Option<&str>) -> Result<String, String> {
+            let output = self.run("setup", shell_bus, can_ask);
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            match output.status.code() {
+                Some(0) => Ok(stdout),
+                Some(1) => Err(stderr),
+                _ => panic!("{output:?}"),
+            }
+        }
+
+        /// The key the service runs: its pid, the session bus in its
+        /// environment and its presence, as it published them.
+        fn key(&self) -> (unistd::Pid, Option<String>, crate::cli::PresenceArg) {
+            let state = self.file("data").join("pqkey");
+            let pid = crate::state_lock::read_pid(&state).unwrap().unwrap();
+            let presence = crate::cli::daemon_args_of(&state, pid).unwrap().presence;
+            let info = fs::read(state.join(crate::state_lock::INFO_FILE)).unwrap();
+            let end = info.iter().position(|&byte| byte == b'\n').unwrap();
+            let header = String::from_utf8(info[..end].to_vec()).unwrap();
+            let bus = header
+                .split(' ')
+                .nth(4)
+                .unwrap()
+                .strip_prefix('x')
+                .map(|hex| {
+                    let bytes = (0..hex.len())
+                        .step_by(2)
+                        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                        .collect();
+                    String::from_utf8(bytes).unwrap()
+                });
+            (pid, bus, presence)
+        }
+    }
+
+    impl Drop for Manager {
+        fn drop(&mut self) {
+            let state = self.file("data").join("pqkey");
+            if let Ok(crate::state_lock::DaemonState::Running(pid)) =
+                crate::state_lock::daemon_state(&state)
+            {
+                let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+            }
+        }
+    }
+
+    /// The child of the tests with a `Manager`: `pqkey stop`, or, for
+    /// `setup`, the start of the service and its check, as `pqkey setup`
+    /// runs them. `PQKEY_CAN_ASK` names the one bus where a notification
+    /// server can ask; without it, a bus gets the check setup makes.
+    #[test]
+    fn service_child() {
+        let Ok(step) = env::var("PQKEY_SERVICE_CHILD") else {
+            return;
+        };
+        let state = crate::state::default_state_dir();
+        let binary = env::current_exe().unwrap().canonicalize().unwrap();
+        let result = if step == "stop" {
+            daemon::stop(&state)
+        } else {
+            let can_ask = |address: &str| match env::var("PQKEY_CAN_ASK") {
+                Ok(bus) => address == bus,
+                Err(_) => System::can_ask_at(address),
+            };
+            start_service(&state, &binary, can_ask).and_then(|running| {
+                SetupHost::verify(&System::real().unwrap(), &state, &binary, running)
+            })
+        };
+        if let Err(err) = &result {
+            eprintln!("pqkey: {err}");
+        }
+        std::process::exit(i32::from(result.is_err()));
+    }
+
+    /// The key a `Manager` runs as the service: once the key before it has
+    /// let go of the state directory, it publishes this process, with the
+    /// presence `PQKEY_SERVICE_KEY` names and its own session bus, as the
+    /// daemon does, and runs until SIGTERM.
+    #[test]
+    fn service_key_child() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+            time::Instant,
+        };
+        let Ok(presence) = env::var("PQKEY_SERVICE_KEY") else {
+            return;
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stop)).unwrap();
+        let state = crate::state::default_state_dir();
+        crate::state::ensure_state_dir(&state).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let lock = loop {
+            if let Some(lock) = crate::state_lock::StateLock::try_acquire(&state).unwrap() {
+                break lock;
+            }
+            assert!(Instant::now() < deadline, "the key before never stopped");
+        };
+        crate::state_lock::remove_pid_file(&state, &lock).unwrap();
+        crate::state_lock::remove_info_file(&state, &lock).unwrap();
+        let args = crate::cli::DaemonArgs {
+            presence: if presence == "unanswered" {
+                crate::cli::PresenceArg::Unanswered
+            } else {
+                crate::cli::PresenceArg::Notify
+            },
+            ..Default::default()
+        };
+        crate::test_support::daemon_info(&args)
+            .publish(&state, &lock)
+            .unwrap();
+        crate::state_lock::write_pid_file(&state, &lock).unwrap();
+        // Never outlive its test for long.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        crate::state_lock::remove_pid_file(&state, &lock).unwrap();
+        crate::state_lock::remove_info_file(&state, &lock).unwrap();
+    }
+
+    /// Only the calls that read or change the manager's environment, or
+    /// start, restart or stop the service, in order.
+    fn session_calls(calls: &[String]) -> Vec<&str> {
+        calls
+            .iter()
+            .map(String::as_str)
+            .filter(|call| {
+                call.contains("environment")
+                    || (call.ends_with("pqkey.service")
+                        && ["start ", "restart ", "stop "]
+                            .iter()
+                            .any(|action| call.starts_with(action)))
+            })
+            .collect()
+    }
+
+    /// Setup gives the user manager this shell's session bus only where a
+    /// notification server there can ask, and never a bus over TCP, which
+    /// the service cannot use: an unreachable bus, as in a terminal left from
+    /// an earlier login, leaves the manager's environment as it was, and the
+    /// service starts with the bus the manager gives it. A bus that can ask
+    /// is given before the service starts.
+    #[test]
+    fn setup_gives_the_user_manager_only_a_checked_unix_bus() {
+        let block = |bus: &str| format!("HOME=/home/u\nDBUS_SESSION_BUS_ADDRESS={bus}\n");
+        for case in ["unreachable", "tcp", "no-bus", "can-ask"] {
+            let manager = Manager::new("setup-bus-check");
+            let user_bus = manager.bus("user-bus");
+            manager.set_environment(&block(&user_bus));
+            let tcp = "tcp:host=127.0.0.1,port=9";
+            let desktop = manager.bus("desktop-bus");
+            let (shell_bus, can_ask) = match case {
+                // Checked as setup checks it: nothing listens there.
+                "unreachable" => (Some(manager.bus("gone")), None),
+                // Even where the check would pass.
+                "tcp" => (Some(tcp.to_owned()), Some(tcp)),
+                "no-bus" => (None, None),
+                _ => (Some(desktop.clone()), Some(desktop.as_str())),
+            };
+            let shown = manager.setup(shell_bus.as_deref(), can_ask);
+            let stdout = shown.unwrap_or_else(|err| panic!("{case}: {err}"));
+            assert!(
+                stdout.contains("✓ Key started; it starts with your session\n"),
+                "{case}: {stdout}"
+            );
+            let calls = manager.calls();
+            let (_, bus, _) = manager.key();
+            if case == "can-ask" {
+                assert_eq!(
+                    manager.environment(),
+                    format!("HOME=/home/u\nDBUS_SESSION_BUS_ADDRESS={desktop}\n")
+                );
+                assert_eq!(
+                    session_calls(&calls),
+                    [
+                        "show-environment".to_owned(),
+                        format!("set-environment DBUS_SESSION_BUS_ADDRESS={desktop}"),
+                        "start pqkey.service".to_owned()
+                    ]
+                );
+                // The unit is read again before then.
+                let reload = calls.iter().position(|call| call == "daemon-reload");
+                let set = calls
+                    .iter()
+                    .position(|call| call.starts_with("set-environment"));
+                assert!(reload < set, "{calls:?}");
+                assert_eq!(bus, Some(desktop));
+            } else {
+                assert_eq!(manager.environment(), block(&user_bus), "{case}");
+                assert!(
+                    !calls.iter().any(|call| call.starts_with("set-environment")),
+                    "{case}: {calls:?}"
+                );
+                assert_eq!(bus, Some(user_bus), "{case}");
+            }
+        }
+    }
+
+    /// A service that started before the user manager had this shell's bus,
+    /// as one does after `systemctl --user import-environment` without a
+    /// restart, is restarted onto it: setup neither keeps it on its old bus
+    /// nor tells the user to remove an override there is none of. A bus that
+    /// setup gives the manager itself is given before the restart.
+    #[test]
+    fn setup_restarts_a_service_started_before_the_bus_was_imported() {
+        let manager = Manager::new("setup-imported-bus");
+        let (user_bus, desktop) = (manager.bus("user-bus"), manager.bus("desktop-bus"));
+        manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={user_bus}\n"));
+        manager.setup(Some(&user_bus), None).unwrap();
+        let (before, bus, _) = manager.key();
+        assert_eq!(bus.as_deref(), Some(user_bus.as_str()));
+        // `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS` in
+        // a terminal of the desktop.
+        manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={desktop}\n"));
+        manager.calls();
+        let stdout = manager.setup(Some(&desktop), None).unwrap();
+        assert!(
+            stdout.contains("✓ Key restarted; it starts with your session\n"),
+            "{stdout}"
+        );
+        assert_eq!(
+            session_calls(&manager.calls()),
+            ["show-environment", "restart pqkey.service"]
+        );
+        let (after, bus, _) = manager.key();
+        assert_ne!(after, before);
+        assert_eq!(bus, Some(desktop));
+        // From a terminal on a bus that can ask and that the manager does not
+        // have yet.
+        let next = manager.bus("next-desktop-bus");
+        let stdout = manager.setup(Some(&next), Some(&next)).unwrap();
+        assert!(
+            stdout.contains("✓ Key restarted; it starts with your session\n"),
+            "{stdout}"
+        );
+        let calls = manager.calls();
+        assert_eq!(
+            session_calls(&calls),
+            [
+                "show-environment".to_owned(),
+                format!("set-environment DBUS_SESSION_BUS_ADDRESS={next}"),
+                "restart pqkey.service".to_owned()
+            ]
+        );
+        let reload = calls.iter().position(|call| call == "daemon-reload");
+        let restart = calls
+            .iter()
+            .position(|call| call == "restart pqkey.service");
+        assert!(reload < restart, "{calls:?}");
+        let (last, bus, _) = manager.key();
+        assert_ne!(last, after);
+        assert_eq!(bus, Some(next));
+    }
+
+    /// Setup's fix for a service whose unit or drop-in sets its own
+    /// DBUS_SESSION_BUS_ADDRESS, followed as written, ends with the service
+    /// on this shell's bus: rerun after the override is gone, setup restarts
+    /// it. A shell without a bus the manager gives, here none at all, gets
+    /// no such fix: setup checks the bus the key has.
+    #[test]
+    fn the_override_fix_followed_as_written_moves_the_service_to_the_shells_bus() {
+        let manager = Manager::new("setup-override");
+        let (user_bus, desktop) = (manager.bus("user-bus"), manager.bus("desktop-bus"));
+        manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={user_bus}\n"));
+        let other = manager.bus("other-bus");
+        fs::write(manager.file("override"), &other).unwrap();
+        assert_eq!(
+            manager.setup(Some(&desktop), Some(&desktop)),
+            Err(
+                "pqkey: the service uses another notification session; remove its \
+                 DBUS_SESSION_BUS_ADDRESS override and rerun `pqkey setup`\n"
+                    .to_owned()
+            )
+        );
+        assert_eq!(manager.key().1, Some(other.clone()));
+        // Without this shell's bus in the manager, the bus is not setup's to
+        // require, nor to restart the service for.
+        let stdout = manager.setup(None, None).unwrap();
+        assert!(stdout.contains("✓ Key running;"), "{stdout}");
+        assert_eq!(manager.key().1, Some(other));
+        fs::remove_file(manager.file("override")).unwrap();
+        let stdout = manager.setup(Some(&desktop), Some(&desktop)).unwrap();
+        assert!(
+            stdout.contains("✓ Key restarted; it starts with your session\n"),
+            "{stdout}"
+        );
+        assert_eq!(manager.key().1, Some(desktop));
+    }
+
+    /// The fix for a service that never answers, followed as written after
+    /// its drop-in is changed, ends with the service running the changed
+    /// options: setup does not restart a running service for a drop-in, so
+    /// the fix stops it first.
+    #[test]
+    fn the_unanswered_fix_followed_as_written_runs_the_changed_options() {
+        use crate::cli::PresenceArg;
+        let manager = Manager::new("setup-options");
+        let user_bus = manager.bus("user-bus");
+        manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={user_bus}\n"));
+        fs::write(manager.file("presence"), "unanswered").unwrap();
+        manager.setup(Some(&user_bus), None).unwrap();
+        let (before, _, presence) = manager.key();
+        assert_eq!(presence, PresenceArg::Unanswered);
+        let fix = key::running_problems(
+            &manager.file("data").join("pqkey"),
+            &System::real().unwrap(),
+            Running::Service(before),
+            Duration::ZERO,
+        )
+        .unwrap()
+        .pop()
+        .unwrap()
+        .fix;
+        assert!(
+            fix.ends_with(", then run `pqkey stop && pqkey setup`"),
+            "{fix}"
+        );
+        // The drop-in, changed to the default presence.
+        fs::write(manager.file("presence"), "").unwrap();
+        // Setup alone keeps the key it finds.
+        let stdout = manager.setup(Some(&user_bus), None).unwrap();
+        assert!(stdout.contains("✓ Key running;"), "{stdout}");
+        assert_eq!(
+            manager.key(),
+            (before, Some(user_bus.clone()), PresenceArg::Unanswered)
+        );
+        // `pqkey stop && pqkey setup`
+        let stopped = manager.run("stop", Some(&user_bus), None);
+        assert!(stopped.status.success(), "{stopped:?}");
+        let stdout = manager.setup(Some(&user_bus), None).unwrap();
+        assert!(stdout.contains("✓ Key started;"), "{stdout}");
+        let (after, _, presence) = manager.key();
+        assert_ne!(after, before);
+        assert_eq!(presence, PresenceArg::Notify);
     }
 }

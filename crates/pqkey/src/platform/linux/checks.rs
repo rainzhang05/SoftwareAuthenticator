@@ -437,6 +437,17 @@ pub fn key_notification_problem(
     Some(found)
 }
 
+/// What the notification server on the session bus at `address`, or with
+/// `None` on this process's own, says about itself.
+fn server_at(address: Option<&str>) -> Result<ServerInfo, ConnectError> {
+    use super::dbus::SessionBus;
+    use crate::presence::notification::NotificationServer;
+    let mut bus = address.map_or_else(SessionBus::new, SessionBus::at);
+    let server = bus.connect();
+    bus.disconnect();
+    server
+}
+
 impl System {
     pub fn check_setup_caller(state_dir: &Path) -> io::Result<()> {
         super::setup::check_caller(state_dir)
@@ -501,20 +512,19 @@ impl System {
         service: bool,
         address: &str,
     ) -> io::Result<Option<Problem>> {
-        use super::dbus::SessionBus;
-        use crate::presence::notification::NotificationServer;
         let here = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok();
         Ok(key_notification_problem(
             service,
             address,
             here.as_deref(),
-            |address| {
-                let mut bus = address.map_or_else(SessionBus::new, SessionBus::at);
-                let server = bus.connect();
-                bus.disconnect();
-                server
-            },
+            server_at,
         ))
+    }
+    /// Whether a notification server on the session bus at `address` can ask
+    /// for approval, connecting there as the key does: the check that
+    /// `key_notification_problem` makes of the key's bus.
+    pub fn can_ask_at(address: &str) -> bool {
+        notification_problem(&server_at(Some(address)), Some(address)).is_none()
     }
     pub fn uninstall_instructions(binary: &Path, state_dir: &Path) -> io::Result<Vec<String>> {
         let script = super::setup::root_undo_script(binary);

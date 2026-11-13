@@ -308,20 +308,58 @@ impl UserService {
                 .map(Pid::from_raw),
         )
     }
-    /// Ensure the daemon uses the desktop bus setup checked in this shell.
-    pub fn prepare_session() -> io::Result<bool> {
-        if let Some(address) = env::var_os("DBUS_SESSION_BUS_ADDRESS") {
-            let address = address
-                .to_str()
-                .ok_or_else(|| io::Error::other("session bus address is not UTF-8"))?;
-            let wanted = format!("DBUS_SESSION_BUS_ADDRESS={address}");
-            let current = systemctl(&["show-environment"])?;
-            if !current.lines().any(|line| line == wanted) {
-                systemctl(&["set-environment", &wanted])?;
-                return Ok(true);
-            }
+    /// This shell's session bus, the address in its DBUS_SESSION_BUS_ADDRESS,
+    /// unless that is a bus over TCP, which the service cannot use: its unit
+    /// allows it only Unix sockets.
+    fn shell_bus() -> io::Result<Option<String>> {
+        let Some(address) = env::var_os("DBUS_SESSION_BUS_ADDRESS") else {
+            return Ok(None);
+        };
+        let address = address
+            .into_string()
+            .map_err(|_| io::Error::other("session bus address is not UTF-8"))?;
+        Ok((!super::dbus::is_tcp_address(&address)).then_some(address))
+    }
+
+    /// Whether the user manager gives the services it starts `address` as
+    /// their session bus.
+    fn gives_bus(address: &str) -> io::Result<bool> {
+        let wanted = format!("DBUS_SESSION_BUS_ADDRESS={address}");
+        Ok(systemctl(&["show-environment"])?
+            .lines()
+            .any(|line| line == wanted))
+    }
+
+    /// Whether the user manager gives the services it starts this shell's
+    /// session bus, as [`Self::prepare_session`] arranges.
+    pub fn gives_shell_bus() -> io::Result<bool> {
+        match Self::shell_bus()? {
+            Some(address) => Self::gives_bus(&address),
+            None => Ok(false),
         }
-        Ok(false)
+    }
+
+    /// Have the user manager give the services it starts, the daemon among
+    /// them, this shell's session bus, if it does not yet and `can_ask` finds
+    /// a notification server there that can ask for approval. A bus that
+    /// fails that check, as one left over from an earlier login, is not
+    /// handed on: every user service started afterwards would inherit it.
+    /// Returns whether the manager gives services this shell's bus now.
+    pub fn prepare_session(can_ask: impl FnOnce(&str) -> bool) -> io::Result<bool> {
+        let Some(address) = Self::shell_bus()? else {
+            return Ok(false);
+        };
+        if Self::gives_bus(&address)? {
+            return Ok(true);
+        }
+        if !can_ask(&address) {
+            return Ok(false);
+        }
+        systemctl(&[
+            "set-environment",
+            &format!("DBUS_SESSION_BUS_ADDRESS={address}"),
+        ])?;
+        Ok(true)
     }
     pub fn action(action: ServiceAction) -> io::Result<()> {
         let action = match action {
@@ -467,7 +505,8 @@ mod setup_tests {
             }
             let changed = UserService::install(Path::new("/usr/local/bin/pqkey"))?;
             println!("CHANGED:{changed}");
-            UserService::prepare_session()?;
+            // A bus that passes setup's check; cli::setup's tests check it.
+            UserService::prepare_session(|_| true)?;
             UserService::action(ServiceAction::Enable)
         })();
         if let Err(err) = &result {
