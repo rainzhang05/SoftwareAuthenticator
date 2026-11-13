@@ -1670,6 +1670,9 @@ esac
         Membership,
         /// The passkeys that were in a legacy store's lost directory.
         LegacyDirectory,
+        /// Sign-ins that count on the shared signature counter; passkeys
+        /// count on their own, and the key counts them all.
+        Counter,
         /// The store cannot be checked.
         Unchecked,
     }
@@ -1739,6 +1742,14 @@ esac
             "legacy directory" => {
                 std::fs::remove_dir_all(dir.join("credentials")).unwrap();
                 ("(credentials is missing".into(), Fails::LegacyDirectory)
+            }
+            "counter" => {
+                FileStore::open(dir)
+                    .unwrap()
+                    .set_signature_counter(5)
+                    .unwrap();
+                damage_file(&dir.join("signature-counter"));
+                ("(signature-counter is corrupt".into(), Fails::Counter)
             }
             "short key" => {
                 std::fs::write(dir.join("keys").join("credential.key"), b"short").unwrap();
@@ -1820,6 +1831,7 @@ esac
             "removed marker",
             "managed directory",
             "legacy directory",
+            "counter",
             "short key",
         ] {
             let dir = TempDir::new("status-damage");
@@ -1879,6 +1891,16 @@ esac
                     let token = key.management_token(b"1234").unwrap();
                     assert_eq!(key.passkeys(&token).unwrap(), []);
                     assert_eq!(store_problem(dir.path()), None, "{kind}");
+                }
+                Fails::Counter => {
+                    assert_eq!(counted, "Passkeys: room for 997 more", "{kind}");
+                    assert!(
+                        problem.what.ends_with(
+                            "the key cannot sign in to sites that registered it as a security \
+                             key and whose credentials it did not store"
+                        ),
+                        "{kind}: {problem:?}"
+                    );
                 }
                 Fails::Unchecked => {
                     assert_eq!(counted, "Passkeys: cannot be counted", "{kind}");

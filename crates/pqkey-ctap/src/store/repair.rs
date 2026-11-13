@@ -1,4 +1,4 @@
-//! Explicit repair of a damaged credential set.
+//! Explicit repair of a damaged credential set and signature counter.
 //!
 //! [`FileStore::plan_repair`] finds what to do without changing anything,
 //! and [`FileStore::repair`] does it.  `pqkey repair` plans with the key
@@ -6,20 +6,30 @@
 //! else repairs a store, and no operation rebuilds membership by itself.
 //!
 //! Every file of the store that repair replaces or removes, a damaged
-//! record or metadata file, the replaced manifest, a failed upgrade's
-//! prepared manifest, or a record the new list does not name, first gets a
-//! name in a new quarantine directory, `damaged/<UTC time>/`, at its path
-//! relative to the state directory: a hard link for a file, which keeps it
-//! in place until then, so that a crash before publication leaves the store
-//! as it was, and a rename for anything else in a file's place.  Membership
-//! is published as every commit publishes it, and cleanup after the
+//! record, metadata file or signature counter, the replaced manifest, a
+//! failed upgrade's prepared manifest, a record the new list does not name,
+//! or a record whose counter it raises, first gets a name in a new
+//! quarantine directory, `damaged/<UTC time>/`, at its path relative to the
+//! state directory: a hard link for anything but a directory, which keeps it
+//! in place until whatever replaces or removes it, and a rename for a
+//! directory, which cannot be linked.  So a crash leaves every file of the
+//! store in its place, in `credential-set/` after a legacy store's rename,
+//! or in the quarantine, as [`FileStore::repair`] says.  Membership is
+//! published as every commit publishes it, and cleanup after the
 //! publication then removes the records' old names, as it removes any file
-//! membership no longer names.
+//! membership no longer names.  A counter whose count is lost is written
+//! again above every count the key returned on it, under the conditions
+//! [`FileStore::repair`] states.
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
+
+/// The largest count a counter holds, `u32::MAX`, read as a time in seconds
+/// since 1970: 2106-02-07T06:28:15Z.  The count rule leaves out a time at or
+/// past it, the clock's or a file's, which no count can exceed.
+const LARGEST_COUNT: u64 = u32::MAX as u64;
 
 /// The directory of the state directory that holds the quarantines: outside
 /// both record directories, which cleanup scans, and `credentials`.
@@ -65,9 +75,21 @@ pub struct RepairPlan {
     /// it is damaged, or missing although the store is in the managed
     /// layout, or because a legacy store moves to that layout.
     pub marker: bool,
+    /// Whether the shared signature counter, `signature-counter`, is written
+    /// again because it is damaged, above every count the key returned on
+    /// it, under the conditions [`FileStore::repair`] states.
+    pub counter: bool,
+    /// The records whose counters are raised the same way, at their paths
+    /// relative to the state directory, in order: copies of credentials that
+    /// a rebuild keeps while another copy of their record, in the other
+    /// record directory, is damaged, and so can have counted higher.
+    pub raised: Vec<String>,
     /// Every file and directory moved into the quarantine, at its path
     /// relative to the state directory, in order.
     pub moved: Vec<String>,
+    /// The highest counter planning read: of the records it read, and of
+    /// the shared counter if it is not damaged.
+    highest: u32,
     publication: Publication,
 }
 
@@ -90,6 +112,9 @@ pub enum Membership {
     /// `credential-set`, with an empty list, or a legacy store's
     /// `credentials`.
     Created(String),
+    /// Nothing but the signature counter is damaged: the list, or a legacy
+    /// store's directory of records, stays as it is.
+    Intact,
 }
 
 /// An account the repaired list holds more than one passkey of: passkeys
@@ -191,20 +216,31 @@ impl<K: KeySource> FileStore<K> {
     ///   passkey of its account, which [`RepairPlan::shared`] then names.
     ///   Of two authentic copies of one credential, in both
     ///   record directories, only one is kept, since the manifest can name
-    ///   one: the one with the higher signature counter.  The new list may
-    ///   hold more credentials than the store's limit
-    ///   ([`RepairPlan::max_credentials`]).
+    ///   one: the one with the higher signature counter.  Of an authentic
+    ///   copy and a damaged one, the authentic one is kept, and its counter
+    ///   is raised, since the damaged one can have counted higher
+    ///   ([`RepairPlan::raised`]).  The new list may hold more credentials
+    ///   than the store's limit ([`RepairPlan::max_credentials`]).
     /// * A damaged format marker is written again, and so is a missing one
     ///   of a store in the managed layout; a manifest that authenticates is
     ///   used whatever the marker.
     /// * A missing namespace is created again, empty: its records went
     ///   with it ([`Membership::Created`]).
+    /// * A shared signature counter that cannot be read, or fails
+    ///   authentication or decoding, is written again
+    ///   ([`RepairPlan::counter`]); if nothing else is damaged, the
+    ///   credential set stays as it is ([`Membership::Intact`]).  A
+    ///   directory in its place is an error instead, which changes nothing:
+    ///   a rename cannot replace a directory with a file, and moving it away
+    ///   first would leave no counter, which reads as one never written.
+    ///   Anything else there, an empty file included, is repaired.
     ///
     /// Call it with nothing else writing the store, as `pqkey repair` does
     /// with the key stopped.  A record or credential key it cannot read is
     /// an error, as for the inspection: repair never takes out what it could
-    /// not read.  Records are decrypted on a stack that is scrubbed
-    /// afterwards.
+    /// not read.  A counter it cannot read is damage instead, since writing
+    /// it again needs nothing of its contents.  Records are decrypted on a
+    /// stack that is scrubbed afterwards.
     pub fn plan_repair(&self) -> Result<Option<RepairPlan>, StoreError> {
         let damage = self.inspect()?;
         if damage.is_empty() {
@@ -217,7 +253,10 @@ impl<K: KeySource> FileStore<K> {
             self.plan_with(&keys, damage).map(Some)
         })?;
         Ok(plan.filter(|plan| {
-            plan.publication != Publication::Nothing || plan.marker || !plan.moved.is_empty()
+            plan.publication != Publication::Nothing
+                || plan.marker
+                || plan.counter
+                || !plan.moved.is_empty()
         }))
     }
 
@@ -227,30 +266,70 @@ impl<K: KeySource> FileStore<K> {
     /// and a different plan is an error that changes nothing.  Then:
     ///
     /// 1. Every entry in [`RepairPlan::moved`] gets its name in a new
-    ///    quarantine directory, `damaged/<UTC time>/`, which is flushed.  A
-    ///    file keeps its old name for now; anything else, which cannot be
-    ///    linked, moves.
-    /// 2. The new list is published, as a commit publishes it: for a
+    ///    quarantine directory, `damaged/<UTC time>/`, which is flushed.
+    ///    Anything but a directory keeps its old name for now; a directory,
+    ///    which cannot be linked, moves.
+    /// 2. A damaged shared signature counter, and the counter of each record
+    ///    in [`RepairPlan::raised`], is written at one more than the largest
+    ///    of: the clock's seconds since 1970, read after step 1; the newest
+    ///    modification time of the state directory, of each entry in it and
+    ///    of each entry in a directory of records, read before step 1; and
+    ///    every counter planning read.  A time at or past `u32::MAX` seconds,
+    ///    2106-02-07T06:28:15Z, the clock's or a file's, is left out, so a
+    ///    clock or file that far ahead does not stop the counter.  The count
+    ///    is at most `u32::MAX`, where counting stops, which it reaches
+    ///    only from a time a second earlier or a counter planning read at
+    ///    `u32::MAX - 1` or `u32::MAX`.  A record keeps its creation order and
+    ///    the rest of its contents.
+    /// 3. The new list is published, as a commit publishes it: for a
     ///    managed store, by renaming a flushed manifest over
     ///    `credential-set/active`; for a legacy store, by renaming the
     ///    prepared `credentials/` to `credential-set/`, after writing the
     ///    format marker if it has no authentic one.  Cleanup then removes the
     ///    old names of the records the list does not name.
-    /// 3. A damaged or missing format marker of a managed store is written
+    /// 4. A damaged or missing format marker of a managed store is written
     ///    last, since it decides whether the list is used at all.
     ///
-    /// So an error or a crash at any checkpoint leaves the store serving
-    /// the credentials it served before or those of the repaired list, and
-    /// every file of the store in its place, in `credential-set/` after a
-    /// legacy store's rename, or in the quarantine; repairing again finishes
-    /// the work.  Only where the store could serve no credential before,
-    /// because its metadata or namespace is damaged, can such a crash leave
-    /// another fault of that kind: a damaged metadata entry that is not a
-    /// file, moved away, or a recreated namespace without its list yet.
+    /// A counter is written at every count, and each write renames its file
+    /// into one of those directories, so a damaged counter's file, or a
+    /// damaged copy of a record, has the clock's reading at its last count as
+    /// its modification time, unless something has written it, taken its
+    /// place or set its time since: a file created in its place by hand has
+    /// the clock's reading then.  Nothing can tell a time set otherwise from
+    /// such a reading.  So a counter written again before
+    /// 2106-02-07T06:28:15Z is above every count it returned if:
     ///
-    /// The shared signature counter, the PIN state, the large-blob array,
-    /// the attestation record and the keys are left as they are, and no
-    /// record is rewritten, so each keeps its own counter.
+    /// 1. at each count and each repair, the key had counted fewer times
+    ///    than whole seconds had passed since 1970, and since any earlier
+    ///    repair ended;
+    /// 2. no time that this repair or an earlier one read, the clock's or a
+    ///    file's, was ahead of the real time, as when the clock never ran
+    ///    ahead and every time on the state directory and its files came from
+    ///    this computer's clock, not from a hand edit, a copy that kept its
+    ///    times or a fault that damaged the file; and
+    /// 3. the clock is right now, or the damaged file still has the time a
+    ///    right clock gave it at the last count or later, nothing having
+    ///    changed that time since.
+    ///
+    /// A time ahead that this repair reads can raise the count it writes, so
+    /// that a later repair, even under a right clock, can start at or below
+    /// the counts returned in between.
+    ///
+    /// By the order of the steps, an error or a crash at any checkpoint leaves
+    /// the store serving the credentials it served before or those of the
+    /// repaired list, each counter it writes damaged as before or written
+    /// again, and every file of the store in its place, in `credential-set/`
+    /// after a legacy store's rename, or in the quarantine; repairing again
+    /// finishes the work, unless an error stops it too.  Only where the store
+    /// could serve no credential before, because its metadata or namespace is
+    /// damaged, can such a crash leave another fault of that kind: a
+    /// directory in a metadata file's place, moved away, or a recreated
+    /// namespace without its list yet.
+    ///
+    /// The PIN state, the large-blob array, the attestation record and the
+    /// keys are left as they are, and so is the shared signature counter
+    /// unless it is damaged; no record is rewritten but to raise its counter,
+    /// so each other keeps its own.
     pub fn repair(&self, plan: &RepairPlan) -> Result<Repaired, StoreError> {
         if self.plan_repair()?.as_ref() != Some(plan) {
             return Err(fsio::io_error(&self.root, std::io::Error::other(CHANGED)));
@@ -268,7 +347,14 @@ impl<K: KeySource> FileStore<K> {
         keys: &CredentialKeys,
         damage: Vec<Damage>,
     ) -> Result<RepairPlan, StoreError> {
-        let mut plan = if !exists(&self.root.join(MANAGED_DIR))? {
+        // A damaged counter, which the inspection names first, says nothing
+        // of the credential set, and is repaired on its own.
+        let (counter, damage): (Vec<Damage>, Vec<Damage>) = damage
+            .into_iter()
+            .partition(|damage| damage.file == SIGNATURE_COUNTER_FILE);
+        let mut plan = if damage.is_empty() {
+            self.plan_intact(keys)?
+        } else if !exists(&self.root.join(MANAGED_DIR))? {
             if exists(&self.credentials_dir)? {
                 self.plan_listing(keys, damage)?
             } else if exists(&self.root.join(FORMAT_FILE))? {
@@ -295,8 +381,56 @@ impl<K: KeySource> FileStore<K> {
             plan.mark(marker, true);
             plan
         };
+        if counter.is_empty() {
+            plan.highest = plan.highest.max(self.counter(keys)?);
+        } else {
+            // A rename cannot replace a directory with a file, and moving it
+            // away first would leave no counter, which reads as one never
+            // written: a crash in between would let counts start again.
+            let path = self.root.join(SIGNATURE_COUNTER_FILE);
+            if fs::symlink_metadata(&path)
+                .map_err(|err| fsio::io_error(&path, err))?
+                .is_dir()
+            {
+                return Err(fsio::io_error(
+                    &path,
+                    std::io::Error::new(
+                        ErrorKind::IsADirectory,
+                        "is a directory, which repair cannot replace with a counter in one step",
+                    ),
+                ));
+            }
+            plan.counter = true;
+            plan.moved.push(SIGNATURE_COUNTER_FILE.to_owned());
+            plan.damage.splice(0..0, counter);
+        }
         plan.moved.sort();
         plan.max_credentials = self.max_credentials;
+        Ok(plan)
+    }
+
+    /// Only the signature counter is damaged: the credential set stays as
+    /// it is, and is read for its counters and what the plan reports.
+    fn plan_intact(&self, keys: &CredentialKeys) -> Result<RepairPlan, StoreError> {
+        let members: Vec<(String, Location, PathBuf)> = match self.active_manifest(keys)? {
+            Some(manifest) => manifest
+                .into_iter()
+                .map(|(name, location)| (name, location, self.record_dir(location)))
+                .collect(),
+            None => self
+                .credential_file_names()?
+                .into_iter()
+                .map(|name| (name, Location::Legacy, self.credentials_dir.clone()))
+                .collect(),
+        };
+        let mut kept = Vec::new();
+        for (name, location, dir) in members {
+            if let Some(record) = self.read_credential_in(keys, &name, &dir, location)? {
+                kept.push(Kept::of(&record, name, location));
+            }
+        }
+        let mut plan = RepairPlan::new(Vec::new(), Membership::Intact, Publication::Nothing);
+        plan.keep(&kept);
         Ok(plan)
     }
 
@@ -343,6 +477,7 @@ impl<K: KeySource> FileStore<K> {
     ) -> Result<RepairPlan, StoreError> {
         add(&mut damage, lost);
         let mut found = Vec::new();
+        let mut damaged = BTreeSet::new();
         for location in [Location::Legacy, Location::Managed] {
             let dir = self.record_dir(location);
             for name in record_files(&dir)? {
@@ -351,6 +486,7 @@ impl<K: KeySource> FileStore<K> {
                     Ok(None) => {}
                     Err(StoreError::Corrupt { object, reason }) => {
                         add(&mut damage, Damage::corrupt(object, reason));
+                        damaged.insert(name);
                     }
                     Err(err) => return Err(err),
                 }
@@ -361,13 +497,22 @@ impl<K: KeySource> FileStore<K> {
         // Fail before anything changes if the list cannot be written.
         let _ = manifest::encode(&list)?;
         let mut plan = RepairPlan::new(damage, Membership::Rebuilt, Publication::Nothing);
-        // The manifest's place is taken by the new one: a file there keeps
-        // its contents in the quarantine, and anything else moves there.
+        // The manifest's place is taken by the new one: whatever is there
+        // gets a name in the quarantine first, and a directory moves there.
         let active = format!("{MANAGED_DIR}/{ACTIVE_FILE}");
         if exists(&self.root.join(&active))? {
             plan.moved.push(active);
         }
         plan.moved.extend(self.reclaimed(&list)?);
+        // A kept copy whose name a damaged copy in the other directory has
+        // too: that copy's counter is lost, and can be higher than this one.
+        plan.raised = kept
+            .iter()
+            .filter(|kept| damaged.contains(&kept.name))
+            .map(|kept| self.relative(&self.record_dir(kept.location), &kept.name))
+            .collect();
+        plan.raised.sort();
+        plan.moved.extend(plan.raised.iter().cloned());
         plan.publication = Publication::Manifest(list);
         plan.keep(&kept);
         Ok(plan)
@@ -438,11 +583,32 @@ impl<K: KeySource> FileStore<K> {
     }
 
     fn carry_out(&self, keys: &CredentialKeys, plan: &RepairPlan) -> Result<Repaired, StoreError> {
+        // Read before the quarantine changes the state directory's time.
+        let newest = if plan.counter || !plan.raised.is_empty() {
+            Some(self.newest_change()?)
+        } else {
+            None
+        };
         let quarantine = if plan.moved.is_empty() {
             None
         } else {
             Some(self.quarantine(&plan.moved)?)
         };
+        if let Some(newest) = newest {
+            let count = count_above(plan.highest, newest, SystemTime::now());
+            if plan.counter {
+                let plaintext = codec::encode_signature_counter(count)?;
+                self.write_object(
+                    &keys.record,
+                    RecordType::SignatureCounter,
+                    SIGNATURE_COUNTER_FILE,
+                    &plaintext,
+                )?;
+            }
+            for raised in &plan.raised {
+                self.raise(keys, raised, count)?;
+            }
+        }
         let mut commit = CredentialCommit {
             durability: CommitDurability::Flushed,
             cleanup_pending: false,
@@ -478,6 +644,83 @@ impl<K: KeySource> FileStore<K> {
             durability: commit.durability,
             cleanup_pending: commit.cleanup_pending,
         })
+    }
+
+    /// The newest modification time, in seconds since 1970, of the state
+    /// directory, of each entry in it, and of each entry in a directory of
+    /// records, leaving out a time at or past [`LARGEST_COUNT`].  The store
+    /// writes the counter's file at each count, and a record at each of its
+    /// counts, so their time is the clock's reading at their last count,
+    /// unless something else has written them, taken their place or set
+    /// their time since.  Each time is taken for a reading of this computer's
+    /// clock, which nothing here can check: [`FileStore::repair`] states what
+    /// its guarantee needs of them.
+    fn newest_change(&self) -> Result<u64, StoreError> {
+        let mut newest = 0;
+        let mut note = |path: &Path, metadata: fs::Metadata| {
+            let time = seconds(
+                metadata
+                    .modified()
+                    .map_err(|err| fsio::io_error(path, err))?,
+            );
+            if time < LARGEST_COUNT {
+                newest = newest.max(time);
+            }
+            Ok::<_, StoreError>(())
+        };
+        note(
+            &self.root,
+            fs::symlink_metadata(&self.root).map_err(|err| fsio::io_error(&self.root, err))?,
+        )?;
+        for dir in [
+            self.root.clone(),
+            self.record_dir(Location::Legacy),
+            self.record_dir(Location::Managed),
+            self.credentials_dir.clone(),
+        ] {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                Err(err) => return Err(fsio::io_error(&dir, err)),
+            };
+            for entry in entries {
+                let entry = entry.map_err(|err| fsio::io_error(&dir, err))?;
+                let path = entry.path();
+                let metadata = entry.metadata().map_err(|err| fsio::io_error(&path, err))?;
+                note(&path, metadata)?;
+            }
+        }
+        Ok(newest)
+    }
+
+    /// Write the record at `raised`, its path relative to the state
+    /// directory, again with the counter `count`, as a same-ID update writes
+    /// it: in place, under its logical name, with its creation order.
+    fn raise(&self, keys: &CredentialKeys, raised: &str, count: u32) -> Result<(), StoreError> {
+        let path = Path::new(raised);
+        let location = if path.starts_with(Path::new(MANAGED_DIR).join(RECORDS_DIR)) {
+            Location::Managed
+        } else {
+            Location::Legacy
+        };
+        let dir = self.record_dir(location);
+        let changed = || fsio::io_error(&self.root.join(raised), std::io::Error::other(CHANGED));
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(changed)?;
+        let mut record = self
+            .read_credential_in(keys, name, &dir, location)?
+            .ok_or_else(changed)?;
+        record.sign_count = count;
+        let plaintext = codec::encode_credential(&record, record.created_at)?;
+        let sealed = envelope::seal(
+            &keys.record,
+            RecordType::Credential,
+            &credential_object(name, location),
+            &plaintext,
+        )?;
+        fsio::replace_file(&dir, name, &sealed)
     }
 
     /// Give each of `moved` its name in a new quarantine directory, at its
@@ -551,16 +794,20 @@ impl RepairPlan {
             others: 0,
             max_credentials: 0,
             marker: false,
+            counter: false,
+            raised: Vec::new(),
             moved: Vec::new(),
+            highest: 0,
             publication,
         }
     }
 
     /// Count the credentials of the repaired list, `kept`, and the accounts
-    /// it holds more than one passkey of.
+    /// it holds more than one passkey of, and note their highest counter.
     fn keep(&mut self, kept: &[Kept]) {
         self.passkeys = kept.iter().filter(|kept| kept.discoverable).count();
         self.others = kept.len() - self.passkeys;
+        self.highest = kept.iter().map(|kept| kept.sign_count).max().unwrap_or(0);
         let mut accounts: BTreeMap<(&str, &[u8]), (&Kept, usize)> = BTreeMap::new();
         for passkey in kept.iter().filter(|kept| kept.discoverable) {
             accounts
@@ -685,12 +932,29 @@ fn new_quarantine(parent: &Path, now: SystemTime) -> Result<PathBuf, StoreError>
     ))
 }
 
+/// The count a repair writes a counter at whose count is lost: one more than
+/// the largest of `now`, the clock's reading, in seconds since 1970, unless
+/// it is at or past [`LARGEST_COUNT`]; `newest`, the store's newest change
+/// ([`FileStore::newest_change`]); and `highest`, the highest counter
+/// planning read.  At most `u32::MAX`, where counting stops, which it
+/// reaches only from a time a second earlier or a counter planning read at
+/// `u32::MAX - 1` or `u32::MAX`.
+fn count_above(highest: u32, newest: u64, now: SystemTime) -> u32 {
+    let clock = Some(seconds(now)).filter(|&clock| clock < LARGEST_COUNT);
+    let largest = newest.max(clock.unwrap_or(0)).max(u64::from(highest));
+    u32::try_from(largest.saturating_add(1)).unwrap_or(u32::MAX)
+}
+
+/// `time` in whole seconds since 1970; a time before 1970 counts as 1970.
+fn seconds(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
 /// `time` in UTC as ISO 8601's basic format, `20261104T221507Z`, which needs
 /// no colon in a file name.  A time before 1970 counts as 1970.
 fn utc_stamp(time: SystemTime) -> String {
-    let seconds = time
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs());
+    let seconds = seconds(time);
     let (year, month, day) = civil_from_days(seconds / 86_400);
     let second = seconds % 86_400;
     format!(
@@ -725,6 +989,32 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The count rule: one more than the largest of the clock, the store's
+    /// newest change and the counters planning read.  A clock at or past the
+    /// largest count is left out; the count reaches it only from a clock a
+    /// second before it or a counter one below it or at it.
+    #[test]
+    fn a_lost_count_starts_above_the_clock_the_last_change_and_every_count() {
+        let at = |seconds| UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        let now = 1_794_500_000;
+        assert_eq!(count_above(7, 100, at(now)), 1_794_500_001);
+        assert_eq!(count_above(7, now + 50, at(now)), 1_794_500_051);
+        assert_eq!(count_above(1_794_600_000, 100, at(now)), 1_794_600_001);
+        // 2106-02-07T06:28:15Z and 2200-01-01: the clock is left out.
+        for clock in [u64::from(u32::MAX), 7_258_118_400] {
+            assert_eq!(count_above(7, now, at(clock)), 1_794_500_001, "{clock}");
+            assert_eq!(count_above(7, 0, at(clock)), 8, "{clock}");
+        }
+        // 2106-02-07T06:28:14Z, the last time a count can be above.
+        assert_eq!(count_above(7, 0, at(u64::from(u32::MAX) - 1)), u32::MAX);
+        assert_eq!(count_above(u32::MAX - 1, now, at(now)), u32::MAX);
+        assert_eq!(count_above(u32::MAX, now, at(now)), u32::MAX);
+        assert_eq!(
+            count_above(0, 0, UNIX_EPOCH - std::time::Duration::from_secs(1)),
+            1
+        );
+    }
 
     /// Checked against Python's `datetime.fromtimestamp(t, timezone.utc)`.
     #[test]

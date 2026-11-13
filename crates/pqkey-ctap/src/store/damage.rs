@@ -1,5 +1,6 @@
-//! Damage to a file store's credential set: which file, what is wrong with
-//! it, what fails because of it, and what to do about it.
+//! Damage to a file store's credential set and to its shared signature
+//! counter: which file, what is wrong with it, what fails because of it, and
+//! what to do about it.
 //!
 //! The key's log ([`StoreError::damage_hint`], [`damage_log`],
 //! [`damage_unchecked_log`]) and `pqkey status` ([`damage_summary`],
@@ -13,7 +14,7 @@
 
 use core::fmt;
 
-use super::file::CREDENTIALS_DIR;
+use super::file::{CREDENTIALS_DIR, SIGNATURE_COUNTER_FILE};
 use super::keys::is_credential_file_name;
 use super::{Corruption, StoreError};
 
@@ -26,8 +27,8 @@ const NAMED: usize = 3;
 /// looks.
 pub(super) const UNSETTLED: &str = "it kept changing while it was checked";
 
-/// A file or directory of a [`FileStore`](super::FileStore)'s credential set
-/// that is missing or cannot be used, as
+/// A file or directory of a [`FileStore`](super::FileStore)'s credential set,
+/// or its shared signature counter, that is missing or cannot be used, as
 /// [`FileStore::inspect`](super::FileStore::inspect) finds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -36,7 +37,8 @@ pub struct Damage {
     /// as `credential-set/records/<64 hex digits>`; the membership metadata
     /// of a store in the managed layout, `credential-format` or
     /// `credential-set/active`, or the directory `credential-set` that holds
-    /// it; or a legacy store's directory `credentials`.
+    /// it; a legacy store's directory `credentials`; or the shared signature
+    /// counter, `signature-counter`.
     pub file: String,
     /// What is wrong with it.
     pub fault: Fault,
@@ -50,8 +52,11 @@ pub enum Fault {
     Missing,
     /// It fails authentication or decoding.
     Corrupt(Corruption),
-    /// Reading it failed, for this reason. Only membership metadata is
-    /// damaged by a failed read: the store cannot do without it.
+    /// Reading it failed, for this reason. Only membership metadata and the
+    /// signature counter are damaged by a failed read: the store cannot do
+    /// without them, and a repair writes them again without reading them,
+    /// unless a directory is in the counter's place, which it refuses to
+    /// replace.  A record that cannot be read fails the inspection instead.
     Unreadable(String),
 }
 
@@ -118,9 +123,13 @@ impl fmt::Display for Damage {
     }
 }
 
-/// What damage to a file costs, which its path tells.
+/// What damage to a file costs, which its path tells.  The credential set's
+/// kinds are ordered by cost; the counter's costs nothing of the set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
+    /// The shared signature counter, which every sign-in with a credential
+    /// sealed into its ID counts on.
+    Counter,
     /// A credential's record.
     Record,
     /// A legacy store's directory `credentials`, which opening the store
@@ -135,6 +144,8 @@ fn kind(file: &str) -> Kind {
         Kind::Record
     } else if file == CREDENTIALS_DIR {
         Kind::LegacyDirectory
+    } else if file == SIGNATURE_COUNTER_FILE {
+        Kind::Counter
     } else {
         Kind::Membership
     }
@@ -145,11 +156,18 @@ fn kind(file: &str) -> Kind {
 /// directory only what fails both before and after the key opens the store,
 /// which creates the directory again, empty.  That directory may have held
 /// no passkey at all, as in a new store: a legacy store keeps no list of its
-/// credentials, so nothing tells once the directory is lost.  Nothing is
-/// said of the PIN: the inspection does not read the PIN state, which
+/// credentials, so nothing tells once the directory is lost.  The counter
+/// fails only the sign-ins that count on it: those with a credential sealed
+/// into its ID, which a site registers when it uses the key as a security
+/// key, over CTAP 2 or U2F, unless the key stores the credential.  Nothing
+/// is said of the PIN: the inspection does not read the PIN state, which
 /// `pqkey status` shows on a line of its own.
 fn consequence(kind: Kind, files: usize) -> &'static str {
     match (kind, files) {
+        (Kind::Counter, _) => {
+            "the key cannot sign in to sites that registered it as a security key and whose \
+             credentials it did not store"
+        }
         (Kind::Record, 1) => "the key cannot register passkeys, or use the credential in that file",
         (Kind::Record, _) => {
             "the key cannot register passkeys, or use the credentials in those files"
@@ -160,15 +178,24 @@ fn consequence(kind: Kind, files: usize) -> &'static str {
 }
 
 /// What fails in a credential store found to have `damage`, which is not
-/// empty: what the worst of it costs, as [`damage_summary`] says it.
+/// empty, as [`damage_summary`] says it: what damage to the signature counter
+/// costs, if it is damaged, then what the worst damage to the credential set
+/// costs, which only the set's damaged files count towards.
 #[must_use]
-pub fn damage_consequence(damage: &[Damage]) -> &'static str {
-    let worst = damage
+pub fn damage_consequence(damage: &[Damage]) -> String {
+    let set: Vec<Kind> = damage
         .iter()
         .map(|damage| kind(&damage.file))
-        .max()
-        .unwrap_or(Kind::Record);
-    consequence(worst, damage.len())
+        .filter(|&kind| kind != Kind::Counter)
+        .collect();
+    let mut consequences = Vec::new();
+    if set.len() < damage.len() {
+        consequences.push(consequence(Kind::Counter, 1));
+    }
+    if let Some(&worst) = set.iter().max() {
+        consequences.push(consequence(worst, set.len()));
+    }
+    consequences.join("; ")
 }
 
 /// What `pqkey status` says is wrong with a credential store found to have
@@ -240,13 +267,17 @@ fn sentence(text: &str) -> String {
 impl StoreError {
     /// What the key logs after this error when it reports damage to the
     /// credential set, a file or directory that is missing or cannot be
-    /// used: where it is, what fails, and what to do. `None` for any other
-    /// error.
+    /// used, or a signature counter that fails authentication or decoding:
+    /// where it is, what fails, and what to do. `None` for any other error.
     #[must_use]
     pub fn damage_hint(&self) -> Option<String> {
         let file = match self {
             StoreError::CredentialSetUnavailable { object, .. } => object,
-            StoreError::Corrupt { object, .. } if kind(object) == Kind::Record => object,
+            StoreError::Corrupt { object, .. }
+                if matches!(kind(object), Kind::Record | Kind::Counter) =>
+            {
+                object
+            }
             _ => return None,
         };
         Some(format!(
@@ -340,6 +371,8 @@ mod tests {
         assert_eq!(kind("credentials"), Kind::LegacyDirectory);
         assert!(!Damage::missing("credentials").is_record());
         assert!(Damage::missing(RECORD).is_record());
+        assert_eq!(kind("signature-counter"), Kind::Counter);
+        assert!(!Damage::missing("signature-counter").is_record());
     }
 
     /// Operations refuse damage as the store always has: as unavailable
@@ -417,6 +450,57 @@ mod tests {
         );
     }
 
+    /// A damaged signature counter costs what it costs whatever else is
+    /// damaged, and it is said first, as the inspection names it first; what
+    /// damage to the credential set costs follows, counting only its files.
+    #[test]
+    fn a_damaged_counter_is_said_first_and_costs_the_set_nothing() {
+        const COUNTER: &str = "the key cannot sign in to sites that registered it as a security \
+                               key and whose credentials it did not store";
+        let counter = Damage::corrupt("signature-counter", Corruption::Authentication);
+        assert_eq!(
+            damage_summary(std::slice::from_ref(&counter)),
+            format!(
+                "the credential store is damaged (signature-counter is corrupt: authentication \
+                 failed): {COUNTER}"
+            )
+        );
+        let other = RECORD.replace("records/0123", "records/4567");
+        for (set, costs) in [
+            (
+                vec![Damage::missing(RECORD)],
+                "the key cannot register passkeys, or use the credential in that file",
+            ),
+            (
+                vec![Damage::missing(RECORD), Damage::missing(other)],
+                "the key cannot register passkeys, or use the credentials in those files",
+            ),
+            (
+                vec![Damage::missing("credential-set/active")],
+                "the key cannot register, use or list passkeys",
+            ),
+            (
+                vec![Damage::missing("credentials")],
+                "the key cannot use any passkeys that were in it",
+            ),
+        ] {
+            let damage: Vec<_> = std::iter::once(counter.clone()).chain(set).collect();
+            assert_eq!(damage_consequence(&damage), format!("{COUNTER}; {costs}"));
+        }
+        let unreadable = Damage::unreadable(
+            "signature-counter",
+            StoreError::Io {
+                path: "/state/signature-counter".into(),
+                source: std::io::Error::other("injected"),
+            },
+        );
+        assert_eq!(
+            unreadable.to_string(),
+            "signature-counter cannot be read: /state/signature-counter: injected"
+        );
+        assert_eq!(damage_consequence(&[unreadable]), COUNTER);
+    }
+
     /// Many damaged files are counted after the first few.
     #[test]
     fn a_summary_counts_files_beyond_the_first_three() {
@@ -492,6 +576,16 @@ mod tests {
                     "The credential store is damaged at {RECORD}: the key cannot register \
                      passkeys, or use the credential in that file."
                 ),
+            ),
+            (
+                StoreError::Corrupt {
+                    object: "signature-counter".into(),
+                    reason: Corruption::Authentication,
+                },
+                "The credential store is damaged at signature-counter: the key cannot sign in \
+                 to sites that registered it as a security key and whose credentials it did not \
+                 store."
+                    .to_owned(),
             ),
         ] {
             let found = error.damage_hint().unwrap();

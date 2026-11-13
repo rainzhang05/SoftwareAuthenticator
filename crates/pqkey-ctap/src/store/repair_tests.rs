@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::*;
 use crate::CoseAlg;
@@ -149,10 +150,25 @@ pub(super) enum Scenario {
     Namespace,
     /// A legacy store's `credentials/` is lost.
     LegacyDirectory,
+    /// The shared signature counter fails authentication, and nothing else.
+    Counter,
+    /// A copy of the migrated passkey `kept` among the managed records, as
+    /// a writer outside this code could leave it, has counted higher and
+    /// fails authentication; so do the manifest and the shared counter.
+    Copies,
+    /// A symbolic link to itself in the shared counter's place, which fails
+    /// reads with ELOOP.
+    CounterLinkLoop,
+    /// A symbolic link to the directory `keys` in the shared counter's
+    /// place, which fails reads with EISDIR.
+    CounterLinkToDirectory,
+    /// An empty file in the shared counter's place, as repair's refusal of a
+    /// directory there says to create: it fails authentication by its length.
+    EmptyCounter,
 }
 
 impl Scenario {
-    pub(super) const ALL: [Self; 11] = [
+    pub(super) const ALL: [Self; 16] = [
         Self::Record,
         Self::RemovedRecord,
         Self::Legacy,
@@ -164,7 +180,28 @@ impl Scenario {
         Self::MarkerAndManifest,
         Self::Namespace,
         Self::LegacyDirectory,
+        Self::Counter,
+        Self::Copies,
+        Self::CounterLinkLoop,
+        Self::CounterLinkToDirectory,
+        Self::EmptyCounter,
     ];
+
+    /// Whether repair writes the shared counter again.
+    fn rebuilds_counter(self) -> bool {
+        self == Self::Copies || self.counter_alone()
+    }
+
+    /// Whether the shared counter is damaged, and nothing else.
+    fn counter_alone(self) -> bool {
+        matches!(
+            self,
+            Self::Counter
+                | Self::CounterLinkLoop
+                | Self::CounterLinkToDirectory
+                | Self::EmptyCounter
+        )
+    }
 
     /// Set up the damaged store in `state`, with a PIN state, the shared
     /// counter and a large-blob array, which repair leaves alone.
@@ -222,6 +259,28 @@ impl Scenario {
             Self::MarkerOnly => {}
             Self::Namespace => fs::remove_dir_all(&set).unwrap(),
             Self::LegacyDirectory => fs::remove_dir_all(state.join(CREDENTIALS_DIR)).unwrap(),
+            Self::Counter => flip_last_byte(&state.join(SIGNATURE_COUNTER_FILE)),
+            Self::Copies => {
+                let mut copy = passkey(b"kept", 1);
+                copy.sign_count = 2000;
+                plant(&store, &copy, 1, Location::Managed);
+                let keys = store.credential_keys().unwrap().unwrap();
+                let name = keys.file_name(b"kept").unwrap();
+                flip_last_byte(&set.join(RECORDS_DIR).join(name));
+                flip_last_byte(&set.join(ACTIVE_FILE));
+                flip_last_byte(&state.join(SIGNATURE_COUNTER_FILE));
+            }
+            Self::CounterLinkLoop | Self::CounterLinkToDirectory => {
+                let counter = state.join(SIGNATURE_COUNTER_FILE);
+                fs::remove_file(&counter).unwrap();
+                let target = if self == Self::CounterLinkLoop {
+                    SIGNATURE_COUNTER_FILE
+                } else {
+                    KEYS_DIR
+                };
+                std::os::unix::fs::symlink(target, &counter).unwrap();
+            }
+            Self::EmptyCounter => fs::write(state.join(SIGNATURE_COUNTER_FILE), b"").unwrap(),
         }
         if matches!(self, Self::Marker | Self::MarkerOnly) {
             flip_last_byte(&state.join(FORMAT_FILE));
@@ -229,13 +288,36 @@ impl Scenario {
     }
 }
 
-/// What a store serves: no credential at all, or the credentials it lists,
-/// with their counters, and for a managed store its members.
+/// What a store serves: its credentials, and its shared counter, which
+/// repair writes on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Served {
+struct Served {
+    credentials: Credentials,
+    /// The shared counter, or `None` if it cannot be read.
+    counter: Option<u32>,
+}
+
+/// The credentials a store serves: none at all, or those it lists, with
+/// their counters, and for a managed store its members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Credentials {
     Unavailable,
     Legacy(Vec<(Vec<u8>, u32)>),
     Managed(Vec<(Vec<u8>, u32)>, BTreeSet<String>),
+}
+
+/// How [`served`] shows a count that repair wrote from the clock, which is
+/// not the same from one repair to the next.
+const FROM_THE_CLOCK: u32 = u32::MAX;
+
+/// `count`, or [`FROM_THE_CLOCK`] if repair wrote it: these tests count no
+/// higher than a few thousand.
+fn shown(count: u32) -> u32 {
+    if count >= 1_000_000_000 {
+        FROM_THE_CLOCK
+    } else {
+        count
+    }
 }
 
 fn served(state: &Path) -> Served {
@@ -246,15 +328,19 @@ fn served(state: &Path) -> Served {
             .list()
             .unwrap()
             .iter()
-            .map(|record| (record.credential_id.clone(), record.sign_count))
+            .map(|record| (record.credential_id.clone(), shown(record.sign_count)))
             .collect();
         listed.sort();
         listed
     };
-    match store.membership(&keys).unwrap() {
-        Err(_) => Served::Unavailable,
-        Ok(None) => Served::Legacy(listed()),
-        Ok(Some(manifest)) => Served::Managed(listed(), manifest.into_keys().collect()),
+    let credentials = match store.membership(&keys).unwrap() {
+        Err(_) => Credentials::Unavailable,
+        Ok(None) => Credentials::Legacy(listed()),
+        Ok(Some(manifest)) => Credentials::Managed(listed(), manifest.into_keys().collect()),
+    };
+    Served {
+        credentials,
+        counter: store.counter(&keys).ok().map(shown),
     }
 }
 
@@ -302,15 +388,96 @@ fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     found
 }
 
+/// A copy of `from`, every file and directory, at `to`, with each symbolic
+/// link copied as a link: those these tests make point by relative names.
 fn copy_tree(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();
     for entry in fs::read_dir(from).unwrap() {
         let path = entry.unwrap().path();
         let target = to.join(path.file_name().unwrap());
-        if fs::symlink_metadata(&path).unwrap().is_dir() {
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        if metadata.file_type().is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&path).unwrap(), &target).unwrap();
+        } else if metadata.is_dir() {
             copy_tree(&path, &target);
         } else {
             fs::copy(&path, &target).unwrap();
+        }
+    }
+}
+
+/// Every symbolic link under `dir`, by its path relative to `dir`, with
+/// what it points to.
+fn links(dir: &Path) -> BTreeMap<PathBuf, PathBuf> {
+    let mut found = BTreeMap::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(current) = dirs.pop() {
+        for entry in fs::read_dir(&current).unwrap() {
+            let path = entry.unwrap().path();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            if metadata.is_dir() {
+                dirs.push(path);
+            } else if metadata.file_type().is_symlink() {
+                found.insert(
+                    path.strip_prefix(dir).unwrap().to_path_buf(),
+                    fs::read_link(&path).unwrap(),
+                );
+            }
+        }
+    }
+    found
+}
+
+/// Every symbolic link of `before` is still in `state`, pointing where it
+/// did: where it was, or in a quarantine at its relative path.
+#[track_caller]
+fn assert_no_link_lost(before: &BTreeMap<PathBuf, PathBuf>, state: &Path, context: &str) {
+    let after = links(state);
+    for (path, points_to) in before {
+        let kept = after.iter().any(|(other, held)| {
+            held == points_to
+                && (other == path || other.starts_with(QUARANTINE) && other.ends_with(path))
+        });
+        assert!(kept, "{context}: the link {} was lost", path.display());
+    }
+}
+
+/// The shared counter of the store in `state`, `None` if it cannot be read,
+/// and the counter of each credential it lists, as they are, unlike
+/// [`served`] shows them.
+fn counts(state: &Path) -> (Option<u32>, BTreeMap<Vec<u8>, u32>) {
+    let store = FileStore::unopened(state);
+    let keys = store.credential_keys().unwrap().unwrap();
+    let listed = store
+        .list()
+        .map(|records| {
+            records
+                .iter()
+                .map(|record| (record.credential_id.clone(), record.sign_count))
+                .collect()
+        })
+        .unwrap_or_default();
+    (store.counter(&keys).ok(), listed)
+}
+
+/// No count of `before` is higher than the same count `after`: the shared
+/// counter, and each credential's.
+#[track_caller]
+fn assert_no_count_lower(
+    before: &(Option<u32>, BTreeMap<Vec<u8>, u32>),
+    after: &(Option<u32>, BTreeMap<Vec<u8>, u32>),
+    context: &str,
+) {
+    if let Some(shared) = before.0 {
+        assert!(
+            after.0.is_some_and(|now| now >= shared),
+            "{context}: the shared counter went from {shared} to {:?}",
+            after.0
+        );
+    }
+    for (id, count) in &before.1 {
+        if let Some(now) = after.1.get(id) {
+            assert!(now >= count, "{context}: {id:?} went from {count} to {now}");
         }
     }
 }
@@ -336,24 +503,27 @@ fn assert_nothing_lost(before: &BTreeMap<PathBuf, Vec<u8>>, state: &Path, contex
     }
 }
 
-/// The files repair never touches.
+/// The files repair never touches, and the shared counter, unless repair
+/// writes it again in `scenario`.
 #[track_caller]
-fn assert_untouched(before: &BTreeMap<PathBuf, Vec<u8>>, state: &Path, context: &str) {
+fn assert_untouched(
+    before: &BTreeMap<PathBuf, Vec<u8>>,
+    state: &Path,
+    scenario: Scenario,
+    context: &str,
+) {
     let after = files(state);
-    for path in [
-        PIN_STATE_FILE,
-        SIGNATURE_COUNTER_FILE,
-        LARGE_BLOBS_FILE,
-        ATTESTATION_FILE,
-    ]
-    .map(PathBuf::from)
-    .into_iter()
-    .chain(
-        before
-            .keys()
-            .filter(|path| path.starts_with(KEYS_DIR))
-            .cloned(),
-    ) {
+    for path in [PIN_STATE_FILE, LARGE_BLOBS_FILE, ATTESTATION_FILE]
+        .into_iter()
+        .chain((!scenario.rebuilds_counter()).then_some(SIGNATURE_COUNTER_FILE))
+        .map(PathBuf::from)
+        .chain(
+            before
+                .keys()
+                .filter(|path| path.starts_with(KEYS_DIR))
+                .cloned(),
+        )
+    {
         assert_eq!(
             before.get(&path),
             after.get(&path),
@@ -369,8 +539,10 @@ const QUARANTINE: &str = "damaged";
 /// for each run, so that every run has the same keys and file names.
 struct Template {
     _scratch: TempDir,
+    scenario: Scenario,
     state: PathBuf,
     before: BTreeMap<PathBuf, Vec<u8>>,
+    before_links: BTreeMap<PathBuf, PathBuf>,
     old: Served,
     repaired: Served,
 }
@@ -381,6 +553,7 @@ impl Template {
         let state = scratch.path().join("template");
         scenario.apply(&state);
         let before = files(&state);
+        let before_links = links(&state);
         let old = served(&state);
         let copy = scratch.path().join("repaired");
         copy_tree(&state, &copy);
@@ -389,8 +562,10 @@ impl Template {
         assert_ne!(old, repaired, "{scenario:?}: repair changes what is served");
         Self {
             _scratch: scratch,
+            scenario,
             state,
             before,
+            before_links,
             old,
             repaired,
         }
@@ -405,19 +580,43 @@ impl Template {
         (state, plan)
     }
 
-    /// After a repair that failed or crashed: the store serves what it
-    /// served or what repair makes it serve, every file is where it was or
-    /// in a quarantine, and repairing again finishes the work.  Returns
-    /// whether the store served what repair makes it serve already.
+    /// After a repair that failed or crashed: the store serves the
+    /// credentials it served or those repair makes it serve, and its counter
+    /// is as it was or as repair writes it, never missing, and named by the
+    /// inspection until it is written again; every file and link is where
+    /// it was or in a quarantine; and repairing again finishes the work
+    /// without lowering any count.  Returns whether the store served what
+    /// repair makes it serve already.
     #[track_caller]
     fn assert_recovers(&self, state: &Path, context: &str) -> bool {
         let now = served(state);
         assert!(
-            now == self.old || now == self.repaired,
+            now.credentials == self.old.credentials || now.credentials == self.repaired.credentials,
             "{context}: serves {now:?}"
         );
+        assert!(
+            now.counter == self.old.counter || now.counter == self.repaired.counter,
+            "{context}: counts {now:?}"
+        );
+        if self.scenario.rebuilds_counter() {
+            assert!(
+                fs::symlink_metadata(state.join(SIGNATURE_COUNTER_FILE)).is_ok(),
+                "{context}: the counter is missing"
+            );
+            if now.counter == self.old.counter {
+                assert!(
+                    FileStore::inspect_in(state)
+                        .unwrap()
+                        .iter()
+                        .any(|damage| damage.file == SIGNATURE_COUNTER_FILE),
+                    "{context}: the damaged counter is not reported"
+                );
+            }
+        }
         assert_nothing_lost(&self.before, state, context);
-        assert_untouched(&self.before, state, context);
+        assert_no_link_lost(&self.before_links, state, context);
+        assert_untouched(&self.before, state, self.scenario, context);
+        let counted = counts(state);
         if let Some(plan) = FileStore::plan_repair_in(state).unwrap() {
             FileStore::repair_in(state, &plan)
                 .unwrap_or_else(|err| panic!("{context}: repairing again: {err}"));
@@ -425,6 +624,8 @@ impl Template {
         assert_eq!(served(state), self.repaired, "{context}");
         assert_eq!(FileStore::inspect_in(state).unwrap(), [], "{context}");
         assert_nothing_lost(&self.before, state, context);
+        assert_no_link_lost(&self.before_links, state, context);
+        assert_no_count_lower(&counted, &counts(state), context);
         now == self.repaired
     }
 }
@@ -724,11 +925,68 @@ fn each_repair_names_what_it_leaves_out_and_keeps_the_rest() {
                 vec![],
                 vec![],
             ),
+            Scenario::Counter => (
+                vec![corrupt(SIGNATURE_COUNTER_FILE.into())],
+                Membership::Intact,
+                managed_kept.iter().map(|id| id.to_vec()).collect(),
+                vec![],
+                vec![SIGNATURE_COUNTER_FILE.to_owned()],
+            ),
+            Scenario::Copies => {
+                // The authentic copy of `kept` is kept, and so is the
+                // passkey a registration of account 4 replaced.
+                let mut kept: Vec<Vec<u8>> = managed_kept.iter().map(|id| id.to_vec()).collect();
+                kept.push(b"retired".to_vec());
+                (
+                    vec![
+                        corrupt(SIGNATURE_COUNTER_FILE.into()),
+                        corrupt(active.clone()),
+                        corrupt(file_of(b"kept", &records)),
+                    ],
+                    Membership::Rebuilt,
+                    kept,
+                    vec![("user 4", 2)],
+                    vec![
+                        active.clone(),
+                        SIGNATURE_COUNTER_FILE.to_owned(),
+                        file_of(b"kept", &records),
+                        file_of(b"kept", MANAGED_DIR),
+                    ],
+                )
+            }
+            Scenario::CounterLinkLoop
+            | Scenario::CounterLinkToDirectory
+            | Scenario::EmptyCounter => {
+                let path = state.join(SIGNATURE_COUNTER_FILE);
+                let fault = if scenario == Scenario::EmptyCounter {
+                    Fault::Corrupt(Corruption::Length)
+                } else {
+                    let err = fs::read(&path).unwrap_err();
+                    Fault::Unreadable(format!("{}: {err}", path.display()))
+                };
+                (
+                    vec![Damage {
+                        file: SIGNATURE_COUNTER_FILE.into(),
+                        fault,
+                    }],
+                    Membership::Intact,
+                    managed_kept.iter().map(|id| id.to_vec()).collect(),
+                    vec![],
+                    vec![SIGNATURE_COUNTER_FILE.to_owned()],
+                )
+            }
         };
         moved.sort();
         let context = format!("{scenario:?}");
         assert_eq!(plan.damage, damage, "{context}");
         assert_eq!(plan.membership, membership, "{context}");
+        assert_eq!(plan.counter, scenario.rebuilds_counter(), "{context}");
+        let raised = if scenario == Scenario::Copies {
+            vec![file_of(b"kept", MANAGED_DIR)]
+        } else {
+            vec![]
+        };
+        assert_eq!(plan.raised, raised, "{context}");
         assert_eq!(
             plan.shared,
             shared
@@ -769,6 +1027,7 @@ fn each_repair_names_what_it_leaves_out_and_keeps_the_rest() {
         assert_eq!(plan.damage[..inspected.len()], inspected[..], "{context}");
 
         let before = files(&state);
+        let before_links = links(&state);
         let repaired = FileStore::repair_in(&state, &plan).unwrap();
         assert_eq!(repaired.durability, CommitDurability::Flushed, "{context}");
         assert!(!repaired.cleanup_pending, "{context}");
@@ -783,12 +1042,20 @@ fn each_repair_names_what_it_leaves_out_and_keeps_the_rest() {
                 let held = files(quarantine);
                 for file in &moved {
                     let path = PathBuf::from(file);
-                    match before.get(&path) {
+                    match (before.get(&path), before_links.get(&path)) {
                         // Byte for byte what the store had.
-                        Some(original) => {
+                        (Some(original), _) => {
                             assert_eq!(held.get(&path), Some(original), "{context}: {file}");
                         }
-                        None => assert!(quarantine.join(file).is_dir(), "{context}: {file}"),
+                        // The link itself, pointing where it did.
+                        (None, Some(points_to)) => assert_eq!(
+                            fs::read_link(quarantine.join(file)).ok().as_ref(),
+                            Some(points_to),
+                            "{context}: {file}"
+                        ),
+                        (None, None) => {
+                            assert!(quarantine.join(file).is_dir(), "{context}: {file}");
+                        }
                     }
                 }
                 // Nothing else is in it.
@@ -804,9 +1071,24 @@ fn each_repair_names_what_it_leaves_out_and_keeps_the_rest() {
                 );
             }
         }
-        assert_untouched(&before, &state, &context);
+        assert_untouched(&before, &state, scenario, &context);
         assert_eq!(FileStore::inspect_in(&state).unwrap(), [], "{context}");
+        // A counter whose count is lost counts on from the clock, in a file
+        // that took the place of whatever was there.
+        if scenario.rebuilds_counter() {
+            assert_eq!(served(&state).counter, Some(FROM_THE_CLOCK), "{context}");
+            assert!(
+                fs::symlink_metadata(state.join(SIGNATURE_COUNTER_FILE))
+                    .unwrap()
+                    .is_file(),
+                "{context}"
+            );
+        }
         let store = FileStore::open(&state).unwrap();
+        if scenario == Scenario::Copies {
+            let kept = store.get(b"kept").unwrap().unwrap();
+            assert_eq!(shown(kept.sign_count), FROM_THE_CLOCK, "{context}");
+        }
         let listed: BTreeSet<Vec<u8>> = store
             .list()
             .unwrap()
@@ -826,7 +1108,8 @@ fn each_repair_names_what_it_leaves_out_and_keeps_the_rest() {
         // directories, so no later cleanup has anything to remove; except
         // where repair publishes no list, which leaves what cleanup left as
         // it was, for the next commit.
-        let left: BTreeSet<String> = if scenario == Scenario::MarkerOnly {
+        let left: BTreeSet<String> = if scenario == Scenario::MarkerOnly || scenario.counter_alone()
+        {
             BTreeSet::from([name_of(b"retired")])
         } else {
             BTreeSet::new()
@@ -1399,6 +1682,915 @@ fn counters_never_go_back() {
     assert_eq!(store.get(b"kept").unwrap().unwrap().sign_count, 7);
     assert_eq!(store.get(b"second").unwrap().unwrap().sign_count, 7);
     assert_eq!(store.signature_counter().unwrap(), 500);
+}
+
+/// The clock's seconds since 1970.
+fn clock() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// A counter whose count is lost is written at one more than the largest of
+/// the clock's seconds since 1970, the newest change to the store, and every
+/// counter repair read.  So it is above the clock; above the time the
+/// counter's file, a record's in any directory of records, or the state
+/// directory itself last changed, read before the quarantine changes the
+/// directory, if the clock has gone back since; and above a record's counter
+/// that is ahead of the clock.  A file's time at or past the largest count,
+/// as on a stray file, is left out, so it does not stop the counter, which
+/// reaches the largest count only from a time a second before it or a
+/// counter one below it or at it.
+#[test]
+fn a_lost_count_is_written_above_the_clock_the_last_change_and_every_count() {
+    let repaired = |setup: &dyn Fn(&Path)| {
+        let scratch = TempDir::new();
+        let state = scratch.path().join("state");
+        Scenario::Counter.apply(&state);
+        setup(&state);
+        let plan = plan(&state);
+        assert!(plan.counter);
+        let before = clock();
+        FileStore::repair_in(&state, &plan).unwrap();
+        let count = u64::from(FileStore::unopened(&state).signature_counter().unwrap());
+        (before, count, clock())
+    };
+    let (before, count, after) = repaired(&|_| {});
+    assert!(
+        (before + 1..=after + 1).contains(&count),
+        "{before} < {count} <= {after} + 1"
+    );
+
+    // Ten days ahead of the clock, as when the clock went back ten days
+    // since the counter's file, a record's, or the state directory, which
+    // the quarantine is created in, was last written.  The records are in
+    // each directory of records: `credential-set/records/`, and
+    // `credential-set/`, which keeps the record of a passkey stored before
+    // the upgrade, as a legacy store's `credentials/` keeps every record.
+    let ahead = SystemTime::now() + Duration::from_secs(10 * 86_400);
+    let ahead_seconds = ahead.duration_since(UNIX_EPOCH).unwrap().as_secs();
+    for file in ["counter", "record", "upgraded record", "state directory"] {
+        let (_, count, _) = repaired(&|state| {
+            let store = FileStore::unopened(state);
+            let opened = match file {
+                "counter" => fs::File::options()
+                    .write(true)
+                    .open(state.join(SIGNATURE_COUNTER_FILE)),
+                "record" => fs::File::options()
+                    .write(true)
+                    .open(record_file(&store, b"second")),
+                "upgraded record" => {
+                    let upgraded = record_file(&store, b"kept");
+                    assert!(upgraded.starts_with(state.join(MANAGED_DIR)));
+                    assert!(!upgraded.starts_with(state.join(MANAGED_DIR).join(RECORDS_DIR)));
+                    fs::File::options().write(true).open(upgraded)
+                }
+                _ => fs::File::open(state),
+            };
+            opened.unwrap().set_modified(ahead).unwrap();
+        });
+        assert_eq!(count, ahead_seconds + 1, "{file}");
+    }
+    let scratch = TempDir::new();
+    let state = scratch.path().join("legacy");
+    let mut store = FileStore::open(&state).unwrap();
+    store.put(&passkey(b"first", 1)).unwrap();
+    store.set_signature_counter(500).unwrap();
+    flip_last_byte(&state.join(SIGNATURE_COUNTER_FILE));
+    let legacy = record_file(&store, b"first");
+    assert!(legacy.starts_with(state.join(CREDENTIALS_DIR)));
+    fs::File::options()
+        .write(true)
+        .open(legacy)
+        .unwrap()
+        .set_modified(ahead)
+        .unwrap();
+    FileStore::repair_in(&state, &plan(&state)).unwrap();
+    assert_eq!(
+        u64::from(FileStore::unopened(&state).signature_counter().unwrap()),
+        ahead_seconds + 1,
+        "legacy record"
+    );
+
+    // A time at or past the largest count, 2106-02-07T06:28:15Z or in 2200,
+    // on the counter's own file or on a stray file in the state directory,
+    // is left out.  A second earlier is the last time a count can be above:
+    // the largest count.
+    let stamped = |file: &str, seconds: u64| {
+        repaired(&|state| {
+            fs::File::options()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(state.join(file))
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
+                .unwrap();
+        })
+    };
+    for seconds in [u64::from(u32::MAX), 7_258_118_400] {
+        for file in [SIGNATURE_COUNTER_FILE, "stray"] {
+            let (before, count, after) = stamped(file, seconds);
+            assert!(
+                (before + 1..=after + 1).contains(&count),
+                "{seconds} {file}: {before} < {count} <= {after} + 1"
+            );
+        }
+    }
+    let (_, count, _) = stamped("stray", u64::from(u32::MAX) - 1);
+    assert_eq!(count, u64::from(u32::MAX));
+
+    // A record counted past the clock, as one does that a repair raised
+    // while the clock was ahead; and a record at the largest count.
+    let past = u32::try_from(clock() + 1_000_000).unwrap();
+    for (recorded, expected) in [(past, u64::from(past) + 1), (u32::MAX, u64::from(u32::MAX))] {
+        let (_, count, _) = repaired(&|state| {
+            let mut used = passkey(b"kept", 1);
+            used.sign_count = recorded;
+            FileStore::open(state).unwrap().put(&used).unwrap();
+        });
+        assert_eq!(count, expected, "{recorded}");
+    }
+}
+
+/// Two authentic copies of one credential's record, one in each record
+/// directory, as a writer outside this code could leave them: the passkey
+/// `used`, migrated with the count 1000 to `credential-set/`, and a copy in
+/// `credential-set/records/` with `other_count` and the creation order 7.
+/// Returns the store and the records' file name.
+fn copies(state: &Path, other_count: u32) -> (FileStore, String) {
+    let mut store = FileStore::open(state).unwrap();
+    let mut used = passkey(b"used", 1);
+    used.sign_count = 1000;
+    store.put(&used).unwrap();
+    store
+        .insert_or_replace_discoverable(&passkey(b"other", 2))
+        .unwrap();
+    used.sign_count = other_count;
+    plant(&store, &used, 7, Location::Managed);
+    let name = store
+        .credential_keys()
+        .unwrap()
+        .unwrap()
+        .file_name(b"used")
+        .unwrap();
+    (store, name)
+}
+
+/// The case the round-2 verifier's N5 left open, with the kept copy in
+/// either record directory: the list names the copy with the higher
+/// counter, which signs.  Then that copy and the list are damaged.  A
+/// rebuild keeps the other copy, whose counter is lower than the count the
+/// key returned, so repair raises it as it writes a lost shared counter
+/// again, just above the clock, where it is, under its logical name, with
+/// its creation order: the next sign-in returns a count above every count
+/// returned before.  The copy is kept in the quarantine as it was.
+#[test]
+fn a_kept_copy_counts_on_above_what_its_damaged_copy_returned() {
+    for kept_at in [Location::Legacy, Location::Managed] {
+        let scratch = TempDir::new();
+        let state = scratch.path().join("state");
+        let higher = if kept_at == Location::Legacy {
+            2000
+        } else {
+            500
+        };
+        let (store, name) = copies(&state, higher);
+        let keys = store.credential_keys().unwrap().unwrap();
+        if kept_at == Location::Legacy {
+            // The list names the managed copy, which counted higher; cleanup
+            // fails, so the migrated copy stays.
+            let mut manifest = store.active_manifest(&keys).unwrap().unwrap();
+            manifest.insert(name.clone(), Location::Managed);
+            without_cleanup(|| store.publish_manifest(&keys, &manifest)).unwrap();
+        }
+        let damaged_at = if kept_at == Location::Legacy {
+            Location::Managed
+        } else {
+            Location::Legacy
+        };
+        let kept_dir = store.record_dir(kept_at);
+        let kept_before = store
+            .read_credential_in(&keys, &name, &kept_dir, kept_at)
+            .unwrap()
+            .unwrap();
+        let kept_contents = fs::read(kept_dir.join(&name)).unwrap();
+        let mut app = CtapApp::with_file_store(
+            FileStore::open(&state).unwrap(),
+            AutoApprove,
+            &INTERRUPT,
+            [0; 16],
+        );
+        let returned = assertion_counter(&mut app, b"used");
+        let context = format!("kept in {kept_at:?}");
+        assert_eq!(
+            returned,
+            if kept_at == Location::Legacy {
+                2001
+            } else {
+                1001
+            },
+            "{context}"
+        );
+        drop(app);
+
+        flip_last_byte(&store.record_dir(damaged_at).join(&name));
+        flip_last_byte(&state.join(MANAGED_DIR).join(ACTIVE_FILE));
+        let plan = plan(&state);
+        assert_eq!(plan.membership, Membership::Rebuilt, "{context}");
+        let kept = store.relative(&kept_dir, &name);
+        assert_eq!(plan.raised, std::slice::from_ref(&kept), "{context}");
+        assert!(!plan.counter, "{context}");
+        assert!(plan.moved.contains(&kept), "{context}: {:?}", plan.moved);
+        let before = clock();
+        let quarantine = FileStore::repair_in(&state, &plan)
+            .unwrap()
+            .quarantine
+            .unwrap();
+        let after = clock();
+        assert_eq!(
+            fs::read(quarantine.join(&kept)).unwrap(),
+            kept_contents,
+            "{context}"
+        );
+        let raised = store
+            .read_credential_in(&keys, &name, &kept_dir, kept_at)
+            .unwrap()
+            .unwrap();
+        // Just above the clock, so the site sees about when repair ran.
+        assert!(
+            (before + 1..=after + 1).contains(&u64::from(raised.sign_count)),
+            "{context}: {before} < {} <= {after} + 1",
+            raised.sign_count
+        );
+        assert_eq!(raised.created_at, kept_before.created_at, "{context}");
+        let mut expected = kept_before.clone();
+        expected.sign_count = raised.sign_count;
+        assert_eq!(raised, expected, "{context}: only the count changes");
+        assert_eq!(store.get(b"used").unwrap().unwrap(), raised, "{context}");
+        assert_eq!(
+            store.signature_counter().unwrap(),
+            0,
+            "{context}: the shared counter is left alone"
+        );
+        let mut app = CtapApp::with_file_store(store, AutoApprove, &INTERRUPT, [0; 16]);
+        let next = assertion_counter(&mut app, b"used");
+        assert!(next > returned, "{context}: {next} <= {returned}");
+        assert_eq!(next, raised.sign_count + 1, "{context}");
+    }
+}
+
+/// What `pqkey repair` advises for a record it cannot read: move it out of
+/// the state directory and create an empty file of the same name in its place.
+/// The empty file is damage repair handles as any other, with or without a
+/// copy of the record in the other record directory.
+///
+/// * With an intact list, whose member is a directory, which fails reads
+///   with EISDIR, as root too: planning refuses, naming it.  With the empty
+///   file in its place, repair leaves the credential out of the list, and
+///   moves the copy at the other location, which the list does not name,
+///   into the quarantine too: the credential is off the key.
+/// * In a rebuild, where the copy the list named and that signed last is
+///   the one that cannot be read: with the empty file in its place, repair
+///   keeps the other copy and raises its count above the one returned
+///   before.  Moved out without an empty file, the copy would just be gone,
+///   and the other kept without a raise.
+#[test]
+fn an_empty_file_in_an_unreadable_records_place_is_damage_repair_handles() {
+    // An intact list, whose member cannot be read, and a copy elsewhere.
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    let (store, name) = copies(&state, 2000);
+    let member = store.record_dir(Location::Legacy).join(&name);
+    fs::remove_file(&member).unwrap();
+    fs::create_dir(&member).unwrap();
+    let unchanged = entries(&state);
+    let Err(StoreError::Io { path, .. }) = FileStore::plan_repair_in(&state) else {
+        panic!("a record that cannot be read is planned");
+    };
+    assert_eq!(path, member);
+    assert_eq!(entries(&state), unchanged, "planning changed it");
+    fs::rename(&member, scratch.path().join("moved out")).unwrap();
+    fs::write(&member, b"").unwrap();
+    let kept = plan(&state);
+    assert_eq!(kept.membership, Membership::Kept);
+    assert_eq!(
+        kept.damage,
+        [Damage::corrupt(
+            store.relative(&store.record_dir(Location::Legacy), &name),
+            Corruption::Length
+        )]
+    );
+    assert!(kept.raised.is_empty());
+    for location in [Location::Legacy, Location::Managed] {
+        let moved = store.relative(&store.record_dir(location), &name);
+        assert!(kept.moved.contains(&moved), "{moved}: {:?}", kept.moved);
+    }
+    FileStore::repair_in(&state, &kept).unwrap();
+    assert_eq!(store.get(b"used").unwrap(), None);
+    assert_eq!(FileStore::inspect_in(&state).unwrap(), []);
+
+    // A rebuild, where the copy that signed last cannot be read.
+    for advice_followed in [true, false] {
+        let scratch = TempDir::new();
+        let state = scratch.path().join("state");
+        let (store, name) = copies(&state, 2000);
+        let keys = store.credential_keys().unwrap().unwrap();
+        let mut manifest = store.active_manifest(&keys).unwrap().unwrap();
+        manifest.insert(name.clone(), Location::Managed);
+        without_cleanup(|| store.publish_manifest(&keys, &manifest)).unwrap();
+        let mut app = CtapApp::with_file_store(
+            FileStore::open(&state).unwrap(),
+            AutoApprove,
+            &INTERRUPT,
+            [0; 16],
+        );
+        let returned = assertion_counter(&mut app, b"used");
+        drop(app);
+        let higher = store.record_dir(Location::Managed).join(&name);
+        fs::rename(&higher, scratch.path().join("moved out")).unwrap();
+        if advice_followed {
+            fs::write(&higher, b"").unwrap();
+        }
+        flip_last_byte(&state.join(MANAGED_DIR).join(ACTIVE_FILE));
+        let plan = plan(&state);
+        assert_eq!(plan.membership, Membership::Rebuilt);
+        let kept = store.relative(&store.record_dir(Location::Legacy), &name);
+        if !advice_followed {
+            assert_eq!(plan.raised, [] as [String; 0], "nothing tells it was there");
+            continue;
+        }
+        assert_eq!(plan.raised, std::slice::from_ref(&kept));
+        FileStore::repair_in(&state, &plan).unwrap();
+        let mut app = CtapApp::with_file_store(store, AutoApprove, &INTERRUPT, [0; 16]);
+        let next = assertion_counter(&mut app, b"used");
+        assert!(next > returned, "{next} <= {returned}");
+    }
+}
+
+/// A lost count alone, in a legacy store or one in the managed layout:
+/// repair writes the counter again, and leaves every other file of the
+/// store as it was, so a legacy store keeps its layout.
+#[test]
+fn a_lost_count_alone_leaves_the_credential_set_as_it_is() {
+    for legacy in [true, false] {
+        let scratch = TempDir::new();
+        let state = scratch.path().join("state");
+        let mut store = FileStore::open(&state).unwrap();
+        store.put(&passkey(b"first", 1)).unwrap();
+        if !legacy {
+            store
+                .insert_or_replace_discoverable(&passkey(b"second", 2))
+                .unwrap();
+        }
+        store.put(&security_key(0x51)).unwrap();
+        store.set_signature_counter(500).unwrap();
+        flip_last_byte(&state.join(SIGNATURE_COUNTER_FILE));
+        let before = files(&state);
+        let plan = plan(&state);
+        let context = if legacy { "legacy" } else { "managed" };
+        assert_eq!(
+            plan.damage,
+            [Damage::corrupt(
+                SIGNATURE_COUNTER_FILE,
+                Corruption::Authentication
+            )],
+            "{context}"
+        );
+        assert_eq!(plan.membership, Membership::Intact, "{context}");
+        assert!(plan.counter && !plan.marker, "{context}");
+        assert_eq!(plan.raised, [] as [String; 0], "{context}");
+        assert_eq!(plan.moved, [SIGNATURE_COUNTER_FILE], "{context}");
+        let passkeys = if legacy { 1 } else { 2 };
+        assert_eq!((plan.passkeys, plan.others), (passkeys, 1), "{context}");
+        FileStore::repair_in(&state, &plan).unwrap();
+        let after = files(&state);
+        for (path, contents) in &before {
+            if path != Path::new(SIGNATURE_COUNTER_FILE) {
+                assert_eq!(
+                    after.get(path),
+                    Some(contents),
+                    "{context}: {}",
+                    path.display()
+                );
+            }
+        }
+        for path in after.keys().filter(|path| !before.contains_key(*path)) {
+            assert!(
+                path.starts_with(QUARANTINE),
+                "{context}: {}",
+                path.display()
+            );
+        }
+        assert_eq!(state.join(CREDENTIALS_DIR).exists(), legacy, "{context}");
+        assert_eq!(state.join(MANAGED_DIR).exists(), !legacy, "{context}");
+        assert_eq!(FileStore::inspect_in(&state).unwrap(), [], "{context}");
+        assert_eq!(
+            FileStore::open(&state).unwrap().count().unwrap(),
+            passkeys + 1
+        );
+    }
+}
+
+/// A directory in the counter's place, which fails reads with EISDIR, as
+/// root too, is damage the inspection names, but repair cannot replace it
+/// in one step, so planning refuses, naming it, and nothing changes.  Moved
+/// out of the state directory, with an empty file created in its place, as
+/// the refusal says, the counter is damage repair writes again above the clock,
+/// moving the empty file into the quarantine.
+#[test]
+fn a_directory_in_the_counters_place_is_refused_until_an_empty_file_takes_it() {
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    managed(&state);
+    let counter = state.join(SIGNATURE_COUNTER_FILE);
+    fs::remove_file(&counter).unwrap();
+    fs::create_dir(&counter).unwrap();
+    fs::write(counter.join("left"), b"inside").unwrap();
+    let found = FileStore::inspect_in(&state).unwrap();
+    assert!(
+        matches!(
+            &found[..],
+            [Damage { file, fault: Fault::Unreadable(_) }] if file == SIGNATURE_COUNTER_FILE
+        ),
+        "{found:?}"
+    );
+    let unchanged = entries(&state);
+    let Err(StoreError::Io { path, source }) = FileStore::plan_repair_in(&state) else {
+        panic!("a directory in the counter's place is planned");
+    };
+    assert_eq!(path, counter);
+    assert_eq!(source.kind(), ErrorKind::IsADirectory);
+    assert_eq!(
+        source.to_string(),
+        "is a directory, which repair cannot replace with a counter in one step"
+    );
+    assert_eq!(entries(&state), unchanged, "planning changed it");
+    assert!(!state.join(QUARANTINE).exists());
+
+    fs::rename(&counter, scratch.path().join("moved out")).unwrap();
+    fs::write(&counter, b"").unwrap();
+    let plan = plan(&state);
+    assert_eq!(
+        plan.damage,
+        [Damage::corrupt(SIGNATURE_COUNTER_FILE, Corruption::Length)]
+    );
+    assert_eq!(plan.membership, Membership::Intact);
+    assert!(plan.counter);
+    assert_eq!(plan.moved, [SIGNATURE_COUNTER_FILE]);
+    let before = clock();
+    let quarantine = FileStore::repair_in(&state, &plan)
+        .unwrap()
+        .quarantine
+        .unwrap();
+    assert_eq!(
+        fs::read(quarantine.join(SIGNATURE_COUNTER_FILE)).unwrap(),
+        b""
+    );
+    let count = FileStore::unopened(&state).signature_counter().unwrap();
+    assert!(u64::from(count) > before, "{count} <= {before}");
+    assert_eq!(FileStore::inspect_in(&state).unwrap(), []);
+}
+
+/// Set the modification time of `path`, a file or a directory, to `seconds`
+/// since 1970: the time a clock that read it then leaves on what it writes.
+fn stamp(path: &Path, seconds: u64) {
+    let file = if fs::symlink_metadata(path).unwrap().is_dir() {
+        fs::File::open(path)
+    } else {
+        fs::File::options().write(true).open(path)
+    };
+    file.unwrap()
+        .set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
+        .unwrap();
+}
+
+/// Set the modification time of the symbolic link `link` itself to
+/// `seconds` since 1970, as [`stamp`] sets a file's.  The standard library
+/// sets only the time of what a link points to, so `touch -h` copies it from
+/// a file stamped with it.
+fn stamp_link(link: &Path, seconds: u64) {
+    let scratch = TempDir::new();
+    let reference = scratch.path().join("reference");
+    fs::write(&reference, b"").unwrap();
+    stamp(&reference, seconds);
+    let status = Command::new("touch")
+        .arg("-h")
+        .arg("-r")
+        .arg(&reference)
+        .arg(link)
+        .status()
+        .unwrap();
+    assert!(status.success(), "touch -h: {status}");
+    let metadata = fs::symlink_metadata(link).unwrap();
+    assert!(metadata.file_type().is_symlink());
+    assert_eq!(
+        metadata.modified().unwrap(),
+        UNIX_EPOCH + Duration::from_secs(seconds)
+    );
+}
+
+/// An earlier repair of the store in `state` at `earlier`, by a clock that
+/// was right then, left its quarantine with that time.
+fn quarantined_at(state: &Path, earlier: u64) {
+    let quarantine = state.join(QUARANTINE);
+    fs::create_dir_all(quarantine.join("earlier")).unwrap();
+    stamp(&quarantine.join("earlier"), earlier);
+    stamp(&quarantine, earlier);
+}
+
+/// A managed store whose shared counter an earlier repair wrote again at
+/// `earlier`, from a clock that was right then, and which counted on to
+/// `earlier + 1000`, its last count at `earlier + 2000`, the clock still
+/// right: the counter's file and the state directory have that time.
+/// Returns the last count.
+fn counted_on_after_a_repair(state: &Path, earlier: u64) -> u64 {
+    let mut store = managed(state);
+    let last = earlier + 1000;
+    store
+        .set_signature_counter(u32::try_from(last).unwrap())
+        .unwrap();
+    quarantined_at(state, earlier);
+    stamp(&state.join(SIGNATURE_COUNTER_FILE), earlier + 2000);
+    stamp(state, earlier + 2000);
+    last
+}
+
+/// A directory takes the place of the counter of [`counted_on_after_a_repair`]
+/// at `earlier + 2010`, the clock still right, and planning refuses it.  The
+/// advice is followed: the directory is moved out of the state directory,
+/// and an empty file is created in its place at `created`, or by this
+/// machine's clock if `None`.  Returns the count repair then writes.
+fn counter_advice_followed(state: &Path, earlier: u64, created: Option<u64>) -> u64 {
+    let counter = state.join(SIGNATURE_COUNTER_FILE);
+    fs::remove_file(&counter).unwrap();
+    fs::create_dir(&counter).unwrap();
+    stamp(&counter, earlier + 2010);
+    stamp(state, earlier + 2010);
+    assert!(FileStore::plan_repair_in(state).is_err());
+    let outside = TempDir::new();
+    fs::rename(&counter, outside.path().join("moved out")).unwrap();
+    fs::write(&counter, b"").unwrap();
+    if let Some(created) = created {
+        stamp(&counter, created);
+        stamp(state, created);
+    }
+    FileStore::repair_in(state, &plan(state)).unwrap();
+    u64::from(FileStore::unopened(state).signature_counter().unwrap())
+}
+
+/// The passkey `used` of [`copies`], whose list names its copy in
+/// `credential-set/records/`, while the upgrade's copy in `credential-set/`,
+/// which cleanup could not remove, counts 1000.  An earlier repair at
+/// `earlier`, from a clock that was right then, raised the listed copy's
+/// count, which counted on to `earlier + 1000`, its last count at
+/// `earlier + 2000`, the clock still right: that copy and its directory
+/// have that time.  Returns the store, the records' name and the last count.
+fn raised_and_counted_on(state: &Path, earlier: u64) -> (FileStore, String, u64) {
+    let (store, name) = copies(state, u32::try_from(earlier + 999).unwrap());
+    let keys = store.credential_keys().unwrap().unwrap();
+    let mut manifest = store.active_manifest(&keys).unwrap().unwrap();
+    manifest.insert(name.clone(), Location::Managed);
+    without_cleanup(|| store.publish_manifest(&keys, &manifest)).unwrap();
+    let mut app = CtapApp::with_file_store(
+        FileStore::open(state).unwrap(),
+        AutoApprove,
+        &INTERRUPT,
+        [0; 16],
+    );
+    let last = u64::from(assertion_counter(&mut app, b"used"));
+    assert_eq!(last, earlier + 1000);
+    drop(app);
+    quarantined_at(state, earlier);
+    let records = store.record_dir(Location::Managed);
+    stamp(&records.join(&name), earlier + 2000);
+    stamp(&records, earlier + 2000);
+    (store, name, last)
+}
+
+/// The list of [`raised_and_counted_on`] is damaged, so repair rebuilds it,
+/// and the copy it listed, which counted last, cannot be read.  The advice
+/// for a record repair cannot read is followed: the copy is moved out of the
+/// state directory, and an empty file of its name is created in its place at
+/// `created`, or by this machine's clock if `None`.  Returns the count the
+/// rebuild raises the other copy to.
+fn record_advice_followed(
+    state: &Path,
+    store: &FileStore,
+    name: &str,
+    created: Option<u64>,
+) -> u64 {
+    let records = store.record_dir(Location::Managed);
+    let unreadable = records.join(name);
+    let outside = TempDir::new();
+    fs::rename(&unreadable, outside.path().join("moved out")).unwrap();
+    fs::write(&unreadable, b"").unwrap();
+    if let Some(created) = created {
+        stamp(&unreadable, created);
+        stamp(&records, created);
+    }
+    flip_last_byte(&state.join(MANAGED_DIR).join(ACTIVE_FILE));
+    let plan = plan(state);
+    assert_eq!(plan.membership, Membership::Rebuilt);
+    assert_eq!(
+        plan.raised,
+        [store.relative(&store.record_dir(Location::Legacy), name)]
+    );
+    FileStore::repair_in(state, &plan).unwrap();
+    u64::from(store.get(b"used").unwrap().unwrap().sign_count)
+}
+
+/// What the third condition of the README's guarantee says of a clock that
+/// is behind during a repair: it does no harm while the damaged file still
+/// has the time a right clock gave it when the key last signed or later.
+/// This machine's clock plays one that has gone back since: everything
+/// before the repair is set in its future.  An earlier repair, with the
+/// clock right, wrote a count from it, on which the key counted.
+///
+/// * The damaged file still has the time of the last count: the shared
+///   counter, or the copy of a stored credential's record that counted last,
+///   damaged where it is.  That time keeps the new count above the last.  So
+///   does the time of a symbolic link that took the counter's place after
+///   the last count, while the clock was right: repair reads the link's own
+///   time, not its target's.
+/// * The round-2 verifier's G1: the advice for a directory in the counter's
+///   place, or for a record repair cannot read, followed while the clock is
+///   behind.  The file that had the time of the last count is moved out, and
+///   the empty file created in its place has the clock's time, behind it,
+///   so the latest time left is the earlier repair's: the new count is below
+///   the last.  So the advice asks for a right clock first.
+/// * The round-3 verifier's V1b: the damaged file's time set back since, as
+///   `touch -d` or a fault in the file system's metadata can leave it, while
+///   its directory changed under the behind clock: the new count is below
+///   the last too.
+#[test]
+fn a_behind_clock_does_no_harm_only_while_the_damaged_file_keeps_a_right_clocks_time() {
+    let earlier = clock() + 100_000;
+    let scratch = TempDir::new();
+
+    let state = scratch.path().join("counter in place");
+    let last = counted_on_after_a_repair(&state, earlier);
+    let counter = state.join(SIGNATURE_COUNTER_FILE);
+    // A flipped bit, which leaves the time of the last count.
+    flip_last_byte(&counter);
+    stamp(&counter, earlier + 2000);
+    FileStore::repair_in(&state, &plan(&state)).unwrap();
+    let count = u64::from(FileStore::unopened(&state).signature_counter().unwrap());
+    assert_eq!(count, earlier + 2001);
+    assert!(count > last);
+
+    // A symbolic link took the counter's place at `earlier + 2010`, the clock
+    // still right, pointing to a file outside the store that the behind clock
+    // wrote; the state directory changed under the behind clock too.
+    let state = scratch.path().join("counter link");
+    let last = counted_on_after_a_repair(&state, earlier);
+    let counter = state.join(SIGNATURE_COUNTER_FILE);
+    let target = scratch.path().join("link target");
+    fs::write(&target, b"not a counter").unwrap();
+    fs::remove_file(&counter).unwrap();
+    std::os::unix::fs::symlink(&target, &counter).unwrap();
+    stamp_link(&counter, earlier + 2010);
+    FileStore::repair_in(&state, &plan(&state)).unwrap();
+    let count = u64::from(FileStore::unopened(&state).signature_counter().unwrap());
+    assert_eq!(count, earlier + 2011);
+    assert!(count > last);
+
+    let state = scratch.path().join("counter by hand");
+    let last = counted_on_after_a_repair(&state, earlier);
+    let count = counter_advice_followed(&state, earlier, None);
+    assert_eq!(count, earlier + 1);
+    assert!(count < last, "{count} >= {last}");
+
+    let state = scratch.path().join("record in place");
+    let (store, name, last) = raised_and_counted_on(&state, earlier);
+    let copy = store.record_dir(Location::Managed).join(&name);
+    flip_last_byte(&copy);
+    stamp(&copy, earlier + 2000);
+    flip_last_byte(&state.join(MANAGED_DIR).join(ACTIVE_FILE));
+    let planned = plan(&state);
+    assert_eq!(
+        planned.raised,
+        [store.relative(&store.record_dir(Location::Legacy), &name)]
+    );
+    FileStore::repair_in(&state, &planned).unwrap();
+    let count = u64::from(store.get(b"used").unwrap().unwrap().sign_count);
+    assert_eq!(count, earlier + 2001);
+    assert!(count > last);
+
+    let state = scratch.path().join("record by hand");
+    let (store, name, last) = raised_and_counted_on(&state, earlier);
+    let count = record_advice_followed(&state, &store, &name, None);
+    assert_eq!(count, earlier + 1);
+    assert!(count < last, "{count} >= {last}");
+
+    // Each damaged where it is, then its time set back, while its directory
+    // changed under the behind clock, as the pid file `pqkey repair` removes,
+    // or a registration, changes it.
+    let state = scratch.path().join("counter set back");
+    let last = counted_on_after_a_repair(&state, earlier);
+    let counter = state.join(SIGNATURE_COUNTER_FILE);
+    flip_last_byte(&counter);
+    stamp(&counter, clock() - 1000);
+    stamp(&state, clock());
+    FileStore::repair_in(&state, &plan(&state)).unwrap();
+    let count = u64::from(FileStore::unopened(&state).signature_counter().unwrap());
+    assert_eq!(count, earlier + 1);
+    assert!(count < last, "{count} >= {last}");
+
+    let state = scratch.path().join("record set back");
+    let (store, name, last) = raised_and_counted_on(&state, earlier);
+    let records = store.record_dir(Location::Managed);
+    let copy = records.join(&name);
+    flip_last_byte(&copy);
+    stamp(&copy, clock() - 1000);
+    stamp(&records, clock());
+    flip_last_byte(&state.join(MANAGED_DIR).join(ACTIVE_FILE));
+    let planned = plan(&state);
+    assert_eq!(
+        planned.raised,
+        [store.relative(&store.record_dir(Location::Legacy), &name)]
+    );
+    FileStore::repair_in(&state, &planned).unwrap();
+    let count = u64::from(store.get(b"used").unwrap().unwrap().sign_count);
+    assert_eq!(count, earlier + 1);
+    assert!(count < last, "{count} >= {last}");
+}
+
+/// What the second condition of the README's guarantee excludes: a time
+/// ahead of the real time that no clock of this computer left, read by a
+/// repair, which starts above it.  Two seconds after that repair ended, the
+/// key signs once, and another repair runs, under a right clock, every other
+/// condition holding: one count in two whole seconds.  The round-3
+/// verifier's V1a, at the store:
+///
+/// * A stray file dated ten days ahead is read again: the later repair
+///   starts where the first did, so the next count repeats the one returned
+///   in between.
+/// * The damaged counter's own time, garbled ten days ahead, went with the
+///   counter the first repair replaced: the later repair starts at the
+///   clock, about ten days below the count returned in between.
+#[test]
+fn a_time_ahead_that_no_clock_left_lets_a_later_repair_repeat_or_go_back() {
+    let ahead = clock() + 10 * 86_400;
+    let scratch = TempDir::new();
+    let mut repaired = Vec::new();
+    for variant in ["stray file", "garbled counter"] {
+        let state = scratch.path().join(variant);
+        let store = managed(&state);
+        let counter = state.join(SIGNATURE_COUNTER_FILE);
+        flip_last_byte(&counter);
+        if variant == "stray file" {
+            fs::write(state.join("stray"), b"").unwrap();
+            stamp(&state.join("stray"), ahead);
+        } else {
+            stamp(&counter, ahead);
+        }
+        FileStore::repair_in(&state, &plan(&state)).unwrap();
+        let first = store.signature_counter().unwrap();
+        assert_eq!(u64::from(first), ahead + 1, "{variant}");
+        repaired.push((variant, state, store, first));
+    }
+    // Fewer counts than whole seconds since that repair ended, at the
+    // sign-in and at the later repair.
+    std::thread::sleep(Duration::from_secs(2));
+    for (variant, state, mut store, first) in repaired {
+        // A sealed sign-in counts on it, as the engine counts.
+        let returned = first + 1;
+        store.set_signature_counter(returned).unwrap();
+        flip_last_byte(&state.join(SIGNATURE_COUNTER_FILE));
+        FileStore::repair_in(&state, &plan(&state)).unwrap();
+        let next = store.signature_counter().unwrap() + 1;
+        if variant == "stray file" {
+            assert_eq!(next, returned, "{variant}: the same count again");
+        } else {
+            assert!(u64::from(next) < ahead, "{variant}: {next}");
+            assert!(next < returned, "{variant}: {next} >= {returned}");
+        }
+    }
+}
+
+/// Every counter planning read includes the shared counter when it is
+/// intact: a raise planned while it is above the clock and the kept records
+/// starts above it, and the shared counter is left as it is.
+#[test]
+fn a_raise_starts_above_an_intact_shared_counter() {
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    let (mut store, name) = copies(&state, 2000);
+    let shared = u32::try_from(clock() + 5_000_000).unwrap();
+    store.set_signature_counter(shared).unwrap();
+    flip_last_byte(&store.record_dir(Location::Managed).join(&name));
+    flip_last_byte(&state.join(MANAGED_DIR).join(ACTIVE_FILE));
+    let plan = plan(&state);
+    assert!(!plan.counter);
+    assert_eq!(
+        plan.raised,
+        [store.relative(&store.record_dir(Location::Legacy), &name)]
+    );
+    FileStore::repair_in(&state, &plan).unwrap();
+    assert_eq!(store.get(b"used").unwrap().unwrap().sign_count, shared + 1);
+    assert_eq!(store.signature_counter().unwrap(), shared);
+}
+
+/// What the advice for a directory in the counter's place, and for a record
+/// repair cannot read, asks: a right clock when the empty file is created
+/// and the repair runs.  Either keeps the new count above every count the
+/// key returned, after an earlier repair that wrote a count from the clock.
+///
+/// * The empty file created while the clock is right, and the repair run
+///   while it is behind, as this machine's clock plays it: the empty file
+///   has the time it was created, after the last count.
+/// * The empty file created while the clock is behind, before the earlier
+///   repair, and the repair run while it is right, as this machine's clock
+///   plays it: the new count is above the clock.
+#[test]
+fn the_advice_for_a_file_repair_cannot_read_keeps_counts_above_under_a_right_clock() {
+    let scratch = TempDir::new();
+    let earlier = clock() + 100_000;
+    let state = scratch.path().join("counter, right when created");
+    let last = counted_on_after_a_repair(&state, earlier);
+    let count = counter_advice_followed(&state, earlier, Some(earlier + 2020));
+    assert_eq!(count, earlier + 2021);
+    assert!(count > last);
+    let state = scratch.path().join("record, right when created");
+    let (store, name, last) = raised_and_counted_on(&state, earlier);
+    let count = record_advice_followed(&state, &store, &name, Some(earlier + 2020));
+    assert_eq!(count, earlier + 2021);
+    assert!(count > last);
+
+    let earlier = clock() - 100_000;
+    let state = scratch.path().join("counter, right during the repair");
+    let last = counted_on_after_a_repair(&state, earlier);
+    let before = clock();
+    let count = counter_advice_followed(&state, earlier, Some(earlier - 50_000));
+    assert!(count > before && before > last, "{count}, {before}, {last}");
+    let state = scratch.path().join("record, right during the repair");
+    let (store, name, last) = raised_and_counted_on(&state, earlier);
+    let before = clock();
+    let count = record_advice_followed(&state, &store, &name, Some(earlier - 50_000));
+    assert!(count > before && before > last, "{count}, {before}, {last}");
+}
+
+/// What the README says of `damaged/`: it holds what repair took out of the
+/// store, here an intact record the list no longer named, which reads with
+/// the store's key until a reset replaces the key; and the store never
+/// needs it, so deleting it changes nothing the key does.
+#[test]
+fn the_quarantine_reads_with_the_key_until_a_reset_and_the_store_never_needs_it() {
+    for reset in [false, true] {
+        let scratch = TempDir::new();
+        let state = scratch.path().join("state");
+        Scenario::Record.apply(&state);
+        let plan = plan(&state);
+        let quarantine = FileStore::repair_in(&state, &plan)
+            .unwrap()
+            .quarantine
+            .unwrap();
+        let mut store = FileStore::open(&state).unwrap();
+        let keys = store.credential_keys().unwrap().unwrap();
+        let name = keys.file_name(b"retired").unwrap();
+        let held = quarantine.join(MANAGED_DIR).join(RECORDS_DIR);
+        assert!(held.join(&name).is_file());
+        let read = |store: &FileStore| {
+            let keys = store.credential_keys().unwrap().unwrap();
+            store.read_credential_in(&keys, &name, &held, Location::Managed)
+        };
+        if reset {
+            store.clear().unwrap();
+            assert!(held.join(&name).is_file(), "a reset leaves it");
+            assert!(matches!(
+                read(&store),
+                Err(StoreError::Corrupt {
+                    reason: Corruption::Authentication,
+                    ..
+                })
+            ));
+            continue;
+        }
+        assert_eq!(
+            read(&store).unwrap().unwrap().credential_id,
+            b"retired".to_vec()
+        );
+        let listed = |store: &FileStore| {
+            let mut listed: Vec<_> = store
+                .list()
+                .unwrap()
+                .into_iter()
+                .map(|record| (record.credential_id.clone(), record.sign_count))
+                .collect();
+            listed.sort();
+            listed
+        };
+        let before = listed(&store);
+        fs::remove_dir_all(state.join(QUARANTINE)).unwrap();
+        assert_eq!(listed(&store), before);
+        assert_eq!(FileStore::inspect_in(&state).unwrap(), []);
+        assert_eq!(FileStore::plan_repair_in(&state).unwrap(), None);
+        let mut app = CtapApp::with_file_store(store, AutoApprove, &INTERRUPT, [0; 16]);
+        assert_eq!(sign_in(&mut app, b"kept"), CTAP2_OK);
+        assert_eq!(register(&mut app), CTAP2_OK);
+    }
 }
 
 /// A plan is carried out only on the store it was made for: a store that

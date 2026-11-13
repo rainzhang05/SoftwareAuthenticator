@@ -294,6 +294,12 @@ it again, and `pqkey start` starts it when you are back.
 - Sealed non-discoverable credentials share one signature counter, as on
   most hardware keys. Stored ones (RSA, Brainpool and payment-enabled) keep
   their own.
+- After `pqkey repair` writes the shared counter again, its count starts
+  just above the number of seconds since 1970 by the computer's clock, or
+  above a newer time on the store's files or a higher count that repair
+  reads. When the clock gave the start, a site that sees the count
+  afterwards can tell roughly when the repair ran by that clock. The same
+  holds for a stored credential's count that repair raises.
 - Logs name sites and users only at debug level.
 - The USB IDs `1209:0001` are a [pid.codes](https://pid.codes/1209/0001/) test
   ID that is not unique to pqkey.

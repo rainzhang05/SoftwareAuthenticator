@@ -61,7 +61,7 @@ type Operation = fn(&mut FileStore);
 
 #[test]
 fn every_persisting_operation_flushes_before_it_publishes_removes_or_returns() {
-    let operations: [(&str, Setup, Operation); 26] = [
+    let operations: [(&str, Setup, Operation); 29] = [
         ("legacy put of a new record", legacy, |store| {
             store.put(&credential(b"new", 4)).unwrap();
         }),
@@ -162,6 +162,21 @@ fn every_persisting_operation_flushes_before_it_publishes_removes_or_returns() {
         (
             "repair of a legacy directory",
             |path| damaged(path, Scenario::LegacyDirectory),
+            repair,
+        ),
+        (
+            "repair of the signature counter",
+            |path| damaged(path, Scenario::Counter),
+            repair,
+        ),
+        (
+            "rebuild raising a record's counter",
+            |path| damaged(path, Scenario::Copies),
+            repair,
+        ),
+        (
+            "repair of a counter that is a symbolic link",
+            |path| damaged(path, Scenario::CounterLinkLoop),
             repair,
         ),
     ];

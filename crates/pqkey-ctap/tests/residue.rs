@@ -1026,12 +1026,26 @@ fn check_repair() {
         created_at: 0,
     };
     let mut store = FileStore::open(&dir).expect("store");
-    for user in [1, 2] {
-        store
-            .insert_or_replace_discoverable(&passkey(user))
-            .expect("a passkey");
-    }
-    let active = dir.join("credential-set").join("active");
+    // The first passkey is stored before the upgrade, which keeps its record
+    // in credential-set/.  A copy of that record among the managed ones fails
+    // authentication there, so repair raises the first passkey's counter,
+    // decrypting and encrypting its record again.
+    store.put(&passkey(1)).expect("a passkey");
+    store
+        .insert_or_replace_discoverable(&passkey(2))
+        .expect("a passkey");
+    let set = dir.join("credential-set");
+    let migrated = std::fs::read_dir(&set)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.file_name().is_some_and(|name| name.len() == 64))
+        .expect("the record the upgrade kept");
+    std::fs::copy(
+        &migrated,
+        set.join("records").join(migrated.file_name().unwrap()),
+    )
+    .unwrap();
+    let active = set.join("active");
     let mut contents = std::fs::read(&active).unwrap();
     *contents.last_mut().unwrap() ^= 1;
     std::fs::write(&active, contents).unwrap();
@@ -1051,6 +1065,7 @@ fn check_repair() {
         .map(|(name, needle)| (*name, scan(needle)))
         .collect();
     let plan = plan.expect("plan").expect("a damaged manifest to rebuild");
+    assert_eq!(plan.raised.len(), 1, "repair: a counter to raise");
     wipe();
     let repaired = FileStore::repair_in(&dir, &plan);
     let repairing: Vec<_> = needles
@@ -1073,7 +1088,7 @@ fn check_repair() {
     );
     std::fs::remove_dir_all(dir).unwrap();
     println!(
-        "repair: no stored scalar or CredRandom left in the stack after planning or rebuilding a damaged manifest"
+        "repair: no stored scalar or CredRandom left in the stack after planning or rebuilding a damaged manifest and raising a counter"
     );
 }
 

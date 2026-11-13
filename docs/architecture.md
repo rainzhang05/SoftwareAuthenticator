@@ -450,6 +450,11 @@ do; a lookup of a member whose record is missing finds no credential, as for
 one never stored, and logs nothing. The daemon at start-up and `pqkey status`
 report damage from a read-only inspection, which looks again before it
 reports damage so that a concurrent commit's cleanup is not taken for it.
+The inspection also reads the shared signature counter, and names it first
+if it cannot be read or fails authentication or decoding: then every
+sign-in with a sealed credential fails, over CTAP2 and U2F. For a counter
+that fails authentication or decoding, the engine logs the file, what fails
+and what to do, as for damage to the set.
 With neither namespace present, a legacy store reports its missing
 `credentials/`; a store whose format marker shows the managed layout reports
 both `credential-set/` and `credentials/`, since nothing tells whether it had
@@ -482,7 +487,9 @@ it is.
   removes one, and the account's next discoverable registration replaces
   them all. Of two authentic copies of one record name, in both record
   directories, only one can be a member, and repair keeps the one with the
-  higher signature counter. The new list may hold more credentials than the
+  higher signature counter. Of an authentic copy and a damaged one, it keeps
+  the authentic one and raises its counter as below, since the damaged copy
+  can have counted higher. The new list may hold more credentials than the
   store's limit; the plan then says so, and a registration that adds a
   credential is refused until the store holds fewer than its limit.
 - A manifest that authenticates is used even if the format marker does not;
@@ -491,27 +498,79 @@ it is.
   all.
 - A missing namespace is created again, empty: `credential-set/` with an
   empty manifest when the format marker shows the managed layout, or else a
-  legacy store's `credentials/`. Its records went with it. The keys, the PIN
-  state and the shared signature counter stay as they are, so sealed
-  credential IDs still open.
+  legacy store's `credentials/`. Its records went with it. The keys and the
+  PIN state stay as they are, and so does the shared signature counter
+  unless it is damaged, so sealed credential IDs still open.
+- A shared signature counter whose count is lost, because it cannot be read
+  or fails authentication or decoding, is written again at one more than the
+  largest of: the clock's seconds since 1970, read after the quarantine step
+  below; the newest modification time of the state directory, of each entry
+  in it and of each entry in a directory of records, read before that step;
+  and every counter planning read. A time at or past `u32::MAX` seconds
+  (2106-02-07T06:28:15Z), the clock's or a file's, is left out, so a clock or
+  file that far ahead does not stop the counter. The count is at most
+  `u32::MAX`, where counting stops, which it reaches only from a time a
+  second earlier or a counter planning read at `u32::MAX - 1` or
+  `u32::MAX`. If nothing else is damaged, the credential set stays as it
+  is. A directory in the counter's place makes planning refuse, naming
+  it: a rename cannot replace a directory with a file, and moving it away
+  first would leave no counter, which reads as one never written. Moved out,
+  with an empty file created in its place, it is repaired as a corrupt
+  counter. Each count rewrites the counter's file, renaming it into the
+  state directory, and a stored credential's count rewrites its record, so
+  a damaged counter's file, or a damaged copy of a record, has the clock's
+  reading at its last count as its modification time, unless something has
+  written it, taken its place or set its time since. Nothing can tell a
+  time set otherwise from such a reading. For a repair before
+  2106-02-07T06:28:15Z, a count it writes or raises this way is above every
+  count the key returned on that counter, so the count a relying party sees
+  jumps and does not go back, if:
+  1. at each count and each repair, the key had counted fewer times than
+     whole seconds had passed since 1970, and since any earlier repair
+     ended;
+  2. no time that this repair or an earlier one read, the clock's or a
+     file's, was ahead of the real time, as when the clock never ran ahead
+     and every time on the state directory and its files came from this
+     computer's clock, not from a hand edit, a copy that kept its times
+     (`cp -a`, `tar`, `rsync -a`) or a fault that damaged the file; and
+  3. the clock is right during the repair, or the damaged file still has
+     the time a right clock gave it at the last count or later, nothing
+     having changed that time since.
+
+  An empty file created in the damaged file's place by hand, as repair's
+  advice for a directory in the counter's place or for a record it cannot
+  read asks, takes the clock's reading then, so the advice asks for a right
+  clock first: under a clock that is behind both then and during the
+  repair, condition 3 fails, and the count can go back. A time ahead of the
+  real time that a repair reads, the clock's or a file's, which condition 2
+  excludes, can raise the count that repair writes; a later repair, even
+  with a right clock, can then start at or below the counts returned since.
+  A raised record keeps its creation order and logical name.
 
 Every file of the store that repair replaces or removes, damaged metadata,
-the replaced manifest, a failed upgrade's prepared manifest and staged
-records, and each record file that the new list does not name, first gets a
-name in a new `damaged/<UTC time>/`, at its path relative to the state
-directory: a hard link for a file and a rename for anything else, flushed
-before anything replaces or removes the original. No cleanup, inspection or
-reset touches that directory. Membership is then published through the same
-atomic publication, flush and cleanup as every commit, and cleanup removes
-the old names of the records left out. An error or a crash at any checkpoint
-leaves the store serving the credentials it served before or those of the
-repaired list, and every file of the store in place, in `credential-set/`
+a damaged signature counter, the replaced manifest, a failed upgrade's
+prepared manifest and staged records, each record file that the new list
+does not name, and each record whose counter it raises, first gets a name in
+a new `damaged/<UTC time>/`, at its path relative to the state directory: a
+hard link for anything but a directory (a file, a symbolic link itself, a
+FIFO, a socket or a device node), which keeps it in place until whatever
+replaces or removes it, and a rename for a directory, flushed before anything
+replaces or removes the original. No cleanup, inspection or reset touches that
+directory, and nothing reads what is in it. A counter is then written again,
+and raised records are rewritten in place, before membership is published
+through the same atomic publication, flush and cleanup as every commit, and
+cleanup removes the old names of the records left out. An error or a crash
+at any checkpoint leaves the store serving the credentials it served before
+or those of the repaired list, each counter it writes damaged as before or
+written again, and every file of the store in place, in `credential-set/`
 after a legacy store's rename, or in the quarantine; repairing again
-finishes. Only a store that served no credential before can meanwhile show
-another fault of that kind: a moved non-file metadata entry, or a recreated
-namespace that awaits its manifest. Repair leaves the shared signature
-counter, the PIN state, the large-blob array, the attestation record and the
-keys as they are, and rewrites no record, so each keeps its own counter.
+finishes, unless an error stops it too. Only a store that served no
+credential before can meanwhile show another fault of that kind: a directory
+in a metadata file's place, moved away, or a recreated namespace that awaits
+its manifest. Repair leaves the PIN state, the large-blob array, the
+attestation record and the keys as they are, and the shared signature
+counter too unless it is damaged; it rewrites a record only to raise its
+counter, so each other keeps its own.
 
 Explicit reset uses the following order in both store layouts:
 

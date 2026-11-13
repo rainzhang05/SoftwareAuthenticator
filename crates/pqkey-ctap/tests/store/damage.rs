@@ -9,7 +9,9 @@
 //!
 //! Then each is repaired, as `pqkey repair` does, and every passkey whose
 //! record is intact works again; and what the README's "Damaged credential
-//! store" says of copies, hand edits and reset holds.
+//! store" says of copies, hand edits and reset holds.  A damaged signature
+//! counter is named, fails what it is said to, and is repaired the same way,
+//! without a count going back.
 
 #![expect(
     clippy::disallowed_methods,
@@ -44,6 +46,9 @@ const RECORDS: &str = "the key cannot register passkeys, or use the credentials 
 const MEMBERSHIP: &str = "the key cannot register, use or list passkeys";
 /// What it says after a legacy store's `credentials` directory is lost.
 const LEGACY_DIRECTORY: &str = "the key cannot use any passkeys that were in it";
+/// What it says after damage to the shared signature counter.
+const COUNTER: &str = "the key cannot sign in to sites that registered it as a security key and \
+                       whose credentials it did not store";
 /// The advice the engine's hint ends with.
 const FIX: &str = "Stop the key with `pqkey stop`, keep a copy of the state directory, run `pqkey \
                    repair`, then start the key again with `pqkey start`; `pqkey reset` erases \
@@ -943,6 +948,136 @@ fn repair_of_a_lost_namespace_keeps_the_pin_and_security_key_sign_ins() {
     }
 }
 
+/// The count getAssertion on example.com returns for `id`.
+fn assertion_count(app: &mut CtapApp<'static>, id: &[u8]) -> u32 {
+    let response = app.call(&request(
+        CTAP_CMD_GET_ASSERTION,
+        vec![
+            (int(1), text("example.com")),
+            (int(2), Value::Bytes(vec![0x22; 32])),
+            (
+                int(3),
+                Value::Array(vec![Value::Map(vec![
+                    (text("id"), Value::Bytes(id.to_vec())),
+                    (text("type"), text("public-key")),
+                ])]),
+            ),
+        ],
+    ));
+    assert_eq!(response[0], CTAP2_OK);
+    let Value::Map(fields) = ciborium::de::from_reader(&response[1..]).unwrap() else {
+        panic!("getAssertion returns a map");
+    };
+    let Some((_, Value::Bytes(data))) = fields.into_iter().find(|(key, _)| *key == int(2)) else {
+        panic!("no authenticator data");
+    };
+    u32::from_be_bytes(data[33..37].try_into().unwrap())
+}
+
+/// The count U2F authentication with `handle` for `application` returns.
+fn u2f_count(app: &mut CtapApp<'static>, application: [u8; 32], handle: &[u8]) -> u32 {
+    let mut data = vec![0x44; 32];
+    data.extend_from_slice(&application);
+    data.push(u8::try_from(handle.len()).unwrap());
+    data.extend_from_slice(handle);
+    let mut apdu = vec![0x00, 0x02, 0x03, 0x00, u8::try_from(data.len()).unwrap()];
+    apdu.extend_from_slice(&data);
+    let response = app.call_u2f(&apdu);
+    assert_eq!(response[response.len() - 2..], [0x90, 0x00]);
+    u32::from_be_bytes(response[1..5].try_into().unwrap())
+}
+
+/// A damaged signature counter: the inspection names it, and what the
+/// summary says fails does, over CTAP 2 and U2F, with the engine naming the
+/// file, what fails and what to do; sign-ins with credentials the key stored
+/// count on their own counters and work, and so does registration.  Repair
+/// writes the counter again, keeping the damaged one in its quarantine, and
+/// every count the key returns afterwards is above every count it returned
+/// before.
+#[test]
+fn a_damaged_counter_fails_security_key_sign_ins_until_repair_counts_on_above_them() {
+    logs::install();
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    let passkeys = passkeys_in(&state, true);
+    // A security key's credential that the store keeps, as it keeps older
+    // ones, and those with an RSA or Brainpool key or with payment enabled.
+    let mut stored = new_record(CoseAlg::ES256);
+    stored.credential_id = [vec![0], random_bytes::<32>().to_vec()].concat();
+    stored.user_id = Vec::new();
+    stored.user_name = None;
+    stored.user_display_name = None;
+    FileStore::open(&state).unwrap().put(&stored).unwrap();
+    let mut app = engine(&state);
+    let sealed = register_security_key(&mut app);
+    let application = [0x55; 32];
+    let handle = register_u2f(&mut app, application);
+    let mut returned = Vec::new();
+    for _ in 0..2 {
+        returned.push(assertion_count(&mut app, &sealed));
+        returned.push(u2f_count(&mut app, application, &handle));
+    }
+    assert_eq!(returned, [1, 2, 3, 4], "one count, shared");
+    drop(app);
+    let counter = state.join("signature-counter");
+    flip_last_byte(&counter);
+    let damaged = fs::read(&counter).unwrap();
+
+    let store = FileStore::open(&state).unwrap();
+    let found = inspect(&store, &state);
+    assert_eq!(
+        faults(&found),
+        [(
+            "signature-counter".to_owned(),
+            Fault::Corrupt(Corruption::Authentication)
+        )]
+    );
+    assert_eq!(
+        damage_summary(&found),
+        format!(
+            "the credential store is damaged (signature-counter is corrupt: authentication \
+             failed): {COUNTER}"
+        )
+    );
+    let mut app = engine(&state);
+    let hint = format!("The credential store is damaged at signature-counter: {COUNTER}. {FIX}");
+    let error = "cannot read the global signature counter: signature-counter is corrupt: \
+                 authentication failed";
+    let (status, logged) = logging(&hint, || sign_in(&mut app, Some(&sealed)));
+    assert_eq!(status, CTAP2_ERR_PROCESSING);
+    assert_eq!(logged, [format!("{error}. {hint}")]);
+    let (status, logged) = logging(&hint, || authenticate_u2f(&mut app, application, &handle));
+    assert_eq!(status, [0x6f, 0x00]);
+    assert_eq!(logged, [format!("{error}. {hint}")]);
+    assert_eq!(
+        sign_in(&mut app, Some(&stored.credential_id)),
+        CTAP2_OK,
+        "the key stored it"
+    );
+    for (record, _) in &passkeys {
+        assert_eq!(sign_in(&mut app, Some(&record.credential_id)), CTAP2_OK);
+    }
+    assert_eq!(register(&mut app), CTAP2_OK);
+    assert!(counts(&mut app));
+    drop(app);
+    assert_eq!(fs::read(&counter).unwrap(), damaged, "left as it was");
+
+    let (plan, quarantine) = repair(&state);
+    assert_eq!(plan.membership, Membership::Intact);
+    assert!(plan.counter);
+    assert_eq!(plan.moved, ["signature-counter"]);
+    assert_eq!(
+        fs::read(quarantine.unwrap().join("signature-counter")).unwrap(),
+        damaged
+    );
+    let mut app = engine(&state);
+    let sealed_count = assertion_count(&mut app, &sealed);
+    let u2f = u2f_count(&mut app, application, &handle);
+    let highest = *returned.iter().max().unwrap();
+    assert!(sealed_count > highest, "{sealed_count} <= {highest}");
+    assert_eq!(u2f, sealed_count + 1);
+}
+
 /// A rebuild brings back a passkey that was deleted, if its record was left
 /// behind, as a copy restored over the store leaves it: here alone, since
 /// its account had no other passkey, so the plan names no account, and the
@@ -1004,6 +1139,73 @@ fn an_older_list_hides_newer_passkeys_and_the_next_change_deletes_their_records(
     assert!(file.is_file(), "hidden, not yet deleted");
     store.insert_or_replace_discoverable(&passkey()).unwrap();
     assert!(!file.exists(), "the next change deleted it");
+}
+
+/// A directory in the counter's place: the inspection names it, and sealed
+/// sign-ins fail, but repair cannot replace it with a counter in one step,
+/// so planning refuses, naming it, and changes nothing.  Moved out of the
+/// state directory, with an empty file created in its place, as the refusal
+/// says, it is damage repair handles: the next count is above every count
+/// returned before.
+#[test]
+fn a_directory_in_the_counters_place_is_refused_until_an_empty_file_takes_it() {
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    let mut app = engine(&state);
+    let sealed = register_security_key(&mut app);
+    let counts: Vec<_> = (0..3).map(|_| assertion_count(&mut app, &sealed)).collect();
+    assert_eq!(counts, [1, 2, 3]);
+    drop(app);
+    let counter = state.join("signature-counter");
+    fs::remove_file(&counter).unwrap();
+    fs::create_dir(&counter).unwrap();
+
+    let store = FileStore::open(&state).unwrap();
+    let found = inspect(&store, &state);
+    assert!(
+        matches!(&faults(&found)[..], [(file, Fault::Unreadable(_))] if file == "signature-counter"),
+        "{found:?}"
+    );
+    assert!(damage_summary(&found).ends_with(COUNTER), "{found:?}");
+    let mut app = engine(&state);
+    assert_eq!(sign_in(&mut app, Some(&sealed)), CTAP2_ERR_PROCESSING);
+    drop(app);
+    let before = snapshot(&state);
+    let Err(StoreError::Io { path, source }) = FileStore::plan_repair_in(&state) else {
+        panic!("a directory in the counter's place is planned");
+    };
+    assert_eq!(
+        (path, source.kind()),
+        (counter.clone(), std::io::ErrorKind::IsADirectory)
+    );
+    assert_eq!(snapshot(&state), before, "planning changes nothing");
+
+    fs::rename(&counter, scratch.path().join("moved out")).unwrap();
+    fs::write(&counter, b"").unwrap();
+    let (plan, _) = repair(&state);
+    assert_eq!(plan.membership, Membership::Intact);
+    assert!(plan.counter);
+    let mut app = engine(&state);
+    let next = assertion_count(&mut app, &sealed);
+    assert!(next > 3, "{next}");
+}
+
+/// Why the README says not to delete `signature-counter` by hand: nothing
+/// tells a deleted counter from one never written, so the next sign-in
+/// counts again from 0, below the counts sites have seen.
+#[test]
+fn a_deleted_counter_counts_again_from_zero() {
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    let mut app = engine(&state);
+    let sealed = register_security_key(&mut app);
+    let counts: Vec<_> = (0..3).map(|_| assertion_count(&mut app, &sealed)).collect();
+    assert_eq!(counts, [1, 2, 3]);
+    drop(app);
+    fs::remove_file(state.join("signature-counter")).unwrap();
+    assert_eq!(FileStore::inspect_in(&state).unwrap(), []);
+    let mut app = engine(&state);
+    assert_eq!(assertion_count(&mut app, &sealed), 1);
 }
 
 /// Why the README says to delete the copy of the state directory once the

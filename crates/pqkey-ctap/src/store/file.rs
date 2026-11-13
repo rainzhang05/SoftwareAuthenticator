@@ -32,7 +32,8 @@ pub use repair::{Account, Membership, RepairPlan, Repaired};
 pub(super) const CREDENTIALS_DIR: &str = "credentials";
 const KEYS_DIR: &str = "keys";
 const PIN_STATE_FILE: &str = "pin-state";
-const SIGNATURE_COUNTER_FILE: &str = "signature-counter";
+/// The shared signature counter of the credentials sealed into their IDs.
+pub(super) const SIGNATURE_COUNTER_FILE: &str = "signature-counter";
 const LARGE_BLOBS_FILE: &str = "large-blobs";
 const ATTESTATION_FILE: &str = "attestation";
 /// How often [`FileStore::inspect`] looks, at most, for damage that two
@@ -262,13 +263,15 @@ const INSPECTIONS: usize = 3;
 /// authority from files. The format marker distinguishes a missing managed
 /// namespace from a legacy store; a failed migration still has its usable
 /// legacy directory. Explicit reset rotates the key and establishes empty
-/// authority. [`inspect`](Self::inspect) reports such damage, and members
-/// whose records are missing or corrupt, without changing anything.
-/// Explicit [`repair`](Self::repair) drops the members whose records are
-/// missing or corrupt, or builds new membership from the records that
-/// authenticate under the current key, and first gives every file it
-/// replaces or removes a name in `damaged/<UTC time>/`, which no cleanup or
-/// reset touches.
+/// authority. [`inspect`](Self::inspect) reports such damage, members
+/// whose records are missing or corrupt, and a signature counter that
+/// cannot be read, without changing anything. Explicit
+/// [`repair`](Self::repair) drops the members whose records are missing or
+/// corrupt, or builds new membership from the records that authenticate
+/// under the current key, writes a counter it cannot read again above every
+/// count the key returned on it, under the conditions it states, and first
+/// gives every file it replaces or removes a name in `damaged/<UTC time>/`,
+/// which no cleanup or reset touches.
 ///
 /// Upgrade is forward-only: old binaries do not understand this namespace.
 /// Back up the whole store before upgrading; do not run an old binary on an
@@ -424,14 +427,17 @@ impl<K: KeySource> FileStore<K> {
         &self.keys
     }
 
-    /// What is damaged in the credential set, found without changing
-    /// anything: the membership metadata, or the directory of either layout,
-    /// if operations cannot use it, or else every member whose record is
-    /// missing or fails authentication or decoding, and in a legacy store
-    /// every record that fails them.  The first hides every stored
-    /// credential; any of the others fails every registration of a passkey.
-    /// Empty if every credential can be used, as in a store that has no
-    /// credential key yet.
+    /// What is damaged in the credential set and the signature counter,
+    /// found without changing anything.  First the shared signature counter,
+    /// if it cannot be read or fails authentication or decoding: every
+    /// sign-in with a credential sealed into its ID counts on it.  Then the
+    /// membership metadata, or the directory of either layout, if operations
+    /// cannot use it, or else every member whose record is missing or fails
+    /// authentication or decoding, and in a legacy store every record that
+    /// fails them.  Unusable metadata, or a directory operations cannot use,
+    /// hides every stored credential; damage to a record fails every
+    /// registration of a passkey.  Empty if every credential can be used, as
+    /// in a store that has no credential key yet.
     ///
     /// Another process can commit while this looks: retire a member, and
     /// remove its file, between the reads of the manifest and the member, or
@@ -479,8 +485,15 @@ impl<K: KeySource> FileStore<K> {
         let Some(keys) = self.credential_keys()? else {
             return Ok(Vec::new());
         };
+        let mut damage = Vec::new();
+        if let Err(err) = self.counter(&keys) {
+            damage.push(Damage::unreadable(SIGNATURE_COUNTER_FILE, err));
+        }
         let (members, managed): (Vec<(String, Location)>, bool) = match self.membership(&keys)? {
-            Err(damage) => return Ok(damage),
+            Err(set) => {
+                damage.extend(set);
+                return Ok(damage);
+            }
             Ok(Some(manifest)) => (manifest.into_iter().collect(), true),
             Ok(None) => (
                 self.credential_file_names()?
@@ -490,7 +503,6 @@ impl<K: KeySource> FileStore<K> {
                 false,
             ),
         };
-        let mut damage = Vec::new();
         for (name, location) in members {
             let dir = if managed {
                 self.record_dir(location)
@@ -748,6 +760,18 @@ impl<K: KeySource> FileStore<K> {
             Ok(None) => Err(Damage::missing(FORMAT_FILE)),
             Err(err) => Err(Damage::unreadable(FORMAT_FILE, err)),
         }
+    }
+
+    /// The shared signature counter, 0 if it has never been written.
+    fn counter(&self, keys: &CredentialKeys) -> Result<u32, StoreError> {
+        Ok(self
+            .read_object(
+                &keys.record,
+                RecordType::SignatureCounter,
+                SIGNATURE_COUNTER_FILE,
+                codec::decode_signature_counter,
+            )?
+            .unwrap_or(0))
     }
 
     /// The manifest, `credential-set/active`, or what is wrong with it.
@@ -1345,14 +1369,7 @@ impl<K: KeySource> CredentialStore for FileStore<K> {
         let Some(keys) = self.credential_keys()? else {
             return Ok(0);
         };
-        Ok(self
-            .read_object(
-                &keys.record,
-                RecordType::SignatureCounter,
-                SIGNATURE_COUNTER_FILE,
-                codec::decode_signature_counter,
-            )?
-            .unwrap_or(0))
+        self.counter(&keys)
     }
 
     fn set_signature_counter(&mut self, value: u32) -> Result<(), StoreError> {

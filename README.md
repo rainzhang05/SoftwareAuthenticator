@@ -365,15 +365,57 @@ sign-ins of sites that registered the key as a security key, unless the key
 stored their credentials: it stores some, such as those with an RSA or
 Brainpool key or with payment enabled, and older ones.
 
+Sites that registered the key as a security key see a count of its sign-ins
+that grows with each one, up to the largest count, 4294967295. The key keeps
+that count in `signature-counter` for all of them, unless it stored their
+credentials, which keep their own. If `signature-counter` is damaged, the key
+cannot sign in to those sites, and the count is lost. Repair writes a new count
+above the number of seconds since 1970 by the computer's clock, above the time
+on the damaged file, in case the clock has gone back since that file was
+written, and above every count it reads, up to the largest count. It leaves
+out a time at or past that count, 06:28:15 UTC on 7 February 2106, whether the
+clock's or a file's. When repair builds a new list of the credentials and
+keeps one copy of a stored credential's record while another copy is damaged,
+it raises that credential's count the same way. An intact list names the copy
+the key signed with, which keeps its count, so repair raises nothing there.
+
+For a repair before 06:28:15 UTC on 7 February 2106, each count it writes or
+raises this way is above every count the key returned on that counter, so the
+count a site sees jumps forward and does not go back, if all of these hold:
+
+- at each sign-in and each repair, the key had signed fewer times than whole
+  seconds had passed since 1970, and since any earlier repair ended;
+- the clock never ran ahead, and every time on the state directory and its
+  files came from this computer's clock, not from a hand edit, a copy that
+  kept its times (`cp -a`, `tar`, `rsync -a`) or a fault that damaged the
+  file;
+- the clock is right during the repair, or the damaged file still has the
+  time a right clock gave it when the key last signed or later: nothing has
+  changed that time since.
+
+The key never uses what repair moved into `damaged/`, and nothing deletes it.
+The records in it stay readable with the key in `keys/`, as the store's own
+are, until `pqkey reset` replaces that key. You may delete `damaged/` once the
+key works again.
+
 Delete the copy once the key works again: it holds the keys, so it would keep
-your passkeys readable even after a later reset. Do not edit, delete or
-replace `credential-format` or the files in `credential-set/` or
-`credentials/` by hand: an older `credential-set/active` hides the passkeys
-registered since, and the next change to that list can delete the record
-files it does not name. If `pqkey status` says the store cannot be checked
-because a key file in `keys/` is missing, restore that file from a copy of
-the state directory made since the last reset. `pqkey reset` erases every
-passkey, so use it only as a last resort.
+your passkeys readable even after a later reset. If `pqkey repair` stops
+before it lists the damage, unable to read a file or to replace a directory
+where `signature-counter` should be, it names it and says what to do: make the
+file readable or, for a credential's record that cannot be read at all, or
+that directory, check that the computer's clock is right, then move it out of
+the state directory, create an empty file of the same name in its place, for
+example with `touch`, and run `pqkey repair` again. A clock that is behind
+then can let the count go back. Repair then treats the empty file as a damaged
+record or counter, and the plan shows what follows. Apart from that, do not
+edit, delete or replace `credential-format`, `signature-counter` or the files
+in `credential-set/` or `credentials/` by hand: an older
+`credential-set/active` hides the passkeys registered since, the next change
+to that list can delete the record files it does not name, and a deleted
+`signature-counter` counts again from 0. If `pqkey status` says the store
+cannot be checked because a key file in `keys/` is missing, restore that file
+from a copy of the state directory made since the last reset. `pqkey reset`
+erases every passkey, so use it only as a last resort.
 
 ## Uninstall
 

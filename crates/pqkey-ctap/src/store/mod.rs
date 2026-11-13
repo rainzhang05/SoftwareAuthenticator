@@ -72,13 +72,15 @@
 //! refuses unreadable active records rather than risk leaving a matching
 //! credential usable. Unreferenced ciphertext in a managed store is cleanup
 //! garbage, even if corrupt; it cannot be repaired back into membership by a
-//! read or reopen. [`FileStore::inspect`] lists such [`Damage`] without
-//! changing anything, and [`StoreError::damage_hint`] says what an error
-//! reporting damage makes fail and what to do about it.  Only an explicit
-//! [`FileStore::repair`], which `pqkey repair` runs with the key stopped,
-//! changes damaged membership: it drops lost members, or builds new
-//! membership from the records that authenticate, and keeps every file it
-//! replaces or removes in a quarantine directory.
+//! read or reopen. [`FileStore::inspect`] lists such [`Damage`], and a
+//! signature counter that cannot be read, without changing anything, and
+//! [`StoreError::damage_hint`] says what an error reporting damage makes fail
+//! and what to do about it.  Only an explicit [`FileStore::repair`], which
+//! `pqkey repair` runs with the key stopped, changes damaged membership: it
+//! drops lost members, or builds new membership from the records that
+//! authenticate, writes a counter it cannot read again above every count
+//! the key returned on it, under the conditions it states, and keeps every
+//! file it replaces or removes in a quarantine directory.
 //!
 //! # Concurrency
 //!

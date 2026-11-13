@@ -90,19 +90,20 @@ pub(crate) fn create_private_dir(dir: &Path) -> Result<bool, StoreError> {
 }
 
 /// Give the existing entry `from` the new name `to`, which must not exist,
-/// leaving its contents as they are: a hard link for a regular file, so that
-/// `from` stays in place until whatever replaces or removes it, and a
-/// rename for anything else, which cannot be linked.  The caller flushes the
-/// directory of `to`.
+/// leaving its contents as they are: a hard link for anything but a
+/// directory, a regular file, a symbolic link (the link itself, never its
+/// target), a FIFO, a socket or a device node, so that `from` stays in place
+/// until whatever replaces or removes it; and a rename for a directory,
+/// which cannot be linked.  The caller flushes the directory of `to`.
 ///
 /// The checkpoint names `from`, which the link and rename checkpoints do not.
 pub(crate) fn quarantine(from: &Path, to: &Path) -> Result<(), StoreError> {
     checkpoint("quarantine", from)?;
     let metadata = fs::symlink_metadata(from).map_err(|err| io_error(from, err))?;
-    if metadata.is_file() {
-        hard_link(from, to)
-    } else {
+    if metadata.is_dir() {
         rename(from, to, "rename", "renamed")?
+    } else {
+        hard_link(from, to)
     }
 }
 
@@ -827,8 +828,9 @@ mod tests {
         assert_eq!(read_file(&path, 4).unwrap().unwrap(), b"01234");
     }
 
-    /// A regular file gets a second name and keeps its first; a directory,
-    /// which cannot be linked, moves. Neither may take an existing name.
+    /// A regular file, and a symbolic link itself, gets a second name and
+    /// keeps its first; a directory, which cannot be linked, moves. None may
+    /// take an existing name.
     #[test]
     fn quarantine_links_files_and_moves_directories() {
         let scratch = scratch_dir();
@@ -846,6 +848,24 @@ mod tests {
         quarantine(&dir, &held.join("dir")).unwrap();
         assert!(!dir.exists());
         assert!(held.join("dir").join("inside").is_dir());
+        // A symbolic link, to a directory or to itself, is linked as the link
+        // itself, which stays in place, its target untouched.
+        let target = scratch.path().join("target");
+        fs::create_dir(&target).unwrap();
+        for (name, points_to) in [("to-dir", "target"), ("loop", "loop")] {
+            let link = scratch.path().join(name);
+            std::os::unix::fs::symlink(points_to, &link).unwrap();
+            quarantine(&link, &held.join(name)).unwrap();
+            for kept in [&link, &held.join(name)] {
+                assert!(
+                    fs::symlink_metadata(kept).unwrap().file_type().is_symlink(),
+                    "{}",
+                    kept.display()
+                );
+                assert_eq!(fs::read_link(kept).unwrap(), Path::new(points_to));
+            }
+        }
+        assert!(target.is_dir());
         assert!(quarantine(&file, &held.join("file")).is_err());
         assert!(quarantine(&scratch.path().join("missing"), &held.join("missing")).is_err());
     }
