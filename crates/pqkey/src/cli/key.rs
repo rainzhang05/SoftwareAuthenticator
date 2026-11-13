@@ -141,6 +141,17 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
             }
         }
         Some(running) => {
+            // Read once, and before the device wait: a read after a restart
+            // fails as if an older pqkey had started the key. One that fails
+            // because the key no longer runs as found means it is starting or
+            // stopping.
+            let info = super::daemon_info_of(state_dir, running.pid());
+            if info.is_err()
+                && crate::state_lock::daemon_state(state_dir)?
+                    != crate::state_lock::DaemonState::Running(running.pid())
+            {
+                return outln!("Key:      starting or stopping");
+            }
             match running {
                 Running::Service(pid) => outln!(
                     "Key:      running (pid {pid}, {})",
@@ -149,9 +160,7 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
                 Running::Daemon(pid) => outln!("Key:      running (pid {pid})")?,
             }
             show_key(running)?;
-            // Read once: a key that restarts between two reads would fail the
-            // second as if an older pqkey had started it.
-            let info = super::daemon_info_of(state_dir, running.pid())?;
+            let info = info?;
             problems.extend(running_problems_of(&system, running, &info, STATUS_WAIT)?);
             problems.extend(presence_problem(&info.1, running));
         }
@@ -244,8 +253,9 @@ pub fn running_problems(
 
 /// [`running_problems`] of the key `running`, whose published information and
 /// options are `info`. Notifications are checked on the key's own session bus,
-/// or, for a key of an older pqkey, which did not publish it, on this
-/// process's.
+/// or on this process's: for a key of an older pqkey, which did not publish
+/// it, and for one started by hand on a bus over TCP, which status does not
+/// connect to (`System::key_notification_problem`).
 fn running_problems_of(
     system: &System,
     running: Running,
@@ -1474,7 +1484,8 @@ mod tests {
     /// A directory with a fake `systemctl`, for `PATH`, which says that the
     /// user service is installed and enabled, and that its main process is
     /// its caller's parent where `PQKEY_STATUS_RUNS` is `service`, or that it
-    /// has none.
+    /// has none. Asked for that, it first removes the file
+    /// `PQKEY_STATUS_STOPS` names, if any.
     fn fake_systemctl(dir: &Path) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("bin");
@@ -1486,7 +1497,9 @@ mod tests {
 case "$*" in
 *LoadState,*) printf 'LoadState=loaded\nUnitFileState=enabled\n' ;;
 *LoadState*) echo loaded ;;
-*MainPID*) if [ "$PQKEY_STATUS_RUNS" = service ]; then echo "$PPID"; else echo 0; fi ;;
+*MainPID*)
+    [ -z "$PQKEY_STATUS_STOPS" ] || /bin/rm -f "$PQKEY_STATUS_STOPS"
+    if [ "$PQKEY_STATUS_RUNS" = service ]; then echo "$PPID"; else echo 0; fi ;;
 *) exit 1 ;;
 esac
 "#,
@@ -1546,12 +1559,31 @@ esac
         }
     }
 
-    /// The child of `status_names_a_key_that_approves_without_asking` and
-    /// `status_checks_notifications_on_the_keys_own_session_bus`: this
-    /// process plays a key on the default state directory, run with the
-    /// presence `PQKEY_STATUS_CHILD` names, and runs `pqkey status`. The key's
+    /// Rewrite what the key on `state_dir` published as the header
+    /// `pqkey-daemon-VERSION PID DEVICE INODE` gives it, with no session bus:
+    /// version `v1` is a pqkey too old to publish its bus.
+    fn publish_as_version(state_dir: &Path, version: &str) {
+        let path = state_dir.join(crate::state_lock::INFO_FILE);
+        let published = std::fs::read(&path).unwrap();
+        let end = published.iter().position(|&byte| byte == b'\n').unwrap();
+        // pqkey-daemon-v2 PID DEVICE INODE BUS
+        let header: Vec<&str> = std::str::from_utf8(&published[..end])
+            .unwrap()
+            .split(' ')
+            .collect();
+        let mut rewritten =
+            format!("pqkey-daemon-{version} {}", header[1..4].join(" ")).into_bytes();
+        rewritten.extend_from_slice(&published[end..]);
+        std::fs::write(&path, rewritten).unwrap();
+    }
+
+    /// The child of the tests of `status` that play a key: this process
+    /// plays a key on the default state directory, run with the presence
+    /// `PQKEY_STATUS_CHILD` names, and runs `pqkey status`. The key's
     /// DBUS_SESSION_BUS_ADDRESS is `PQKEY_STATUS_KEY_BUS` where that is set,
-    /// with `-` for none, and this process's otherwise.
+    /// with `-` for none, and this process's otherwise. Where
+    /// `PQKEY_STATUS_KEY_VERSION` is set, the key publishes that version of
+    /// its information instead (`publish_as_version`).
     #[test]
     fn status_child() {
         use std::os::unix::ffi::OsStrExt;
@@ -1565,6 +1597,9 @@ esac
         let state_dir = default_state_dir();
         crate::state::ensure_state_dir(&state_dir).unwrap();
         let _key = publish_as_key(&state_dir, info);
+        if let Ok(version) = std::env::var("PQKEY_STATUS_KEY_VERSION") {
+            publish_as_version(&state_dir, &version);
+        }
         let result = status(&state_dir);
         if let Err(err) = &result {
             errln!("pqkey: {err}");
@@ -1750,6 +1785,151 @@ esac
                 "{context}"
             );
         }
+    }
+
+    /// `status` of a key another pqkey started. One too old to publish its
+    /// session bus (`pqkey-daemon-v1`) has notifications checked on this
+    /// terminal's bus, which the problem names. One whose information this
+    /// pqkey cannot read at all, as from a newer pqkey, was not started by
+    /// this version: it keeps running, so status says so after what it found
+    /// on the device, and fails.
+    #[test]
+    fn status_of_a_key_another_pqkey_started() {
+        use std::process::{Command, Stdio};
+        let dir = TempDir::new("status-versions");
+        let bin = fake_systemctl(dir.path());
+        let here = format!("unix:path={}", dir.path().join("shell-bus").display());
+        let children: Vec<_> = ["v1", "v3"]
+            .into_iter()
+            .map(|version| {
+                let child = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
+                    .env("PQKEY_STATUS_CHILD", "notify")
+                    .env("PQKEY_STATUS_RUNS", "service")
+                    .env("PQKEY_STATUS_KEY_VERSION", version)
+                    .env("PATH", &bin)
+                    .env("XDG_DATA_HOME", dir.path().join(version))
+                    .env("DBUS_SESSION_BUS_ADDRESS", &here)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                (version, child.id(), child)
+            })
+            .collect();
+        for (version, pid, child) in children {
+            let output = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let context = format!("{version}: {stdout}{stderr}");
+            assert!(
+                stdout.contains(&format!(
+                    "Key:      running (pid {pid}, systemd user service pqkey.service)\n"
+                )),
+                "{context}"
+            );
+            if version == "v1" {
+                assert_eq!(output.status.code(), Some(0), "{context}");
+                assert!(
+                    stdout.contains(&format!(
+                        "  ! there is no D-Bus session bus (failed to connect to `{here}`: No \
+                         such file or directory (os error 2)), so every registration, sign-in \
+                         and reset is denied\n    Fix: in a terminal of your desktop session, \
+                         run `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS`, then \
+                         `pqkey stop && pqkey start`\n"
+                    )),
+                    "{context}"
+                );
+            } else {
+                assert_eq!(output.status.code(), Some(1), "{context}");
+                assert!(
+                    stderr.contains(&format!(
+                        "pqkey: the key (pid {pid}) was not started by this version of pqkey; \
+                         restart it with `pqkey stop && pqkey start` first\n"
+                    )),
+                    "{context}"
+                );
+            }
+        }
+    }
+
+    /// Where the key cannot ask on its own bus, `status` tries this
+    /// terminal's, the one its DBUS_SESSION_BUS_ADDRESS names, as a bus to
+    /// move the key to. One that never answers is none, and the key keeps its
+    /// own fix. The test holds that bus's socket and counts the connections
+    /// waiting there.
+    #[test]
+    fn status_tries_this_terminals_bus_for_a_key_that_cannot_ask() {
+        use std::os::unix::net::UnixListener;
+        use std::process::Command;
+        let dir = TempDir::new("status-terminal-bus");
+        let terminal = dir.path().join("terminal-bus");
+        let listener = UnixListener::bind(&terminal).unwrap();
+        let key = format!("unix:path={}", dir.path().join("key-bus").display());
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
+            .env("PQKEY_STATUS_CHILD", "notify")
+            .env("PQKEY_STATUS_RUNS", "service")
+            .env("PQKEY_STATUS_KEY_BUS", &key)
+            .env("PATH", fake_systemctl(dir.path()))
+            .env("XDG_DATA_HOME", dir.path().join("data"))
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}", terminal.display()),
+            )
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let context = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.status.code(), Some(0), "{context}");
+        assert!(
+            stdout.contains(&format!(
+                "  ! the key cannot connect to its session bus (failed to connect to `{key}`: No \
+                 such file or directory (os error 2)), so every registration, sign-in and reset \
+                 is denied\n    Fix: in a terminal of your desktop session, run `systemctl --user \
+                 import-environment DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey start`\n"
+            )),
+            "{context}"
+        );
+        listener.set_nonblocking(true).unwrap();
+        let tried = std::iter::from_fn(|| listener.accept().ok()).count();
+        assert_eq!(tried, 1, "{context}");
+    }
+
+    /// A key that stops or restarts just as `status` finds it is starting or
+    /// stopping, not a key that an older pqkey started. Here it removes its
+    /// pid file, as a key that stops does first, while status asks systemd
+    /// whether it is the service, before status reads what it published.
+    #[test]
+    fn status_finds_a_key_that_stops_meanwhile_starting_or_stopping() {
+        use std::process::Command;
+        let dir = TempDir::new("status-stops");
+        let data = dir.path().join("data");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
+            .env("PQKEY_STATUS_CHILD", "notify")
+            .env("PQKEY_STATUS_RUNS", "service")
+            // The default state directory under XDG_DATA_HOME.
+            .env(
+                "PQKEY_STATUS_STOPS",
+                data.join("pqkey").join(crate::state_lock::PID_FILE),
+            )
+            .env("PATH", fake_systemctl(dir.path()))
+            .env("XDG_DATA_HOME", &data)
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}", dir.path().join("no-bus").display()),
+            )
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let context = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.status.code(), Some(0), "{context}");
+        assert!(
+            stdout.contains("Key:      starting or stopping\n"),
+            "{context}"
+        );
+        assert!(!stdout.contains("Key:      running"), "{context}");
     }
 
     /// The child of `status_reads_what_the_key_published_once`: this process

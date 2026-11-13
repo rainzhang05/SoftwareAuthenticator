@@ -327,9 +327,11 @@ for regression coverage and execution limits.
 browser behaviour, see
 [Troubleshooting](docs/development-notes.md#troubleshooting).
 
-For approvals, `pqkey status` connects to the running key's own D-Bus session
-bus and checks for a notification server that shows buttons and text, as the
-key does before each prompt. It shows no notification, so it cannot see a
+For approvals, `pqkey status` checks the running key's D-Bus session bus for a
+notification server that shows buttons and text, as the key does before each
+prompt. It checks your terminal's session bus instead when no key runs, and
+for a key started by hand on a TCP bus or by a pqkey too old to record the
+key's bus. It shows no notification, so it cannot see a
 server that fails to show a prompt or to return your answer, and it sees a bus
 or server that fails now and then only while it fails. The key logs why it
 denied each request it could not ask about: `journalctl --user -u pqkey`, or
