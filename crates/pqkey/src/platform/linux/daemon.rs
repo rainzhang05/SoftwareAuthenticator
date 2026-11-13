@@ -946,6 +946,12 @@ exit 0
             .env("XDG_CONFIG_HOME", dir.join("config"))
             .env("XDG_DATA_HOME", dir.join("data"))
             .env_remove("DBUS_SESSION_BUS_ADDRESS");
+        if limited {
+            // Built for coverage, the child writes its profile as it exits,
+            // under the same limit: that truncated profile goes here, not
+            // where cargo llvm-cov merges every profile and fails on it.
+            child.env("LLVM_PROFILE_FILE", dir.join("limited.profraw"));
+        }
         child.output().unwrap()
     }
 
