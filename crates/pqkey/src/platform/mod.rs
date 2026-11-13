@@ -19,7 +19,7 @@ pub(crate) use linux::{
 };
 pub use linux::{
     ClientLink, Device, Notifications, SeatWatch, System, UserService, default_state_dir,
-    notifications, open_client,
+    notifications, open_client, session_bus_address,
 };
 
 /// Create the Linux virtual device. Drop removes it.

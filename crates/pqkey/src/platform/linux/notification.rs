@@ -31,20 +31,21 @@ pub(crate) fn refresh_interval(name: Option<&str>) -> Option<Duration> {
 /// without it: `--presence auto-approve` lets anything running as the user
 /// use the passkeys unnoticed.
 pub(crate) fn failure_message(unavailable: &Unavailable, summary: &str) -> String {
-    // `pqkey status` connects as the daemon does, but with the environment of
-    // its own shell, whose session bus need not be the daemon's.
-    const STATUS: &str = "`pqkey status` repeats this check with the session bus of the shell it \
-        runs in; if it reports no problem with notifications while requests are still denied \
-        with this message, the daemon is not on that bus: run \
-        `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS` in a terminal of your \
-        desktop session, then `pqkey stop && pqkey start`";
+    // `pqkey status` connects as the daemon does, to the session bus the
+    // daemon published (cli/daemon_info.rs); it sees what is wrong only while
+    // it runs.
+    const STATUS: &str = "`pqkey status` repeats this check on the daemon's own session bus, and \
+        names the fix while the problem lasts";
     // The summary, unlike the prompt, holds no text from the request.
     let denied = format!("denied without asking ({}): ", summary);
     match unavailable {
+        // The service, too, may lack a bus: it has the service manager's
+        // environment, which the import changes for the restarted key.
         Unavailable::Connect(ConnectError::NoSession(err)) => format!(
-            "{denied}cannot ask for user presence because the daemon has no D-Bus session bus \
-                 ({err}). Run the daemon in your desktop session, for example as the systemd user \
-                 service, so that DBUS_SESSION_BUS_ADDRESS is set. {STATUS}"
+            "{denied}cannot ask for user presence because the daemon cannot connect to a D-Bus \
+                 session bus ({err}). In a terminal of your desktop session, run `systemctl --user \
+                 import-environment DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey start`. \
+                 {STATUS}"
         ),
         Unavailable::Connect(ConnectError::NoServer(err)) => format!(
             "{denied}cannot ask for user presence because no desktop notification server \
@@ -106,9 +107,10 @@ mod tests {
             (
                 Unavailable::Connect(ConnectError::NoSession("no address".into())),
                 [
-                    "the daemon has no D-Bus session bus (no address)",
-                    "Run the daemon in your desktop session, for example as the systemd user \
-                     service",
+                    "the daemon cannot connect to a D-Bus session bus (no address)",
+                    "In a terminal of your desktop session, run `systemctl --user \
+                     import-environment DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey \
+                     start`. ",
                 ],
             ),
             (
@@ -171,20 +173,23 @@ mod tests {
     }
 
     /// Each denial keeps its cause and remedy, and claims no more for `pqkey
-    /// status` than it does: status repeats the connection, but with the
-    /// session bus of its own shell, which need not be the daemon's, and it
-    /// never shows a notification.
+    /// status` than it does: status repeats the connection on the daemon's own
+    /// session bus while it runs, and never shows a notification.
     #[test]
     fn denials_keep_their_remedy_and_say_what_pqkey_status_checks() {
+        let status = ". `pqkey status` repeats this check on the daemon's own session bus, and \
+                      names the fix while the problem lasts";
         for (unavailable, said) in denials() {
             let message = failure_message(&unavailable, "Sign in with a passkey");
             for words in said {
                 assert!(message.contains(words), "{words:?} not in: {message}");
             }
-            let other_bus = "if it reports no problem with notifications while requests are \
-                             still denied with this message, the daemon is not on that bus: run \
-                             `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS` in a \
-                             terminal of your desktop session, then `pqkey stop && pqkey start`";
+            // What status did before it checked the daemon's own bus.
+            assert!(!message.contains("of the shell it runs in"), "{message}");
+            assert!(
+                !message.contains("the daemon is not on that bus"),
+                "{message}"
+            );
             if let Unavailable::Failed(_) = unavailable {
                 assert!(
                     message.ends_with(
@@ -192,16 +197,9 @@ mod tests {
                     ),
                     "{message}"
                 );
-                assert!(!message.contains(other_bus), "{message}");
+                assert!(!message.contains("repeats this check"), "{message}");
             } else {
-                assert!(
-                    message.contains(
-                        "`pqkey status` repeats this check with the session bus of the shell it \
-                         runs in; "
-                    ),
-                    "{message}"
-                );
-                assert!(message.ends_with(other_bus), "{message}");
+                assert!(message.ends_with(status), "{message}");
             }
         }
     }

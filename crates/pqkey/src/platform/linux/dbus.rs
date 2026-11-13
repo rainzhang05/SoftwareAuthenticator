@@ -20,6 +20,8 @@
 
 use std::{
     collections::HashMap,
+    env,
+    ffi::OsStr,
     future::poll_fn,
     num::NonZeroUsize,
     pin::Pin,
@@ -28,8 +30,8 @@ use std::{
 
 use futures_core::Stream;
 use zbus::{
-    Connection, MatchRule, Message, MessageStream, OwnedGuid, Variant, connection, message::Type,
-    names::OwnedUniqueName,
+    Address, Connection, MatchRule, Message, MessageStream, OwnedGuid, Variant, address::Transport,
+    connection, message::Type, names::OwnedUniqueName,
 };
 use zruntime::SharedRuntime;
 
@@ -70,6 +72,9 @@ const URGENCY_NORMAL: u8 = 1;
 #[derive(Default)]
 pub struct SessionBus {
     session: Option<Session>,
+    /// The bus's address; without one, the session bus this process's
+    /// environment names.
+    address: Option<String>,
 }
 
 /// The connection for one presence request.
@@ -84,6 +89,15 @@ impl SessionBus {
         Self::default()
     }
 
+    /// The session bus at `address`, which another process found in its
+    /// environment: what `pqkey status` checks for the running key.
+    pub fn at(address: &str) -> Self {
+        Self {
+            session: None,
+            address: Some(address.to_owned()),
+        }
+    }
+
     fn session(&mut self) -> Result<&mut Session, String> {
         self.session
             .as_mut()
@@ -94,9 +108,14 @@ impl SessionBus {
 impl NotificationServer for SessionBus {
     fn connect(&mut self) -> Result<ServerInfo, ConnectError> {
         self.disconnect();
-        let (session, info) = zbus::block_on(async {
+        let builder = match &self.address {
+            // An invalid address fails in `build`, as an invalid variable does.
+            Some(address) => connection::Builder::address(address.as_str()),
             // Uses DBUS_SESSION_BUS_ADDRESS, or $XDG_RUNTIME_DIR/bus without it.
-            let connection = connect_bus(connection::Builder::session(), METHOD_TIMEOUT).await?;
+            None => connection::Builder::session(),
+        };
+        let (session, info) = zbus::block_on(async {
+            let connection = connect_bus(builder, METHOD_TIMEOUT).await?;
 
             // Also starts a D-Bus activatable server that is not running yet.
             let capabilities: Vec<String> = connection
@@ -290,6 +309,32 @@ impl Drop for SessionBus {
     }
 }
 
+/// The address of the session bus that [`SessionBus::new`] connects to in a
+/// process whose DBUS_SESSION_BUS_ADDRESS is `variable`, as zbus finds it
+/// (`zbus::Address::session`): the variable, or, without one or with one that
+/// is not UTF-8, which zbus ignores, `$XDG_RUNTIME_DIR/bus`. This process's
+/// XDG_RUNTIME_DIR stands in for that process's, which nothing records; for
+/// one user both are /run/user/UID wherever systemd-logind sets it.
+pub fn session_bus_address(variable: Option<&OsStr>) -> String {
+    match variable.and_then(OsStr::to_str) {
+        Some(address) => address.to_owned(),
+        None => {
+            let runtime_dir = env::var("XDG_RUNTIME_DIR")
+                .unwrap_or_else(|_| format!("/run/user/{}", nix::unistd::geteuid()));
+            format!("unix:path={runtime_dir}/bus")
+        }
+    }
+}
+
+/// Whether `address` names a bus over TCP, which a process allowed only Unix
+/// sockets, as the user service is (`RestrictAddressFamilies=AF_UNIX`), cannot
+/// connect to.
+pub fn is_tcp_address(address: &str) -> bool {
+    address
+        .parse::<Address>()
+        .is_ok_and(|address| matches!(address.transport(), Transport::Tcp(_)))
+}
+
 /// Connect to the bus `builder` names within `timeout`, with every method
 /// call on the connection limited to `timeout` as well. Runs inside
 /// `zbus::block_on`, on the calling thread's runtime.
@@ -460,6 +505,66 @@ mod tests {
         };
         assert!(rule.matches(&action(":1.7")).unwrap());
         assert!(!rule.matches(&action(":1.8")).unwrap());
+    }
+
+    /// A bus named by its address is the one connected to, whatever this
+    /// process's own session bus is.
+    #[test]
+    fn a_bus_at_an_address_is_the_one_connected_to() {
+        let dir = TempDir::new("bus-at-address");
+        let missing = format!("unix:path={}", dir.path().join("missing-bus").display());
+        match SessionBus::at(&missing).connect() {
+            Err(ConnectError::NoSession(err)) => {
+                assert!(err.contains(&format!("`{missing}`")), "{err}");
+            }
+            other => panic!("connected to {missing}: {other:?}"),
+        }
+        assert!(matches!(
+            SessionBus::at("not an address").connect(),
+            Err(ConnectError::NoSession(_))
+        ));
+    }
+
+    /// The address zbus connects to for a value of DBUS_SESSION_BUS_ADDRESS:
+    /// the value, unless it is missing or not UTF-8, which zbus ignores for
+    /// `$XDG_RUNTIME_DIR/bus`.
+    #[test]
+    fn the_session_bus_address_is_the_variable_or_the_runtime_directory_bus() {
+        use std::os::unix::ffi::OsStrExt;
+        let fallback = format!(
+            "unix:path={}/bus",
+            env::var("XDG_RUNTIME_DIR")
+                .unwrap_or_else(|_| format!("/run/user/{}", nix::unistd::geteuid()))
+        );
+        assert_eq!(
+            session_bus_address(Some(OsStr::new("unix:abstract=/tmp/dbus-x"))),
+            "unix:abstract=/tmp/dbus-x"
+        );
+        assert_eq!(session_bus_address(None), fallback);
+        assert_eq!(
+            session_bus_address(Some(OsStr::from_bytes(b"unix:path=/tmp/\xff/bus"))),
+            fallback
+        );
+    }
+
+    #[test]
+    fn only_tcp_addresses_need_more_than_unix_sockets() {
+        for address in [
+            "tcp:host=127.0.0.1,port=17171",
+            "nonce-tcp:host=localhost,port=1,noncefile=/tmp/nonce",
+        ] {
+            assert!(is_tcp_address(address), "{address}");
+        }
+        for address in [
+            "unix:path=/run/user/1000/bus",
+            "unix:abstract=/tmp/dbus-x,guid=0123456789abcdef0123456789abcdef",
+            // Not addresses at all: both the daemon and status fail on them alike.
+            "tcp:host=localhost",
+            "not an address",
+            "",
+        ] {
+            assert!(!is_tcp_address(address), "{address}");
+        }
     }
 
     #[test]

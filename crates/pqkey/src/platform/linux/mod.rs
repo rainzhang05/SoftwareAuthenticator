@@ -14,7 +14,7 @@ pub mod uhid;
 pub use self::{
     checks::System,
     daemon::UserService,
-    dbus::SessionBus as Notifications,
+    dbus::{SessionBus as Notifications, session_bus_address},
     hidraw::{Hidraw as ClientLink, open_client},
     seat::SeatWatch,
     state::default_state_dir,

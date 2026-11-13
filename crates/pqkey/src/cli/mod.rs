@@ -402,8 +402,20 @@ pub(crate) fn daemon_args_of(
     state_dir: &std::path::Path,
     pid: nix::unistd::Pid,
 ) -> io::Result<DaemonArgs> {
+    daemon_info_of(state_dir, pid).map(|(_, args)| args)
+}
+
+/// The published information of the daemon `pid`, read once, and the options
+/// it runs with, as [`daemon_args_of`] gives them.
+pub(crate) fn daemon_info_of(
+    state_dir: &std::path::Path,
+    pid: nix::unistd::Pid,
+) -> io::Result<(daemon_info::DaemonInfo, DaemonArgs)> {
     daemon_info::DaemonInfo::read(state_dir, pid)
-        .and_then(|info| info.args())
+        .and_then(|info| {
+            let args = info.args()?;
+            Ok((info, args))
+        })
         .map_err(|_| {
             io::Error::other(format!(
                 "the key (pid {pid}) was not started by this version of pqkey; restart it with \

@@ -27,6 +27,7 @@ use signal_hook::{consts::SIGINT, flag};
 use super::ConfigAction;
 use super::checks::Problem;
 use super::daemon::{self, Running};
+use super::daemon_info::DaemonInfo;
 use super::output::{self, errln, outln};
 use crate::client::ctap2::{Authenticator, ClientError, Info, Passkey, PinRetries, Token};
 use crate::client::ctaphid::{ReportLink, STATUS_UPNEEDED};
@@ -148,8 +149,11 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
                 Running::Daemon(pid) => outln!("Key:      running (pid {pid})")?,
             }
             show_key(running)?;
-            problems.extend(running_problems(state_dir, &system, running, STATUS_WAIT)?);
-            problems.extend(presence_warning(state_dir, running)?);
+            // Read once: a key that restarts between two reads would fail the
+            // second as if an older pqkey had started it.
+            let info = super::daemon_info_of(state_dir, running.pid())?;
+            problems.extend(running_problems_of(&system, running, &info, STATUS_WAIT)?);
+            problems.extend(presence_problem(&info.1, running));
         }
     }
     problems.extend(state_dir_problem(state_dir));
@@ -234,12 +238,28 @@ pub fn running_problems(
     running: Running,
     wait: Duration,
 ) -> io::Result<Vec<Problem>> {
+    let info = super::daemon_info_of(state_dir, running.pid())?;
+    running_problems_of(system, running, &info, wait)
+}
+
+/// [`running_problems`] of the key `running`, whose published information and
+/// options are `info`. Notifications are checked on the key's own session bus,
+/// or, for a key of an older pqkey, which did not publish it, on this
+/// process's.
+fn running_problems_of(
+    system: &System,
+    running: Running,
+    (info, args): &(DaemonInfo, super::DaemonArgs),
+    wait: Duration,
+) -> io::Result<Vec<Problem>> {
     let mut problems = system.device_problems(running.pid(), wait)?;
-    let args = super::daemon_args_of(state_dir, running.pid())?;
     match args.presence {
-        super::PresenceArg::Notify => {
-            problems.extend(system.notification_problem(&notification_server())?);
-        }
+        super::PresenceArg::Notify => problems.extend(match info.session_bus_address() {
+            Some(address) => {
+                system.key_notification_problem(matches!(running, Running::Service(_)), &address)?
+            }
+            None => system.notification_problem(&notification_server())?,
+        }),
         super::PresenceArg::Unanswered => problems.push(Problem::new(
             "the configured presence provider never answers requests",
             "configure the service to use --presence notify, then run `pqkey setup`",
@@ -256,11 +276,18 @@ pub fn running_problems(
 /// option, so the service has it from ExecStart= in its unit or a drop-in, and
 /// the fix removes only the option.
 pub fn presence_warning(state_dir: &Path, running: Running) -> io::Result<Option<Problem>> {
-    let args = super::daemon_args_of(state_dir, running.pid())?;
+    Ok(presence_problem(
+        &super::daemon_args_of(state_dir, running.pid())?,
+        running,
+    ))
+}
+
+/// [`presence_warning`] of the key `running` with the options `args`.
+fn presence_problem(args: &super::DaemonArgs, running: Running) -> Option<Problem> {
     if args.presence != super::PresenceArg::AutoApprove {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(Problem::new(
+    Some(Problem::new(
         "the key runs with --presence auto-approve: it approves every registration, sign-in and \
          reset without asking, so anything running as you can use your passkeys unnoticed",
         match running {
@@ -273,7 +300,7 @@ pub fn presence_warning(state_dir: &Path, running: Running) -> io::Result<Option
                 "run `pqkey stop`, then `pqkey start` without --presence auto-approve"
             }
         },
-    )))
+    ))
 }
 
 /// A state directory whose filesystem does not support flushing directories,
@@ -310,7 +337,8 @@ fn store_problem(state_dir: &Path) -> Option<Problem> {
     }
 }
 
-/// What the desktop's notification server says about itself.
+/// What the notification server on this process's own session bus says about
+/// itself.
 fn notification_server() -> Result<ServerInfo, ConnectError> {
     let mut bus = platform::notifications().map_err(|err| ConnectError::Failed(err.to_string()))?;
     let server = bus.connect();
@@ -1408,18 +1436,64 @@ mod tests {
         state_dir: &Path,
         presence: crate::cli::PresenceArg,
     ) -> crate::state_lock::StateLock {
+        publish_as_key(state_dir, key_info(presence))
+    }
+
+    /// What a key with `presence` publishes, run in this process's
+    /// environment.
+    fn key_info(presence: crate::cli::PresenceArg) -> DaemonInfo {
+        crate::test_support::daemon_info(&crate::cli::DaemonArgs {
+            presence,
+            ..Default::default()
+        })
+    }
+
+    /// [`run_as_key`], publishing `info`.
+    fn publish_as_key(state_dir: &Path, info: DaemonInfo) -> crate::state_lock::StateLock {
         let lock = crate::state_lock::StateLock::try_acquire(state_dir)
             .unwrap()
             .unwrap();
-        let args = crate::cli::DaemonArgs {
-            presence,
-            ..Default::default()
-        };
-        crate::test_support::daemon_info(&args)
-            .publish(state_dir, &lock)
-            .unwrap();
+        info.publish(state_dir, &lock).unwrap();
         crate::state_lock::write_pid_file(state_dir, &lock).unwrap();
         lock
+    }
+
+    /// The presence option `name` names.
+    fn presence_named(name: &str) -> crate::cli::PresenceArg {
+        use crate::cli::PresenceArg;
+        [
+            PresenceArg::Notify,
+            PresenceArg::AutoApprove,
+            PresenceArg::Unanswered,
+        ]
+        .into_iter()
+        .find(|presence| presence.name() == name)
+        .unwrap()
+    }
+
+    /// A directory with a fake `systemctl`, for `PATH`, which says that the
+    /// user service is installed and enabled, and that its main process is
+    /// its caller's parent where `PQKEY_STATUS_RUNS` is `service`, or that it
+    /// has none.
+    fn fake_systemctl(dir: &Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let systemctl = bin.join("systemctl");
+        std::fs::write(
+            &systemctl,
+            r#"#!/bin/sh
+case "$*" in
+*LoadState,*) printf 'LoadState=loaded\nUnitFileState=enabled\n' ;;
+*LoadState*) echo loaded ;;
+*MainPID*) if [ "$PQKEY_STATUS_RUNS" = service ]; then echo "$PPID"; else echo 0; fi ;;
+*) exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
     }
 
     /// Only a key that approves without asking gets the presence warning,
@@ -1472,26 +1546,25 @@ mod tests {
         }
     }
 
-    /// The child of `status_names_a_key_that_approves_without_asking`: this
+    /// The child of `status_names_a_key_that_approves_without_asking` and
+    /// `status_checks_notifications_on_the_keys_own_session_bus`: this
     /// process plays a key on the default state directory, run with the
-    /// presence `PQKEY_STATUS_CHILD` names, and runs `pqkey status`.
+    /// presence `PQKEY_STATUS_CHILD` names, and runs `pqkey status`. The key's
+    /// DBUS_SESSION_BUS_ADDRESS is `PQKEY_STATUS_KEY_BUS` where that is set,
+    /// with `-` for none, and this process's otherwise.
     #[test]
     fn status_child() {
-        use crate::cli::PresenceArg;
+        use std::os::unix::ffi::OsStrExt;
         let Ok(name) = std::env::var("PQKEY_STATUS_CHILD") else {
             return;
         };
-        let presence = [
-            PresenceArg::Notify,
-            PresenceArg::AutoApprove,
-            PresenceArg::Unanswered,
-        ]
-        .into_iter()
-        .find(|presence| presence.name() == name)
-        .unwrap();
+        let mut info = key_info(presence_named(&name));
+        if let Some(bus) = std::env::var_os("PQKEY_STATUS_KEY_BUS") {
+            info = info.with_session_bus((bus != "-").then_some(bus.as_bytes()));
+        }
         let state_dir = default_state_dir();
         crate::state::ensure_state_dir(&state_dir).unwrap();
-        let _key = run_as_key(&state_dir, presence);
+        let _key = publish_as_key(&state_dir, info);
         let result = status(&state_dir);
         if let Err(err) = &result {
             errln!("pqkey: {err}");
@@ -1508,25 +1581,10 @@ mod tests {
     /// started by hand, that it has none.
     #[test]
     fn status_names_a_key_that_approves_without_asking() {
-        use std::os::unix::fs::PermissionsExt;
         use std::process::{Command, Stdio};
         let dir = TempDir::new("status-presence");
-        let bin = dir.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let systemctl = bin.join("systemctl");
-        std::fs::write(
-            &systemctl,
-            r#"#!/bin/sh
-case "$*" in
-*LoadState,*) printf 'LoadState=loaded\nUnitFileState=enabled\n' ;;
-*LoadState*) echo loaded ;;
-*MainPID*) if [ "$PQKEY_STATUS_RUNS" = service ]; then echo "$PPID"; else echo 0; fi ;;
-*) exit 1 ;;
-esac
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = fake_systemctl(dir.path());
+        let no_bus = format!("unix:path={}", dir.path().join("no-bus").display());
         let children: Vec<_> = [
             ("auto-approve", "service"),
             ("auto-approve", "by-hand"),
@@ -1545,10 +1603,7 @@ esac
                     dir.path().join(format!("{presence}-{runs}")),
                 )
                 // No session bus there: a key that asks cannot.
-                .env(
-                    "DBUS_SESSION_BUS_ADDRESS",
-                    format!("unix:path={}", dir.path().join("no-bus").display()),
-                )
+                .env("DBUS_SESSION_BUS_ADDRESS", &no_bus)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -1594,13 +1649,192 @@ esac
                     "{context}"
                 ),
                 _ => assert!(
-                    stdout.contains("  ! there is no D-Bus session bus ("),
+                    stdout.contains(&format!(
+                        "  ! the key cannot connect to its session bus (failed to connect to \
+                         `{no_bus}`: "
+                    )),
                     "{context}"
                 ),
             }
             if presence != "auto-approve" {
                 assert!(!stdout.contains("auto-approve"), "{context}");
             }
+        }
+    }
+
+    /// `status` checks notifications on the session bus the key published,
+    /// not on its own: the bus in the key's DBUS_SESSION_BUS_ADDRESS, or
+    /// without one `$XDG_RUNTIME_DIR/bus`. It names that bus, and gives the
+    /// fix that gives the key a bus. For the user service, which its unit
+    /// allows only Unix sockets, a bus over TCP is the problem itself; for a
+    /// key started by hand, status does not connect to a TCP address it read
+    /// from the key, and checks its own bus instead. Each child plays the key
+    /// on a bus of its own, with no bus there, and has another as its own
+    /// session bus.
+    #[test]
+    fn status_checks_notifications_on_the_keys_own_session_bus() {
+        use std::process::{Command, Stdio};
+        let dir = TempDir::new("status-bus");
+        let bin = fake_systemctl(dir.path());
+        let here = format!("unix:path={}", dir.path().join("shell-bus").display());
+        let key = format!("unix:path={}", dir.path().join("key-bus").display());
+        let runtime = dir.path().join("runtime");
+        let fallback = format!("unix:path={}/bus", runtime.display());
+        let tcp = "tcp:host=127.0.0.1,port=9";
+        let denied = "so every registration, sign-in and reset is denied";
+        let import = "    Fix: in a terminal of your desktop session, run `systemctl --user \
+                      import-environment DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey \
+                      start`\n";
+        let cannot_connect = |address: &str| {
+            format!(
+                "  ! the key cannot connect to its session bus (failed to connect to \
+                 `{address}`: No such file or directory (os error 2)), {denied}\n{import}"
+            )
+        };
+        let children: Vec<_> = [
+            ("by-hand", key.clone(), cannot_connect(&key)),
+            ("service", "-".to_owned(), cannot_connect(&fallback)),
+            (
+                "service",
+                tcp.to_owned(),
+                format!(
+                    "  ! the key's session bus ({tcp}) is not a Unix socket, which the user \
+                     service cannot use (its unit allows only Unix sockets), {denied}\n    Fix: \
+                     in a terminal of a desktop session whose session bus is a Unix socket (its \
+                     address starts with unix:), run `systemctl --user import-environment \
+                     DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey start`\n"
+                ),
+            ),
+            (
+                "by-hand",
+                tcp.to_owned(),
+                format!(
+                    "  ! there is no D-Bus session bus (failed to connect to `{here}`: No such \
+                     file or directory (os error 2)), {denied}\n{import}"
+                ),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(n, (runs, bus, expected))| {
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
+                .env("PQKEY_STATUS_CHILD", "notify")
+                .env("PQKEY_STATUS_RUNS", runs)
+                .env("PQKEY_STATUS_KEY_BUS", &bus)
+                .env("PATH", &bin)
+                .env("XDG_DATA_HOME", dir.path().join(format!("data-{n}")))
+                .env("XDG_RUNTIME_DIR", &runtime)
+                .env("DBUS_SESSION_BUS_ADDRESS", &here)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            (format!("{runs} on {bus}"), expected, child)
+        })
+        .collect();
+        for (key_runs, expected, child) in children {
+            let output = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let context = format!("{key_runs}: {stdout}{stderr}");
+            assert_eq!(output.status.code(), Some(0), "{context}");
+            assert!(stdout.contains(&expected), "{context}");
+            // Its one notification problem: this process's bus, which has
+            // none either, gives no other fix, and is named only where it
+            // stands in.
+            assert_eq!(stdout.matches(denied).count(), 1, "{context}");
+            assert_eq!(
+                stdout.contains(&here),
+                key_runs == format!("by-hand on {tcp}"),
+                "{context}"
+            );
+        }
+    }
+
+    /// The child of `status_reads_what_the_key_published_once`: this process
+    /// plays a key run with the presence `PQKEY_STATUS_CHILD` names on the
+    /// state directory `PQKEY_STATUS_READS` names, runs `pqkey status`, and
+    /// says how often it opened what the key published.
+    #[test]
+    fn status_reads_child() {
+        use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+        let (Ok(name), Some(state_dir)) = (
+            std::env::var("PQKEY_STATUS_CHILD"),
+            std::env::var_os("PQKEY_STATUS_READS"),
+        ) else {
+            return;
+        };
+        let state_dir = std::path::PathBuf::from(state_dir);
+        let _key = run_as_key(&state_dir, presence_named(&name));
+        let inotify = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).unwrap();
+        // Closes too, so that two opens in a row are not merged into one event.
+        inotify
+            .add_watch(
+                &state_dir.join(crate::state_lock::INFO_FILE),
+                AddWatchFlags::IN_OPEN | AddWatchFlags::IN_CLOSE_NOWRITE,
+            )
+            .unwrap();
+        let result = status(&state_dir);
+        let mut opens = 0;
+        while let Ok(events) = inotify.read_events() {
+            if events.is_empty() {
+                break;
+            }
+            opens += events
+                .iter()
+                .filter(|event| event.mask.contains(AddWatchFlags::IN_OPEN))
+                .count();
+        }
+        errln!("opens of authenticator.info: {opens}");
+        if let Err(err) = &result {
+            errln!("pqkey: {err}");
+        }
+        std::process::exit(i32::from(crate::cli::exit_status(&result)));
+    }
+
+    /// `status` reads what the running key published once, so that a key
+    /// that restarts meanwhile cannot fail a second read as if an older pqkey
+    /// had started it: for a key that asks, whose bus is checked, and one
+    /// that approves without asking, which is warned about.
+    #[test]
+    fn status_reads_what_the_key_published_once() {
+        use std::process::{Command, Stdio};
+        let dir = TempDir::new("status-reads");
+        let children: Vec<_> = ["notify", "auto-approve"]
+            .into_iter()
+            .map(|presence| {
+                let state_dir = dir.path().join(presence);
+                std::fs::create_dir(&state_dir).unwrap();
+                let child = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "cli::key::tests::status_reads_child",
+                        "--nocapture",
+                    ])
+                    .env("PQKEY_STATUS_CHILD", presence)
+                    .env("PQKEY_STATUS_READS", &state_dir)
+                    .env(
+                        "DBUS_SESSION_BUS_ADDRESS",
+                        format!("unix:path={}", dir.path().join("no-bus").display()),
+                    )
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                (presence, child)
+            })
+            .collect();
+        for (presence, child) in children {
+            let output = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let context = format!("{presence}: {stdout}{stderr}");
+            assert_eq!(output.status.code(), Some(0), "{context}");
+            assert!(
+                stderr.contains("opens of authenticator.info: 1\n"),
+                "{context}"
+            );
         }
     }
 

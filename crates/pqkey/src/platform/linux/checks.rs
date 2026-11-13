@@ -319,23 +319,53 @@ pub fn browser_problems(system: &System, node: &Path, opened: &io::Result<()>) -
     problems
 }
 
+/// What every notification problem leads to.
+const DENIED: &str = "so every registration, sign-in and reset is denied";
+
+/// Where a key has no session bus it can use: give the user's service manager
+/// the desktop's, which the user service starts with, and restart the key,
+/// which reads its environment only when it starts. A key `pqkey start` runs
+/// without the service takes the terminal's.
+const IMPORT_BUS_FIX: &str = "in a terminal of your desktop session, run `systemctl --user \
+    import-environment DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey start`";
+
 /// Whether the desktop can ask for approval: a notification server with
-/// action buttons and a body, without which every request is denied.
-pub fn notification_problem(server: &Result<ServerInfo, ConnectError>) -> Option<Problem> {
-    let denied = "so every registration, sign-in and reset is denied";
+/// action buttons and a body, without which every request is denied. `key_bus`
+/// is the address of the running key's session bus, when that is the bus
+/// `server` answered on; without it, it is this process's own.
+pub fn notification_problem(
+    server: &Result<ServerInfo, ConnectError>,
+    key_bus: Option<&str>,
+) -> Option<Problem> {
+    let on = key_bus.map_or_else(String::new, |address| {
+        format!(" on the key's session bus ({address})")
+    });
     match server {
         Err(ConnectError::NoSession(err)) => Some(Problem::new(
-            format!("there is no D-Bus session bus ({err}), {denied}"),
-            "run pqkey in your desktop session",
+            match key_bus {
+                Some(_) => format!("the key cannot connect to its session bus ({err}), {DENIED}"),
+                None => format!("there is no D-Bus session bus ({err}), {DENIED}"),
+            },
+            IMPORT_BUS_FIX,
         )),
-        Err(ConnectError::NoServer(_)) => Some(Problem::new(
-            format!("no desktop notification server is running, {denied}"),
+        Err(ConnectError::NoServer(err)) => Some(Problem::new(
+            match key_bus {
+                Some(address) => format!(
+                    "no desktop notification server answers on the key's session bus \
+                     ({address}: {err}), {DENIED}"
+                ),
+                None => format!("no desktop notification server is running, {DENIED}"),
+            },
             "use a desktop with notifications that have buttons, such as GNOME, KDE Plasma or \
              dunst",
         )),
+        // The bus did not answer in time, or refused to pass the server's
+        // answers on. The key's log says no more than this, and its denial
+        // points back here, so the fix is not to read it.
         Err(ConnectError::Failed(err)) => Some(Problem::new(
-            format!("the notification server cannot be reached ({err}), {denied}"),
-            "check `journalctl --user -u pqkey`",
+            format!("the notification server{on} cannot be reached ({err}), {DENIED}"),
+            "try again in a moment; if it keeps failing, log out and back in, or restart the \
+             computer",
         )),
         Ok(info) => {
             let missing: Vec<&str> = ["actions", "body"]
@@ -348,7 +378,7 @@ pub fn notification_problem(server: &Result<ServerInfo, ConnectError>) -> Option
             (!missing.is_empty()).then(|| {
                 Problem::new(
                     format!(
-                        "the notification server ({}) cannot show {}, {denied}",
+                        "the notification server ({}){on} cannot show {}, {DENIED}",
                         info.name.as_deref().unwrap_or("unnamed"),
                         missing.join(" or ")
                     ),
@@ -357,6 +387,54 @@ pub fn notification_problem(server: &Result<ServerInfo, ConnectError>) -> Option
             })
         }
     }
+}
+
+/// Whether the running key can ask for approval on its session bus, at
+/// `address`: [`notification_problem`] for what `check` finds there, as the key
+/// would. `check` connects to the bus at an address, or with `None` to this
+/// process's own. `service` is a key that runs as the user service, whose unit
+/// allows it only Unix sockets. When the key cannot ask, and this process's
+/// DBUS_SESSION_BUS_ADDRESS, `here`, names another bus where it could, the fix
+/// moves the key to that bus.
+///
+/// An address over TCP from the key's information is never connected to:
+/// connecting reads and sends the nonce file it may name, and the file can be
+/// written by the key's process, which the service's sandbox keeps off the
+/// network. The service cannot use such a bus anyway; for a key started by
+/// hand, this process's own bus stands in, as for a key that published none.
+pub fn key_notification_problem(
+    service: bool,
+    address: &str,
+    here: Option<&str>,
+    check: impl Fn(Option<&str>) -> Result<ServerInfo, ConnectError>,
+) -> Option<Problem> {
+    if super::dbus::is_tcp_address(address) {
+        if !service {
+            return notification_problem(&check(None), None);
+        }
+        return Some(Problem::new(
+            format!(
+                "the key's session bus ({address}) is not a Unix socket, which the user service \
+                 cannot use (its unit allows only Unix sockets), {DENIED}"
+            ),
+            "in a terminal of a desktop session whose session bus is a Unix socket (its address \
+             starts with unix:), run `systemctl --user import-environment \
+             DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey start`",
+        ));
+    }
+    let mut found = notification_problem(&check(Some(address)), Some(address))?;
+    if let Some(here) = here
+        && here != address
+        && !super::dbus::is_tcp_address(here)
+        && notification_problem(&check(None), None).is_none()
+    {
+        found.fix = format!(
+            "this terminal's session bus ({here}) has a notification server that can ask: run \
+             `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS` here, then `pqkey \
+             stop && pqkey start`"
+        );
+    }
+    Some(found)
 }
 
 impl System {
@@ -413,7 +491,30 @@ impl System {
         &self,
         server: &Result<ServerInfo, ConnectError>,
     ) -> io::Result<Option<Problem>> {
-        Ok(notification_problem(server))
+        Ok(notification_problem(server, None))
+    }
+    /// Whether the running key can ask for approval on its session bus, at
+    /// `address`, connecting there as the key does, and the fix: the free
+    /// function of this name, with this process's DBUS_SESSION_BUS_ADDRESS.
+    pub fn key_notification_problem(
+        &self,
+        service: bool,
+        address: &str,
+    ) -> io::Result<Option<Problem>> {
+        use super::dbus::SessionBus;
+        use crate::presence::notification::NotificationServer;
+        let here = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok();
+        Ok(key_notification_problem(
+            service,
+            address,
+            here.as_deref(),
+            |address| {
+                let mut bus = address.map_or_else(SessionBus::new, SessionBus::at);
+                let server = bus.connect();
+                bus.disconnect();
+                server
+            },
+        ))
     }
     pub fn uninstall_instructions(binary: &Path, state_dir: &Path) -> io::Result<Vec<String>> {
         let script = super::setup::root_undo_script(binary);
@@ -671,23 +772,280 @@ mod tests {
             })
         };
         assert_eq!(
-            notification_problem(&server(&["actions", "body", "persistence"])),
+            notification_problem(&server(&["actions", "body", "persistence"]), None),
             None
         );
-        let problem = notification_problem(&server(&["body"])).unwrap();
+        let problem = notification_problem(&server(&["body"]), None).unwrap();
         assert!(
             problem.what.contains("(example) cannot show actions"),
             "{problem:?}"
         );
-        let problem = notification_problem(&server(&[])).unwrap();
+        let problem = notification_problem(&server(&[]), None).unwrap();
         assert!(
             problem.what.contains("cannot show actions or body"),
             "{problem:?}"
         );
-        let none = notification_problem(&Err(ConnectError::NoServer("x".into()))).unwrap();
+        let none = notification_problem(&Err(ConnectError::NoServer("x".into())), None).unwrap();
         assert!(
             none.what
                 .contains("every registration, sign-in and reset is denied")
+        );
+    }
+
+    /// No bus, or one that does not answer: fixes that act, never one that
+    /// sends the user to the log, whose denial sends them back to status.
+    #[test]
+    fn a_missing_or_silent_bus_has_a_fix_of_its_own() {
+        let none = notification_problem(&Err(ConnectError::NoSession("x".into())), None).unwrap();
+        assert_eq!(
+            none,
+            Problem::new(
+                "there is no D-Bus session bus (x), so every registration, sign-in and reset is \
+                 denied",
+                IMPORT_BUS_FIX
+            )
+        );
+        assert_eq!(
+            IMPORT_BUS_FIX,
+            "in a terminal of your desktop session, run `systemctl --user import-environment \
+             DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey start`"
+        );
+        let silent = notification_problem(&Err(ConnectError::Failed("timed out".into())), None);
+        assert_eq!(
+            silent,
+            Some(Problem::new(
+                "the notification server cannot be reached (timed out), so every registration, \
+                 sign-in and reset is denied",
+                "try again in a moment; if it keeps failing, log out and back in, or restart the \
+                 computer"
+            ))
+        );
+    }
+
+    /// The running key's own bus is checked and named, and when it cannot
+    /// ask there, this process's bus, if it is another where the check
+    /// passes, gives the fix that moves the key. Nothing is checked twice,
+    /// and no address over TCP from the key is connected to.
+    #[test]
+    fn the_keys_own_bus_is_checked_and_named_with_its_fix() {
+        use std::cell::RefCell;
+        type Answer = fn() -> Result<ServerInfo, ConnectError>;
+        /// What the key's bus and this process's answer, and what is found
+        /// and checked.
+        struct Case {
+            service: bool,
+            key: &'static str,
+            here: Option<&'static str>,
+            key_answers: Answer,
+            here_answers: Answer,
+            found: Option<(String, String)>,
+            checked: &'static [&'static str],
+        }
+        fn case(
+            service: bool,
+            key: &'static str,
+            here: Option<&'static str>,
+            key_answers: Answer,
+            here_answers: Answer,
+            found: Option<(String, String)>,
+            checked: &'static [&'static str],
+        ) -> Case {
+            Case {
+                service,
+                key,
+                here,
+                key_answers,
+                here_answers,
+                found,
+                checked,
+            }
+        }
+        const KEY: &str = "unix:path=/run/user/1000/bus";
+        const DESKTOP: &str = "unix:abstract=/tmp/dbus-desktop";
+        const TCP: &str = "tcp:host=127.0.0.1,port=17171";
+        /// What `checked` lists for this process's own bus.
+        const OWN: &str = "this process's bus";
+        let fine: Answer = || {
+            Ok(ServerInfo {
+                supports_actions: true,
+                supports_body: true,
+                name: Some("example".into()),
+                ..ServerInfo::default()
+            })
+        };
+        let no_server: Answer = || Err(ConnectError::NoServer("ServiceUnknown".into()));
+        let denied = "so every registration, sign-in and reset is denied";
+        let own_fix = "use a desktop with notifications that have buttons, such as GNOME, KDE Plasma or dunst";
+        let no_server_found = |fix: &str| {
+            Some((
+                format!(
+                    "no desktop notification server answers on the key's session bus ({KEY}: \
+                     ServiceUnknown), {denied}"
+                ),
+                fix.to_owned(),
+            ))
+        };
+        let moved = format!(
+            "this terminal's session bus ({DESKTOP}) has a notification server that can ask: run \
+             `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS` here, then `pqkey \
+             stop && pqkey start`"
+        );
+        for Case {
+            service,
+            key,
+            here,
+            key_answers,
+            here_answers,
+            found,
+            checked,
+        } in [
+            // The key's bus can ask: nothing else is checked.
+            case(false, KEY, Some(DESKTOP), fine, no_server, None, &[KEY]),
+            // The same bus, or no variable here: the key's own fix.
+            case(
+                false,
+                KEY,
+                Some(KEY),
+                no_server,
+                fine,
+                no_server_found(own_fix),
+                &[KEY],
+            ),
+            case(
+                false,
+                KEY,
+                None,
+                no_server,
+                fine,
+                no_server_found(own_fix),
+                &[KEY],
+            ),
+            // This process's bus can ask: the fix moves the key there.
+            case(
+                false,
+                KEY,
+                Some(DESKTOP),
+                no_server,
+                fine,
+                no_server_found(&moved),
+                &[KEY, OWN],
+            ),
+            // Neither can: the key's own fix.
+            case(
+                false,
+                KEY,
+                Some(DESKTOP),
+                no_server,
+                no_server,
+                no_server_found(own_fix),
+                &[KEY, OWN],
+            ),
+            // No bus for the key.
+            case(
+                true,
+                KEY,
+                Some(KEY),
+                || Err(ConnectError::NoSession("no socket".into())),
+                fine,
+                Some((
+                    format!("the key cannot connect to its session bus (no socket), {denied}"),
+                    IMPORT_BUS_FIX.into(),
+                )),
+                &[KEY],
+            ),
+            // The service on a TCP bus: the problem, found without connecting.
+            case(
+                true,
+                TCP,
+                Some(TCP),
+                fine,
+                fine,
+                Some((
+                    format!(
+                        "the key's session bus ({TCP}) is not a Unix socket, which the user \
+                         service cannot use (its unit allows only Unix sockets), {denied}"
+                    ),
+                    "in a terminal of a desktop session whose session bus is a Unix socket (its \
+                     address starts with unix:), run `systemctl --user import-environment \
+                     DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey start`"
+                        .into(),
+                )),
+                &[],
+            ),
+            // A key started by hand on a TCP bus: this process's bus stands in.
+            case(false, TCP, Some(DESKTOP), fine, fine, None, &[OWN]),
+            case(
+                false,
+                TCP,
+                Some(TCP),
+                fine,
+                no_server,
+                Some((
+                    format!("no desktop notification server is running, {denied}"),
+                    own_fix.into(),
+                )),
+                &[OWN],
+            ),
+            // A TCP bus here is never the fix.
+            case(
+                true,
+                KEY,
+                Some(TCP),
+                || Err(ConnectError::Failed("did not answer".into())),
+                fine,
+                Some((
+                    format!(
+                        "the notification server on the key's session bus ({KEY}) cannot be \
+                         reached (did not answer), {denied}"
+                    ),
+                    "try again in a moment; if it keeps failing, log out and back in, or restart \
+                     the computer"
+                        .into(),
+                )),
+                &[KEY],
+            ),
+            case(
+                false,
+                KEY,
+                Some(TCP),
+                no_server,
+                fine,
+                no_server_found(own_fix),
+                &[KEY],
+            ),
+        ] {
+            let buses = RefCell::new(Vec::new());
+            let problem = key_notification_problem(service, key, here, |bus| {
+                buses.borrow_mut().push(bus.unwrap_or(OWN).to_owned());
+                match bus {
+                    Some(bus) if bus == key => key_answers(),
+                    Some(bus) => panic!("connected to {bus}"),
+                    None => here_answers(),
+                }
+            });
+            let context = format!("{service} {key} {here:?}");
+            assert_eq!(
+                problem.map(|problem| (problem.what, problem.fix)),
+                found,
+                "{context}"
+            );
+            assert_eq!(buses.into_inner(), checked, "{context}");
+        }
+        let capabilities = key_notification_problem(false, KEY, None, |_| {
+            Ok(ServerInfo {
+                supports_actions: false,
+                supports_body: true,
+                name: Some("example".into()),
+                ..ServerInfo::default()
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            capabilities.what,
+            format!(
+                "the notification server (example) on the key's session bus ({KEY}) cannot show \
+                 actions, {denied}"
+            )
         );
     }
 

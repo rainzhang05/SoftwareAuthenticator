@@ -327,6 +327,15 @@ for regression coverage and execution limits.
 browser behaviour, see
 [Troubleshooting](docs/development-notes.md#troubleshooting).
 
+For approvals, `pqkey status` connects to the running key's own D-Bus session
+bus and checks for a notification server that shows buttons and text, as the
+key does before each prompt. It shows no notification, so it cannot see a
+server that fails to show a prompt or to return your answer, and it sees a bus
+or server that fails now and then only while it fails. The key logs why it
+denied each request it could not ask about: `journalctl --user -u pqkey`, or
+`authenticator.log` in the state directory for a key that `pqkey start` ran
+without the service.
+
 If the PIN looks blocked, or the key says it could not read or write its
 state, restart it with `pqkey stop && pqkey start` and run `pqkey status`
 again before you reset it: a restart clears a block that came from a PIN state

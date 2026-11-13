@@ -15,6 +15,9 @@ pub(crate) struct DaemonInfo {
     inode: u64,
     cmdline: Vec<u8>,
     session_bus: Option<Vec<u8>>,
+    /// Whether the daemon published `session_bus`, which one of an older
+    /// pqkey (`pqkey-daemon-v1`) did not.
+    bus_published: bool,
 }
 
 impl DaemonInfo {
@@ -36,7 +39,15 @@ impl DaemonInfo {
             cmdline,
             session_bus: std::env::var_os("DBUS_SESSION_BUS_ADDRESS")
                 .map(|address| address.as_encoded_bytes().to_vec()),
+            bus_published: true,
         }
+    }
+
+    /// This information with `bus` as the daemon's DBUS_SESSION_BUS_ADDRESS.
+    #[cfg(test)]
+    pub(crate) fn with_session_bus(mut self, bus: Option<&[u8]>) -> Self {
+        self.session_bus = bus.map(<[u8]>::to_vec);
+        self
     }
 
     pub fn publish(&self, state_dir: &Path, lock: &StateLock) -> io::Result<()> {
@@ -76,7 +87,8 @@ impl DaemonInfo {
         else {
             return Err(invalid_info());
         };
-        let session_bus = if version == VERSION {
+        let bus_published = version == VERSION;
+        let session_bus = if bus_published {
             let encoded = fields.next().ok_or_else(invalid_info)?;
             if encoded == "-" {
                 None
@@ -110,11 +122,24 @@ impl DaemonInfo {
             inode: inode.parse().map_err(|_| invalid_info())?,
             cmdline,
             session_bus,
+            bus_published,
         })
     }
 
     pub fn args(&self) -> io::Result<DaemonArgs> {
         daemon_args_from(&self.cmdline).ok_or_else(invalid_info)
+    }
+
+    /// The address of the session bus the daemon asks for presence on, from
+    /// the environment it started with; `None` for a daemon of an older pqkey,
+    /// which did not publish it.
+    pub fn session_bus_address(&self) -> Option<String> {
+        use std::os::unix::ffi::OsStrExt;
+        self.bus_published.then(|| {
+            crate::platform::session_bus_address(
+                self.session_bus.as_deref().map(std::ffi::OsStr::from_bytes),
+            )
+        })
     }
 
     /// The provider checked by setup must be the one the daemon can reach.
@@ -181,6 +206,50 @@ mod tests {
                 .args()
                 .is_ok()
         );
+    }
+
+    /// What `pqkey status` checks notifications on: the bus the daemon
+    /// published, or without one zbus's default, `$XDG_RUNTIME_DIR/bus`, which
+    /// is also what zbus takes for an address that is not UTF-8; nothing for a
+    /// daemon of an older pqkey, which did not publish it.
+    #[test]
+    fn status_finds_the_session_bus_the_daemon_published() {
+        let dir = TempDir::new("daemon-info-address");
+        let lock = StateLock::try_acquire(dir.path()).unwrap().unwrap();
+        state_lock::write_pid_file(dir.path(), &lock).unwrap();
+        let fallback = format!(
+            "unix:path={}/bus",
+            std::env::var("XDG_RUNTIME_DIR")
+                .unwrap_or_else(|_| format!("/run/user/{}", nix::unistd::geteuid()))
+        );
+        let read = || DaemonInfo::read(dir.path(), Pid::this()).unwrap();
+        for (published, address) in [
+            (
+                Some(b"unix:path=/run/user/1000/bus".as_slice()),
+                "unix:path=/run/user/1000/bus",
+            ),
+            (
+                Some(b"tcp:host=127.0.0.1,port=17171"),
+                "tcp:host=127.0.0.1,port=17171",
+            ),
+            (None, fallback.as_str()),
+            (Some(b"unix:path=/tmp/\xff/bus"), fallback.as_str()),
+        ] {
+            crate::test_support::daemon_info(&DaemonArgs::default())
+                .with_session_bus(published)
+                .publish(dir.path(), &lock)
+                .unwrap();
+            assert_eq!(read().session_bus_address().as_deref(), Some(address));
+        }
+        let info = crate::test_support::daemon_info(&DaemonArgs::default());
+        let mut old = format!(
+            "pqkey-daemon-v1 {} {} {}\n",
+            info.pid, info.device, info.inode
+        )
+        .into_bytes();
+        old.extend_from_slice(&info.cmdline);
+        fs::write(dir.path().join(state_lock::INFO_FILE), old).unwrap();
+        assert_eq!(read().session_bus_address(), None);
     }
 
     #[test]
