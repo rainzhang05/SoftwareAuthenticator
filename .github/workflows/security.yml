@@ -67,7 +67,7 @@ jobs:
         with:
           toolchain: stable
       - name: Install cargo-audit
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-audit@0.22.2
 
@@ -105,7 +105,7 @@ jobs:
         with:
           toolchain: stable
       - name: Install cargo-deny
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           # Version-pinned deliberately: cargo-deny's config schema changes
           # between minor releases and a silent bump would break deny.toml.
