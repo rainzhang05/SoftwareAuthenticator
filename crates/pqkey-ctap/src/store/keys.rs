@@ -294,8 +294,11 @@ impl KeySource for FileKeySource {
             log::warn!("credential store: could not overwrite the old {domain} key: {err}");
         }
         // A crash during an earlier creation or rotation can leave a temporary
-        // file holding a key; do not let one outlive a rotation.
-        fsio::remove_temp_files(&self.dir);
+        // file holding a key; do not let one outlive a rotation. The caller
+        // treats the old key as gone once this returns, so the removal must be
+        // durable by then: a failed flush fails the rotation, as a failed
+        // flush of the new key's publication does.
+        fsio::remove_temp_files(&self.dir)?;
         Ok(key)
     }
 }

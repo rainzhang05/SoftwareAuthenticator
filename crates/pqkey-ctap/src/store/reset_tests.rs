@@ -313,11 +313,74 @@ fn provision(path: &Path) {
         .unwrap();
 }
 
-fn trace(managed: bool) -> Vec<(String, PathBuf)> {
+/// The stores the checkpoint sweeps reset: legacy or managed, and whether
+/// `keys/` holds a leftover copy of the credential key.
+const SWEPT: [(bool, bool); 3] = [(false, false), (true, false), (true, true)];
+
+/// The name of the temporary file [`leave_key_copy`] writes in `keys/`.
+pub(super) const KEY_COPY: &str = ".tmp-0123456789abcdef";
+
+/// Leave a copy of the credential key of the store in `path` in a temporary
+/// file of its `keys/`. A crash while the key is created leaves its
+/// temporary name behind, as a second name for the key, and a copy of the
+/// directory that does not keep hard links makes that a file of its own,
+/// which only its removal destroys.
+pub(super) fn leave_key_copy(path: &Path) {
+    let source = FileKeySource::new(path.join(KEYS_DIR));
+    fs::copy(
+        source.key_path(KeyDomain::Credential),
+        source.dir().join(KEY_COPY),
+    )
+    .unwrap();
+}
+
+/// No file in the `keys/` of the store in `path` holds `old_key`.
+fn assert_no_copy(path: &Path, old_key: &RootKey) {
+    for entry in fs::read_dir(path.join(KEYS_DIR)).unwrap() {
+        let file = entry.unwrap().path();
+        assert!(
+            fs::read(&file).unwrap() != old_key.expose(),
+            "{} holds the old key after a reset",
+            file.display()
+        );
+    }
+}
+
+/// The boundaries of the flush of `keys/` after the removal of the leftover
+/// copy of the key in `events`.
+fn key_copy_flush(events: &[(String, PathBuf)]) -> [usize; 2] {
+    let removed = events
+        .iter()
+        .position(|(event, path)| event == "removed" && path.ends_with(KEY_COPY))
+        .expect("the reset removes the leftover copy of the key");
+    let flush = removed
+        + events[removed..]
+            .iter()
+            .position(|(event, path)| event == "directory-flush" && path.ends_with(KEYS_DIR))
+            .expect("the removal of the leftover copy of the key is flushed");
+    assert_eq!(events[flush + 1].0, "directory-flushed");
+    [flush, flush + 1]
+}
+
+/// The checkpoints of `events` that a sweep visits: all of them, or with a
+/// leftover copy of the key those of the rotation, which ends with the flush
+/// after the copy's removal; the rest of the reset is the same without it.
+fn swept(events: &[(String, PathBuf)], leftover: bool) -> &[(String, PathBuf)] {
+    if leftover {
+        &events[..=key_copy_flush(events)[1]]
+    } else {
+        events
+    }
+}
+
+fn trace(managed: bool, leftover: bool) -> Vec<(String, PathBuf)> {
     let scratch = TempDir::new();
     let path = scratch.path().join("state");
     setup(&path, managed);
     provision(&path);
+    if leftover {
+        leave_key_copy(&path);
+    }
     let mut store = FileStore::open(&path).unwrap();
     let trace = Rc::new(RefCell::new(Vec::new()));
     let captured = trace.clone();
@@ -382,8 +445,9 @@ fn assert_interruption(path: &Path, old_key: &RootKey, record: &CredentialRecord
 
 #[test]
 fn every_reset_checkpoint_preserves_survivors_or_invalidates_them_and_retry_recovers() {
-    for managed in [false, true] {
-        let events = trace(managed);
+    for (managed, leftover) in SWEPT {
+        let events = trace(managed, leftover);
+        let copy_flush = leftover.then(|| key_copy_flush(&events));
         assert!(
             events
                 .iter()
@@ -402,15 +466,20 @@ fn every_reset_checkpoint_preserves_survivors_or_invalidates_them_and_retry_reco
         if managed {
             assert!(events.iter().any(|(event, _)| event == "publication"));
         }
-        for (boundary, event) in events.iter().enumerate() {
+        for (boundary, event) in swept(&events, leftover).iter().enumerate() {
             let scratch = TempDir::new();
             let path = scratch.path().join("state");
             let (id, _, record) = setup(&path, managed);
             provision(&path);
+            if leftover {
+                leave_key_copy(&path);
+            }
             let source = FileKeySource::new(path.join(KEYS_DIR));
             let old_key = source.load(KeyDomain::Credential).unwrap().unwrap();
             let device = fs::read(source.key_path(KeyDomain::Device)).unwrap();
             let attestation = fs::read(path.join(ATTESTATION_FILE)).unwrap();
+            let counter = fs::read(path.join(SIGNATURE_COUNTER_FILE)).unwrap();
+            let pin = fs::read(path.join(PIN_STATE_FILE)).unwrap();
             let mut engine = app(&path);
             let mut index = 0;
             let response = fsio::with_hook(
@@ -427,9 +496,20 @@ fn every_reset_checkpoint_preserves_survivors_or_invalidates_them_and_retry_reco
             );
             assert!(
                 response == [CTAP2_ERR_PROCESSING] || response == [CTAP2_OK],
-                "{managed} {boundary} {event:?}: {response:?}"
+                "{managed} {leftover} {boundary} {event:?}: {response:?}"
             );
             assert_interruption(&path, &old_key, &record);
+            if copy_flush.is_some_and(|flush| flush.contains(&boundary)) {
+                // The copy's removal may not be durable, so the old key does
+                // not count as gone: the rotation fails, and the reset
+                // purges nothing that key protects.
+                assert_eq!(response, [CTAP2_ERR_PROCESSING], "{event:?}");
+                assert_eq!(
+                    fs::read(path.join(SIGNATURE_COUNTER_FILE)).unwrap(),
+                    counter
+                );
+                assert_eq!(fs::read(path.join(PIN_STATE_FILE)).unwrap(), pin);
+            }
             if response != [CTAP2_OK] {
                 assert_ne!(assertion(&mut engine, &id)[0], CTAP2_OK);
                 assert_ne!(assertion(&mut app(&path), &id)[0], CTAP2_OK);
@@ -441,6 +521,7 @@ fn every_reset_checkpoint_preserves_survivors_or_invalidates_them_and_retry_reco
             assert_eq!(fs::read(path.join(ATTESTATION_FILE)).unwrap(), attestation);
             assert_eq!(app(&path).call(&[CTAP_CMD_RESET]), [CTAP2_OK]);
             assert_defaults(&path, managed, &id, &record);
+            assert_no_copy(&path, &old_key);
             assert_eq!(
                 fs::read(source.key_path(KeyDomain::Device)).unwrap(),
                 device
@@ -478,12 +559,16 @@ fn crash_child() {
 
 #[test]
 fn process_exit_at_every_reset_checkpoint_is_recoverable() {
-    for managed in [false, true] {
-        for (boundary, event) in trace(managed).iter().enumerate() {
+    for (managed, leftover) in SWEPT {
+        let events = trace(managed, leftover);
+        for (boundary, event) in swept(&events, leftover).iter().enumerate() {
             let scratch = TempDir::new();
             let path = scratch.path().join("state");
             let (id, _, record) = setup(&path, managed);
             provision(&path);
+            if leftover {
+                leave_key_copy(&path);
+            }
             let source = FileKeySource::new(path.join(KEYS_DIR));
             let old_key = source.load(KeyDomain::Credential).unwrap().unwrap();
             let status = Command::new(std::env::current_exe().unwrap())
@@ -497,11 +582,16 @@ fn process_exit_at_every_reset_checkpoint_is_recoverable() {
                 .stdout(Stdio::null())
                 .status()
                 .unwrap();
-            assert_eq!(status.code(), Some(83), "{managed} {boundary} {event:?}");
+            assert_eq!(
+                status.code(),
+                Some(83),
+                "{managed} {leftover} {boundary} {event:?}"
+            );
             assert_interruption(&path, &old_key, &record);
             assert_ne!(assertion(&mut app(&path), &id)[0], CTAP2_OK);
             assert_eq!(app(&path).call(&[CTAP_CMD_RESET]), [CTAP2_OK]);
             assert_defaults(&path, managed, &id, &record);
+            assert_no_copy(&path, &old_key);
         }
     }
 }

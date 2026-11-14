@@ -577,7 +577,8 @@ Explicit reset uses the following order in both store layouts:
 1. Determine the layout without authenticating damaged metadata, then rotate
    the credential key. The new key file is flushed before atomic publication,
    its directory is flushed, and only then is the old key overwritten as a
-   best effort and stale key temporary files removed.
+   best effort and stale key temporary files removed. Their removal is
+   flushed before rotation succeeds, and a failure of that flush fails it.
 2. After rotation succeeds, purge credential records and managed membership,
    remove the shared signature counter and large-blob array, and flush their
    directories. Missing counter/blob records supply zero/the initial array.

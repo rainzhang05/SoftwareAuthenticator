@@ -20,11 +20,14 @@
 //! 3. A staged namespace is renamed into place only after it was flushed
 //!    following the last change to its entries.
 //! 4. No cleanup starts and nothing is removed or replaced until the
-//!    directory of everything put in place before was flushed, so a power
+//!    directory of everything put in place before, and of every temporary
+//!    file removed from the key directory before, was flushed, so a power
 //!    failure cannot bring back a manifest that names a removed record, or
-//!    the old key after a reset removed its counter, or lose the quarantine
-//!    name of a file that repair replaces or removes.
-//! 5. Every change is flushed before the operation returns.
+//!    the old key or a leftover copy of it after a reset removed its counter,
+//!    or lose the quarantine name of a file that repair replaces or removes.
+//! 5. Every change is flushed before the operation returns. Removing a
+//!    temporary file counts as a change only in the key directory, where it
+//!    can hold a root key.
 //!
 //! A file or directory the store had that repair gives a name in its
 //! quarantine keeps the contents it had, so rules 1 and 3 do not apply to it;
@@ -37,6 +40,7 @@ use std::os::unix::fs::MetadataExt;
 use std::rc::Rc;
 
 use super::repair_tests::Scenario;
+use super::reset_tests::{KEY_COPY, leave_key_copy};
 use super::*;
 use crate::CoseAlg;
 use crate::store::{PrivateKeyMaterial, test_support::TempDir};
@@ -61,7 +65,7 @@ type Operation = fn(&mut FileStore);
 
 #[test]
 fn every_persisting_operation_flushes_before_it_publishes_removes_or_returns() {
-    let operations: [(&str, Setup, Operation); 29] = [
+    let operations: [(&str, Setup, Operation); 31] = [
         ("legacy put of a new record", legacy, |store| {
             store.put(&credential(b"new", 4)).unwrap();
         }),
@@ -103,6 +107,24 @@ fn every_persisting_operation_flushes_before_it_publishes_removes_or_returns() {
             reset,
         ),
         ("reset after an interrupted migration", interrupted, reset),
+        // The caller of a rotation treats the old key as gone once it
+        // returns, and a reset purges what the old key protected.
+        (
+            "key rotation with a leftover copy of the key",
+            |path| leftover(fresh(path)),
+            |store| {
+                store.keys.rotate(KeyDomain::Credential).unwrap();
+                assert_leftover_removed(store);
+            },
+        ),
+        (
+            "reset with a leftover copy of the key",
+            |path| leftover(provisioned(legacy(path))),
+            |store| {
+                reset(store);
+                assert_leftover_removed(store);
+            },
+        ),
         ("PIN state publication", fresh, |store| {
             assert_eq!(
                 store.set_pin_state(&pin()).unwrap(),
@@ -243,10 +265,16 @@ impl Event {
         matches!(self.name.as_str(), "renamed" | "published" | "linked")
     }
 
+    /// Whether this removed a temporary file from the key directory, where
+    /// one can hold a root key.
+    fn removed_key_copy(&self) -> bool {
+        self.name == "removed" && temporary(&self.path) && parent(&self.path).ends_with(KEYS_DIR)
+    }
+
     /// Whether this put an entry in place, or removed one that is not a
-    /// temporary file.
+    /// temporary file or that can hold a root key.
     fn changed(&self) -> bool {
-        self.placed() || self.name == "removed" && !temporary(&self.path)
+        self.placed() || self.name == "removed" && !temporary(&self.path) || self.removed_key_copy()
     }
 }
 
@@ -317,13 +345,12 @@ fn check(scratch: &Path, events: &[Event], exercised: &mut BTreeSet<&'static str
             .iter()
             .any(|event| event.name == "directory-flushed" && event.dir == dir)
     };
-    // What was put in place before `index` without a flush of its directory
-    // since.
-    let unflushed = |index: usize| {
+    // What `counts` before `index` without a flush of its directory since.
+    let unflushed = |index: usize, counts: fn(&Event) -> bool| {
         events[..index]
             .iter()
             .enumerate()
-            .filter(|&(at, event)| event.placed() && !flushed(event.dir, at + 1..index))
+            .filter(|&(at, event)| counts(event) && !flushed(event.dir, at + 1..index))
             .map(|(_, event)| show(&event.path))
             .collect::<Vec<_>>()
     };
@@ -371,7 +398,7 @@ fn check(scratch: &Path, events: &[Event], exercised: &mut BTreeSet<&'static str
         }
         if event.name == "publication" {
             exercised.insert(MEMBERSHIP_LAST);
-            let earlier = unflushed(at);
+            let earlier = unflushed(at, Event::placed);
             if !earlier.is_empty() {
                 fail(
                     MEMBERSHIP_LAST,
@@ -404,7 +431,7 @@ fn check(scratch: &Path, events: &[Event], exercised: &mut BTreeSet<&'static str
         };
         if let Some(removal) = removal {
             exercised.insert(DURABLE_BEFORE_REMOVAL);
-            let earlier = unflushed(at);
+            let earlier = unflushed(at, |event| event.placed() || event.removed_key_copy());
             if !earlier.is_empty() {
                 fail(
                     DURABLE_BEFORE_REMOVAL,
@@ -583,6 +610,19 @@ fn provisioned(mut store: FileStore) -> FileStore {
         .set_large_blob_array(&INITIAL_LARGE_BLOB_ARRAY)
         .unwrap();
     store
+}
+
+/// `store` with a leftover copy of its credential key in the key directory.
+fn leftover(store: FileStore) -> FileStore {
+    leave_key_copy(&store.root);
+    store
+}
+
+fn assert_leftover_removed(store: &FileStore) {
+    assert!(
+        fs::symlink_metadata(store.keys.dir().join(KEY_COPY)).is_err(),
+        "the leftover copy of the old key outlived the rotation"
+    );
 }
 
 /// A legacy store whose migration failed after writing the format marker, so

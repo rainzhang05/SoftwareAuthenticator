@@ -383,16 +383,21 @@ pub(crate) fn remove_all_files(dir: &Path) -> Result<(), StoreError> {
     sync_dir(dir)
 }
 
-/// Remove leftover temporary files from `dir`, ignoring failures.
-pub(crate) fn remove_temp_files(dir: &Path) {
+/// Remove leftover temporary files from `dir`, ignoring failures to list or
+/// remove them, then flush `dir` if it had any, so that a power failure
+/// cannot bring a removed one back. Only that flush's error is returned.
+pub(crate) fn remove_temp_files(dir: &Path) -> Result<(), StoreError> {
     let Ok(entries) = fs::read_dir(dir) else {
-        return;
+        return Ok(());
     };
+    let mut found = false;
     for entry in entries.flatten() {
         if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+            found = true;
             let _ = remove_file_if_present(&entry.path());
         }
     }
+    if found { sync_dir(dir) } else { Ok(()) }
 }
 
 /// Overwrite the whole of an open file with zeros and flush it.  `path` is
