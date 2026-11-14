@@ -1,12 +1,13 @@
 //! U2F framing, presence policy and credentials shared with CTAP2.
 
+use super::storage::{closing_errors, io_error};
 use super::support::{
-    NEVER_INTERRUPTED, PresenceEvent, TestApp, TestStore, app_with_store, credential, insert,
-    pin_hash, response_auth_data, scripted_app, test_app,
+    NEVER_INTERRUPTED, PresenceEvent, PresenceLog, TestApp, TestStore, app_with_store, credential,
+    get_pin_retries, insert, pin_hash, response_auth_data, scripted_app, test_app,
 };
 use crate::ctap::presence::{PresenceOperation, PresenceOutcome};
 use crate::ctap::u2f::*;
-use crate::store::{CredentialStore, PinStateRecord, PrivateKeyMaterial};
+use crate::store::{CredentialStore, PinStateRecord, PrivateKeyMaterial, StoreError};
 use crate::{CoseAlg, CryptoError, KeyKind};
 use ciborium::value::{Integer, Value};
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
@@ -636,6 +637,174 @@ fn complexity_and_forced_pin_change_do_not_independently_block_u2f() {
             &application(),
             0,
         );
+        assert_eq!(data(&app.call_u2f(&[0, 3, 0, 0])), b"U2F_V2");
+    }
+}
+
+/// The requests that answer from alwaysUv: registration (`None`), and
+/// authentication that enforces presence, only checks the handle, or does
+/// not enforce presence.
+const POLICY_REQUESTS: [Option<u8>; 4] = [None, Some(3), Some(7), Some(8)];
+
+/// The registration, or the authentication of `handle` with `control`.
+fn policy_request(control: Option<u8>, handle: &[u8]) -> Vec<u8> {
+    control.map_or_else(register_request, |control| {
+        auth_request(control, handle, &application())
+    })
+}
+
+/// Check that `response` is what U2F, enabled, answers [`policy_request`]
+/// for the credential of `registration`.
+fn assert_answered(control: Option<u8>, response: &[u8], registration: &[u8]) {
+    match control {
+        None => assert_eq!(data(response)[0], 5, "a registration"),
+        Some(7) => assert_eq!(response, SW_CONDITIONS_NOT_SATISFIED.to_be_bytes()),
+        Some(control) => {
+            verify_auth(
+                response,
+                &registration[1..66],
+                &application(),
+                u8::from(control == 3),
+            );
+        }
+    }
+}
+
+/// A store holding one U2F registration, and the registration.
+fn store_with_registration() -> (TestStore, Vec<u8>) {
+    let store = TestStore::new();
+    let (mut app, _) = app_with_store(store.clone(), [0x24; 16], [], &NEVER_INTERRUPTED);
+    let registration = register(&mut app);
+    (store, registration)
+}
+
+/// An app over `store` whose read of the PIN state at start-up fails with an
+/// I/O error, and whose next reads fail with `then`, in order.
+fn start_unread(
+    store: &TestStore,
+    then: impl IntoIterator<Item = StoreError>,
+) -> (TestApp, PresenceLog) {
+    store.faults(|faults| {
+        faults.pin_state_errors.push_back(io_error());
+        faults.pin_state_errors.extend(then);
+    });
+    let (app, log) = app_with_store(store.clone(), [0x25; 16], [], &NEVER_INTERRUPTED);
+    assert!(!app.u2f_enabled(), "start-up answers from the closed state");
+    (app, log)
+}
+
+/// A PIN state that start-up could not read for an I/O error does not keep
+/// U2F refused until a restart: registration and authentication, with each
+/// control, read it first, as makeCredential and getAssertion do, and answer
+/// from it once it reads.
+#[test]
+fn u2f_reads_a_pin_state_unread_at_start_up_first() {
+    let (store, registration) = store_with_registration();
+    for control in POLICY_REQUESTS {
+        let (mut app, _) = start_unread(&store, []);
+        let response = app.call_u2f(&policy_request(control, handle(&registration)));
+        assert_answered(control, &response, &registration);
+        assert!(app.u2f_enabled(), "{control:?}: the stored state is read");
+    }
+}
+
+/// While the PIN state still cannot be read, registration and
+/// authentication, with each control, fail with SW_INTERNAL_ERROR, as
+/// makeCredential and getAssertion fail with CTAP2_ERR_PROCESSING: before
+/// presence, without signing or writing, and with the state still unread,
+/// so that the next one reads it again.  VERSION, and APDUs refused for
+/// their length, class or instruction, do not read it.
+#[test]
+fn u2f_fails_with_an_internal_error_while_the_pin_state_cannot_be_read() {
+    let (store, registration) = store_with_registration();
+    for control in POLICY_REQUESTS {
+        let (mut app, log) = start_unread(&store, [io_error()]);
+        assert_eq!(data(&app.call_u2f(&[0, 3, 0, 0])), b"U2F_V2");
+        for (apdu, status) in [
+            (vec![0, 1, 0], SW_WRONG_LENGTH),
+            (vec![1, 1, 0, 0], SW_CLA_NOT_SUPPORTED),
+            (vec![0, 4, 0, 0], SW_INS_NOT_SUPPORTED),
+        ] {
+            assert_eq!(app.call_u2f(&apdu), status.to_be_bytes(), "{apdu:02x?}");
+        }
+        store.faults(|faults| assert_eq!(faults.pin_state_errors.len(), 1, "none read it"));
+        let counter = store.signature_counter().unwrap();
+        let request = policy_request(control, handle(&registration));
+        assert_eq!(
+            app.call_u2f(&request),
+            SW_INTERNAL_ERROR.to_be_bytes(),
+            "{control:?}"
+        );
+        store.faults(|faults| assert!(faults.pin_state_errors.is_empty(), "{control:?}"));
+        assert!(!app.u2f_enabled(), "{control:?}: still closed");
+        assert!(log.take().is_empty(), "{control:?}: nobody was asked");
+        assert_eq!(store.signature_counter().unwrap(), counter, "{control:?}");
+        assert_eq!(store.pin_state_writes(), [], "{control:?}");
+        assert_answered(control, &app.call_u2f(&request), &registration);
+    }
+}
+
+/// A PIN state unread at start-up that registration or authentication then
+/// reads as damaged, or that fails with any other error that closes
+/// authority, fails closed until reset, as when a CTAP2 command reads it:
+/// that request fails with SW_INTERNAL_ERROR, and the PIN is blocked and U2F
+/// refused under the closed state's alwaysUv, although the record reads
+/// again afterwards.  A restart reads the record again.
+#[test]
+fn a_pin_state_unread_at_start_up_that_u2f_reads_as_damaged_fails_closed() {
+    let (store, registration) = store_with_registration();
+    let id = handle(&registration);
+    for control in POLICY_REQUESTS {
+        for err in closing_errors() {
+            let name = format!("{err} ({control:?})");
+            let (mut app, log) = start_unread(&store, [err]);
+            let request = policy_request(control, id);
+            assert_eq!(
+                app.call_u2f(&request),
+                SW_INTERNAL_ERROR.to_be_bytes(),
+                "{name}"
+            );
+            store.faults(|faults| assert!(faults.pin_state_errors.is_empty(), "{name}"));
+            for later in POLICY_REQUESTS {
+                assert_eq!(
+                    app.call_u2f(&policy_request(later, id)),
+                    SW_COMMAND_NOT_ALLOWED.to_be_bytes(),
+                    "{name}: {later:?}"
+                );
+            }
+            assert_eq!(get_pin_retries(&mut app).0, 0, "{name}");
+            assert!(log.take().is_empty(), "{name}");
+            assert_eq!(store.pin_state_writes(), [], "{name}");
+
+            let (mut restarted, _) =
+                app_with_store(store.clone(), [0x26; 16], [], &NEVER_INTERRUPTED);
+            assert_answered(control, &restarted.call_u2f(&request), &registration);
+        }
+    }
+}
+
+/// A PIN state that registration or authentication reads with alwaysUv set
+/// refuses them, with each control, before presence, as when start-up reads
+/// it; VERSION still answers.
+#[test]
+fn a_pin_state_u2f_reads_with_always_uv_set_still_refuses_u2f() {
+    let (mut store, registration) = store_with_registration();
+    let mut state = PinStateRecord::default();
+    state.always_uv = true;
+    store.set_pin_state(&state).unwrap();
+    for control in POLICY_REQUESTS {
+        let (mut app, log) = start_unread(&store, []);
+        assert!(app.pin_state.is_set(), "the closed state has a PIN");
+        assert_eq!(
+            app.call_u2f(&policy_request(control, handle(&registration))),
+            SW_COMMAND_NOT_ALLOWED.to_be_bytes(),
+            "{control:?}"
+        );
+        assert!(
+            !app.pin_state.is_set(),
+            "{control:?}: the stored state, with no PIN, is read"
+        );
+        assert!(log.take().is_empty(), "{control:?}: nobody was asked");
         assert_eq!(data(&app.call_u2f(&[0, 3, 0, 0])), b"U2F_V2");
     }
 }

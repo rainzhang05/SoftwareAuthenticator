@@ -600,7 +600,7 @@ fn pin_with_token_and_spent_retry(app: &mut TestApp) -> [u8; 32] {
 }
 
 /// A read of the backing storage that failed.
-fn io_error() -> StoreError {
+pub(super) fn io_error() -> StoreError {
     StoreError::Io {
         path: "pin-state".into(),
         source: std::io::Error::other("injected failure"),
@@ -608,7 +608,7 @@ fn io_error() -> StoreError {
 }
 
 /// One error of every other kind.
-fn closing_errors() -> [StoreError; 6] {
+pub(super) fn closing_errors() -> [StoreError; 6] {
     [
         StoreError::Corrupt {
             object: "pin-state".into(),
@@ -996,11 +996,6 @@ fn an_io_error_reconciling_a_failed_reset_closes_authority() {
         )),
         [CTAP2_ERR_PIN_AUTH_INVALID]
     );
-    let registration = app.call_u2f(&register_request());
-    assert_eq!(
-        registration[registration.len() - 2..],
-        SW_COMMAND_NOT_ALLOWED.to_be_bytes()
-    );
     let hash = [0x45; 32];
     let pin_uv_auth_param = token_pin_auth(ClassicPinProtocol::V2, &token, &hash);
     assert_eq!(
@@ -1011,6 +1006,11 @@ fn an_io_error_reconciling_a_failed_reset_closes_authority() {
         )),
         Err(CTAP2_ERR_PROCESSING),
         "it reads the PIN state first, and finds it damaged"
+    );
+    let registration = app.call_u2f(&register_request());
+    assert_eq!(
+        registration[registration.len() - 2..],
+        SW_COMMAND_NOT_ALLOWED.to_be_bytes()
     );
     assert_eq!(get_pin_retries(&mut app).0, 0);
 }

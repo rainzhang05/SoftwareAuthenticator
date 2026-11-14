@@ -53,6 +53,9 @@
 //!   the one reconciling a failed reset, after which the engine answers from
 //!   a closed state (PIN set and blocked, alwaysUv) until a read succeeds; a
 //!   corrupt one closes it until reset; a closed state is never written;
+//! * U2F registration and authentication read an unread PIN state first, as
+//!   makeCredential and getAssertion do, before they answer from alwaysUv;
+//!   nothing else in U2F reads the PIN state, and nothing in U2F writes it;
 //! * retries are debited only by published writes, and a PIN verdict (a token,
 //!   a changed PIN or CTAP2_ERR_PIN_INVALID) needs a confirmed debit before
 //!   it; the right PIN is never refused as blocked while retries are left.
@@ -330,6 +333,13 @@ fn failed_call(command: Option<u8>, events: &[Event]) -> Option<usize> {
             (Call::Count, _) | (Call::Get | Call::BlobRead, Some(Fault::Corrupt)) => false,
             _ => true,
         })
+}
+
+/// Whether the engine answers the U2F APDU `request` from alwaysUv: a
+/// registration or authentication, well-formed or not, of the right class
+/// (`decode` in `crates/pqkey-ctap/src/ctap/u2f.rs`).
+fn answers_from_always_uv(request: &[u8]) -> bool {
+    request.len() >= 4 && request[0] == 0 && matches!(request[1], 1 | 2)
 }
 
 struct Credential {
@@ -614,7 +624,7 @@ impl Platform {
         }
         // Before the oracle: a read that closes or recovers the PIN state
         // drops the engine's tokens before the command goes on.
-        self.audit_authority(request, &events);
+        self.audit_authority(request.first() == Some(&CTAP_CMD_RESET), &events);
         self.management.check(
             request,
             &response,
@@ -672,8 +682,7 @@ impl Platform {
     /// store calls, in order.  The commands that depend on it read it before
     /// they write it; a reset whose clear failed then reads it to reconcile
     /// what the clear may have published.
-    fn audit_authority(&mut self, request: &[u8], events: &[Event]) {
-        let reset = request.first() == Some(&CTAP_CMD_RESET);
+    fn audit_authority(&mut self, reset: bool, events: &[Event]) {
         let mut reconciling = false;
         for event in events {
             match event.call {
@@ -915,13 +924,24 @@ impl Platform {
         self.assertion_third_party_payment = false;
         let response = self.engine.call_u2f(request);
         let events = self.engine.take_events();
-        assert!(
-            events
-                .iter()
-                .all(|event| !matches!(event.call, Call::PinRead | Call::PinWrite)),
-            "U2F read or wrote the PIN state"
-        );
-        if let Some(index) = failed_call(None, &events) {
+        // Only registration and authentication read the PIN state, an unread
+        // one, before any other store call.
+        let reads = self.authority == Authority::Unread && answers_from_always_uv(request);
+        let pin_calls: Vec<Call> = events
+            .iter()
+            .map(|event| event.call)
+            .filter(|call| matches!(call, Call::PinRead | Call::PinWrite))
+            .collect();
+        if reads {
+            assert!(
+                pin_calls == [Call::PinRead] && events[0].call == Call::PinRead,
+                "U2F did not read the unread PIN state first"
+            );
+        } else {
+            assert!(pin_calls.is_empty(), "U2F read or wrote the PIN state");
+        }
+        let failed = failed_call(None, &events);
+        if let Some(index) = failed {
             let call = events[index].call;
             assert!(
                 response == SW_INTERNAL_ERROR.to_be_bytes(),
@@ -934,17 +954,21 @@ impl Platform {
                 "the engine went on after a failed {call:?}"
             );
         }
-        self.observe_u2f(request, &response);
+        self.audit_authority(false, &events);
+        let read_failed = failed.is_some_and(|index| events[index].call == Call::PinRead);
+        self.observe_u2f(request, &response, read_failed);
         self.check_store();
         response
     }
 
-    fn observe_u2f(&mut self, request: &[u8], response: &[u8]) {
+    fn observe_u2f(&mut self, request: &[u8], response: &[u8], read_failed: bool) {
         use pqkey_ctap::ctap::u2f::{SW_COMMAND_NOT_ALLOWED, SW_NO_ERROR};
         let end = response.len() - 2;
         let status = u16::from_be_bytes(response[end..].try_into().unwrap());
         let ins = request.get(1).copied().unwrap_or(0);
-        if self.live().always_uv && request.len() >= 4 && request[0] == 0 && matches!(ins, 1 | 2) {
+        // A read of an unread PIN state that fails answers before alwaysUv
+        // does, with SW_INTERNAL_ERROR (`call_u2f` checks it).
+        if self.live().always_uv && answers_from_always_uv(request) && !read_failed {
             assert_eq!(
                 status, SW_COMMAND_NOT_ALLOWED,
                 "U2F signed while alwaysUv was enabled"
@@ -4426,6 +4450,62 @@ mod tests {
             ]
         );
         assert_eq!(p.authority, Authority::Read);
+    }
+
+    /// U2F registration and authentication read a PIN state that start-up
+    /// could not, and VERSION does not: a read that fails with an I/O error
+    /// fails the APDU and leaves the state unread, the next read recovers
+    /// it, and one that finds damage closes it until reset.
+    #[test]
+    fn u2f_reads_an_unread_pin_state_first() {
+        use pqkey_ctap::ctap::u2f::{SW_COMMAND_NOT_ALLOWED, SW_INTERNAL_ERROR, SW_NO_ERROR};
+        let filler = [0x0Fu8; 1 << 12];
+        let pin_read = |kind| Op::StoreFault {
+            slot: 0,
+            kind,
+            after: 0,
+        };
+        let register = || Op::U2fRegister { rp: 0 };
+        for (kind, refused, authority) in [
+            (0, SW_NO_ERROR, Authority::Read),
+            (
+                1,
+                SW_COMMAND_NOT_ALLOWED,
+                Authority::Unreadable { kept: false },
+            ),
+        ] {
+            let mut p = Platform::new(Engine::new(37));
+            let mut u = Unstructured::new(&filler);
+            for op in [
+                register(),
+                pin_read(0),
+                Op::Restart,
+                pin_read(kind),
+                Op::U2fVersion,
+                register(),
+                register(),
+                Op::U2fAuthenticate {
+                    credential: 0,
+                    rp: 0,
+                    control: 0,
+                    corrupt: false,
+                },
+            ] {
+                p.step(op, &mut u).unwrap();
+            }
+            assert_eq!(
+                p.engine.take_trace(),
+                [
+                    (0x81, SW_NO_ERROR),
+                    (0x83, SW_NO_ERROR),
+                    (0x81, SW_INTERNAL_ERROR),
+                    (0x81, refused),
+                    (0x82, refused)
+                ],
+                "fault kind {kind}"
+            );
+            assert_eq!(p.authority, authority, "fault kind {kind}");
+        }
     }
 
     #[test]

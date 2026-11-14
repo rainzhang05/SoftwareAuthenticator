@@ -360,8 +360,9 @@ An I/O error at start-up, or on the read that reconciles a failed reset (which
 may have published a new key or the defaults), leaves the state unread: the
 engine drops its tokens, answers from a closed state (PIN set and blocked,
 alwaysUv) and writes nothing, and the next recheck, clientPIN subcommand other
-than getKeyAgreement, makeCredential or getAssertion reads it first, failing
-with CTAP2_ERR_PROCESSING while it cannot.
+than getKeyAgreement, makeCredential, getAssertion, or U2F registration or
+authentication reads it first, failing with CTAP2_ERR_PROCESSING (U2F:
+SW_INTERNAL_ERROR) while it cannot.
 Unreadable state closes grants and blocks further PIN writes until explicit
 reset recovers: a record that fails authentication or decoding, a root key
 that is unusable or missing, or no record although a PIN or grant exists.

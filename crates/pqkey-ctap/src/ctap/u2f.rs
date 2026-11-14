@@ -53,12 +53,15 @@ enum Request<'a> {
 /// alwaysUv are still the engine's responsibility; this never authorizes it.
 pub fn requests_presence(apdu: &[u8]) -> bool {
     matches!(
-        decode(apdu, false),
+        decode(apdu, || Ok(false)),
         Ok(Request::Register { .. } | Request::Authenticate { control: 3, .. })
     )
 }
 
-fn decode(apdu: &[u8], disabled: bool) -> Result<Request<'_>, u16> {
+/// Decode `apdu`.  `disabled` tells whether alwaysUv disables registration
+/// and authentication; it is asked only for those, once the class and the
+/// instruction are known, and its error fails the APDU.
+fn decode(apdu: &[u8], disabled: impl FnOnce() -> Result<bool, u16>) -> Result<Request<'_>, u16> {
     let header = apdu.get(..4).ok_or(SW_WRONG_LENGTH)?;
     if header[0] != 0 {
         return Err(SW_CLA_NOT_SUPPORTED);
@@ -67,7 +70,7 @@ fn decode(apdu: &[u8], disabled: bool) -> Result<Request<'_>, u16> {
     if !matches!(ins, 1..=3) {
         return Err(SW_INS_NOT_SUPPORTED);
     }
-    if disabled && matches!(ins, 1 | 2) {
+    if matches!(ins, 1 | 2) && disabled()? {
         return Err(SW_COMMAND_NOT_ALLOWED);
     }
     if header[3] != 0
@@ -134,20 +137,19 @@ impl CtapApp<'_> {
     fn call_u2f_inner(&mut self, apdu: &[u8]) -> Vec<u8> {
         self.pending_assertion = None;
         self.observe_large_blob_state(None);
-        let result =
-            decode(apdu, self.pin_state.persistent().always_uv).and_then(|request| match request {
-                Request::Version => Ok(b"U2F_V2".to_vec()),
-                Request::Register {
-                    challenge,
-                    application,
-                } => self.u2f_register(challenge, application),
-                Request::Authenticate {
-                    control,
-                    challenge,
-                    application,
-                    handle,
-                } => self.u2f_authenticate(control, challenge, application, handle),
-            });
+        let result = decode(apdu, || self.u2f_disabled()).and_then(|request| match request {
+            Request::Version => Ok(b"U2F_V2".to_vec()),
+            Request::Register {
+                challenge,
+                application,
+            } => self.u2f_register(challenge, application),
+            Request::Authenticate {
+                control,
+                challenge,
+                application,
+                handle,
+            } => self.u2f_authenticate(control, challenge, application, handle),
+        });
         let (mut response, status) = match result {
             Ok(data) if data.len() <= super::constants::MAX_RESPONSE_SIZE - 2 => {
                 (data, SW_NO_ERROR)
@@ -163,6 +165,19 @@ impl CtapApp<'_> {
             response.len()
         );
         response
+    }
+
+    /// Whether alwaysUv disables registration and authentication.  They
+    /// answer from the PIN and UV policy, so an unread PIN state is read
+    /// first, as makeCredential and getAssertion read it.  If the read fails,
+    /// so does the request, with SW_INTERNAL_ERROR where theirs fail with
+    /// CTAP2_ERR_PROCESSING: after an I/O error the next request reads it
+    /// again, and damage keeps the state closed, and U2F disabled, until
+    /// reset.
+    fn u2f_disabled(&mut self) -> Result<bool, u16> {
+        self.read_pin_state_if_unread()
+            .map_err(|_| SW_INTERNAL_ERROR)?;
+        Ok(!self.u2f_enabled())
     }
 
     fn u2f_presence(&mut self, operation: PresenceOperation) -> Result<(), u16> {
