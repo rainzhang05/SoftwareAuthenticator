@@ -155,18 +155,21 @@ fn missing_device(pid: impl std::fmt::Display, held: Option<Held>) -> String {
              whose session is active there"
         ),
         Some(Held::Missing) => format!(
-            "the key runs (pid {pid}), but its device is missing, and logind's record of seat0 is \
-             missing: a key that has seen the record since it started keeps its device \
-             unplugged until the record is back"
+            "the key runs (pid {pid}), but its device is missing, and /run/systemd/seats has no \
+             record of seat0: where logind runs, a key that has seen the record since it started \
+             keeps its device unplugged until the record is back"
         ),
         None => format!("the key runs (pid {pid}), but its device is missing"),
     }
 }
 
 /// What to do about a missing device. A restart does not help while the
-/// seat holds the device back, since the restarted key waits too; nor while
-/// the record is missing, as a restarted key takes that for a seat that no
-/// one is active on.
+/// seat holds the device back, since the restarted key waits too. While
+/// logind runs and seat0's record is missing, a restarted key would take that
+/// for a seat that no one is active on and plug its device in, so the fix
+/// says not to restart. Without logind, nothing writes the record into the
+/// empty directory that systemd-tmpfiles makes, so the key has not seen one,
+/// and the fix is that for any missing device.
 fn missing_device_fix(held: Option<Held>) -> &'static str {
     match held {
         Some(Held::ByAnotherUser) => {
@@ -178,10 +181,12 @@ fn missing_device_fix(held: Option<Held>) -> &'static str {
              ends, the key plugs its device in while your session, or none, is active"
         }
         Some(Held::Missing) => {
-            "if /run is full (`df /run`), free space there; once logind saves seat0's record \
-             again, as when a session on the seat starts or ends, the key plugs its device in \
-             while your session, or none, is active. Do not restart the key for this: a key that \
-             starts without the record takes the seat for one that no one is active on"
+            "where logind runs (`loginctl` works) and /run is full (`df /run`), free space there; \
+             once logind saves seat0's record again, as when a session on the seat starts or \
+             ends, the key plugs its device in while your session, or none, is active. Do not \
+             restart the key for this while logind runs: a key that starts without the record \
+             takes the seat for one that no one is active on. Without logind, run \
+             `pqkey stop && pqkey start`"
         }
         None => "run `pqkey stop && pqkey start`",
     }
@@ -258,7 +263,9 @@ mod tests {
 
     /// A missing device is explained by another user's session on seat0,
     /// when there is one, or by a record of seat0 the key cannot read, or by
-    /// a missing one, and then a restart is not the advice.
+    /// a missing one. For a record, a restart is not the advice, except for a
+    /// missing one without logind, whose seats directory systemd-tmpfiles
+    /// makes too.
     #[test]
     fn a_missing_device_names_another_users_session() {
         assert_eq!(
@@ -285,13 +292,21 @@ mod tests {
         assert!(!fix.contains("pqkey stop"), "{fix}");
         let missing = missing_device(42, Some(Held::Missing));
         assert!(
-            missing.starts_with("the key runs (pid 42), but its device is missing, and logind's record of seat0 is missing: a key that has seen the record since it started"),
+            missing.starts_with("the key runs (pid 42), but its device is missing, and /run/systemd/seats has no record of seat0: where logind runs, a key that has seen the record since it started"),
             "{missing}"
         );
         let fix = missing_device_fix(Some(Held::Missing));
-        assert!(fix.contains("df /run"), "{fix}");
-        assert!(fix.contains("Do not restart the key"), "{fix}");
-        assert!(!fix.contains("pqkey stop"), "{fix}");
+        let (with_logind, without_logind) = fix
+            .split_once("Without logind")
+            .unwrap_or_else(|| panic!("{fix}"));
+        assert!(
+            with_logind.starts_with("where logind runs (`loginctl` works)"),
+            "{fix}"
+        );
+        assert!(with_logind.contains("df /run"), "{fix}");
+        assert!(with_logind.contains("Do not restart the key"), "{fix}");
+        assert!(!with_logind.contains("pqkey stop"), "{fix}");
+        assert_eq!(without_logind, ", run `pqkey stop && pqkey start`");
     }
 
     #[test]

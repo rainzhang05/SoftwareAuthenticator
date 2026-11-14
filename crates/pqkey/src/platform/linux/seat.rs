@@ -919,6 +919,19 @@ mod tests {
         assert_eq!(polled.look().unwrap(), before);
     }
 
+    /// Without inotify the key has seen a record once it has read it: once
+    /// that record goes, the key cannot tell who is active, as with inotify.
+    #[test]
+    fn a_record_read_without_inotify_counts_as_seen() {
+        let fixture = Fixture::new("seat-polled-seen");
+        fixture.save("seat0", RECORD_OWNER);
+        let mut watch = fixture.watch();
+        watch.watch = Watch::Polled;
+        assert!(file(&watch.look().unwrap()));
+        fs::remove_file(fixture.dir.path().join("seats").join("seat0")).unwrap();
+        assert!(gone_since_seen(watch.look()));
+    }
+
     /// A switch to another user and back between two looks reads the owner
     /// again, from another file.
     #[test]
@@ -1019,6 +1032,26 @@ mod tests {
         let next = watch.look().unwrap();
         assert_eq!(next.active, owner());
         assert_ne!(next.record, back.record);
+    }
+
+    /// A record the key had seen stays seen when its seats directory goes
+    /// away and comes back empty: the key still cannot tell who is active,
+    /// and watches the directory afresh.
+    #[test]
+    fn a_record_seen_is_still_gone_when_its_directory_comes_back_empty() {
+        let fixture = Fixture::new("seat-gone-empty");
+        fixture.save("seat0", RECORD_OWNER);
+        let mut watch = fixture.watch();
+        assert!(file(&watch.look().unwrap()));
+        let seats = fixture.dir.path().join("seats");
+        fs::rename(&seats, fixture.dir.path().join("old-seats")).unwrap();
+        assert!(watch.changed(false).unwrap());
+        assert!(gone_since_seen(watch.look()));
+
+        fs::create_dir(&seats).unwrap();
+        assert!(watch.changed(false).unwrap());
+        assert!(gone_since_seen(watch.look()));
+        assert!(matches!(watch.watch, Watch::Notified(_)));
     }
 
     /// The device's seat is the ID_SEAT udev recorded for its node, or
@@ -1165,6 +1198,9 @@ mod tests {
     fn another_users_session_on_the_seat_is_told_apart_from_yours() {
         let fixture = Fixture::new("seat-cli");
         let seats = fixture.dir.path().join("seats");
+        // An empty directory: logind's, once seat0's record has gone, or the
+        // one systemd-tmpfiles makes where logind does not run, which the
+        // command line cannot tell apart.
         assert_eq!(held_in(&seats, 1000), Some(Held::Missing));
         for (contents, why) in [
             (RECORD_OWNER, None),

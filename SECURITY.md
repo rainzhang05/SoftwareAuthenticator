@@ -144,7 +144,9 @@ does not watch for; no rule that systemd or pqkey ships tags a security key
 so. A program with such access can send the key requests while you are at
 your desktop, naming any site, so deny any prompt you did not start. With
 `--presence auto-approve`, which is for tests only, the key approves such
-requests itself.
+requests itself. Such a program can also keep the key busy and make your
+requests fail, even with your correct PIN: a wrong PIN it sends while your
+client is sending yours can make the key count yours as a wrong one too.
 
 ### Other users' sessions
 
@@ -220,8 +222,11 @@ nothing for the key to see. A program of the new user's can then open the
 device and keep it until the key next removes its device, and for all that
 time do what the list below says, receive what the key sends, and send
 requests that ask for your approval, naming any site: deny any prompt you did
-not start. With `--presence auto-approve` the key approves them itself. So,
-with those versions, do not restart the key while `/run` is full.
+not start. With `--presence auto-approve` the key approves them itself. That
+program can also keep the key busy and make your requests fail, even with
+your correct PIN: a wrong PIN it sends while your client is sending yours can
+make the key count yours as a wrong one too. So, with those versions, do not
+restart the key while `/run` is full.
 
 The key's device is on a seat other than seat0 only if a udev rule your
 administrator added puts it there. When such a seat goes away, logind removes
