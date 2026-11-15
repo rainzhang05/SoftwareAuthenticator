@@ -5,7 +5,7 @@
 //! finds it without changing anything, and what the report says fails does
 //! fail.  That passkeys cannot be listed through credential management where
 //! the report says so is tested through the daemon in the `pqkey` crate
-//! (`cli::key::tests`).
+//! (`cli::status::tests`).
 //!
 //! Then each is repaired, as `pqkey repair` does, and every passkey whose
 //! record is intact works again; and what the README's "Damaged credential

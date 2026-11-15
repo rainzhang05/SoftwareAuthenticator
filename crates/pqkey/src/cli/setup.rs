@@ -4,6 +4,7 @@ use super::{
     daemon::{self, Running},
     key,
     output::{self, outln},
+    status,
 };
 use crate::platform::{ServiceAction, System, UserService};
 use nix::unistd;
@@ -85,10 +86,10 @@ impl SetupHost for System {
         start_service(state, binary, System::can_ask_at)
     }
     fn problems(&self, state: &Path, running: Running) -> io::Result<Vec<checks::Problem>> {
-        key::running_problems(state, self, running, Duration::from_secs(5))
+        status::running_problems(state, self, running, Duration::from_secs(5))
     }
     fn warning(&self, state: &Path, running: Running) -> io::Result<Option<checks::Problem>> {
-        key::presence_warning(state, running)
+        status::presence_warning(state, running)
     }
     fn pin(&mut self, running: Running, interactive: bool) -> io::Result<()> {
         key::ensure_pin(running, interactive)
@@ -127,7 +128,7 @@ fn start_service(
         // anew, as setup does not restart a running one for them (below).
         let refusal = "the running key was started by hand with options of its own";
         return Err(io::Error::other(
-            match key::presence_warning(state_dir, Running::Daemon(pid))? {
+            match status::presence_warning(state_dir, Running::Daemon(pid))? {
                 Some(warning) => {
                     output::problem(
                         warning.what,
@@ -402,7 +403,7 @@ mod tests {
         }
         fn warning(&self, state: &Path, running: Running) -> io::Result<Option<checks::Problem>> {
             self.effect("warning")?;
-            key::presence_warning(state, running)
+            status::presence_warning(state, running)
         }
         fn pin(&mut self, _: Running, interactive: bool) -> io::Result<()> {
             self.effect("pin")?;
@@ -1114,7 +1115,7 @@ esac
         manager.setup(Some(&user_bus), None).unwrap();
         let (before, _, presence) = manager.key();
         assert_eq!(presence, PresenceArg::Unanswered);
-        let fix = key::running_problems(
+        let fix = status::running_problems(
             &manager.file("data").join("pqkey"),
             &System::real().unwrap(),
             Running::Service(before),
@@ -1178,7 +1179,7 @@ esac
             );
             std::thread::sleep(Duration::from_millis(10));
         };
-        let fix = key::running_problems(
+        let fix = status::running_problems(
             &state,
             &System::real().unwrap(),
             Running::Daemon(pid),

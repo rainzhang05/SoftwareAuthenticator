@@ -27,6 +27,7 @@ pub(crate) mod key;
 pub mod output;
 mod repair;
 mod setup;
+mod status;
 
 use std::{ffi::OsString, io, path::PathBuf, process::ExitCode, time::Duration};
 
@@ -476,7 +477,7 @@ pub fn run_cli() -> io::Result<()> {
         Command::Run(args) => daemon::run(state_dir, &args),
         Command::Start(args) => daemon::start(&state_dir, &args),
         Command::Stop => daemon::stop(&state_dir),
-        Command::Status => key::status(&state_dir),
+        Command::Status => status::status(&state_dir),
         Command::Pin => key::pin(&state_dir),
         Command::Config { action } => key::config(&state_dir, action.as_ref()),
         Command::Passkeys { action: None } => key::list_passkeys(&state_dir),
