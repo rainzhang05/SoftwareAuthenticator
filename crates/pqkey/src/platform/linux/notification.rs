@@ -71,9 +71,9 @@ mod tests {
     use crate::presence::notification::ServerInfo;
     use crate::test_support::assert_names;
 
-    /// Every way the daemon can fail to ask, with two things its message must
-    /// name, in order: the cause, by its error, and the fix.
-    fn denials() -> [(Unavailable, [&'static str; 2]); 6] {
+    /// Every way the daemon can fail to ask, with what its message must name,
+    /// in order: the cause, by its error, then the fix's words.
+    fn denials() -> [(Unavailable, &'static str, &'static [&'static str]); 6] {
         // A new way to fail stops this from compiling until it is listed.
         let _: fn(&Unavailable) = |unavailable| match unavailable {
             Unavailable::CannotAsk(
@@ -95,24 +95,29 @@ mod tests {
                 ..ServerInfo::default()
             }))
         };
+        let show = &["shows buttons and text", SERVERS];
         [
             (
                 connect(ConnectError::NoSession("no address".into())),
-                ["(no address)", "`systemctl --user import-environment"],
+                "(no address)",
+                &["`systemctl --user import-environment"],
             ),
             (
                 connect(ConnectError::NoServer("ServiceUnknown".into())),
-                ["ServiceUnknown", SERVERS],
+                "ServiceUnknown",
+                &[SERVERS],
             ),
             (
                 connect(ConnectError::Failed("timed out".into())),
-                ["(timed out)", "try again"],
+                "(timed out)",
+                &["try again"],
             ),
-            (server(false, true), ["Approve and Deny buttons", SERVERS]),
-            (server(true, false), ["notification text", SERVERS]),
+            (server(false, true), "Approve and Deny buttons", show),
+            (server(true, false), "notification text", show),
             (
                 Unavailable::Failed("Notify failed: NoReply".into()),
-                ["(Notify failed: NoReply)", SERVERS],
+                "(Notify failed: NoReply)",
+                &["try again", "restart the notification server", SERVERS],
             ),
         ]
     }
@@ -122,7 +127,7 @@ mod tests {
     /// says how to make the prompt work, never how to do without it.
     #[test]
     fn no_denial_recommends_auto_approve() {
-        for (unavailable, _) in denials() {
+        for (unavailable, ..) in denials() {
             let message = failure_message(&unavailable, "Create a passkey");
             assert!(
                 message.starts_with("denied without asking (Create a passkey): "),
@@ -143,22 +148,19 @@ mod tests {
         let bus = super::super::dbus::session_bus_address(
             std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref(),
         );
-        for (unavailable, [cause, fix]) in denials() {
+        for (unavailable, cause, fix) in denials() {
             let message = failure_message(&unavailable, "Sign in with a passkey");
-            assert_names(&message, &[cause, "Fix: ", fix]);
-            let end = match &unavailable {
+            assert_names(&message, &[&[cause, "Fix: "][..], fix].concat());
+            match &unavailable {
                 Unavailable::CannotAsk(server) => {
                     let status = notification_problem(server, Some(&bus)).unwrap();
-                    format!(
-                        ": {}. Fix: {}. Then run `pqkey status` to check",
-                        status.what, status.fix
-                    )
+                    assert_names(&message, &[&status.what, &status.fix, "run `pqkey status`"]);
                 }
                 Unavailable::Failed(_) => {
-                    ". `pqkey status` does not test this, as it shows no notification".to_owned()
+                    assert_names(&message, &["`pqkey status` does not test"]);
+                    assert!(!message.contains("run `pqkey status`"), "{message}");
                 }
-            };
-            assert!(message.ends_with(&end), "{message}");
+            }
         }
     }
 }

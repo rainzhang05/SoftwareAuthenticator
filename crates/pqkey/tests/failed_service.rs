@@ -70,10 +70,11 @@ const GAVE_UP: &str = "Result=exit-code\nExecMainStatus=1\nLoadState=loaded\nAct
 const DISABLED: &str = "Result=success\nExecMainStatus=0\nLoadState=loaded\nActiveState=inactive\n\
                         SubState=dead\nUnitFileState=disabled\n";
 
-/// What `pqkey status` says about [`GAVE_UP`].
-const GAVE_UP_PROBLEM: &str = "\n  ! the systemd user service pqkey.service failed: the key exited \
-    with status 1\n    Fix: see why in `journalctl --user -u pqkey`, fix that, then run `pqkey \
-    start`\n";
+/// What `pqkey status` names of [`GAVE_UP`]: its cause, and its fix's commands.
+const GAVE_UP_PROBLEM: [&[&str]; 2] = [
+    &["pqkey.service", "failed", "exited with status 1"],
+    &["`journalctl --user -u pqkey`", "`pqkey start`"],
+];
 /// The one call with which `pqkey status` asks about the unit.
 const STATUS_CALL: &str = "--user show --property \
     LoadState,UnitFileState,ActiveState,SubState,Result,ExecMainStatus pqkey.service";
@@ -183,6 +184,33 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+/// Whether `text` names each of `words`, in order: what a cause or a fix
+/// names, rather than its whole wording, which is not the contract.
+fn names(text: &str, words: &[&str]) -> bool {
+    let mut rest = text;
+    words.iter().all(|word| match rest.find(word) {
+        Some(at) => {
+            rest = &rest[at + word.len()..];
+            true
+        }
+        None => false,
+    })
+}
+
+/// Whether `out`, of `pqkey status`, lists a problem, `  ! cause` with
+/// `    Fix: fix` under it, whose cause and fix name `problem`'s words.
+fn lists(out: &str, [cause, fix]: [&[&str]; 2]) -> bool {
+    let lines: Vec<&str> = out.lines().collect();
+    lines.windows(2).any(|pair| {
+        pair[0]
+            .strip_prefix("  ! ")
+            .is_some_and(|what| names(what, cause))
+            && pair[1]
+                .strip_prefix("    Fix: ")
+                .is_some_and(|how| names(how, fix))
+    })
+}
+
 /// `pqkey status` names a service that systemd gave up restarting, where
 /// the cause is logged and the fix, after one `systemctl show`.
 #[test]
@@ -195,7 +223,7 @@ fn status_names_a_service_that_systemd_gave_up_on() {
         out.starts_with("Key:      not running; `pqkey start` starts it\n"),
         "{out}"
     );
-    assert!(out.contains(GAVE_UP_PROBLEM), "{out}");
+    assert!(lists(&out, GAVE_UP_PROBLEM), "{out}");
     assert_eq!(home.calls(), [STATUS_CALL]);
 }
 
@@ -246,7 +274,7 @@ fn status_changes_nothing_in_the_state_directory() {
     assert!(before.len() > 6, "{before:?}");
     let status = home.pqkey(&["status"]).output().unwrap();
     assert_eq!(status.status.code(), Some(0), "{status:?}");
-    assert!(text(&status.stdout).contains(GAVE_UP_PROBLEM), "{status:?}");
+    assert!(lists(&text(&status.stdout), GAVE_UP_PROBLEM), "{status:?}");
     assert_eq!(listing(&data), before);
 
     fs::remove_dir_all(&state).unwrap();
@@ -269,17 +297,26 @@ fn status_names_a_state_directory_it_cannot_look_into() {
     let status = home.pqkey(&["status"]).output().unwrap();
     assert_eq!(status.status.code(), Some(1), "{status:?}");
     assert_eq!(text(&status.stdout), "");
-    assert_eq!(
-        text(&status.stderr),
-        format!(
-            "pqkey: the state directory {state} cannot be checked (cannot open \
-             {state}/authenticator.lock: Not a directory (os error 20)), and the key may not be \
-             able to use it either; check that it is a directory of yours that you can read, \
-             under directories you can enter (`ls -ld` shows each one's owner and mode), and \
-             look in `journalctl -k` for disk errors, then run `pqkey start`\n",
-            state = state.display()
-        )
-    );
+    // One line: `pqkey: `, then the cause and the fix, joined by `; `.
+    let stderr = text(&status.stderr);
+    let (cause, fix) = stderr
+        .strip_prefix("pqkey: ")
+        .and_then(|error| error.strip_suffix('\n'))
+        .filter(|error| !error.contains('\n'))
+        .and_then(|error| error.split_once("; "))
+        .unwrap_or_else(|| panic!("{stderr}"));
+    let state = state.display().to_string();
+    let lock = format!("{state}/authenticator.lock");
+    let enotdir = std::io::Error::from(nix::errno::Errno::ENOTDIR).to_string();
+    let checked = [
+        state.as_str(),
+        "cannot be checked",
+        lock.as_str(),
+        enotdir.as_str(),
+    ];
+    assert!(names(cause, &checked), "{stderr}");
+    let fixed = ["`ls -ld`", "`journalctl -k`", "`pqkey start`"];
+    assert!(names(fix, &fixed), "{stderr}");
     assert_eq!(home.calls(), Vec::<String>::new());
 }
 

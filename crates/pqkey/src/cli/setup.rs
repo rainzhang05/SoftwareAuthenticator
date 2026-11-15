@@ -337,7 +337,9 @@ fn uninstall_inner(state_dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TempDir, assert_ran, child_test};
+    use crate::test_support::{
+        TempDir, assert_names, assert_problem, assert_ran, child_test, listed,
+    };
     use std::path::PathBuf;
     struct Fixture {
         scenario: String,
@@ -565,53 +567,59 @@ mod tests {
             // installed yet: stop the key and rerun setup, then add the
             // options it still needs, never --presence auto-approve, and run
             // `pqkey stop && pqkey setup`.
-            let warning = |fix: &str| {
-                format!(
-                    "  ! the key runs with --presence auto-approve: it approves every \
-                     registration, sign-in and reset without asking, so anything running as you \
-                     can use your passkeys unnoticed\n    Fix: {fix}\n"
-                )
+            let warning = listed(&stdout, "--presence auto-approve");
+            let cause = ["--presence auto-approve", "without asking", "unnoticed"];
+            let rerun = [
+                "`pqkey stop`",
+                "`pqkey setup`",
+                "`systemctl --user edit pqkey`",
+            ];
+            let found = || {
+                warning
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{scenario}: {stdout}"))
             };
-            let service = warning(
-                "remove --presence auto-approve from the ExecStart= line that `systemctl --user \
-                 cat pqkey` shows, in the unit or drop-in file named above it, then run `pqkey \
-                 stop && pqkey setup`",
-            );
-            let by_hand = warning(
-                "run `pqkey stop` and rerun `pqkey setup`; if the key still needs other options, \
-                 add them with `systemctl --user edit pqkey`, never --presence auto-approve, then \
-                 run `pqkey stop && pqkey setup`",
-            );
-            assert_eq!(
-                stdout.contains(&service),
-                scenario == "auto-approve",
-                "{scenario}: {stdout}"
-            );
-            assert_eq!(
-                stdout.contains(&by_hand),
-                scenario == "hand-started",
-                "{scenario}: {stdout}"
-            );
+            match scenario {
+                "auto-approve" => assert_problem(
+                    found(),
+                    &cause,
+                    &[
+                        "remove --presence auto-approve",
+                        "ExecStart=",
+                        "`systemctl --user cat pqkey`",
+                        "`pqkey stop && pqkey setup`",
+                    ],
+                ),
+                "hand-started" => assert_problem(
+                    found(),
+                    &cause,
+                    &[
+                        &rerun[..],
+                        &[
+                            "never --presence auto-approve",
+                            "`pqkey stop && pqkey setup`",
+                        ],
+                    ]
+                    .concat(),
+                ),
+                _ => assert_eq!(warning, None, "{scenario}: {stdout}"),
+            }
             // Status's other path for a key started by hand is not setup's.
             assert!(
                 !stdout.contains("`pqkey start` without"),
                 "{scenario}: {stdout}"
             );
-            let refusal = "pqkey: the running key was started by hand with options of its own; ";
-            for (case, ending) in [
-                ("hand-started", "fix the above\n"),
-                (
-                    "hand-started-options",
-                    "run `pqkey stop` and rerun `pqkey setup`; if it still needs some of them, add \
-                     them with `systemctl --user edit pqkey`, then run `pqkey stop && pqkey \
-                     setup`\n",
+            let refusal = stderr
+                .lines()
+                .find(|line| line.starts_with("pqkey: ") && line.contains("started by hand"));
+            let refused = || refusal.unwrap_or_else(|| panic!("{scenario}: {stderr}"));
+            match scenario {
+                "hand-started" => assert_names(refused(), &["options", "fix the above"]),
+                "hand-started-options" => assert_names(
+                    refused(),
+                    &[&["options"][..], &rerun, &["`pqkey stop && pqkey setup`"]].concat(),
                 ),
-            ] {
-                assert_eq!(
-                    stderr.contains(&format!("{refusal}{ending}")),
-                    scenario == case,
-                    "{scenario}: {stderr}"
-                );
+                _ => assert_eq!(refusal, None, "{scenario}: {stderr}"),
             }
             assert_eq!(
                 stdout.matches("--presence auto-approve:").count(),
@@ -625,26 +633,20 @@ mod tests {
                 );
             }
             if ready {
+                // `pqkey is ready.`, which the installer looks for, then how
+                // requests are approved.
+                let line = stdout
+                    .lines()
+                    .find(|line| line.starts_with("pqkey is ready."))
+                    .unwrap_or_else(|| panic!("{scenario}: {stdout}"));
                 let asks = scenario != "auto-approve";
-                for (ending, shown) in [
-                    (
-                        "approve requests with the configured presence provider.\n",
-                        asks,
-                    ),
-                    (
-                        "it approves requests without asking until you fix the above.\n",
-                        !asks,
-                    ),
-                ] {
-                    assert_eq!(
-                        stdout.contains(&format!(
-                            "pqkey is ready. Use it on sites supporting passkeys or security keys; \
-                             {ending}"
-                        )),
-                        shown,
-                        "{scenario}: {stdout}"
-                    );
-                }
+                assert_eq!(line.contains("without asking"), !asks, "{scenario}: {line}");
+                let approved: &[&str] = if asks {
+                    &["configured presence provider"]
+                } else {
+                    &["without asking", "fix the above"]
+                };
+                assert_names(line, approved);
             }
             let trace = stdout
                 .find("TRACE:")
@@ -1010,10 +1012,7 @@ esac
             };
             let shown = manager.setup(shell_bus.as_deref(), can_ask);
             let stdout = shown.unwrap_or_else(|err| panic!("{case}: {err}"));
-            assert!(
-                stdout.contains("✓ Key started; it starts with your session\n"),
-                "{case}: {stdout}"
-            );
+            assert!(stdout.contains("✓ Key started;"), "{case}: {stdout}");
             let calls = manager.calls();
             let (pid, bus, _) = manager.key();
             if case == "can-ask" {
@@ -1048,10 +1047,7 @@ esac
             let stdout = manager
                 .setup(shell_bus.as_deref(), can_ask)
                 .unwrap_or_else(|err| panic!("{case}: {err}"));
-            assert!(
-                stdout.contains("✓ Key running; it starts with your session\n"),
-                "{case}: {stdout}"
-            );
+            assert!(stdout.contains("✓ Key running;"), "{case}: {stdout}");
             assert_eq!(manager.key().0, pid, "{case}");
             assert_eq!(manager.environment(), environment, "{case}");
             let calls = manager.calls();
@@ -1078,10 +1074,7 @@ esac
         manager.calls();
         let desktop = manager.bus("desktop-bus");
         let stdout = manager.setup(Some(&desktop), Some(&desktop)).unwrap();
-        assert!(
-            stdout.contains("✓ Key restarted; it starts with your session\n"),
-            "{stdout}"
-        );
+        assert!(stdout.contains("✓ Key restarted;"), "{stdout}");
         let calls = manager.calls();
         assert_eq!(
             session_calls(&calls),
@@ -1125,10 +1118,7 @@ esac
         .pop()
         .unwrap()
         .fix;
-        assert!(
-            fix.ends_with(", then run `pqkey stop && pqkey setup`"),
-            "{fix}"
-        );
+        assert_names(&fix, &["--presence notify", "`pqkey stop && pqkey setup`"]);
         // The drop-in, changed to the default presence.
         fs::write(manager.file("presence"), "").unwrap();
         // Setup alone keeps the key it finds.
@@ -1189,17 +1179,18 @@ esac
         .pop()
         .unwrap()
         .fix;
-        assert_eq!(
-            fix,
-            "configure the service to use --presence notify where `systemctl --user cat pqkey` \
-             shows --presence unanswered, then run `pqkey stop && pqkey setup`"
+        assert_names(
+            &fix,
+            &[
+                "--presence notify",
+                "`systemctl --user cat pqkey`",
+                "--presence unanswered",
+                "`pqkey stop && pqkey setup`",
+            ],
         );
         // Setup alone refuses a key started by hand with options of its own.
         let refused = manager.setup(Some(&user_bus), None).unwrap_err();
-        assert!(
-            refused.contains("the running key was started by hand with options of its own"),
-            "{refused}"
-        );
+        assert_names(&refused, &["started by hand", "options"]);
         // `pqkey stop && pqkey setup`
         let stopped = manager.run("stop", Some(&user_bus), None);
         assert!(stopped.status.success(), "{stopped:?}");
@@ -1226,16 +1217,18 @@ esac
         let own = "[Service]\nExecStart=/usr/local/bin/pqkey run --presence unanswered\n";
         fs::write(&unit, own).unwrap();
         let stdout = manager.setup(None, None).unwrap();
-        assert!(
-            stdout.contains(&format!(
-                "  ! pqkey setup keeps your own unit {0} as it is, instead of the unit this \
-                 version installs\n    Fix: if you need its changes, put them in a drop-in with \
-                 `systemctl --user edit pqkey`; then delete {0} and run `pqkey setup`\n  ✓ Key \
-                 started; it starts with your session\n",
-                unit.display()
-            )),
-            "{stdout}"
+        let path = unit.display().to_string();
+        assert_problem(
+            &listed(&stdout, "keeps your own unit").unwrap_or_else(|| panic!("{stdout}")),
+            &["keeps your own unit", &path],
+            &[
+                "`systemctl --user edit pqkey`",
+                &format!("delete {path}"),
+                "`pqkey setup`",
+            ],
         );
+        // Shown, and setup goes on with it.
+        assert_names(&stdout, &["keeps your own unit", "✓ Key started;"]);
         assert_eq!(fs::read_to_string(&unit).unwrap(), own);
         // As setup wrote it for /usr/local/bin/pqkey: as shipped.
         let earlier = include_str!("../platform/linux/earlier-units/2026-10-01-c591936.service");

@@ -530,7 +530,7 @@ impl System {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TempDir, assert_problem};
+    use crate::test_support::{TempDir, assert_names, assert_problem};
 
     fn write(system: &System, path: &str, text: &str) {
         let path = system.path(path);
@@ -553,27 +553,20 @@ mod tests {
         }
     }
 
-    fn whats(problems: &[Problem]) -> Vec<&str> {
-        problems
-            .iter()
-            .map(|problem| problem.what.as_str())
-            .collect()
-    }
-
     #[test]
     fn a_fresh_system_needs_everything() {
         let dir = TempDir::new("checks-fresh");
         let system = System::under(dir.path().to_owned());
         assert_eq!(system.rules(), Rules::Missing);
         assert!(!system.uhid_at_boot());
-        assert_eq!(
-            whats(&start_problems(&system, &member())),
-            [
-                "pqkey's udev rules are not installed",
-                "the uhid module is not loaded at boot",
-                "the uhid module is not loaded",
-            ]
-        );
+        let problems = start_problems(&system, &member());
+        let [rules, at_boot, loaded] = problems.as_slice() else {
+            panic!("{problems:?}");
+        };
+        let setup = ["`pqkey setup`"];
+        assert_problem(rules, &["udev rules", "not installed"], &setup);
+        assert_problem(at_boot, &["uhid module", "not loaded at boot"], &setup);
+        assert_problem(loaded, &["uhid module", "not loaded"], &setup);
     }
 
     #[test]
@@ -665,10 +658,7 @@ mod tests {
             ..member()
         });
         assert_eq!(relogin.len(), 1, "{relogin:?}");
-        assert_eq!(
-            relogin[0].fix,
-            "run `pqkey setup` to grant access in this session"
-        );
+        assert_names(&relogin[0].fix, &["`pqkey setup`", "in this session"]);
         let outsider = fix_for(Membership {
             member: false,
             in_session: false,
@@ -764,22 +754,27 @@ mod tests {
             notification_problem(&server(&["actions", "body", "persistence"]), None),
             None
         );
-        for (capabilities, cause) in [
-            (&["body"][..], "cannot show Approve and Deny buttons,"),
-            (
-                &[],
-                "cannot show Approve and Deny buttons or notification text",
-            ),
-            (&["actions"], "cannot show notification text"),
+        for (capabilities, lacks) in [
+            (&["body"][..], "Approve and Deny buttons,"),
+            (&[], "Approve and Deny buttons or notification text"),
+            (&["actions"], "notification text"),
         ] {
             let problem = notification_problem(&server(capabilities), None).unwrap();
-            assert_problem(&problem, &["(example)", cause, DENIED], &[SERVERS]);
+            assert_problem(
+                &problem,
+                &["(example)", "cannot show", lacks, DENIED],
+                &["shows buttons and text", SERVERS],
+            );
         }
+        // No server on this process's bus, as status checks it for a key
+        // that does not run: giving the key that bus would not help.
         let none = notification_problem(&Err(ConnectError::NoServer("x".into())), None).unwrap();
-        assert!(
-            none.what
-                .contains("every registration, sign-in and reset is denied")
+        assert_problem(
+            &none,
+            &["no desktop notification server", DENIED],
+            &[SERVERS],
         );
+        assert!(!none.fix.contains("import-environment"), "{none:?}");
     }
 
     /// No bus, or one that does not answer: fixes that act, never one that
@@ -787,29 +782,30 @@ mod tests {
     #[test]
     fn a_missing_or_silent_bus_has_a_fix_of_its_own() {
         let none = notification_problem(&Err(ConnectError::NoSession("x".into())), None).unwrap();
-        assert_eq!(
-            none,
-            Problem::new(
-                "there is no D-Bus session bus (x), so every registration, sign-in and reset is \
-                 denied",
-                IMPORT_BUS_FIX
-            )
+        assert_problem(
+            &none,
+            &["no D-Bus session bus", "(x)", DENIED],
+            &[
+                "desktop session",
+                "`systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS`",
+                "`pqkey stop && pqkey start`",
+            ],
         );
-        assert_eq!(
-            IMPORT_BUS_FIX,
-            "in a terminal of your desktop session, run `systemctl --user import-environment \
-             DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey start`"
+        let silent =
+            notification_problem(&Err(ConnectError::Failed("timed out".into())), None).unwrap();
+        assert_problem(
+            &silent,
+            &[
+                "notification server",
+                "cannot be reached",
+                "(timed out)",
+                DENIED,
+            ],
+            &["try again", "log out and back in", "restart the computer"],
         );
-        let silent = notification_problem(&Err(ConnectError::Failed("timed out".into())), None);
-        assert_eq!(
-            silent,
-            Some(Problem::new(
-                "the notification server cannot be reached (timed out), so every registration, \
-                 sign-in and reset is denied",
-                "try again in a moment; if it keeps failing, log out and back in, or restart the \
-                 computer"
-            ))
-        );
+        for problem in [none, silent] {
+            assert!(!problem.fix.contains("journalctl"), "{problem:?}");
+        }
     }
 
     /// The running key's own bus is checked once, as the key would check it,
@@ -836,7 +832,7 @@ mod tests {
             (server(true), &[][..], &[][..]),
             (
                 Err(ConnectError::NoSession("no socket".into())),
-                &["the key cannot connect to its session bus", "no socket"],
+                &["cannot connect", "its session bus", "no socket"],
                 &IMPORT,
             ),
             (
@@ -851,7 +847,8 @@ mod tests {
             (
                 Err(ConnectError::Failed("did not answer".into())),
                 &[
-                    "the notification server on the key's session bus",
+                    "notification server",
+                    "on the key's session bus",
                     KEY,
                     "did not answer",
                 ],
@@ -864,7 +861,7 @@ mod tests {
                     KEY,
                     "Approve and Deny buttons",
                 ],
-                &[SERVERS],
+                &["shows buttons and text", SERVERS],
             ),
         ] {
             let mut checked = Vec::new();

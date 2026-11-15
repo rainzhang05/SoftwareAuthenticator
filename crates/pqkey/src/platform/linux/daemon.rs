@@ -663,19 +663,26 @@ exit 0
             assert!(!stdout.contains("KEPT:"), "{context}: {stdout}");
             assert_eq!(fs::read_to_string(&unit).unwrap(), managed, "{context}");
         };
-        let kept_unit = format!(
-            "KEPT:pqkey setup keeps your own unit {0} as it is, instead of the unit this \
-             version installs\tif you need its changes, put them in a drop-in with \
-             `systemctl --user edit pqkey`; then delete {0} and run `pqkey setup`\n",
-            unit.display()
-        );
+        let path = unit.display().to_string();
         let kept = |installed: &[u8], context: &str| {
             fs::write(&unit, installed).unwrap();
             let output = child("");
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(output.status.success(), "{context}: {output:?}");
             assert!(stdout.contains("CHANGED:false"), "{context}: {stdout}");
-            assert!(stdout.contains(&kept_unit), "{context}: {stdout}");
+            let (what, fix) = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("KEPT:")?.split_once('\t'))
+                .unwrap_or_else(|| panic!("{context}: {stdout}"));
+            assert_problem(
+                &Problem::new(what, fix),
+                &["keeps your own unit", &path],
+                &[
+                    "`systemctl --user edit pqkey`",
+                    &format!("delete {path}"),
+                    "`pqkey setup`",
+                ],
+            );
             assert_eq!(fs::read(&unit).unwrap(), installed, "{context}");
         };
         // An update replaces every unit an earlier version installed, the
@@ -1017,9 +1024,9 @@ exit 0
         }
         let refused = unit_file(Path::new("/home/o'brien/pqkey")).unwrap_err();
         assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(
-            refused.to_string(),
-            "the unit cannot run \"/home/o'brien/pqkey\"; install pqkey somewhere else"
+        assert_names(
+            &refused.to_string(),
+            &["cannot run", "\"/home/o'brien/pqkey\"", "somewhere else"],
         );
     }
 
@@ -1198,7 +1205,10 @@ printf '%s\n' "$UNIT_SHOWN"
         for file in ["disabled", "linked", "linked-runtime"] {
             let unit = shown("loaded", file, "inactive", "dead", "success", "0");
             for running in [false, true] {
-                assert_problem(&problem_of(Some(&unit), running), &not_enabled, &setup);
+                let problem = problem_of(Some(&unit), running);
+                assert_problem(&problem, &not_enabled, &setup);
+                // A masked unit's fix, not this one's.
+                assert!(!problem.fix.contains("unmask"), "{problem:?}");
             }
         }
         let failed = shown("loaded", "disabled", "failed", "failed", "exit-code", "1");
@@ -1245,7 +1255,7 @@ printf '%s\n' "$UNIT_SHOWN"
             for running in [false, true] {
                 assert_problem(
                     &problem_of(unit, running),
-                    &["the key does not start with your session"],
+                    &["does not start", "your session"],
                     &["pqkey setup"],
                 );
             }

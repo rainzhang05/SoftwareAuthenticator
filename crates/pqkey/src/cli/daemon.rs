@@ -432,12 +432,13 @@ mod tests {
         let dir = TempDir::new("daemon-start-log");
         std::fs::create_dir(log_path(dir.path())).unwrap();
         let err = start(dir.path(), &DaemonArgs::default()).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            format!(
-                "cannot open the log {}: Is a directory (os error 21)",
-                log_path(dir.path()).display()
-            )
+        assert_names(
+            &err.to_string(),
+            &[
+                "cannot open the log",
+                &log_path(dir.path()).display().to_string(),
+                &io::Error::from(Errno::EISDIR).to_string(),
+            ],
         );
     }
 
@@ -448,12 +449,13 @@ mod tests {
         let file = dir.path().join("file");
         std::fs::write(&file, b"").unwrap();
         let err = run(file.join("pqkey"), &DaemonArgs::default()).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            format!(
-                "cannot create the state directory {}: File exists (os error 17)",
-                file.join("pqkey").display()
-            )
+        assert_names(
+            &err.to_string(),
+            &[
+                "cannot create the state directory",
+                &file.join("pqkey").display().to_string(),
+                &io::Error::from(Errno::EEXIST).to_string(),
+            ],
         );
     }
 }

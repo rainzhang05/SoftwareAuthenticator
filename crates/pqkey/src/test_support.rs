@@ -67,6 +67,26 @@ pub fn assert_problem(problem: &crate::cli::checks::Problem, cause: &[&str], fix
     assert_names(&problem.fix, fix);
 }
 
+/// The problem whose cause names `word` among those that `output` lists as
+/// `pqkey status` and `pqkey setup` print them, `  ! cause` with `    Fix: fix`
+/// under it, if there is one; more than one fails.
+#[track_caller]
+pub fn listed(output: &str, word: &str) -> Option<crate::cli::checks::Problem> {
+    let lines: Vec<&str> = output.lines().collect();
+    let mut found = lines.windows(2).filter_map(|pair| {
+        let what = pair[0].strip_prefix("  ! ")?;
+        let fix = pair[1].strip_prefix("    Fix: ")?;
+        what.contains(word)
+            .then(|| crate::cli::checks::Problem::new(what, fix))
+    });
+    let problem = found.next();
+    assert!(
+        found.next().is_none(),
+        "two problems name {word:?}: {output}"
+    );
+    problem
+}
+
 /// The `#[test]` function `$test` of the calling module, as a [`ChildTest`].
 /// Its libtest name comes from `module_path!()`, and the function itself is
 /// passed along, so that renaming or moving it fails to compile here instead

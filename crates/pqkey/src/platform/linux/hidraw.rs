@@ -268,32 +268,34 @@ mod tests {
     /// makes too.
     #[test]
     fn a_missing_device_names_another_users_session() {
-        assert_eq!(
-            missing_device(42, None),
-            "the key runs (pid 42), but its device is missing"
-        );
+        // The key, that its device is missing, then why.
+        let named = |text: &str, why: &[&str]| {
+            let missing = ["(pid 42)", "its device is missing"];
+            crate::test_support::assert_names(text, &[&missing[..], why].concat());
+        };
+        let unexplained = missing_device(42, None);
+        named(&unexplained, &[]);
+        assert!(!unexplained.contains("seat0"), "{unexplained}");
         assert_eq!(missing_device_fix(None), "run `pqkey stop && pqkey start`");
         let explained = missing_device(42, Some(Held::ByAnotherUser));
-        assert!(
-            explained.starts_with("the key runs (pid 42), but its device is missing, and another user's session is active on seat0"),
-            "{explained}"
-        );
+        named(&explained, &["another user's session", "active on seat0"]);
         assert!(
             missing_device_fix(Some(Held::ByAnotherUser))
                 .starts_with("use the key from your own session")
         );
         let unreadable = missing_device(42, Some(Held::Unreadable));
-        assert!(
-            unreadable.starts_with("the key runs (pid 42), but its device is missing, and logind's record of seat0 cannot be read or understood"),
-            "{unreadable}"
-        );
+        named(&unreadable, &["logind's record of seat0", "cannot be read"]);
         assert!(!unreadable.contains("another user"), "{unreadable}");
         let fix = missing_device_fix(Some(Held::Unreadable));
         assert!(!fix.contains("pqkey stop"), "{fix}");
         let missing = missing_device(42, Some(Held::Missing));
-        assert!(
-            missing.starts_with("the key runs (pid 42), but its device is missing, and /run/systemd/seats has no record of seat0: where logind runs, a key that has seen the record since it started"),
-            "{missing}"
+        named(
+            &missing,
+            &[
+                "/run/systemd/seats",
+                "no record of seat0",
+                "seen the record",
+            ],
         );
         let fix = missing_device_fix(Some(Held::Missing));
         let (with_logind, without_logind) = fix

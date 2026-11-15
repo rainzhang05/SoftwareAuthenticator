@@ -404,7 +404,9 @@ mod tests {
     use super::*;
     use crate::cli::output::errln;
     use crate::client::tests::{discoverable, start};
-    use crate::test_support::{TempDir, assert_ran, child_test};
+    use crate::test_support::{
+        TempDir, assert_names, assert_problem, assert_ran, child_test, listed,
+    };
 
     /// `status` reports a state directory whose filesystem refuses to flush
     /// directories, as procfs does with EINVAL, with its fix; nothing for one
@@ -446,9 +448,6 @@ mod tests {
                 read_only,
             })
         };
-        let writes = "but the key writes there as it starts and with every registration, sign-in \
-                      and PIN entry";
-        let start = ", then run `pqkey start`";
         for (bytes, files) in [
             (Some(ROOM_BYTES), Some(ROOM_FILES)),
             (Some(u64::MAX), Some(u64::MAX)),
@@ -464,8 +463,17 @@ mod tests {
                 );
             }
         }
-        let free = "free some space on that filesystem (`df -h` and `df -i` show what each one \
-                    has left)";
+        // The problem with what `room` returns, whose fix ends with `pqkey
+        // start` for a key that does not run, and only for that.
+        let named = |room: &dyn Fn() -> io::Result<Room>, cause: &[&str], fix: &[&str]| {
+            for running in [false, true] {
+                let problem = state_fs_problem(dir, room(), running).expect("a problem");
+                let start: &[&str] = if running { &[] } else { &["`pqkey start`"] };
+                assert_problem(&problem, cause, &[fix, start].concat());
+                assert_eq!(problem.fix.contains("pqkey start"), !running, "{problem:?}");
+            }
+        };
+        let at = "state directory /home/u/.local/share/pqkey";
         for (bytes, files, left) in [
             (Some(0), Some(u64::MAX), "0 B left"),
             (Some(1023), None, "1023 B left"),
@@ -479,56 +487,28 @@ mod tests {
             (None, Some(0), "room for 0 more files"),
             (Some(4096), Some(1), "4 KiB left, room for 1 more file"),
         ] {
-            let what = format!(
-                "the state directory /home/u/.local/share/pqkey is on a full filesystem ({left}), \
-                 {writes}"
-            );
-            assert_eq!(
-                state_fs_problem(dir, room(bytes, files, false), false),
-                Some(Problem::new(&what, format!("{free}{start}"))),
-                "{left}"
-            );
-            assert_eq!(
-                state_fs_problem(dir, room(bytes, files, false), true),
-                Some(Problem::new(&what, free)),
-                "{left}"
+            named(
+                &|| room(bytes, files, false),
+                &[at, "full filesystem", &format!("({left})"), "writes there"],
+                &["free some space", "`df -h`", "`df -i`"],
             );
         }
-        let read_only = format!(
-            "the state directory /home/u/.local/share/pqkey is on a read-only filesystem, {writes}"
-        );
-        let remount = "remount that filesystem read-write (one the kernel made read-only after an \
-                       error needs `fsck` first)";
         for (bytes, files) in [
             (Some(u64::MAX), Some(u64::MAX)),
             (Some(0), Some(0)),
             (None, None),
         ] {
-            assert_eq!(
-                state_fs_problem(dir, room(bytes, files, true), false),
-                Some(Problem::new(&read_only, format!("{remount}{start}"))),
-                "{bytes:?} {files:?}"
-            );
-            assert_eq!(
-                state_fs_problem(dir, room(bytes, files, true), true),
-                Some(Problem::new(&read_only, remount)),
-                "{bytes:?} {files:?}"
+            named(
+                &|| room(bytes, files, true),
+                &[at, "read-only filesystem", "writes there"],
+                &["remount", "read-write", "`fsck`"],
             );
         }
-        let unchecked = "the state directory /home/u/.local/share/pqkey cannot be checked \
-                         (Input/output error (os error 5)), and the key may not be able to use it \
-                         either";
-        let check = "check that it is a directory of yours that you can read, under directories \
-                     you can enter (`ls -ld` shows each one's owner and mode), and look in \
-                     `journalctl -k` for disk errors";
-        let failed = || Err(io::Error::from(nix::errno::Errno::EIO));
-        assert_eq!(
-            state_fs_problem(dir, failed(), false),
-            Some(Problem::new(unchecked, format!("{check}{start}")))
-        );
-        assert_eq!(
-            state_fs_problem(dir, failed(), true),
-            Some(Problem::new(unchecked, check))
+        let eio = nix::errno::Errno::EIO;
+        named(
+            &|| Err(io::Error::from(eio)),
+            &[at, "cannot be checked", &io::Error::from(eio).to_string()],
+            &["`ls -ld`", "`journalctl -k`"],
         );
     }
 
@@ -544,37 +524,44 @@ mod tests {
         std::fs::write(&file, b"").unwrap();
         let socket = dir.path().join("socket");
         let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        for (state_dir, err) in [
-            (file.join("pqkey"), "Not a directory (os error 20)"),
-            (socket, "No such device or address (os error 6)"),
-        ] {
+        use nix::errno::Errno;
+        for (state_dir, err) in [(file.join("pqkey"), Errno::ENOTDIR), (socket, Errno::ENXIO)] {
             let problem = state_dir_problem(&state_dir, false).expect("a problem");
-            assert_eq!(
-                problem.what,
-                format!(
-                    "the state directory {} cannot be checked ({err}), and the key may not be \
-                     able to use it either",
-                    state_dir.display()
-                )
-            );
-            assert!(
-                problem.fix.ends_with("disk errors, then run `pqkey start`"),
-                "{problem:?}"
+            assert_problem(
+                &problem,
+                &[
+                    &state_dir.display().to_string(),
+                    "cannot be checked",
+                    &io::Error::from(err).to_string(),
+                ],
+                &["`ls -ld`", "`journalctl -k`", "`pqkey start`"],
             );
         }
     }
 
     /// What `status` and `setup` say about a key run with --presence
-    /// auto-approve, and their fixes for the service and for a key started
-    /// by hand.
-    const AUTO_APPROVE: &str = "the key runs with --presence auto-approve: it approves every \
-        registration, sign-in and reset without asking, so anything running as you can use your \
-        passkeys unnoticed";
-    const SERVICE_FIX: &str = "remove --presence auto-approve from the ExecStart= line that \
-        `systemctl --user cat pqkey` shows, in the unit or drop-in file named above it, then run \
-        `pqkey stop && pqkey setup`";
-    const BY_HAND_FIX: &str =
-        "run `pqkey stop`, then `pqkey start` without --presence auto-approve";
+    /// auto-approve, and the commands of their fixes for the service and for
+    /// a key started by hand.
+    const AUTO_APPROVE: [&str; 3] = ["--presence auto-approve", "without asking", "unnoticed"];
+    const SERVICE_FIX: [&str; 4] = [
+        "remove --presence auto-approve",
+        "ExecStart=",
+        "`systemctl --user cat pqkey`",
+        "`pqkey stop && pqkey setup`",
+    ];
+    const BY_HAND_FIX: [&str; 3] = [
+        "`pqkey stop`",
+        "`pqkey start`",
+        "without --presence auto-approve",
+    ];
+    /// What `status` says about a key that never answers, and its fix.
+    const UNANSWERED: [&str; 2] = ["presence provider", "never answers"];
+    const UNANSWERED_FIX: [&str; 4] = [
+        "--presence notify",
+        "`systemctl --user cat pqkey`",
+        "--presence unanswered",
+        "`pqkey stop && pqkey setup`",
+    ];
 
     /// Publish this process as the key running on `state_dir` with
     /// `presence`, as a daemon does once it serves. It runs while the
@@ -665,35 +652,29 @@ esac
             let _key = run_as_key(dir.path(), presence);
             let warnings = [Running::Service(me), Running::Daemon(me)]
                 .map(|running| presence_warning(dir.path(), running).unwrap());
-            let mut expected = system.device_problems(me, Duration::ZERO).unwrap();
+            let expected = system.device_problems(me, Duration::ZERO).unwrap();
             match presence {
                 PresenceArg::Notify => {
                     assert_eq!(warnings, [None, None]);
                     continue;
                 }
-                PresenceArg::AutoApprove => assert_eq!(
-                    warnings,
-                    [
-                        Some(Problem::new(AUTO_APPROVE, SERVICE_FIX)),
-                        Some(Problem::new(AUTO_APPROVE, BY_HAND_FIX))
-                    ]
-                ),
-                PresenceArg::Unanswered => {
-                    assert_eq!(warnings, [None, None]);
-                    expected.push(Problem::new(
-                        "the configured presence provider never answers requests",
-                        "configure the service to use --presence notify where `systemctl --user \
-                         cat pqkey` shows --presence unanswered, then run `pqkey stop && pqkey \
-                         setup`",
-                    ));
+                PresenceArg::AutoApprove => {
+                    let [Some(service), Some(by_hand)] = &warnings else {
+                        panic!("{warnings:?}");
+                    };
+                    assert_problem(service, &AUTO_APPROVE, &SERVICE_FIX);
+                    assert_problem(by_hand, &AUTO_APPROVE, &BY_HAND_FIX);
                 }
+                PresenceArg::Unanswered => assert_eq!(warnings, [None, None]),
             }
             for running in [Running::Service(me), Running::Daemon(me)] {
-                assert_eq!(
-                    running_problems(dir.path(), &system, running, Duration::ZERO).unwrap(),
-                    expected,
-                    "{presence:?}"
-                );
+                let mut found =
+                    running_problems(dir.path(), &system, running, Duration::ZERO).unwrap();
+                if presence == PresenceArg::Unanswered {
+                    let unanswered = found.pop().expect("its problem");
+                    assert_problem(&unanswered, &UNANSWERED, &UNANSWERED_FIX);
+                }
+                assert_eq!(found, expected, "{presence:?}");
             }
         }
     }
@@ -792,8 +773,7 @@ esac
             let stderr = String::from_utf8_lossy(&output.stderr);
             let context = format!("{presence} {runs}: {stdout}{stderr}");
             assert_eq!(output.status.code(), Some(0), "{context}");
-            let named =
-                |fix: &str| stdout.contains(&format!("  ! {AUTO_APPROVE}\n    Fix: {fix}\n"));
+            let named = |word: &str| listed(&stdout, word).unwrap_or_else(|| panic!("{context}"));
             match (presence, runs) {
                 ("auto-approve", "service") => {
                     assert!(
@@ -802,35 +782,23 @@ esac
                         )),
                         "{context}"
                     );
-                    assert!(named(SERVICE_FIX), "{context}");
+                    assert_problem(&named("auto-approve"), &AUTO_APPROVE, &SERVICE_FIX);
                 }
                 ("auto-approve", _) => {
                     assert!(
                         stdout.contains(&format!("Key:      running (pid {pid})\n")),
                         "{context}"
                     );
-                    assert!(named(BY_HAND_FIX), "{context}");
+                    assert_problem(&named("auto-approve"), &AUTO_APPROVE, &BY_HAND_FIX);
                     // Its other problem, as before.
-                    assert!(
-                        stdout.contains(&format!("  ! the key (pid {pid}) was started by hand")),
-                        "{context}"
-                    );
+                    assert_names(&named("started by hand").what, &[&format!("(pid {pid})")]);
                 }
-                ("unanswered", _) => assert!(
-                    stdout.contains(
-                        "  ! the configured presence provider never answers requests\n    Fix: \
-                         configure the service to use --presence notify where `systemctl --user \
-                         cat pqkey` shows --presence unanswered, then run `pqkey stop && pqkey \
-                         setup`\n"
-                    ),
-                    "{context}"
-                ),
-                _ => assert!(
-                    stdout.contains(&format!(
-                        "  ! the key cannot connect to its session bus (failed to connect to \
-                         `{no_bus}`: "
-                    )),
-                    "{context}"
+                ("unanswered", _) => {
+                    assert_problem(&named("never answers"), &UNANSWERED, &UNANSWERED_FIX);
+                }
+                _ => assert_names(
+                    &named("cannot connect").what,
+                    &["session bus", &format!("`{no_bus}`")],
                 ),
             }
             if presence != "auto-approve" {
@@ -849,12 +817,7 @@ esac
         let bin = fake_systemctl(dir.path());
         let unit = dir.path().join("config/systemd/user/pqkey.service");
         std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
-        let kept = format!(
-            "  ! pqkey setup keeps your own unit {0} as it is, instead of the unit this version \
-             installs\n    Fix: if you need its changes, put them in a drop-in with `systemctl \
-             --user edit pqkey`; then delete {0} and run `pqkey setup`\n",
-            unit.display()
-        );
+        let path = unit.display().to_string();
         for own in [true, false] {
             if own {
                 std::fs::write(
@@ -881,7 +844,20 @@ esac
             assert_ran(&output.stdout);
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert_eq!(output.status.code(), Some(0), "{own}: {output:?}");
-            assert_eq!(stdout.contains(&kept), own, "{own}: {stdout}");
+            let kept = listed(&stdout, "keeps your own unit");
+            if own {
+                assert_problem(
+                    &kept.unwrap_or_else(|| panic!("{stdout}")),
+                    &["keeps your own unit", &path],
+                    &[
+                        "`systemctl --user edit pqkey`",
+                        &format!("delete {path}"),
+                        "`pqkey setup`",
+                    ],
+                );
+            } else {
+                assert_eq!(kept, None, "{stdout}");
+            }
         }
     }
 
@@ -895,7 +871,6 @@ esac
     /// counts the connections waiting there.
     #[test]
     fn status_checks_notifications_on_the_keys_own_session_bus() {
-        use crate::test_support::assert_names;
         use std::os::unix::net::UnixListener;
         use std::process::Stdio;
         let dir = TempDir::new("status-bus");
@@ -1010,7 +985,7 @@ esac
             );
             if version == "v1" {
                 assert_eq!(output.status.code(), Some(0), "{context}");
-                crate::test_support::assert_names(
+                assert_names(
                     &stdout,
                     &[
                         "  ! pqkey cannot check",
@@ -1022,12 +997,15 @@ esac
                 assert!(!stdout.contains(&here), "{context}");
             } else {
                 assert_eq!(output.status.code(), Some(1), "{context}");
-                assert!(
-                    stderr.contains(&format!(
-                        "pqkey: the key (pid {pid}) was not started by this version of pqkey; \
-                         restart it with `pqkey stop && pqkey start` first\n"
-                    )),
-                    "{context}"
+                let error = stderr.lines().last().unwrap_or_default();
+                assert!(error.starts_with("pqkey: "), "{context}");
+                assert_names(
+                    error,
+                    &[
+                        &format!("(pid {pid})"),
+                        "not started by this version",
+                        "`pqkey stop && pqkey start`",
+                    ],
                 );
             }
         }
@@ -1387,20 +1365,21 @@ esac
             let files = store_with_passkeys(dir.path(), !legacy);
             let (named, fails) = damage(dir.path(), kind, &files);
             let problem = store_problem(dir.path()).unwrap_or_else(|| panic!("{kind}: no problem"));
-            let what = match fails {
-                Fails::Unchecked => format!("the credential store cannot be checked: {named}"),
-                _ => format!("the credential store is damaged {named}"),
+            let state = match fails {
+                Fails::Unchecked => "cannot be checked",
+                _ => "is damaged",
             };
-            assert!(problem.what.starts_with(&what), "{kind}: {problem:?}");
-            assert_eq!(
-                problem.fix,
-                format!(
-                    "stop the key with `pqkey stop`, keep a copy of {}, run `pqkey repair`, then \
-                     start the key again with `pqkey start`; `pqkey reset` erases every passkey, \
-                     so use it only as a last resort",
-                    dir.path().display()
-                ),
-                "{kind}"
+            assert_problem(
+                &problem,
+                &["credential store", state, &named],
+                &[
+                    "`pqkey stop`",
+                    &format!("a copy of {}", dir.path().display()),
+                    "`pqkey repair`",
+                    "`pqkey start`",
+                    "`pqkey reset`",
+                    "last resort",
+                ],
             );
 
             let (_daemon, mut key) = start(&dir);
@@ -1442,12 +1421,14 @@ esac
                 }
                 Fails::Counter => {
                     assert_eq!(counted, "Passkeys: room for 997 more", "{kind}");
-                    assert!(
-                        problem.what.ends_with(
-                            "the key cannot sign in to sites that registered it as a security \
-                             key and whose credentials it did not store"
-                        ),
-                        "{kind}: {problem:?}"
+                    assert_names(
+                        &problem.what,
+                        &[
+                            &named,
+                            "cannot sign in",
+                            "as a security key",
+                            "did not store",
+                        ],
                     );
                 }
                 Fails::Unchecked => {
@@ -1469,11 +1450,9 @@ esac
         let (daemon, mut key) = start(&dir);
         std::fs::remove_dir_all(dir.path().join("credentials")).unwrap();
         let problem = store_problem(dir.path()).expect("a lost directory is a problem");
-        assert!(
-            problem
-                .what
-                .starts_with("the credential store is damaged (credentials is missing)"),
-            "{problem:?}"
+        assert_names(
+            &problem.what,
+            &["credential store", "is damaged", "(credentials is missing)"],
         );
         assert_eq!(
             passkeys_status(&key.info().unwrap()),
