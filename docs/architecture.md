@@ -32,34 +32,21 @@ device through `/dev/uhid`. Browsers open its hidraw node as they would any
 security key.
 
 The daemon keeps that device only while the session logind records as active
-on the device's seat is its own user's, or no session is active there
-(`crates/pqkey/src/seat.rs`). It asks before the transport handles or sends
-each report. logind writes each state of a seat to a new file, which it
-renames, or for a seat's first record may link, into place as the seat's
-record. So a device serves only while the record is the file it was created
-under, or, if the seat had no record then that the key had seen since it
-started, while it still has none. Once the record names another user's
-session, cannot be read or understood, has gone since the key saw it, or is
-another file, the transport ends, which destroys the device, cancels the
-engine's request and drops the CTAPHID channels. A switch away and back
-between two looks therefore ends it too, and so does any other save of the
-record, even one that leaves the daemon's user active, as when another
-session on the seat starts or ends. The daemon waits until the record names
-its user, or no one, as active, reading it again every 100 ms while it
-cannot tell, then creates a new device for the same engine, under the record
-it read last: its clock and PIN state carry on, so a new device is not a new
-power-up.
+on its seat is its own user's, or none (`crates/pqkey/src/seat.rs`). Before
+each report it handles or sends, the transport checks that the seat's record
+is still the file the device was created under: logind writes each state as a
+new file, so any other file ends the transport and the device, as does a
+record that cannot be read or has gone since the key saw it. Once its user,
+or no one, is active, the daemon creates a new device for the same engine,
+which is not a new power-up.
 
-The binary's allocator wipes every heap block before returning it to the
-system allocator. Reallocation allocates a replacement, copies the retained
-prefix, and wipes the old block, including any discarded tail.
-
-Before opening the store or creating the device, the daemon disables core
-files with a zero core size limit and makes itself non-dumpable, blocking
-core dumps, ptrace attachment and `/proc` memory reads by other
-unprivileged processes. Failures are warned about and startup continues.
-The user service also sets `LimitCORE=0`. Memory in use, swap and root remain
-outside these protections; the daemon does not lock its memory.
+The binary's allocator wipes every heap block, a reallocation's old block and
+discarded tail included, before returning it to the system allocator. Before
+opening the store or creating the device, the daemon sets a zero core size
+limit and makes itself non-dumpable, which blocks core dumps, ptrace
+attachment and `/proc` memory reads by other unprivileged processes; it warns
+about a failure and continues. The user service also sets `LimitCORE=0`.
+Memory in use, swap and root remain outside these protections.
 
 The transport loop in `crates/pqkey/src/transport/mod.rs` speaks CTAPHID
 (§11.2). It puts requests together from
@@ -120,14 +107,14 @@ Two details carry ML-DSA's large messages across the kernel:
 
 The kernel's uhid driver looks at its event queue without the queue's lock,
 so a read that comes just as an event arrives can copy from a null pointer,
-and the kernel then kills the reading thread. This shows on arm64. The Linux
+and the kernel then kills the reading thread; this shows on arm64. The Linux
 backend therefore waits 100 µs between seeing an event waiting and reading
 it, and looks again for each event, so reading a 30-packet request takes
-about 6 ms. The queue holds 31 events: a whole request of that size, plus
-the event for a client opening the device, fits before the first read. While
-an answer is paced out, the transport reads during the 1 ms pauses. Two
-clients sending large requests at the same moment can still fill the queue;
-the kernel drops what does not fit, and the request fails or times out.
+about 6 ms. The queue's 31 events fit such a request and a client's open
+event before the first read, and the transport reads during the 1 ms pauses
+of a paced answer.
+Two clients sending large requests at once can still fill it; the kernel
+drops what does not fit, and the request fails or times out.
 
 ## Platform boundary
 
@@ -182,22 +169,12 @@ The Linux backend exposes these interfaces:
   records the bus, owner and notification ID.
 - `SeatWatch::new(uniq)`, implementing `SeatSource`: `changed(report)`,
   `look`, `wait(timeout)` and `plugged`. It reads logind's record of the
-  device's seat in `/run/systemd/seats` as sd_seat_get_active(3) does, and
-  watches the directory with inotify as sd_login_monitor_new(3) does; an
-  event only says that a look is due, and without inotify every check looks.
-  The seat is the node's `ID_SEAT` in udev's database, or seat0, looked up
-  until it is found or 10 seconds have passed since the device was created.
-  A look says who is active and which record it read: the open file's device
-  and inode number, or, without a record it has seen, a number that changes
-  whenever events are lost, the watch is lost or regained, or the seat
-  changes, so not, when polled, for a record that came and went between two
-  reads. A record missing after the key has read it, or seen it named in a
-  notification, since it started is a failed look instead: logind removes a
-  record it wrote only when its seat goes away or, with systemd 257 and older
-  and with elogind, when a save fails. A look keeps the file it read open
-  until the next look has opened the record, so that a filesystem that reuses
-  the numbers of freed inodes cannot give them to a later record. The
-  decision stays in `seat`.
+  device's seat as sd_seat_get_active(3) does and watches it with inotify as
+  sd_login_monitor_new(3) does, or reads it at every check without inotify;
+  a look says who is active and which file it read. The seat is the node's
+  `ID_SEAT` in udev's database, or seat0, looked up until it is found or 10
+  seconds have passed since the device was created. The decision stays in
+  `seat`.
 - `default_state_dir`, `disable_core_dumps`,
   `current_executable_identity` and `BootTimeClock::new`. Identity is the
   executable's device and inode; `DaemonInfo` owns its format and validation.
@@ -391,326 +368,226 @@ pqkey's crate version does not change per commit.
 ```
 
 Every file above except the root keys is encrypted and authenticated with
-XChaCha20-Poly1305, under keys derived from a root key with HKDF-SHA-256.
-Credential records can also hold an opaque blob of at most 32 bytes,
-protected by the same encryption as their private keys, and an optional
-32-byte large-blob key on discoverable credentials. The key is wiped on drop,
-redacted from debug output and compared in constant time. Older records read
-without a large-blob key. The PIN state also keeps the configuration: the
-minimum PIN length and its RP IDs, whether a PIN change is required, the
-PIN's length, always-UV and PIN complexity (optional boolean field 10). A PIN
-state written before these fields existed reads with their defaults, and its
-PIN counts as 4 code points long.
+XChaCha20-Poly1305, under keys derived from a root key with HKDF-SHA-256. A
+credential record can also hold an opaque blob of at most 32 bytes and, if
+discoverable, a 32-byte large-blob key, which is wiped on drop, redacted from
+debug output and compared in constant time. The PIN state also keeps the
+configuration: the minimum PIN length and its RP IDs, whether a PIN change is
+required, the PIN's length, always-UV and PIN complexity. Records and PIN
+states written before a field existed read with its default, an old PIN
+counting as 4 code points long.
 
-Discoverable registration replaces all stored discoverable credentials with
-exactly the same RP ID and user handle through one store transaction.
+A discoverable registration replaces every stored discoverable credential
+with exactly the same RP ID and user handle in one store transaction,
+keeping its fresh ID, key, extension secrets and creation order.
 makeCredential refuses an empty user handle for a discoverable credential
-(CTAP1_ERR_INVALID_LENGTH, as for one over 64 bytes), so passkeys of different
-accounts never replace each other through it. The new registration retains its
-fresh ID, key, extension secrets and creation order. Replacement succeeds at
-logical capacity without deleting an old credential first. Physical space for
-staging remains necessary; a new account still respects the configured limit,
-including stored non-discoverable keys.
+(CTAP1_ERR_INVALID_LENGTH, as for one over 64 bytes), so passkeys of
+different accounts never replace each other. Replacement works at full
+logical capacity, but staging needs physical space, and a new account still
+needs a free slot.
 
 Existing stores remain readable. The first atomic registration writes an
-encrypted `credential-format` marker and stages the candidate and encrypted
+encrypted `credential-format` marker, stages the candidate and an encrypted
 membership manifest inside the legacy directory, where legacy lookup ignores
-them. After flushing preparation, an atomic rename from `credentials/` to
-`credential-set/` commits the new set. Later transactions commit by atomically
-replacing `credential-set/active`. The manifest records sorted, unique opaque
-filename HMACs and their locations. Retained legacy ciphertext keeps its
-original authenticated logical name; new records live in
-`credential-set/records/`. Credential encodings and existing key domains stay
-unchanged. The manifest and marker use envelope types 6 and 7 under the
-credential record key, authenticated with their logical paths. Membership
-metadata has the existing 1 MiB envelope bound.
+them, flushes them, and commits by renaming `credentials/` to
+`credential-set/`; later transactions atomically replace
+`credential-set/active`. The manifest lists sorted, unique filename HMACs and
+their locations: retained legacy records keep their logical names, and new
+ones go to `credential-set/records/`. Credential encodings and key domains
+are unchanged; the manifest and marker are envelope types 6 and 7 under the
+credential record key, bound to their logical paths, within the 1 MiB
+envelope bound. Upgrade is forward-only: back up the complete store, and do
+not use an older binary on upgraded state.
 
-Only manifest members can be read, listed, counted, asserted or managed.
-Staging and retired ciphertext consume no logical slots. Pre-publication
-errors preserve the preceding usable credentials. Atomic registration returns
-an explicit committed result after publication: `Flushed` or `Unconfirmed`,
-with a separate pending-cleanup flag. MemoryStore reports `Volatile`.
-`Unconfirmed` means a process restart sees publication, while power loss may
-roll it back. Old ciphertext is retained until publication and its namespace
-have both been flushed successfully. Cleanup then removes a record file only
-if the manifest does not name it, or names it at the other location and a
-regular file of that name is there; a symbolic link or directory does not
-count. A member whose only file sits at the other location is kept with a
-warning, so a manifest that misplaces members hides their records instead of
-deleting them. Cleanup failure never changes membership, including after
-restart, further replacement or deletion of the new credential.
-A later membership transaction retries cleanup. Managed inserts and deletes
-also return success after publication and log subsequent problems.
+Only manifest members can be read, listed, counted, asserted or managed, and
+only they take slots. An error before publication keeps the preceding
+credentials; after it, atomic registration returns `Flushed` or
+`Unconfirmed`, as PIN writes do below, with a pending-cleanup flag, and
+MemoryStore `Volatile`. Old ciphertext stays until publication and its
+namespace are flushed. Cleanup then removes a record file only if the
+manifest does not name it, or names it at the other location, where a
+regular file of that name exists. A member whose only file is at the other
+location is kept with a warning, so a manifest that misplaces members hides
+their records rather than deleting them. A cleanup failure never changes
+membership, and the next membership transaction retries it; managed inserts
+and deletes also succeed once published, and log later problems.
 
-Missing, corrupt or inconsistent authoritative metadata fails closed; no
-operation rebuilds it by scanning leftover records, and only an explicit
-`pqkey repair` does (below). Individual corrupt records retain the existing
-lookup-error/list-skip behavior, but replacement must read every active
-record successfully to avoid leaving an unknown matching record usable.
-Listing logs a member whose record is missing as it logs a corrupt one. Each
-operation that such damage makes fail logs the file, what fails and what to
-do; a lookup of a member whose record is missing finds no credential, as for
-one never stored, and logs nothing. The daemon at start-up and `pqkey status`
-report damage from a read-only inspection, which looks again before it
-reports damage so that a concurrent commit's cleanup is not taken for it.
-The inspection also reads the shared signature counter, and names it first
-if it cannot be read or fails authentication or decoding: then every
-sign-in with a sealed credential fails, over CTAP2 and U2F. For a counter
-that fails authentication or decoding, the engine logs the file, what fails
-and what to do, as for damage to the set.
-With neither namespace present, a legacy store reports its missing
-`credentials/`; a store whose format marker shows the managed layout reports
-both `credential-set/` and `credentials/`, since nothing tells whether it had
-upgraded or was upgrading. Opening a legacy store creates a missing
-`credentials/` again, empty, as it always has, and logs the loss when the
-credential key shows that the directory existed.
+Missing, corrupt or inconsistent membership metadata fails closed: only an
+explicit `pqkey repair` rebuilds it. A corrupt record fails its lookup and is
+skipped by listing, but a replacement must read every active record, so that
+no unknown matching record stays usable. Each operation that damage makes
+fail logs the file, what fails and what to do; listing logs a missing member
+as it logs a corrupt one, and a lookup of one finds nothing and logs nothing.
+The daemon at start-up and `pqkey status` report damage from a read-only
+inspection, which looks again before reporting, so that a concurrent commit's
+cleanup is not taken for damage. It names an unreadable or corrupt shared
+signature counter first, since every sign-in with a sealed credential then
+fails; the engine logs a corrupt one as it logs damage to the set. A store
+with neither namespace reports its missing `credentials/`, and also
+`credential-set/` if its format marker shows the managed layout. Opening a
+legacy store creates a missing `credentials/` again, empty, and logs the loss
+when the credential key shows that the directory existed.
 
-`pqkey repair` repairs such damage, with the key stopped: it refuses while
-the daemon holds the state lock. It plans without changing anything, takes
-the lock, plans again, prints the damage and each step, and asks (`--yes`
-does not). The repair itself plans once more and refuses a store that
-changed since the plan it printed. A store with nothing to repair is left as
-it is.
+`pqkey repair` repairs such damage with the key stopped, refusing while the
+daemon holds the state lock. It plans without changing anything, takes the
+lock, plans again, prints the damage and each step and asks (`--yes` does
+not), then plans once more and refuses a store that changed since.
+`crates/pqkey-ctap/src/store/repair.rs` documents the rules in full:
 
-- If the manifest authenticates, repair drops the members whose records are
-  missing or fail authentication or decoding. It raises no counter: the
-  manifest names the copy the key signed with, which keeps its count.
-- A legacy store's records that fail are left out of the list it gets: it
-  moves to the managed layout through the first commit's protocol, without a
-  new record.
-- If the manifest is missing or cannot be used, repair builds a new one from
-  the records in `credential-set/` that authenticate under the current key,
-  discoverable or not. Only the lost manifest said which of them were
-  members, and creation orders cannot stand in for it: an insert's order is
-  one above the members it sees, so orders are reused after deletions, and a
-  staged record that never published has one too. So a passkey that was
-  deleted or replaced, or whose registration failed, can come back if its
-  record was left behind, alone or beside another passkey of its account.
-  The plan names each account, by RP ID and user handle, that the new list
-  holds more than one passkey of. The store lists each of them, a deletion
-  removes one, and the account's next discoverable registration replaces
-  them all. Of two authentic copies of one record name, in both record
-  directories, only one can be a member, and repair keeps the one with the
-  higher signature counter. Of an authentic copy and a damaged one, it keeps
-  the authentic one and raises its counter as below, since the damaged copy
-  can have counted higher. The new list may hold more credentials than the
-  store's limit; the plan then says so, and a registration that adds a
-  credential is refused until the store holds fewer than its limit.
-- A manifest that authenticates is used even if the format marker does not;
-  a damaged marker, or a missing one of a store in the managed layout, is
-  written again after the list, since it decides whether the list is used at
-  all.
-- A missing namespace is created again, empty: `credential-set/` with an
-  empty manifest when the format marker shows the managed layout, or else a
-  legacy store's `credentials/`. Its records went with it. The keys and the
-  PIN state stay as they are, and so does the shared signature counter
-  unless it is damaged, so sealed credential IDs still open.
-- A shared signature counter whose count is lost, because it cannot be read
-  or fails authentication or decoding, is written again at one more than the
-  largest of: the clock's seconds since 1970, read after the quarantine step
-  below; the newest modification time of the state directory, of each entry
-  in it and of each entry in a directory of records, read before that step;
-  and every counter planning read. A time at or past `u32::MAX` seconds
-  (2106-02-07T06:28:15Z), the clock's or a file's, is left out, so a clock or
-  file that far ahead does not stop the counter. The count is at most
-  `u32::MAX`, where counting stops, which it reaches only from a time a
-  second earlier or a counter planning read at `u32::MAX - 1` or
-  `u32::MAX`. If nothing else is damaged, the credential set stays as it
-  is. A directory in the counter's place makes planning refuse, naming
-  it: a rename cannot replace a directory with a file, and moving it away
-  first would leave no counter, which reads as one never written. Moved out,
-  with an empty file created in its place, it is repaired as a corrupt
-  counter. Each count rewrites the counter's file, renaming it into the
-  state directory, and a stored credential's count rewrites its record, so
-  a damaged counter's file, or a damaged copy of a record, has the clock's
-  reading at its last count as its modification time, unless something has
-  written it, taken its place or set its time since. Nothing can tell a
-  time set otherwise from such a reading. For a repair before
-  2106-02-07T06:28:15Z, a count it writes or raises this way is above every
-  count the key returned on that counter, so the count a relying party sees
-  jumps and does not go back, if:
-  1. at each count and each repair, the key had counted fewer times than
-     whole seconds had passed since 1970, and since any earlier repair
-     ended;
+- With a manifest that authenticates, repair drops the members whose records
+  are missing or fail authentication or decoding. It raises no record's
+  counter: the manifest names the copy the key signed with. A legacy store
+  leaves its failing records out as it moves to the managed layout through
+  the first commit's protocol.
+- Without a usable manifest, it builds one from the records in
+  `credential-set/` that authenticate under the current key, so a deleted or
+  replaced passkey, or one whose registration failed, can come back if its
+  record was left behind. The plan names each account left with more than
+  one passkey, which its next discoverable registration replaces, and a list
+  over the store's limit, which then refuses new credentials until it holds
+  fewer. Of two authentic copies of a record, it keeps the one with the
+  higher counter; of an authentic and a damaged copy, the authentic one, its
+  counter raised.
+- A damaged format marker, or a missing one in the managed layout, is written
+  again after the list; a manifest that authenticates is used even if the
+  marker does not. A missing namespace is created again, empty: its records
+  are gone, but the keys, the PIN state and an undamaged shared counter stay,
+  so sealed credential IDs still open.
+- A lost shared counter, and a raised record, are written at one more than
+  the largest of the clock's seconds since 1970, the newest modification time
+  of the state directory, its entries and those of its record directories,
+  and every count planning read, leaving out times at or past `u32::MAX`
+  seconds. A directory in the counter's place makes planning refuse. For a
+  repair before 2106-02-07, the new count is above every count the key
+  returned on that counter if:
+  1. at each count, the key had counted fewer times than whole seconds had
+     passed, since 1970 and since any earlier repair;
   2. no time that this repair or an earlier one read, the clock's or a
-     file's, was ahead of the real time, as when the clock never ran ahead
-     and every time on the state directory and its files came from this
-     computer's clock, not from a hand edit, a copy that kept its times
-     (`cp -a`, `tar`, `rsync -a`) or a fault that damaged the file; and
-  3. the clock is right during the repair, or the damaged file still has
-     the time a right clock gave it at the last count or later, nothing
-     having changed that time since.
+     file's, was ahead of the real time, as a hand edit or a copy that kept
+     its times can make one; and
+  3. the clock is right during the repair, or the damaged file still has the
+     time a right clock gave it at its last count or later.
 
-  An empty file created in the damaged file's place by hand, as repair's
-  advice for a directory in the counter's place or for a record it cannot
-  read asks, takes the clock's reading then, so the advice asks for a right
-  clock first: under a clock that is behind both then and during the
-  repair, condition 3 fails, and the count can go back. A time ahead of the
-  real time that a repair reads, the clock's or a file's, which condition 2
-  excludes, can raise the count that repair writes; a later repair, even
-  with a right clock, can then start at or below the counts returned since.
-  A raised record keeps its creation order and logical name.
+Every file that repair replaces or removes first gets a name in a new
+`damaged/<UTC time>/`, at its path relative to the state directory, by a hard
+link, or a rename for a directory, flushed before the original changes; no
+cleanup, inspection or reset touches that directory, and nothing reads it.
+Counters are written, and raised records rewritten in place, before the new
+list is published and cleaned up as every commit is, so an error or crash at
+any checkpoint leaves the store serving its old or its repaired credentials,
+each counter damaged or written again, every file in place or quarantined,
+and repairing again finishes. Repair leaves the PIN state,
+the large-blob array, the attestation record and the keys alone, and
+rewrites a record only to raise its counter.
 
-Every file of the store that repair replaces or removes, damaged metadata,
-a damaged signature counter, the replaced manifest, a failed upgrade's
-prepared manifest and staged records, each record file that the new list
-does not name, and each record whose counter it raises, first gets a name in
-a new `damaged/<UTC time>/`, at its path relative to the state directory: a
-hard link for anything but a directory (a file, a symbolic link itself, a
-FIFO, a socket or a device node), which keeps it in place until whatever
-replaces or removes it, and a rename for a directory, flushed before anything
-replaces or removes the original. No cleanup, inspection or reset touches that
-directory, and nothing reads what is in it. A counter is then written again,
-and raised records are rewritten in place, before membership is published
-through the same atomic publication, flush and cleanup as every commit, and
-cleanup removes the old names of the records left out. An error or a crash
-at any checkpoint leaves the store serving the credentials it served before
-or those of the repaired list, each counter it writes damaged as before or
-written again, and every file of the store in place, in `credential-set/`
-after a legacy store's rename, or in the quarantine; repairing again
-finishes, unless an error stops it too. Only a store that served no
-credential before can meanwhile show another fault of that kind: a directory
-in a metadata file's place, moved away, or a recreated namespace that awaits
-its manifest. Repair leaves the PIN state, the large-blob array, the
-attestation record and the keys as they are, and the shared signature
-counter too unless it is damaged; it rewrites a record only to raise its
-counter, so each other keeps its own.
+Explicit reset works alike in both store layouts:
 
-Explicit reset uses the following order in both store layouts:
+1. It determines the layout without authenticating damaged metadata and
+   rotates the credential key: the new key file is flushed before its atomic
+   publication and its directory after it; only then is the old key
+   overwritten as a best effort, and leftover temporary key files removed
+   where they can be listed and unlinked. A failed flush of their removal
+   fails the rotation.
+2. It purges credential records and membership, removes the shared signature
+   counter and the large-blob array, which then read as zero and the initial
+   array, and flushes their directories.
+3. A managed store gets a new format marker and an empty manifest.
+4. Default PIN and configuration state is published last. Only then does the
+   store report its durability, an unconfirmed empty manifest included, and
+   the engine resets PIN/UV policy, retries, tokens and protocol keys before
+   returning success, durable or not.
 
-1. Determine the layout without authenticating damaged metadata, then rotate
-   the credential key. The new key file is flushed before atomic publication,
-   its directory is flushed, and only then is the old key overwritten as a
-   best effort and stale key temporary files removed. Their removal is
-   flushed before rotation succeeds, and a failure of that flush fails it.
-2. After rotation succeeds, purge credential records and managed membership,
-   remove the shared signature counter and large-blob array, and flush their
-   directories. Missing counter/blob records supply zero/the initial array.
-3. For a managed store, write the authenticated format marker and publish a
-   valid empty manifest under the new key.
-4. Publish default PIN/configuration state last. The store returns an explicit
-   durability outcome only after the preceding work completes and defaults
-   are published. The running engine then resets PIN/UV policy, retries,
-   tokens and protocol keys before returning success, even if publication
-   durability is unconfirmed. Unconfirmed empty-manifest publication is also
-   included in the reset outcome.
+A rotation error does not establish which key is active, and runs no
+cleanup: under the old key everything stays intact, sealed credentials
+continuing the same saturating shared CTAP2/U2F counter even across restarts,
+and under a published new key the untouched records fail authentication,
+unless power loss rolls back the rename. The old key is wiped only after a
+successful flush. After a durable rotation, old credentials are invalid even
+if a later step fails, and until the default PIN state is written a
+restarted engine treats the PIN as set and blocked and requires always-UV; a
+failed command keeps the running engine's PIN/UV state. Publishing the
+defaults completes the reset: later errors become unconfirmed-durability
+warnings, and live and restarted engines see the same defaults. Retrying a
+reset rotates again and recovers a partial or damaged store without the old
+key or readable metadata. The attestation key and record survive every step.
+Checkpoint tests cover errors and process exits at each persistence boundary
+and model rename rollback, but not power loss.
 
-A rotation error does not establish which key is active. Before publication,
-credentials, counters, membership and PIN/UV policy remain intact; surviving
-sealed credentials continue the same saturating shared CTAP2/U2F counter, even
-across restart and repeated failures. An error after publication leaves those
-records untouched too: they fail authentication under the new key, while an
-unflushed rename rolled back by power loss can still use the old key with its
-original counter and policy. Key wiping is deferred until successful flushing.
-No reset cleanup or counter removal runs on a rotation error.
-
-After durable rotation, old stored and sealed credentials are invalid even if
-purging, counter removal, empty-manifest publication or PIN-state writing fails.
-Missing/corrupt managed authority fails closed. Until the default PIN write,
-old PIN state fails authentication; a restarted engine treats it as set and
-blocked and requires always-UV. A failed command keeps the running engine's
-preceding PIN/UV state. Final default-state publication completes the command;
-errors at subsequent checkpoints become unconfirmed durability warnings and
-success, with live and restarted engines observing the same defaults.
-An explicit reset retry rotates again and recovers partial or damaged stores
-without needing the old key or readable metadata. The device/attestation key
-and attestation record survive every step. Checkpoint tests cover errors and
-process exits at each persistence boundary; they model rename rollback but do
-not simulate physical power loss or override filesystem durability guarantees.
-
-Upgrade is forward-only: back up the complete store and
-do not use an older binary on upgraded state.
-
-PIN/configuration writes distinguish publication from durability through
-`Result<CommitDurability, StoreError>`. An error means the candidate PIN record
-was not published. `Flushed` confirms the file and publication directory were
-flushed; `Volatile` describes an intentional memory store. `Unconfirmed` means
-rename published the record but a post-rename checkpoint or strict directory
-flush did not complete successfully. A process restart sees this published
-record, but power loss can restore its predecessor. Flushes are not protection
-against filesystem snapshots or hardware that fails to honor them.
+PIN and configuration writes return `Result<CommitDurability, StoreError>`:
+an error means the record was not published, `Flushed` that the file and its
+directory were flushed, `Volatile` an intentional memory store, and
+`Unconfirmed` that the rename published it but a later checkpoint or the
+strict directory flush did not complete, so a restart sees it while power
+loss can restore its predecessor. Flushes do not protect against filesystem
+snapshots or hardware that ignores them.
 
 setPIN, changePIN and authenticatorConfig treat publication as commitment:
-they return CTAP2_OK, adopt the settings and perform required token
-invalidations even when durability is unconfirmed. getInfo and subsequent
-commands immediately use the published PIN, alwaysUv, minimum length,
-authorized RP IDs and forcePINChange. An unconfirmed warning describes the
-power-loss limitation, rather than claiming the settings failed to change.
-Pre-publication errors keep the preceding PIN and policy; changePIN may still
-have legitimately consumed or restored retries while checking the old PIN.
+they return CTAP2_OK, adopt the settings and invalidate tokens as required
+even when durability is unconfirmed, and later commands use the published
+values at once; the warning describes the power-loss limit, not a failure.
+An error before publication keeps the preceding PIN and policy, though
+changePIN may have consumed or restored retries while checking the old PIN.
 
-PIN verification has a stronger persistence requirement. The engine debits a
-retry before decrypting or comparing pinHashEnc, and adopts the debit only once
-it is published. Only `Flushed` or intentional `Volatile` writes allow
-comparison. Failed and unconfirmed debits return CTAP2_ERR_PROCESSING without a
-PIN verdict or token. A failed debit leaves the live budget as stored, so
-failing writes (a full disk, say) spend no retries, and the PIN works again as
-soon as writes do, without a restart; an unconfirmed debit is published, so it
-stays spent. Successful comparison stages restoration of retries until
-publication. Failed restoration retains the spent budget and preceding
-mismatch history; unconfirmed restoration adopts the published retry state but
-still returns CTAP2_ERR_PROCESSING without authorizing a token or PIN change.
-An observed mismatch remains spent and counts toward the three-mismatch
-power-cycle block even if a following write fails. Restart clears this volatile
-block, while the published retry budget persists; zero retries requires reset.
-Unreadable PIN state remains set, blocked and alwaysUv, and its placeholder is
-never written over the stored record.
+PIN verification needs more. The engine debits a retry before decrypting or
+comparing pinHashEnc, and compares only after a `Flushed` or intentionally
+`Volatile` debit; otherwise it returns CTAP2_ERR_PROCESSING without a
+verdict or token. A failed debit leaves the budget as stored, so failing
+writes (a full disk, say) spend no retries and the PIN works again once
+writes do; an unconfirmed debit is published and stays spent. A match stages
+the restoration of retries until it is published: a failed restoration keeps
+the spent budget and mismatch history, and an unconfirmed one adopts the
+published retries but still fails without a token or PIN change. An
+observed mismatch stays spent and counts toward the three-mismatch block
+even if a following write fails. A restart clears that block, not the stored
+budget, and zero retries needs a reset. Unreadable PIN state counts as set,
+blocked and always-UV, and its placeholder is never written over the record.
 
-Where the store's filesystem does not support directory flushes (fsync of the
-state directory fails with EINVAL, EOPNOTSUPP/ENOTSUP or ENOSYS), every PIN
-state write would be `Unconfirmed`, so no PIN could be verified there. setPIN
-and every PIN check (changePIN, getPinToken,
-getPinUvAuthTokenUsingPinWithPermissions) refuse with CTAP2_ERR_PROCESSING
-before they write anything: a check spends no retry and compares nothing, as
-it compared nothing before, when it refused after publishing its debit. The
-engine flushes the directory to find out at its first PIN operation and keeps
-a definite answer until it restarts; a flush that fails otherwise, as with EIO,
-refuses nothing and is asked again next time. The daemon logs the condition at
-start-up and `pqkey status` reports it with its fix.
+Where the filesystem cannot flush directories (fsync of the state directory
+fails with EINVAL, EOPNOTSUPP/ENOTSUP or ENOSYS), no PIN write could be
+confirmed, so setPIN and every PIN check refuse with CTAP2_ERR_PROCESSING
+before writing anything, spending no retry. The engine finds out with a
+directory flush at its first PIN operation and keeps a definite answer until
+it restarts; another failure, as with EIO, refuses nothing and is tried
+again next time. The daemon logs the condition at start-up, and
+`pqkey status` reports it with its fix.
 
-Other record writes retain their atomic file replacement behavior. Most report
-a directory-flush error even though the renamed file remains visible;
-large-blob writes return success after rename and log that error. Successful
-flushes rely on filesystem and hardware guarantees. Unsupported directory
-flushes abort credential transaction preparation or produce `Unconfirmed`
-after publication. Authentication provides no trusted anti-rollback counter;
-whole-store snapshot restoration or removal of all format evidence cannot be
-distinguished reliably from older state. A missing or corrupt large-blob
-array is served as the initial array; its next committed write replaces it.
-Any other error reading it answers CTAP2_ERR_PROCESSING: a platform that took
-it for empty would write back its own entry alone, erasing every other.
+Other record writes keep atomic file replacement. Most report a
+directory-flush error although the renamed file stays visible; large-blob
+writes succeed after the rename and log it. Unsupported directory flushes
+abort credential transaction preparation, or give `Unconfirmed` after
+publication. Authentication gives no trusted anti-rollback counter: a
+restored whole-store snapshot, or removed format evidence, cannot be told
+reliably from older state. A missing or corrupt large-blob array is served as
+the initial array until a committed write replaces it; any other error
+reading it answers CTAP2_ERR_PROCESSING, since a platform that took it for
+empty would write back its own entry alone, erasing every other.
 [SECURITY.md](../SECURITY.md) describes the encryption-at-rest threat model.
 
 Discoverable credential IDs are `0x01` and 32 random bytes. Sealed IDs are
 107 bytes starting with `0x02`, carrying the algorithm, credProtect, 32-byte
-key and a seed for the hmac-secret CredRandom values. Their assertions use
-the global signature counter. Sealing and lookup accept the RP ID hash
-directly; CTAP2 hashes its RP ID before using them. Counter updates share
-one persistence path, which saves the count before signing.
-RSA and Brainpool non-discoverable credentials instead use
-`0x00` and 32 random bytes, like older stored non-discoverable credentials.
-These records contain no user ID or names, and keep random CredRandom values,
-credProtect and a counter of their own. They work only through an allowList,
-are excluded by an excludeList, consume a slot, and are erased by reset.
+key and a seed for the hmac-secret CredRandom values; their assertions use
+the global signature counter. Sealing and lookup take the RP ID hash, which
+CTAP2 computes first. Counter updates share one persistence path, which
+saves the count before signing. RSA and Brainpool non-discoverable
+credentials instead use `0x00` and 32 random bytes, like older stored
+non-discoverable credentials: their records hold no user ID or names, keep
+random CredRandom values, credProtect and a counter of their own, work only
+through an allowList, are excluded by an excludeList, take a slot, and are
+erased by reset.
 
-The `thirdPartyPayment` boolean is optional credential-record field 16. Older
-records default to false, and false is omitted on writes to preserve existing
-encodings. Enabled non-discoverable credentials use the same stored `0x00` IDs
-as RSA and Brainpool, clear user information and retain their own counters.
-Eligible ordinary credentials keep the existing 107-byte sealed format and
-sealing domains; sealed and U2F-created credentials report false when the
-extension is requested.
-
-MakeCredential accepts true/false, persists only explicit true and returns no
-payment extension output. GetAssertion requesting true signs the selected
-credential's boolean with other extension outputs. GetNextAssertion remembers
-the request and reads each selected record's flag. Absent/false requests omit
-that output. Credential enumeration always includes boolean field `0x0C`;
-older peers can omit it, represented by `None` in the management client.
-Updates and counter writes preserve metadata; atomic replacement takes the new
-registration's value. The flag changes no RP binding, discovery, protection,
-PIN/UV, presence or U2F eligibility rule. Payment semantics and UI belong to the
-client platform, not the authenticator.
+The `thirdPartyPayment` flag is optional credential-record field 16, false
+by default and omitted when false, which keeps existing encodings.
+Enabled non-discoverable credentials are stored with `0x00` IDs, as RSA and
+Brainpool ones are, with no user information and their own counters;
+eligible ordinary credentials keep the sealed format, and sealed and
+U2F-created ones report false. makeCredential stores only an explicit true
+and returns no payment output. getAssertion and getNextAssertion return each
+selected credential's flag, signed with the other extension outputs, only
+when the request asks for true. Credential enumeration always includes field
+`0x0C` (`None` in the management client for older peers that omit it).
+Updates and counter writes keep the flag, and atomic replacement takes the
+new registration's. It changes no RP binding, discovery, protection, PIN/UV,
+presence or U2F rule; payment semantics and UI belong to the client platform.
 
 ## User presence
 
@@ -764,37 +641,32 @@ to "Register a security key" for a non-discoverable credential.
 ## The `pqkey` command
 
 - `pin`, `passkeys` and `reset` talk to the running key over CTAP through its
-  hidraw node, as a security key's management app does. The key's own PIN
-  checks and approvals therefore apply to them too.
-- `reset` restarts the key first, because of the 10-second window.
-- `repair` works on the state directory itself, so it needs the key stopped:
-  it refuses while the daemon holds the state lock, takes the lock itself
-  before it asks, and never stops or starts the key, since the advice that
-  leads to it keeps a copy of the directory first.
-- `setup`, which `install.sh` runs, does three things:
-  - It installs the udev rules and loads uhid at boot, with sudo after it
-    lists what it changes.
-  - It installs and starts the systemd user service.
-  - It checks that the key's device opens and answers, and that a
-    notification server on the key's session bus says it can show buttons
-    and text, without showing a prompt; it completes required PIN setup, and
-    returns success only when every readiness check passes.
+  hidraw node, as a security key's management app does, so the key's own PIN
+  checks and approvals apply to them too. `reset` restarts the key first,
+  because of the 10-second window.
+- `repair` works on the state directory itself, so it needs the key stopped
+  and holds the state lock, but never stops or starts the key, since the
+  advice that leads to it keeps a copy of the directory first.
+- `setup`, which `install.sh` runs, installs the udev rules and loads uhid at
+  boot, with sudo after it lists what it changes, and installs and starts the
+  systemd user service. It checks that the key's device opens and answers,
+  and that a notification server on the key's session bus says it can show
+  buttons and text, without showing a prompt; it completes required PIN
+  setup, and returns success only when every readiness check passes.
 - `status` checks the service, device access, notifications, the state
   directory's filesystem and the credential store, and names a fix for each
   problem it finds. It checks notifications on the running key's own session
   bus, or the terminal's when no key runs, and shows no notification; it
   never connects to a key's bus over TCP.
 
-The daemon itself is `pqkey run`. It also takes hidden options that only
-test rigs use, such as approving every request without asking; they are
-documented in `crates/pqkey/src/cli/mod.rs`.
-
-While holding the state lock, it publishes non-secret run options and the
-running executable's device and inode in `authenticator.info`, then its
-ready pid in `authenticator.pid`. Commands use that information to preserve
-options when restarting and to detect an installed replacement binary, so
-they never read the daemon's `/proc` entries. Both runtime files are removed
-on exit; neither is trusted without the lock and a matching pid.
+The daemon itself is `pqkey run`. Its hidden options, which only test rigs
+use, such as approving every request without asking, are documented in
+`crates/pqkey/src/cli/mod.rs`. Holding the state lock, it publishes its
+non-secret run options and its executable's device and inode in
+`authenticator.info`, then its ready pid in `authenticator.pid`. Commands use
+them to keep options across restarts and to detect an installed replacement
+binary, so they never read the daemon's `/proc` entries. Both files are
+removed on exit; neither is trusted without the lock and a matching pid.
 
 ## Tests
 

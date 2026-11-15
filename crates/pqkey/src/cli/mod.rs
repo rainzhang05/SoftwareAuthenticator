@@ -92,8 +92,9 @@ enum Command {
     Start(DaemonArgs),
     /// Pull the key out: stop it
     Stop,
-    /// Show whether the key is plugged in, whether browsers can reach it, its
-    /// PIN and free passkey slots, and anything that needs fixing
+    /// Show whether the key is plugged in, its PIN and free passkey slots, and
+    /// check the service, device access, notifications, the state directory's
+    /// filesystem and the credential store, with a fix for each problem found
     Status,
     /// Set the key's PIN, or change it if one is set
     ///
