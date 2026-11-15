@@ -2301,9 +2301,10 @@ fn record_advice_followed(
     u64::from(store.get(b"used").unwrap().unwrap().sign_count)
 }
 
-/// What the third condition of the README's guarantee says of a clock that
-/// is behind during a repair: it does no harm while the damaged file still
-/// has the time a right clock gave it when the key last signed or later.
+/// What the third condition of the guarantee in the "Credential store"
+/// section of docs/architecture.md says of a clock that is behind during a
+/// repair: it does no harm while the damaged file still has the time a right
+/// clock gave it when the key last signed or later.
 /// This machine's clock plays one that has gone back since: everything
 /// before the repair is set in its future.  An earlier repair, with the
 /// clock right, wrote a count from it, on which the key counted.
@@ -2417,12 +2418,12 @@ fn a_behind_clock_does_no_harm_only_while_the_damaged_file_keeps_a_right_clocks_
     assert!(count < last, "{count} >= {last}");
 }
 
-/// What the second condition of the README's guarantee excludes: a time
-/// ahead of the real time that no clock of this computer left, read by a
-/// repair, which starts above it.  Two seconds after that repair ended, the
-/// key signs once, and another repair runs, under a right clock, every other
-/// condition holding: one count in two whole seconds.  The round-3
-/// verifier's V1a, at the store:
+/// What the second condition of the guarantee in the "Credential store"
+/// section of docs/architecture.md excludes: a time ahead of the real time
+/// that no clock of this computer left, read by a repair, which starts above
+/// it.  Two seconds after that repair ended, the key signs once, and another
+/// repair runs, under a right clock, every other condition holding: one count
+/// in two whole seconds.  The round-3 verifier's V1a, at the store:
 ///
 /// * A stray file dated ten days ahead is read again: the later repair
 ///   starts where the first did, so the next count repeats the one returned

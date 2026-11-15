@@ -93,7 +93,8 @@ Expiry is exact at the monotonic transport deadline and is checked before
 input arbitration and during paced transmission. It releases only the lease,
 including during a long response. Unlock retains ordinary ownership until its
 response is successfully written. Same-CID INIT preserves an unexpired lease;
-authenticatorReset also preserves it. Transport teardown discards it.
+authenticatorReset also preserves it. Transport teardown discards it. Clients
+should release their leases in cleanup handlers.
 
 CTAPHID_WINK (`0x08`) accepts and returns an empty payload. It sends a
 normal-urgency, transient desktop notification naming `pqkey-<pid>`, with no
@@ -340,8 +341,9 @@ rejected without transient fallback. Read-only grants do not authorize preview
 U2F, and create no cached presence or verification. RP IDs are ignored for pcmr;
 other defined permissions cannot be combined with it. Undefined bits are ignored.
 
-Persistent grants have no transient usage timer. Reissuance returns the same
-secret until PIN change, reset, or a published policy requiring forcePINChange.
+Persistent grants survive restarts and have no transient usage timer.
+Reissuance returns the same secret until PIN change, reset, or a published
+policy requiring forcePINChange.
 Those transitions invalidate both protocols, including complexity enablement
 for an existing PIN. Enumeration cursors bind family, mode, protocol and
 generation; their standard continuations carry no MAC. Authority changes,
@@ -471,7 +473,8 @@ changed since the plan it printed. A store with nothing to repair is left as
 it is.
 
 - If the manifest authenticates, repair drops the members whose records are
-  missing or fail authentication or decoding.
+  missing or fail authentication or decoding. It raises no counter: the
+  manifest names the copy the key signed with, which keeps its count.
 - A legacy store's records that fail are left out of the list it gets: it
   moves to the managed layout through the first commit's protocol, without a
   new record.
@@ -772,10 +775,15 @@ to "Register a security key" for a non-discoverable credential.
   - It installs the udev rules and loads uhid at boot, with sudo after it
     lists what it changes.
   - It installs and starts the systemd user service.
-  - It verifies client communication and presence, completes required PIN setup,
-    and returns success only when every readiness check passes.
-- `status` checks everything the key needs and names the fix for anything
-  missing.
+  - It checks that the key's device opens and answers, and that a
+    notification server on the key's session bus says it can show buttons
+    and text, without showing a prompt; it completes required PIN setup, and
+    returns success only when every readiness check passes.
+- `status` checks the service, device access, notifications, the state
+  directory's filesystem and the credential store, and names a fix for each
+  problem it finds. It checks notifications on the running key's own session
+  bus, or the terminal's when no key runs, and shows no notification; it
+  never connects to a key's bus over TCP.
 
 The daemon itself is `pqkey run`. It also takes hidden options that only
 test rigs use, such as approving every request without asking; they are

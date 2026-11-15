@@ -26,25 +26,15 @@ your presence waits for you to approve it in a desktop notification.
 - **U2F:** CTAP1 registration and authentication over USB HID, using ES256
   credentials that also work over CTAP2. U2F uses approval rather than a
   PIN, and its prompt cannot identify the site. Always-UV disables it.
-- **Device identification:** CTAPHID_WINK briefly names the software key in a
-  desktop notification with no approval buttons. It expires after two seconds
-  and does not authorize an operation. CTAPHID_LOCK supports channel leases
-  of up to ten seconds, renewed or released by their owner.
 - **Rust throughout:** pure-Rust cryptography, and `unsafe` code only where
-  pqkey calls into the operating system.
+  pqkey calls into the operating system and in the allocator that wipes freed
+  memory.
 
 > [!WARNING]
 > pqkey is a research project, not for production use. A software key is not a
 > hardware key: its private keys are files in your home directory, which
 > anything running as you, or as root, can use. See [SECURITY.md](SECURITY.md)
 > for the threat model.
-
-FIDO clients can identify a connection with WINK even when a notification
-server cannot show action buttons. If delivery fails or exceeds 500 ms, WINK
-returns a transport error; the key remains usable. Identification also works
-with PIN complexity and always-UV enabled. LOCK is volatile: expiry or daemon
-shutdown releases it, while channel resynchronization and authenticator reset
-preserve an unexpired lease. Clients should release leases in cleanup handlers.
 
 ## Install
 
@@ -77,78 +67,53 @@ and builds pqkey, and again when it ends;
 [SECURITY.md](SECURITY.md#what-it-does-not-protect-against) says what the
 code that builds pqkey can still do.
 
-A successful installation means the installed service is running, its HID
-client can exchange messages, the configured presence provider is usable,
-and its PIN requirements are complete. `pqkey` works in the same terminal,
-with no reboot or new login. Missing requirements produce a nonzero exit
-status and instructions; the installer log is `~/.cache/pqkey/install.log`
-(or `$XDG_CACHE_HOME/pqkey/install.log`).
+The installer says "pqkey is ready" only once the key runs as the installed
+service, its device opens and answers, a notification server on its session
+bus says it can show buttons and text (setup shows no prompt), and its PIN is
+set and usable. `pqkey` then works in the same terminal, with no reboot or new
+login. Otherwise the installer says what to fix before you rerun it; its log
+is `~/.cache/pqkey/install.log` (or `$XDG_CACHE_HOME/pqkey/install.log`).
 
-`./install.sh --yes` approves installation; you still choose and confirm the
-PIN. Without terminal input, a fresh key remains installed but setup fails
-until you rerun `./install.sh` in a terminal and choose its PIN, except where
-sudo needs your password and has no terminal to ask on: then the installer
-stops before installing pqkey. A configured key can be updated without PIN
-input unless its policy requires a PIN change.
-If your terminal's PATH excludes `/usr/local/bin`, run
-`export PATH="/usr/local/bin:$PATH"` in that terminal and rerun the installer.
-
-Before upgrading, stop the key and back up its complete state directory,
-including the keys. Then run `git pull` and `./install.sh` again in the clone.
-If the clone follows `main`, switch it to `stable` once with
-`git fetch origin && git switch stable`. Reruns repair
-partial setup and preserve credentials, valid PINs and authenticator policy.
-Updates replace the executable atomically. If setup fails after replacement,
-the previous executable remains at `/usr/local/bin/pqkey.previous`; the
-installer prints retry and restore commands. The recovery copy is removed
-after successful setup.
-
-Registering or replacing a discoverable credential upgrades older stores to
-the [authenticated membership format](docs/architecture.md). Restore only the
-executable when the previous version understands that format. A version
-predating this format requires its matching complete state backup as well;
-credentials created after that backup will be absent.
+`./install.sh --yes` skips the question, not the PIN: without a terminal, the
+installer stops before installing pqkey if sudo needs your password, and
+otherwise at a new key's PIN. If your terminal's PATH excludes
+`/usr/local/bin`, run `export PATH="/usr/local/bin:$PATH"` in that terminal
+and rerun the installer.
 
 > [!NOTE]
 > Anyone who can open `/dev/uhid` can create any HID device, keyboards
 > included. The rules give it to the `plugdev` group, and the installer adds
 > you to that group if you are not in it yet (on Ubuntu you already are).
-> An ACL grants this user immediate access while the current session and user
-> service manager still have their old groups. The key's hidraw device is
-> open to the user of the session that is active on the seat (`uaccess`).
-> When logind's record of the seat names another user's session, or a login
-> screen, the key removes its device, and it creates a new one once the
-> record names your session, or none, again. It keeps no device while it
-> cannot tell from the record who is active. So that it cannot miss a switch
-> away and back, it also replaces its device whenever logind saves the
-> record, even when you stay active, as when another session on the seat
-> starts or ends. With systemd 257 and older, or elogind, the other user can
-> still reach the key in the moment they switch in;
-> [SECURITY.md](SECURITY.md#other-users-sessions) says what that allows,
-> what else remains and how to close it.
+> The key removes its own device while another user's session or a login
+> screen is active on the seat, but with systemd 257 and older, or elogind,
+> that user can still reach it as they switch in
+> ([SECURITY.md](SECURITY.md#other-users-sessions)).
+
+## Update
+
+Stop the key with `pqkey stop`, back up its whole state directory, `keys/`
+included, and run `git pull && ./install.sh` in the clone; switch a clone of
+`main` to `stable` first with `git fetch origin && git switch stable`.
+Updates keep passkeys, the PIN and its policy, and ask for no PIN unless the
+policy requires a new one. If setup then fails, the previous executable stays
+at `/usr/local/bin/pqkey.previous`, and the installer says how to retry or
+restore it. Restore it alone only if it reads the store's
+[current format](docs/architecture.md#credential-store); otherwise restore
+your state backup with it, losing the credentials created since.
 
 ## Usage
 
 Register pqkey on any site that supports passkeys or security keys, and approve
 the notification that appears.
 
-Dunst exposes the Approve and Deny actions in its context menu: run
-`dunstctl context`, or use your configured context-menu shortcut, then select
-the action. Denial and an unanswered request's default 30-second timeout both
-reject the request. Cancelling the client or restarting the service withdraws
-its pending prompt.
-
-Fresh installation and a baseline-to-current update passed the
-[native installed desktop acceptance run](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/38828959894)
-on Ubuntu 24.04 x86_64 on 2026-10-15. All 49 checks passed, including default
-Dunst approval/denial, timeouts, cancellation, restart recovery and retained
-passkeys, PIN and policy. The [guide](tests/desktop/README.md) records the exact
-source and environment. Actions were automated in real Dunst/dmenu; this does
-not establish physical human presence.
+Dunst shows Approve and Deny in its context menu: run `dunstctl context`, or
+use your context-menu shortcut. Denying, or not answering within 30 seconds,
+rejects the request; cancelling it in the client, or restarting the key,
+withdraws the prompt.
 
 | Command | What it does |
 |---|---|
-| `pqkey` | Shows the key's status, its PIN, its free passkey slots and anything to fix |
+| `pqkey` | Shows the key's status, PIN and free passkey slots, and each problem it finds with its fix |
 | `pqkey pin` | Sets or changes the PIN |
 | `pqkey config` | Shows always-UV and PIN policy settings |
 | `pqkey config always-uv on\|off` | Requires or stops requiring the PIN |
@@ -161,34 +126,20 @@ not establish physical human presence.
 | `pqkey reset` | Erases credentials, large blobs and PIN; resets settings |
 | `pqkey stop`, `pqkey start` | Unplugs and plugs in the key |
 
-Passkey listing uses CTAP 2.3 persistent read-only credential management when
-advertised, with ordinary credential-management authorization for older peers.
-The native client keeps its token in memory for that invocation; it adds no disk
-cache. Persistent grants survive daemon restarts and transient-token expiry.
-Changing the PIN, resetting the authenticator, or publishing a policy that
-requires a PIN change revokes them. Deletion obtains writable authorization.
-
 Configuration changes ask for the current PIN when one is set. Always-UV
 requires the PIN for registrations and sign-ins that ask for user presence.
 Without a PIN, turn always-UV off or set one with `pqkey pin` before using
 the key in a browser.
 
-The minimum PIN length counts Unicode code points, from 4 to 63, with a
-separate limit of 63 UTF-8 bytes. Raising it asks for confirmation, unless
-`--yes` is given: only `pqkey reset`, which erases every passkey and large
-blob, can lower it again. Repeated `--rp` options replace the RP IDs allowed
-to receive the `minPinLength` extension; omitting them keeps the list. A key
-can remember 8 RP IDs, each up to 253 bytes. The complete configuration request
-must also fit the key's advertised 1,768-byte message limit, including CBOR
-and PIN authentication. If it is too large, pqkey reports its encoded size
-and limit before sending the command; use fewer or shorter RP IDs. The list
-is applied in one operation. If a PIN change becomes required,
-run `pqkey pin` and choose a different PIN meeting the current minimum.
-
-Enable [PIN complexity](docs/pin-complexity-policy.md) with
-`pqkey config pin-complexity`. New PINs must then contain an ASCII letter and
-digit in addition to meeting the length requirements. Only reset disables it;
-enabling with an existing PIN requires one replacement.
+The minimum PIN length counts Unicode code points, from 4 to 63; a PIN also
+has at most 63 bytes in UTF-8. Raising the minimum asks for confirmation,
+unless `--yes` is given: only `pqkey reset`, which erases every passkey and
+large blob, can lower it again. Repeated `--rp` options replace the list of
+up to 8 RP IDs allowed to receive the `minPinLength` extension; omitting
+them keeps the list. [PIN complexity](docs/pin-complexity-policy.md) requires
+an ASCII letter and digit in every new PIN, and only reset disables it. When
+a PIN change becomes required, run `pqkey pin` and choose a different PIN
+that meets the current policy.
 
 `pqkey passkeys` lists only passkeys, which are discoverable credentials. A
 site that registers the key as a second factor keeps the credential's ID and
@@ -199,52 +150,23 @@ Like a hardware key, pqkey accepts a reset only within 10 seconds of being
 plugged in, so `pqkey reset` restarts it first. The key's state lives in
 `~/.local/share/pqkey`.
 
-FIDO clients can store a serialized large-blob array of up to 16,384 bytes,
-transferred in fragments of at most 1,704 bytes. Writes require the PIN's
-large-blob write permission when a PIN is set or always-UV is on. Reset
-restores the empty array; deleting a credential leaves blob collection to
-the client. Discoverable credentials registered with `largeBlobKey` keep a
-secret 32-byte key for platforms to encrypt and decrypt their blobs.
-
-Credentials explicitly registered with `thirdPartyPayment: true` retain that
-metadata for both discoverable and non-discoverable credentials. Assertions
-requesting it return the stored boolean inside signed authenticator data;
-creation returns no payment extension output. `pqkey passkeys` marks enabled
-passkeys in its PAYMENT column. Enabled non-discoverable credentials consume
-storage but still require their RP's allow list and remain outside passkey
-management. Ordinary eligible credentials continue to use sealed IDs.
-
-The flag does not grant cross-RP access or implement a payment prompt. The client
-platform determines payment eligibility and UI, including Secure Payment
-Confirmation (SPC). Authenticator regressions and libfido2 signed-byte checks
-are separate from browser/SPC verification; see the
-[verification notes](docs/development-notes.md#third-party-payment-verification).
-
-Brainpool ESB256 (-265) uses brainpoolP256r1/SHA-256 and ESB384 (-267)
-uses brainpoolP384r1/SHA-384, as [RFC 9864 §2.1](https://www.rfc-editor.org/rfc/rfc9864.html#section-2.1)
-and the [IANA COSE registries](https://www.iana.org/assignments/cose/) specify.
-Public keys carry both coordinates (crv 256/258; 32/48 bytes), and signatures
-are ASN.1 DER ECDSA. Both credential modalities use stored 33-byte IDs: even
-non-discoverable Brainpool credentials consume one storage slot and reduce
-remaining capacity. Both modalities keep their own counters. Non-discoverable
-records keep no user information; credential enumeration lists discoverable
-credentials only.
-
-Independent Python cryptography/OpenSSL fixtures verify Brainpool derivation,
-attestation and assertion signatures. Raw Python FIDO HID tests are provided;
-actual HID execution requires Linux with `/dev/uhid`. Chromium 158.0.8107.0
-verified both Brainpool algorithms; Firefox 158.0 reported client limits.
-libfido2 1.14.0 retains their advertised algorithm IDs but cannot create, verify
-or decode these credential keys for enumeration. These
-limits do not change authenticator support or the client compatibility table.
+The key also stores [large blobs](docs/architecture.md#what-the-key-supports)
+for clients, keeps [payment-enabled credentials](docs/architecture.md#credential-store),
+marked in the PAYMENT column of `pqkey passkeys` (the browser handles
+payment), and creates [Brainpool credentials](docs/architecture.md#brainpool-credential-keys),
+which take a storage slot even when they are not passkeys. A client you give
+the PIN can get a
+[persistent read-only permission](docs/architecture.md#persistent-read-only-management)
+that lists your passkeys until the PIN changes or the key is reset.
 
 ## Clients
 
-The browser rows below were verified over real Linux UHID on 2026-10-15 in the
-[native acceptance run](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/38818030676).
-The [acceptance guide](tests/browser/ACCEPTANCE.md) records the exact versions,
-source and preset outcomes. Earlier manual observations remain in the
-[development notes](docs/development-notes.md#clients).
+The browser rows were verified over real Linux UHID on Ubuntu 24.04 x86_64 on
+2026-10-15, in the
+[native acceptance run](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/38818030676),
+with presence approved automatically; the end-to-end tests run python-fido2
+and libfido2 on x86_64 and arm64. [Clients](docs/development-notes.md#clients)
+in the development notes gives the versions, outcomes and limits.
 
 | Client | ES256 | ML-DSA | Notes |
 |---|:---:|:---:|---|
@@ -253,128 +175,47 @@ source and preset outcomes. Earlier manual observations remain in the
 | python-fido2 2.2.1 | ✓ | ✓ | Used by the end-to-end tests |
 | libfido2 1.14.0 | ✓ | | PIN, credential management, U2F and `hmac-secret` verified in native HID CI |
 
-Browser acceptance uses Ubuntu 24.04 x86_64 with automated PIN/account prompts
-and explicit auto-approve presence. The Python/libfido2 HID suites run on x86_64
-and aarch64. Browser signatures are independently verified, including algorithms
-whose public keys must be read from the attestation object. See
-[Clients](docs/development-notes.md#clients) for outcomes and limits.
-
-Credential management also supports the backwards-compatible `0x41` command
-used by libfido2 1.14.0, including its user-update operation. It accepts legacy
-ClientPIN tokens and modern CM tokens with their RP restrictions. Older native
-clients can decode only their supported classic algorithms; enumeration still
-returns every supported credential. The native pqkey client continues to use
-standard `0x0A`. See the
-[preview verification notes](docs/development-notes.md#credential-management-preview-verification)
-for regression coverage and execution limits.
-
 ## Troubleshooting
 
-`pqkey status` names anything that is missing and how to fix it, and
-`scripts/diagnose.sh` shows the whole state of the key on your computer. For
-browser behaviour, see
+`pqkey status` checks the service, device access, notifications, the state
+directory's filesystem and the credential store, and names a fix for each
+problem it finds. `scripts/diagnose.sh` shows the whole state of the key on
+your computer. For browser behaviour, see
 [Troubleshooting](docs/development-notes.md#troubleshooting).
 
-For approvals, `pqkey status` checks the running key's D-Bus session bus for a
-notification server that shows buttons and text, as the key does before each
-prompt. It checks your terminal's session bus instead when no key runs. It
-cannot check a key's bus over TCP, or one an older pqkey did not record, and
-says so. It shows no notification, so it cannot see a
-server that fails to show a prompt or to return your answer, and it sees a bus
-or server that fails now and then only while it fails. The key logs why it
-denied each request it could not ask about: `journalctl --user -u pqkey`, or
-`authenticator.log` in the state directory for a key that `pqkey start` ran
-without the service.
+`pqkey status` shows no notification, so it cannot see a notification server
+that fails to show a prompt. The key logs why it denied each request it could
+not ask about: `journalctl --user -u pqkey`, or `authenticator.log` in the
+state directory for a key that `pqkey start` ran without the service.
 
 If the PIN looks blocked, or the key says it could not read or write its
 state, restart it with `pqkey stop && pqkey start` and run `pqkey status`
-again before you reset it: a restart clears a block that came from a PIN state
-the key could not read, while `pqkey reset` erases every passkey.
-`journalctl --user -u pqkey` says what the key could not read or write, and
-`pqkey reset` asks again if its own restart unblocks the PIN.
+again before you reset it: a restart reads the PIN state again, which clears
+a block that came from a disk or permission error, while `pqkey reset` erases
+every passkey. `journalctl --user -u pqkey` says what the key could not read
+or write, and `pqkey reset` asks again if its own restart unblocks the PIN.
 
-**Damaged credential store.** `pqkey status` and `journalctl --user -u pqkey`
-name damaged files of the credential store in the key's state directory,
-`~/.local/share/pqkey` by default, and what the key cannot do because of
-them. To repair the store:
+**Damaged credential store.** `pqkey status` and the key's journal name the
+damaged files and what the key cannot do because of them. To repair the store:
 
 1. Stop the key with `pqkey stop`, and keep a copy of the whole state
    directory, `keys/` included: `cp -a ~/.local/share/pqkey ~/pqkey-copy`.
-2. Run `pqkey repair`. It lists the damage and what it will do, and asks
-   before it changes the store. Each file of the store that it replaces or
-   removes, damaged or not, is kept in a new directory in `damaged/` in the
-   state directory.
-3. Start the key again with `pqkey start`.
+2. Check that the computer's clock is right, since repair restarts a damaged
+   signature counter from it. Run `pqkey repair`: it shows what it will do
+   and asks first, or, if it stops before that, says what to do.
+3. Start the key again with `pqkey start`. Once it works, delete the copy:
+   it holds the keys, so it would keep your passkeys readable even after a
+   later reset.
 
-If the key's list of its credentials, `credential-set/active`, is intact,
-repair takes the credentials whose records are missing or damaged out of the
-list and keeps the rest. If the list itself is missing, damaged or
-unreadable, repair builds a new one from the records in `credential-set/`
-that are intact. A passkey that was deleted or replaced, or whose
-registration failed, can come back that way if its record was left behind,
-alone or beside another passkey of its account; the plan names each account
-that will have more than one passkey. If records of a store in the older
-format, in `credentials/`, are damaged, repair upgrades the store to the
-authenticated membership format without them, as registering a passkey
-would. A damaged `credential-format` is written again. A lost directory
-takes the credentials stored in it with it, and the plan says which
-directory repair creates again, without them. Repair leaves the PIN and the
-keys in `keys/` as they are, so unlike `pqkey reset` it does not end the
-sign-ins of sites that registered the key as a security key, unless the key
-stored their credentials: it stores some, such as those with an RSA or
-Brainpool key or with payment enabled, and older ones.
-
-Sites that registered the key as a security key see a count of its sign-ins
-that grows with each one, up to the largest count, 4294967295. The key keeps
-that count in `signature-counter` for all of them, unless it stored their
-credentials, which keep their own. If `signature-counter` is damaged, the key
-cannot sign in to those sites, and the count is lost. Repair writes a new count
-above the number of seconds since 1970 by the computer's clock, above the time
-on the damaged file, in case the clock has gone back since that file was
-written, and above every count it reads, up to the largest count. It leaves
-out a time at or past that count, 06:28:15 UTC on 7 February 2106, whether the
-clock's or a file's. When repair builds a new list of the credentials and
-keeps one copy of a stored credential's record while another copy is damaged,
-it raises that credential's count the same way. An intact list names the copy
-the key signed with, which keeps its count, so repair raises nothing there.
-
-For a repair before 06:28:15 UTC on 7 February 2106, each count it writes or
-raises this way is above every count the key returned on that counter, so the
-count a site sees jumps forward and does not go back, if all of these hold:
-
-- at each sign-in and each repair, the key had signed fewer times than whole
-  seconds had passed since 1970, and since any earlier repair ended;
-- the clock never ran ahead, and every time on the state directory and its
-  files came from this computer's clock, not from a hand edit, a copy that
-  kept its times (`cp -a`, `tar`, `rsync -a`) or a fault that damaged the
-  file;
-- the clock is right during the repair, or the damaged file still has the
-  time a right clock gave it when the key last signed or later: nothing has
-  changed that time since.
-
-The key never uses what repair moved into `damaged/`, and nothing deletes it.
-The records in it stay readable with the key in `keys/`, as the store's own
-are, until `pqkey reset` replaces that key. You may delete `damaged/` once the
-key works again.
-
-Delete the copy once the key works again: it holds the keys, so it would keep
-your passkeys readable even after a later reset. If `pqkey repair` stops
-before it lists the damage, unable to read a file or to replace a directory
-where `signature-counter` should be, it names it and says what to do: make the
-file readable or, for a credential's record that cannot be read at all, or
-that directory, check that the computer's clock is right, then move it out of
-the state directory, create an empty file of the same name in its place, for
-example with `touch`, and run `pqkey repair` again. A clock that is behind
-then can let the count go back. Repair then treats the empty file as a damaged
-record or counter, and the plan shows what follows. Apart from that, do not
-edit, delete or replace `credential-format`, `signature-counter` or the files
-in `credential-set/` or `credentials/` by hand: an older
-`credential-set/active` hides the passkeys registered since, the next change
-to that list can delete the record files it does not name, and a deleted
-`signature-counter` counts again from 0. If `pqkey status` says the store
-cannot be checked because a key file in `keys/` is missing, restore that file
-from a copy of the state directory made since the last reset. `pqkey reset`
-erases every passkey, so use it only as a last resort.
+Repair keeps the PIN, the keys and every passkey whose record is intact
+([its rules](docs/architecture.md#credential-store)), and moves what it
+replaces or removes into `damaged/` in the state directory. The key never
+uses that; its records stay readable with the keys in `keys/` until a reset,
+and you may delete it once the key works. Apart from what repair asks, never
+edit, delete or replace the store's files by hand: an older
+`credential-set/active` hides the passkeys registered since, and the next
+change deletes their records; a deleted `signature-counter` counts again
+from 0. `pqkey reset` erases every passkey, so use it only as a last resort.
 
 ## Uninstall
 
@@ -393,8 +234,8 @@ in `~/.local/share/pqkey` until you delete that directory.
 - [Architecture](docs/architecture.md): how pqkey works, and what it supports
   of CTAP 2.3
 - [Development notes](docs/development-notes.md): the scripts that run every
-  check and test (`scripts/check.sh`, `scripts/e2e.sh` and more), and
-  troubleshooting
+  check and test (`scripts/check.sh`, `scripts/e2e.sh` and more), the
+  acceptance runs, and troubleshooting
 - [Browser test kit](tests/browser/README.md): a local relying party that
   checks everything the key returns
 
