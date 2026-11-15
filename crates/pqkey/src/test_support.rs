@@ -44,6 +44,28 @@ impl Drop for TempDir {
     }
 }
 
+/// Asserts that `text` names each of `words`, in order. A test of a cause or
+/// a fix checks what it names, the cause's words and the fix's commands,
+/// rather than its whole wording, which is not the contract.
+#[track_caller]
+pub fn assert_names(text: &str, words: &[&str]) {
+    let mut rest = text;
+    for word in words {
+        let Some(at) = rest.find(word) else {
+            panic!("{word:?} is missing or out of order in: {text}");
+        };
+        rest = &rest[at + word.len()..];
+    }
+}
+
+/// Asserts that `problem`'s cause names `cause` and its fix names `fix`,
+/// each in order ([`assert_names`]).
+#[track_caller]
+pub fn assert_problem(problem: &crate::cli::checks::Problem, cause: &[&str], fix: &[&str]) {
+    assert_names(&problem.what, cause);
+    assert_names(&problem.fix, fix);
+}
+
 /// Captures everything logged anywhere in the unit test binary.
 ///
 /// The logger is process-wide and tests run in parallel, so callers look for

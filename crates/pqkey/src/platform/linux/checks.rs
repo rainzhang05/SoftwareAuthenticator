@@ -329,10 +329,14 @@ const DENIED: &str = "so every registration, sign-in and reset is denied";
 const IMPORT_BUS_FIX: &str = "in a terminal of your desktop session, run `systemctl --user \
     import-environment DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey start`";
 
+/// The notification servers a fix suggests.
+pub(crate) const SERVERS: &str = "such as GNOME, KDE Plasma or dunst";
+
 /// Whether the desktop can ask for approval: a notification server with
 /// action buttons and a body, without which every request is denied. `key_bus`
 /// is the address of the running key's session bus, when that is the bus
-/// `server` answered on; without it, it is this process's own.
+/// `server` answered on; without it, it is this process's own. The key logs
+/// the same with each request it denies (`notification::failure_message`).
 pub fn notification_problem(
     server: &Result<ServerInfo, ConnectError>,
     key_bus: Option<&str>,
@@ -356,8 +360,7 @@ pub fn notification_problem(
                 ),
                 None => format!("no desktop notification server is running, {DENIED}"),
             },
-            "use a desktop with notifications that have buttons, such as GNOME, KDE Plasma or \
-             dunst",
+            format!("use a desktop with notifications that have buttons, {SERVERS}"),
         )),
         // The bus did not answer in time, or refused to pass the server's
         // answers on. The key's log says no more than this, and its denial
@@ -368,13 +371,13 @@ pub fn notification_problem(
              computer",
         )),
         Ok(info) => {
-            let missing: Vec<&str> = ["actions", "body"]
-                .into_iter()
-                .filter(|capability| match *capability {
-                    "actions" => !info.supports_actions,
-                    _ => !info.supports_body,
-                })
-                .collect();
+            let missing: Vec<&str> = [
+                (!info.supports_actions).then_some("Approve and Deny buttons"),
+                (!info.supports_body).then_some("notification text"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
             (!missing.is_empty()).then(|| {
                 Problem::new(
                     format!(
@@ -382,7 +385,7 @@ pub fn notification_problem(
                         info.name.as_deref().unwrap_or("unnamed"),
                         missing.join(" or ")
                     ),
-                    "use a notification server with buttons, such as GNOME, KDE Plasma or dunst",
+                    format!("use a notification server that shows buttons and text, {SERVERS}"),
                 )
             })
         }
@@ -553,7 +556,7 @@ impl System {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::TempDir;
+    use crate::test_support::{TempDir, assert_names, assert_problem};
 
     fn write(system: &System, path: &str, text: &str) {
         let path = system.path(path);
@@ -771,6 +774,8 @@ mod tests {
         );
     }
 
+    /// A server that cannot show buttons, or text, is named with what it
+    /// lacks.
     #[test]
     fn notifications_need_buttons_and_a_body() {
         let server = |capabilities: &[&str]| {
@@ -785,16 +790,17 @@ mod tests {
             notification_problem(&server(&["actions", "body", "persistence"]), None),
             None
         );
-        let problem = notification_problem(&server(&["body"]), None).unwrap();
-        assert!(
-            problem.what.contains("(example) cannot show actions"),
-            "{problem:?}"
-        );
-        let problem = notification_problem(&server(&[]), None).unwrap();
-        assert!(
-            problem.what.contains("cannot show actions or body"),
-            "{problem:?}"
-        );
+        for (capabilities, cause) in [
+            (&["body"][..], "cannot show Approve and Deny buttons,"),
+            (
+                &[],
+                "cannot show Approve and Deny buttons or notification text",
+            ),
+            (&["actions"], "cannot show notification text"),
+        ] {
+            let problem = notification_problem(&server(capabilities), None).unwrap();
+            assert_problem(&problem, &["(example)", cause, DENIED], &[SERVERS]);
+        }
         let none = notification_problem(&Err(ConnectError::NoServer("x".into())), None).unwrap();
         assert!(
             none.what
@@ -1050,12 +1056,14 @@ mod tests {
             })
         })
         .unwrap();
-        assert_eq!(
-            capabilities.what,
-            format!(
-                "the notification server (example) on the key's session bus ({KEY}) cannot show \
-                 actions, {denied}"
-            )
+        assert_names(
+            &capabilities.what,
+            &[
+                "(example) on the key's session bus",
+                KEY,
+                "cannot show Approve and Deny buttons",
+                denied,
+            ],
         );
     }
 

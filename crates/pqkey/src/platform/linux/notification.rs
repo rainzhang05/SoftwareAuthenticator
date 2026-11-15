@@ -1,5 +1,6 @@
 //! Linux notification details and diagnostics.
 
+use super::checks::{SERVERS, notification_problem};
 use crate::presence::notification::{ConnectError, Unavailable};
 use std::time::Duration;
 
@@ -27,58 +28,31 @@ pub(crate) fn refresh_interval(name: Option<&str>) -> Option<Duration> {
 }
 
 /// The error logged when `unavailable` denied the request `summary` names
-/// without asking: why, and how to make the prompt work. Never how to do
-/// without it: `--presence auto-approve` lets anything running as the user
-/// use the passkeys unnoticed.
+/// without asking: why, and how to make the prompt work, as `pqkey status`
+/// says it while the problem lasts. Never how to do without it: `--presence
+/// auto-approve` lets anything running as the user use the passkeys unnoticed.
 pub(crate) fn failure_message(unavailable: &Unavailable, summary: &str) -> String {
-    // `pqkey status` connects as the daemon does, to the session bus the
-    // daemon published (cli/daemon_info.rs), but never to one over TCP: that
-    // is the problem for the service, and for a daemon started by hand status
-    // checks the bus of its own environment instead
-    // (`checks::key_notification_problem`). It sees what is wrong only while
-    // it runs.
-    const STATUS: &str = "`pqkey status` checks this on the daemon's session bus while the \
-        daemon runs, and names the fix while the problem lasts. For a daemon started by hand on a \
-        TCP bus, it checks the session bus of the terminal it runs in instead";
     // The summary, unlike the prompt, holds no text from the request.
-    let denied = format!("denied without asking ({}): ", summary);
+    let denied = format!("denied without asking ({summary})");
+    // This process is the key: its bus is the one status checks and names
+    // (cli/daemon_info.rs).
+    let bus =
+        super::dbus::session_bus_address(std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref());
     match unavailable {
-        // The service, too, may lack a bus: it has the service manager's
-        // environment, which the import changes for the restarted key.
-        Unavailable::Connect(ConnectError::NoSession(err)) => format!(
-            "{denied}cannot ask for user presence because the daemon cannot connect to a D-Bus \
-                 session bus ({err}). In a terminal of your desktop session, run `systemctl --user \
-                 import-environment DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey start`. \
-                 {STATUS}"
-        ),
-        Unavailable::Connect(ConnectError::NoServer(err)) => format!(
-            "{denied}cannot ask for user presence because no desktop notification server \
-                 answers on the daemon's session bus ({err}). Log in to a desktop that provides \
-                 one, or run a notification daemon that supports action buttons. {STATUS}"
-        ),
-        Unavailable::Connect(ConnectError::Failed(err)) => format!(
-            "{denied}cannot ask for user presence because the notification server could not \
-                 be reached ({err}). Try again, as each request connects anew. {STATUS}"
-        ),
-        Unavailable::NoActions => format!(
-            "{denied}cannot ask for user presence because the desktop notification server \
-                 cannot show Approve and Deny buttons (it lacks the \"actions\" capability). Use a \
-                 notification server that supports actions, such as GNOME Shell, KDE Plasma or \
-                 dunst. {STATUS}"
-        ),
-        Unavailable::NoBody => format!(
-            "{denied}cannot ask for user presence because the desktop notification server \
-                 shows no notification text (it lacks the \"body\" capability), so the prompt \
-                 could not say what it asks to approve. Use a notification server that shows \
-                 bodies, such as GNOME Shell, KDE Plasma or dunst. {STATUS}"
-        ),
+        Unavailable::CannotAsk(server) => match notification_problem(server, Some(&bus)) {
+            Some(problem) => format!(
+                "{denied}: {}. Fix: {}. Then run `pqkey status` to check",
+                problem.what, problem.fix
+            ),
+            // The key does not deny for a server that can ask.
+            None => denied,
+        },
         // Showing the prompt or waiting for its answer failed, which
         // `pqkey status` never tries.
         Unavailable::Failed(err) => format!(
-            "{denied}the desktop notification server failed ({err}). Try again; if every \
-                 request fails like this, restart the notification server or use another one, \
-                 such as GNOME Shell, KDE Plasma or dunst. `pqkey status` does not test this, as \
-                 it shows no notification"
+            "{denied}: the notification server failed ({err}). Fix: try again; if every request \
+             fails like this, restart the notification server or use another one, {SERVERS}. \
+             `pqkey status` does not test this, as it shows no notification"
         ),
     }
 }
@@ -94,66 +68,51 @@ pub(crate) fn connect_error_message(error: &ConnectError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presence::notification::ServerInfo;
+    use crate::test_support::assert_names;
 
     /// Every way the daemon can fail to ask, with two things its message must
-    /// say: the cause, with the error, and its own remedy.
+    /// name, in order: the cause, by its error, and the fix.
     fn denials() -> [(Unavailable, [&'static str; 2]); 6] {
         // A new way to fail stops this from compiling until it is listed.
         let _: fn(&Unavailable) = |unavailable| match unavailable {
-            Unavailable::Connect(
-                ConnectError::NoSession(_) | ConnectError::NoServer(_) | ConnectError::Failed(_),
+            Unavailable::CannotAsk(
+                Err(
+                    ConnectError::NoSession(_)
+                    | ConnectError::NoServer(_)
+                    | ConnectError::Failed(_),
+                )
+                | Ok(_),
             )
-            | Unavailable::NoActions
-            | Unavailable::NoBody
             | Unavailable::Failed(_) => {}
+        };
+        let connect = |err| Unavailable::CannotAsk(Err(err));
+        let server = |actions, body| {
+            Unavailable::CannotAsk(Ok(ServerInfo {
+                supports_actions: actions,
+                supports_body: body,
+                name: Some("example".into()),
+                ..ServerInfo::default()
+            }))
         };
         [
             (
-                Unavailable::Connect(ConnectError::NoSession("no address".into())),
-                [
-                    "the daemon cannot connect to a D-Bus session bus (no address)",
-                    "In a terminal of your desktop session, run `systemctl --user \
-                     import-environment DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey \
-                     start`. ",
-                ],
+                connect(ConnectError::NoSession("no address".into())),
+                ["(no address)", "`systemctl --user import-environment"],
             ),
             (
-                Unavailable::Connect(ConnectError::NoServer("ServiceUnknown".into())),
-                [
-                    "no desktop notification server answers on the daemon's session bus \
-                     (ServiceUnknown)",
-                    "Log in to a desktop that provides one, or run a notification daemon that \
-                     supports action buttons",
-                ],
+                connect(ConnectError::NoServer("ServiceUnknown".into())),
+                ["ServiceUnknown", SERVERS],
             ),
             (
-                Unavailable::Connect(ConnectError::Failed("timed out".into())),
-                [
-                    "the notification server could not be reached (timed out)",
-                    "Try again, as each request connects anew",
-                ],
+                connect(ConnectError::Failed("timed out".into())),
+                ["(timed out)", "try again"],
             ),
-            (
-                Unavailable::NoActions,
-                [
-                    "cannot show Approve and Deny buttons",
-                    "Use a notification server that supports actions",
-                ],
-            ),
-            (
-                Unavailable::NoBody,
-                [
-                    "shows no notification text",
-                    "Use a notification server that shows bodies",
-                ],
-            ),
+            (server(false, true), ["Approve and Deny buttons", SERVERS]),
+            (server(true, false), ["notification text", SERVERS]),
             (
                 Unavailable::Failed("Notify failed: NoReply".into()),
-                [
-                    "the desktop notification server failed (Notify failed: NoReply)",
-                    "Try again; if every request fails like this, restart the notification \
-                     server or use another one",
-                ],
+                ["(Notify failed: NoReply)", SERVERS],
             ),
         ]
     }
@@ -176,39 +135,30 @@ mod tests {
         }
     }
 
-    /// Each denial keeps its cause and remedy, and claims no more for `pqkey
-    /// status` than it does: while the daemon runs, status checks the
-    /// daemon's session bus, or its own for a daemon started by hand on a TCP
-    /// bus, and it never shows a notification.
+    /// Each denial gives the cause and fix that `pqkey status` gives on the
+    /// key's bus, and sends the user to it, unless status cannot see the
+    /// problem: status never shows a notification.
     #[test]
-    fn denials_keep_their_remedy_and_say_what_pqkey_status_checks() {
-        let status = ". `pqkey status` checks this on the daemon's session bus while the daemon \
-                      runs, and names the fix while the problem lasts. For a daemon started by \
-                      hand on a TCP bus, it checks the session bus of the terminal it runs in \
-                      instead";
-        for (unavailable, said) in denials() {
+    fn denials_give_the_cause_and_fix_of_pqkey_status_and_send_the_user_to_it() {
+        let bus = super::super::dbus::session_bus_address(
+            std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref(),
+        );
+        for (unavailable, [cause, fix]) in denials() {
             let message = failure_message(&unavailable, "Sign in with a passkey");
-            for words in said {
-                assert!(message.contains(words), "{words:?} not in: {message}");
-            }
-            // What status did before it checked the daemon's own bus.
-            assert!(!message.contains("of the shell it runs in"), "{message}");
-            assert!(
-                !message.contains("the daemon is not on that bus"),
-                "{message}"
-            );
-            if let Unavailable::Failed(_) = unavailable {
-                assert!(
-                    message.ends_with(
-                        "`pqkey status` does not test this, as it shows no notification"
-                    ),
-                    "{message}"
-                );
-                assert!(!message.contains("repeats this check"), "{message}");
-                assert!(!message.contains("checks this"), "{message}");
-            } else {
-                assert!(message.ends_with(status), "{message}");
-            }
+            assert_names(&message, &[cause, "Fix: ", fix]);
+            let end = match &unavailable {
+                Unavailable::CannotAsk(server) => {
+                    let status = notification_problem(server, Some(&bus)).unwrap();
+                    format!(
+                        ": {}. Fix: {}. Then run `pqkey status` to check",
+                        status.what, status.fix
+                    )
+                }
+                Unavailable::Failed(_) => {
+                    ". `pqkey status` does not test this, as it shows no notification".to_owned()
+                }
+            };
+            assert!(message.ends_with(&end), "{message}");
         }
     }
 }

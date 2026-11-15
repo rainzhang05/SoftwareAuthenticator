@@ -27,7 +27,7 @@ use nix::{
 use pqkey_ctap::store::StoreError;
 
 use crate::cli::output::{errln, outln};
-use crate::cli::{DaemonArgs, daemon_info::DaemonInfo};
+use crate::cli::{DaemonArgs, checks, daemon_info::DaemonInfo};
 use crate::{
     platform::{self, ServiceAction, UserService},
     service,
@@ -87,10 +87,8 @@ fn with_fix(err: io::Error) -> io::Error {
         _ => err.kind(),
     };
     let fix = match kind {
-        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => {
-            "free some space on its filesystem"
-        }
-        io::ErrorKind::ReadOnlyFilesystem => "make its filesystem writable",
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => checks::FREE_SPACE,
+        io::ErrorKind::ReadOnlyFilesystem => checks::MAKE_WRITABLE,
         _ => return err,
     };
     io::Error::new(err.kind(), format!("{err}; {fix}, then run `pqkey start`"))
@@ -372,39 +370,43 @@ pub fn uses_service(state_dir: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::TempDir;
+    use crate::test_support::{TempDir, assert_names};
 
     /// An error from a full or read-only filesystem, the state files' and
-    /// the credential store's, which name their file, gets its fix: make room
-    /// or make it writable, then start the key. Any other error is returned
-    /// as it is, so a key that runs already still exits with status 3.
+    /// the credential store's, which name their file, gets the fix `pqkey
+    /// status` gives: make room or make it writable, then start the key. Any
+    /// other error is returned as it is, so a key that runs already still
+    /// exits with status 3.
     #[test]
     fn a_full_or_read_only_filesystem_gets_its_fix() {
         let path = Path::new("/home/u/.local/share/pqkey/authenticator.info");
+        let full: &[&str] = &["; free some space", "`df -h`", "`df -i`", "`pqkey start`"];
+        let read_only: &[&str] = &["; remount", "`fsck`", "`pqkey start`"];
         for (errno, fix) in [
-            (Errno::ENOSPC, "free some space on its filesystem"),
-            (Errno::EDQUOT, "free some space on its filesystem"),
-            (Errno::EROFS, "make its filesystem writable"),
+            (Errno::ENOSPC, full),
+            (Errno::EDQUOT, full),
+            (Errno::EROFS, read_only),
         ] {
             let cause = io::Error::from(errno);
             let err = state::path_error(io::Error::from(errno), "write", path);
             let fixed = with_fix(err);
             assert_eq!(fixed.kind(), cause.kind());
-            assert_eq!(
-                fixed.to_string(),
-                format!(
-                    "cannot write {}: {cause}; {fix}, then run `pqkey start`",
-                    path.display()
-                )
+            let message = fixed.to_string();
+            assert!(
+                message.starts_with(&format!("cannot write {}: {cause};", path.display())),
+                "{message}"
             );
+            assert_names(&message, fix);
             let store = io::Error::other(StoreError::Io {
                 path: path.to_owned(),
                 source: io::Error::from(errno),
             });
-            assert_eq!(
-                with_fix(store).to_string(),
-                format!("{}: {cause}; {fix}, then run `pqkey start`", path.display())
+            let message = with_fix(store).to_string();
+            assert!(
+                message.starts_with(&format!("{}: {cause};", path.display())),
+                "{message}"
             );
+            assert_names(&message, fix);
         }
         let denied = state::path_error(io::Error::from(Errno::EACCES), "write", path);
         let message = denied.to_string();

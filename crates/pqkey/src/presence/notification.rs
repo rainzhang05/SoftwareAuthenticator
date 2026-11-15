@@ -237,20 +237,16 @@ impl<S: NotificationServer> NotificationPresence<S> {
         let info = match self.server.connect() {
             Ok(info) => info,
             Err(err) => {
-                log::error!("{}", Unavailable::Connect(err).message(request));
+                log::error!("{}", Unavailable::CannotAsk(Err(err)).message(request));
                 return PresenceOutcome::Denied;
             }
         };
         self.close_stale_prompt(&info);
-        if !info.supports_actions {
-            log::error!("{}", Unavailable::NoActions.message(request));
-            return PresenceOutcome::Denied;
-        }
         // The relying party, the account and what a reset deletes are only
         // in the body, so a provider that shows only the title cannot ask
         // meaningfully.
-        if !info.supports_body {
-            log::error!("{}", Unavailable::NoBody.message(request));
+        if !info.supports_actions || !info.supports_body {
+            log::error!("{}", Unavailable::CannotAsk(Ok(info)).message(request));
             return PresenceOutcome::Denied;
         }
         let markup = info.body_markup;
@@ -354,9 +350,9 @@ impl<S: NotificationServer> UserPresence for NotificationPresence<S> {
 
 /// Why a request was denied without asking.
 pub(crate) enum Unavailable {
-    Connect(ConnectError),
-    NoActions,
-    NoBody,
+    /// What connecting found: no server, or one without buttons or a body.
+    CannotAsk(Result<ServerInfo, ConnectError>),
+    /// Showing the prompt or waiting for its answer failed.
     Failed(String),
 }
 

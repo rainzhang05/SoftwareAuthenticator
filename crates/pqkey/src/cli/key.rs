@@ -27,7 +27,7 @@ use pqkey_ctap::store::{
 use signal_hook::{consts::SIGINT, flag};
 
 use super::ConfigAction;
-use super::checks::Problem;
+use super::checks::{FREE_SPACE, MAKE_WRITABLE, Problem};
 use super::daemon::{self, Running};
 use super::daemon_info::DaemonInfo;
 use super::output::{self, errln, outln};
@@ -397,10 +397,7 @@ fn state_fs_problem(state_dir: &Path, room: io::Result<Room>, running: bool) -> 
     if room.read_only {
         return Some(Problem::new(
             format!("the state directory {dir} is on a read-only filesystem, {WRITES}"),
-            format!(
-                "remount that filesystem read-write (one the kernel made read-only after an \
-                 error needs `fsck` first){start}"
-            ),
+            format!("{MAKE_WRITABLE}{start}"),
         ));
     }
     let bytes = room.bytes.filter(|&bytes| bytes < ROOM_BYTES).map(|bytes| {
@@ -426,10 +423,7 @@ fn state_fs_problem(state_dir: &Path, room: io::Result<Room>, running: bool) -> 
             "the state directory {dir} is on a full filesystem ({}), {WRITES}",
             left.join(", ")
         ),
-        format!(
-            "free some space on that filesystem (`df -h` and `df -i` show what each one has \
-             left){start}"
-        ),
+        format!("{FREE_SPACE}{start}"),
     ))
 }
 
