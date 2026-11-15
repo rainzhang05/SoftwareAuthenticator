@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import pty
-import re
 import select
 import shutil
 import signal
@@ -36,15 +35,6 @@ TOOLS_PROMPT = "Password for sudo (tester), to install what building needs:"
 PQKEY_PROMPT = "Password for sudo (tester), to install pqkey:"
 
 
-def running(pid):
-    """Whether process PID still runs: a zombie only while threads of its process do."""
-    try:
-        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-        return state not in ("Z", "X") or len(os.listdir(f"/proc/{pid}/task")) > 1
-    except (OSError, IndexError):
-        return False
-
-
 class Installer(unittest.TestCase):
     def setUp(self):
         if not Path("/pqkey-installer-fixture").exists() or not Path("/.dockerenv").exists():
@@ -67,17 +57,18 @@ class Installer(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(self.home), CARGO_HOME=str(self.home / "cargo"),
                         PATH=f"{self.bin}:/usr/local/bin", COMMAND_TRACE=str(self.root / "trace"),
                         FIXTURE_BIN=str(self.bin), PQKEY_TEMPLATE=str(SOURCE / "tests/installer/pqkey.py"),
-                        SUDO_TICKET=str(self.root / "sudo-ticket"), INSTALLER_SID=str(os.getsid(0)),
-                        NO_COLOR="1")
+                        SUDO_TICKET=str(self.root / "sudo-ticket"), NO_COLOR="1")
         # Expose only the prerequisites this case chooses; host tools cannot
         # accidentally satisfy a missing prerequisite or run a package manager.
         for name in ("bash", "sh", "dirname", "mkdir", "tail", "tr", "grep", "sed", "wc",
-                     "awk", "sort", "head", "cut", "sleep", "tee", "ln", "setsid"):
+                     "awk", "sort", "head", "cut", "sleep", "tee", "ln"):
             (self.bin / name).symlink_to(shutil.which(name))
         for name in ("uname", "id", "df", "sudo", "cc", "curl", "setfacl", "cargo", "rustc",
                      "rustup", "apt-get", "install", "mv", "cp", "rm", "cargo-source", "rustup-source",
                      "rustc-source"):
             (self.bin / name).symlink_to(SOURCE / "tests/installer/command.py")
+        # After the build install.sh runs the system's commands only: its sudo is this case's.
+        self.system_command("sudo")[0].symlink_to(self.bin / "sudo")
         self.env["PATH"] += ":" + str(self.home / "cargo/bin")
         for path in (INSTALLED, RECOVERY):
             path.unlink(missing_ok=True)
@@ -87,22 +78,23 @@ class Installer(unittest.TestCase):
             path.unlink(missing_ok=True)
         self.temp.cleanup()
 
+    def system_command(self, name):
+        """For this case, /usr/bin/NAME, where install.sh finds NAME after the build, and
+        where the system's own NAME, if any, is moved meanwhile: the two paths."""
+        command = Path("/usr/bin", name)
+        real = command.with_name(name + ".fixture-real")
+        if command.exists():
+            command.rename(real)
+            self.addCleanup(real.rename, command)
+        self.addCleanup(command.unlink, missing_ok=True)
+        return command, real
+
     def commands(self):
         path = self.root / "trace"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
     def sudo_and_build(self):
         return [command for command in self.commands() if command[0] in ("sudo", "cargo")]
-
-    def planted_here(self):
-        """Commands planted in your directories (command.py's plant) that ran in the
-        installer's own session, where only install.sh's commands run."""
-        return [command for command in self.commands()
-                if command[0] == "planted" and command[-1] == "installer session"]
-
-    def functions_run(self):
-        """Records of functions from the environment, BASH_ENV or rustup's env file."""
-        return [command for command in self.commands() if "function" in command[0] or "trap" in command[0]]
 
     def installers(self):
         """Processes running this case's install.sh: the script, or a subshell of it."""
@@ -121,43 +113,11 @@ class Installer(unittest.TestCase):
             time.sleep(0.05)
         return running
 
-    def run_on_terminal(self, command):
-        """Run COMMAND with a new pty as its controlling terminal, as a terminal would."""
-        pid, fd = pty.fork()
-        if pid == 0:
-            os.execve(command[0], command, self.env)
-        output, deadline = b"", time.monotonic() + 30
-        try:
-            while time.monotonic() < deadline:
-                if select.select([fd], [], [], 0.1)[0]:
-                    try:
-                        chunk = os.read(fd, 8192)
-                    except OSError:
-                        break
-                    if not chunk:
-                        break
-                    output += chunk
-            else:
-                os.kill(pid, signal.SIGKILL)
-        finally:
-            os.close(fd)
-        return os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]), output.decode(errors="replace")
-
-    def build_processes(self, seconds=5):
-        """The processes the fake build listed (BUILD_PIDS) still running after up to SECONDS."""
-        path, deadline = self.root / "build-pids", time.monotonic() + seconds
-        while True:
-            alive = [pid for pid in (path.read_text().split() if path.exists() else []) if running(pid)]
-            if not alive or time.monotonic() >= deadline:
-                return alive
-            time.sleep(0.05)
-
-    def run_install(self, args=("--yes",), interactive=False, responses=(), shell="/bin/bash", terminal=True,
-                    argv=None):
+    def run_install(self, args=("--yes",), interactive=False, responses=(), terminal=True):
         """install.sh, its input none (or, interactive, a pty that is its terminal too).
         Like the tests, it has the pty of __main__ as its terminal, unless not terminal:
         then it runs in a session of its own, which has none."""
-        command = argv or [shell, str(self.clone / "install.sh"), *args]
+        command = ["/bin/bash", str(self.clone / "install.sh"), *args]
         if not interactive:
             result = subprocess.run(command, env=self.env, input=b"", stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, timeout=20, start_new_session=not terminal)
@@ -374,10 +334,9 @@ class Installer(unittest.TestCase):
                 self.assertEqual(commands[start:start + 5], [FORGET, CHECK, ["sudo", "-K"], BUILD, ASK_FOR_PQKEY])
 
     def test_sudo_is_kept_fresh_only_after_the_build_and_while_the_installer_runs(self):
-        # The keeper's minute lasts under a second here; the build takes two, setup three.
-        sleep = self.bin / "sleep"
-        real = sleep.resolve()
-        sleep.unlink()
+        # The keeper's minute lasts under a second here, with the system's sleep fast; the
+        # build takes two seconds, setup three.
+        sleep, real = self.system_command("sleep")
         sleep.write_text(f"#!/bin/sh\nexec {real} 0.01\n")
         sleep.chmod(0o755)
         self.env.update(BUILD_SECONDS="2", SETUP_SECONDS="3")
@@ -414,76 +373,6 @@ class Installer(unittest.TestCase):
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
 
-    def assert_nothing_left_running(self, status, output):
-        self.assertEqual(status, 0, output)
-        self.assertEqual(len((self.root / "build-pids").read_text().split()), 2, output)
-        commands = self.commands()
-        self.assertIn(ASK_FOR_PQKEY, commands)
-        self.assertNotIn(["left running", "when sudo asked"], commands)
-        self.assertNotIn(["left running", "found a password cached"], commands)
-        self.assertEqual(self.build_processes(), [])
-
-    def test_what_the_build_leaves_running_is_gone_before_sudo_asks(self):
-        # It leaves the build's process group, ignores INT, TERM and HUP, and waits
-        # for sudo to cache a password, as is or with a name holding a newline, its
-        # main thread gone, a new PID every fork, or a chain of processes that each
-        # fork the next; the build's session is emptied first.
-        self.env["BUILD_PIDS"] = str(self.root / "build-pids")
-        for shape in ("plain", "newline", "thread", "hop", "chain"):
-            with self.subTest(shape=shape):
-                for path in (self.root / "trace", self.root / "build-pids"):
-                    path.unlink(missing_ok=True)
-                self.env["LEAVE_BEHIND"] = shape
-                self.assert_nothing_left_running(*self.run_install())
-
-    def test_job_control_leaves_the_build_within_reach(self):
-        # bash -i, bash -p -i, monitor in SHELLOPTS and set -m in BASH_ENV each turn
-        # job control on, which makes setsid fork and the session ID differ from $!.
-        # install.sh starts again, once, in a shell without it, and set +m keeps it so.
-        self.env.update(LEAVE_BEHIND="plain", BUILD_PIDS=str(self.root / "build-pids"))
-        (self.root / "bash-env").write_text("set -m\n")
-        script = str(self.clone / "install.sh")
-        for trigger, extra, run in (
-                ("bash -i", {}, lambda: self.run_on_terminal(["/bin/bash", "-i", script, "--yes"])),
-                ("bash -p -i", {}, lambda: self.run_on_terminal(["/bin/bash", "-p", "-i", script, "--yes"])),
-                ("SHELLOPTS", {"SHELLOPTS": "braceexpand:hashall:interactive-comments:monitor"},
-                 lambda: self.run_on_terminal(["/bin/bash", script, "--yes"])),
-                ("BASH_ENV", {"BASH_ENV": str(self.root / "bash-env")}, self.run_install)):
-            with self.subTest(trigger=trigger):
-                for path in (self.root / "trace", self.root / "build-pids"):
-                    path.unlink(missing_ok=True)
-                saved = dict(self.env)
-                self.env.update(extra)
-                try:
-                    self.assert_nothing_left_running(*run())
-                finally:
-                    self.env = saved
-
-    def test_a_session_it_cannot_establish_stops_the_install_before_sudo_asks(self):
-        # A setsid that forks leaves the session ID unknown: the session's own shell
-        # sees it and stops before the build starts, saying why.
-        (self.bin / "setsid").unlink()
-        (self.bin / "setsid").write_text(f"#!/bin/sh\nexec {shutil.which('setsid')} --fork \"$@\"\n")
-        (self.bin / "setsid").chmod(0o755)
-        status, output = self.run_install()
-        self.assertNotEqual(status, 0, output)
-        self.assertIn("cannot run cargo in a session of its own, so sudo is not asked for your password", output)
-        self.assertNotIn(BUILD, self.commands())
-        self.assertNotIn(ASK_FOR_PQKEY, self.commands())
-
-    def test_a_setsid_that_makes_no_session_stops_the_install_before_sudo_asks(self):
-        # A setsid that runs the command in place leaves it in this session, whose ID
-        # is not the session shell's own: that shell sees it and stops before the
-        # build starts, saying why.
-        (self.bin / "setsid").unlink()
-        (self.bin / "setsid").write_text('#!/bin/sh\n[ "$1" != --wait ] || shift\nexec "$@"\n')
-        (self.bin / "setsid").chmod(0o755)
-        status, output = self.run_install()
-        self.assertNotEqual(status, 0, output)
-        self.assertIn("cannot run cargo in a session of its own, so sudo is not asked for your password", output)
-        self.assertNotIn(BUILD, self.commands())
-        self.assertNotIn(ASK_FOR_PQKEY, self.commands())
-
     def test_a_password_sudo_cannot_forget_stops_the_install_before_rust_and_the_build(self):
         # sudo -k failing, or -K when -k left the password cached: install.sh stops,
         # and nothing that is not root's runs.
@@ -502,9 +391,9 @@ class Installer(unittest.TestCase):
                 self.assertFalse(any(entry[0] in ("curl", "rustup", "rustc", "cargo")
                                      for entry in self.commands()), self.commands())
 
-    def test_the_rust_installer_runs_after_sudo_forgets_in_a_session_of_its_own(self):
+    def test_the_rust_installer_runs_after_sudo_forgets(self):
         # Build tools missing: sudo has a password cached before them. The fake Rust
-        # installer fails if it still is, or if it shares the installer's session.
+        # installer fails if it still is.
         for name in ("setfacl", "cargo", "rustup"):
             (self.bin / name).unlink()
         status, output = self.run_install()
@@ -514,7 +403,7 @@ class Installer(unittest.TestCase):
         order = [ASK_FOR_TOOLS, FORGET, rust, BUILD, ASK_FOR_PQKEY]
         self.assertEqual(sorted(order, key=commands.index), order)
 
-    def test_the_rust_update_runs_after_sudo_forgets_in_a_session_of_its_own(self):
+    def test_the_rust_update_runs_after_sudo_forgets(self):
         (self.bin / "setfacl").unlink()
         self.env["RUST_VERSION"] = "1.88.0"
         status, output = self.run_install()
@@ -523,115 +412,23 @@ class Installer(unittest.TestCase):
         order = [ASK_FOR_TOOLS, FORGET, UPDATE, BUILD, ASK_FOR_PQKEY]
         self.assertEqual(sorted(order, key=commands.index), order)
 
-    def nosuid_directory(self):
-        """A directory of root's on a mount that is nosuid, as every mount a user can
-        make is, but not noexec, so that its commands could run: Docker's /dev."""
-        mounts = {fields[4]: fields[5].split(",") for fields in
-                  (line.split() for line in Path("/proc/self/mountinfo").read_text().splitlines())}
-        self.assertIn("nosuid", mounts.get("/dev", []), "the fixture needs /dev mounted nosuid")
-        self.assertNotIn("noexec", mounts["/dev"])
-        directory = Path(tempfile.mkdtemp(prefix="pqkey-installer-", dir="/dev"))
-        directory.chmod(0o755)
-        self.addCleanup(shutil.rmtree, directory)
-        return directory
-
-    def fake_fuse(self, directory):
-        """Have stat -f say that DIRECTORY is on FUSE, when asked as install.sh asks:
-        the system's stat, which command -p finds, is replaced for this case."""
-        stat = Path("/usr/bin/stat")
-        real = stat.with_name("stat.fixture-real")
-        stat.rename(real)
-        self.addCleanup(real.rename, stat)
-        stat.write_text(f"""#!/usr/bin/python3
-import os, subprocess, sys
-args = sys.argv[1:]
-if args[:3] != ["-fc", "%t", "--"]:
-    os.execv("{real}", ["stat", *args])
-for path in args[3:]:
-    if path == "{directory}" or path.startswith("{directory}/"):
-        print("65735546", flush=True)  # FUSE_SUPER_MAGIC
-    elif subprocess.call(["{real}", "-fc", "%t", "--", path]):
-        sys.exit(1)
-""")
-        stat.chmod(0o755)
-
     def test_commands_the_build_plants_in_your_directories_are_not_run(self):
-        # The build plants commands of install.sh's names in directories ahead of the
-        # system's on PATH that you, and so the build, can change: ~/.local/bin and
-        # ~/.cargo/bin, which you own; one of root's in one of yours; one your group
-        # can write; a sticky one anyone can write; one on a nosuid mount, as every
-        # mount you can make is; and one on FUSE, whose daemon says who owns what.
-        # install.sh runs none of them: it finds commands only in the others.
-        local, cargo, tools = self.home / ".local/bin", Path(self.env["CARGO_HOME"]) / "bin", self.home / "tools"
-        for directory in (local, cargo, tools):
-            directory.mkdir(parents=True)
-            os.chown(directory, 1000, 1000)
-        in_yours, group, sticky, fuse = tools / "bin", self.root / "group", self.root / "sticky", self.root / "fuse"
-        for directory, mode in ((in_yours, 0o755), (group, 0o775), (sticky, 0o1777), (fuse, 0o755)):
-            directory.mkdir()
-            directory.chmod(mode)
-        self.fake_fuse(fuse)
-        directories = [local, cargo, in_yours, group, sticky, self.nosuid_directory(), fuse]
+        # The build plants commands of install.sh's names in ~/.local/bin and
+        # ~/.cargo/bin, which you own, ahead of the system's on PATH. After the build
+        # install.sh runs none of them: it runs the system's commands only, and pqkey
+        # setup gets the system's directories, then pqkey's own.
+        directories = [self.home / ".local/bin", Path(self.env["CARGO_HOME"]) / "bin"]
         self.env.update(PATH=":".join(map(str, [*directories, self.env["PATH"]])),
                         PLANT=":".join(map(str, directories)))
         status, output = self.run_install()
         self.assertEqual(status, 0, output)
         for directory in directories:
-            self.assertTrue((directory / "tee").exists(), directory)
-        self.assertIn(ASK_FOR_PQKEY, self.commands())
-        self.assertEqual(self.planted_here(), [])
-
-    def test_rust_in_your_directories_and_what_it_leaves_there(self):
-        # Rust only in ~/.cargo/bin, which you own, with rustup's env file and commands
-        # of install.sh's names beside it, which functions in the env file shadow too,
-        # and those commands in ~/.local/bin, first on PATH: left by an earlier
-        # install, or by this one's Rust installer. install.sh finds Rust there, gives
-        # Rust and the build your PATH, and runs none of the rest itself.
-        cargo, local = Path(self.env["CARGO_HOME"]) / "bin", self.home / ".local/bin"
-        for name in ("cargo", "rustup", "rustc"):
-            (self.bin / name).unlink()
-        self.env.update(PATH=f"{local}:{self.env['PATH']}", RUST_INSTALLER_PLANTS=f"{cargo}:{local}")
-        for case, version in (("Rust installer", "1.89.0"), ("earlier install", "1.88.0")):
-            with self.subTest(case=case):
-                shutil.rmtree(cargo.parent, ignore_errors=True)
-                shutil.rmtree(local, ignore_errors=True)
-                local.mkdir(parents=True)
-                os.chown(local, 1000, 1000)
-                self.env["RUST_VERSION"] = version  # 1.88.0: an update too, run alone
-                if case == "earlier install":
-                    # The fake Rust installer, run before install.sh, outside its session.
-                    Path(self.env["SUDO_TICKET"]).unlink(missing_ok=True)
-                    env = {name: value for name, value in self.env.items() if name != "INSTALLER_SID"}
-                    script = subprocess.run([str(self.bin / "curl")], env=env, check=True,
-                                            stdout=subprocess.PIPE).stdout
-                    subprocess.run(["/bin/sh"], input=script, env=env, check=True)
-                (self.root / "trace").unlink(missing_ok=True)
-                status, output = self.run_install()
-                self.assertEqual(status, 0, output)
-                commands = self.commands()
-                self.assertIn(BUILD, commands)
-                self.assertIn(UPDATE if case == "earlier install" else ["curl", "--proto", "=https", "--tlsv1.2",
-                                                                       "-sSf", "https://sh.rustup.rs"], commands)
-                self.assertTrue((cargo / "tee").exists() and (cargo.parent / "env").exists())
-                self.assertEqual(self.functions_run(), [])
-                self.assertEqual(self.planted_here(), [])
-
-    def test_functions_and_bash_env_from_your_environment_never_run(self):
-        # Exported functions, and a BASH_ENV file's functions and DEBUG trap, of the
-        # names install.sh runs: none of them runs once install.sh starts again in a
-        # clean shell, nor in the shell of the build's session.
-        names = ("sudo", "sleep", "tee", "setsid", "kill", "dirname", "tail", "wc", "readstat", "end_session")
-        bash_env = self.root / "bash-env"
-        bash_env.write_text("".join(f"{name}() {{ printf '[\"BASH_ENV function\", \"{name}\"]\\n' "
-                                    f">>\"$COMMAND_TRACE\"; command {name} \"$@\"; }}\n" for name in names) +
-                            "trap 'grep -q \"\\\"build\\\"\" \"$COMMAND_TRACE\" 2>/dev/null && "
-                            "printf \"[\\\"BASH_ENV trap\\\"]\\\\n\" >>\"$COMMAND_TRACE\"' DEBUG\n")
-        for name in names:
-            self.env[f"BASH_FUNC_{name}%%"] = (f"() {{ printf '[\"environment function\", \"{name}\"]\\n' "
-                                               f">>\"$COMMAND_TRACE\"; command {name} \"$@\"; }}")
-        self.env.update(BASH_ENV=str(bash_env), LEAVE_BEHIND="plain", BUILD_PIDS=str(self.root / "build-pids"))
-        self.assert_nothing_left_running(*self.run_install())
-        self.assertEqual(self.functions_run(), [])
+            self.assertTrue((directory / "sudo").exists(), directory)
+        commands = self.commands()
+        self.assertIn(ASK_FOR_PQKEY, commands)
+        self.assertEqual([command for command in commands if command[0] == "planted"], [])
+        self.assertEqual([command[1] for command in commands if command[0] == "setup PATH"],
+                         ["/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin"])
 
     def test_what_the_build_writes_into_install_sh_is_not_run(self):
         # The build overwrites install.sh in place, from the command after the build
@@ -645,43 +442,14 @@ for path in args[3:]:
         self.assertIn(ASK_FOR_PQKEY, self.commands())
         self.assertIn("pqkey is ready.", output)
 
-    def test_a_bash_of_yours_hands_over_to_the_systems(self):
-        # Started by a bash in a directory of yours, first on PATH, where
-        # #!/usr/bin/env bash finds it: install.sh starts again in the system's bash,
-        # which runs it from then on.
-        local, system = self.home / ".local/bin", os.path.realpath(shutil.which("bash"))
-        local.mkdir(parents=True)
-        shutil.copy2(system, local / "bash")
-        for path in (local, local / "bash"):
-            os.chown(path, 1000, 1000)
-        self.env["PATH"] = f"{local}:{self.env['PATH']}"
-        status, output = self.run_install(shell=str(local / "bash"))
-        self.assertEqual(status, 0, output)
-        self.assertEqual([command[1] for command in self.commands() if command[0] == "installer shell"], [system])
-
-    def forgetting(self, seconds=15):
-        """Wait until the installer has sudo forget as it ends: a second sudo -k, after
-        the one before the build."""
-        deadline = time.monotonic() + seconds
-        while self.commands().count(FORGET) < 2 and time.monotonic() < deadline:
-            time.sleep(0.001)
-        self.assertEqual(self.commands().count(FORGET), 2, self.sudo_and_build())
-
     def test_sudo_forgets_the_password_when_the_installer_ends(self):
         # However install.sh ends, unless a signal kills it first (kill -9): done,
         # failing after the password was given, or stopped by Ctrl-C, kill or a closed
         # terminal while setup runs (signals to its process group, as a terminal sends
-        # them: a closed one sends HUP twice, the second here as the installer has sudo
-        # forget), also with its output going to a pipe no one reads any more
-        # (./install.sh | tee log, tee gone); and done, with every signal that would end
-        # or pause it and that it can ignore sent to it as it has sudo forget. -k forgets
-        # it, or, when -k misses as with timestamp_type=kernel, -K; the exit status
-        # stays install.sh's.
-        anything = sorted(signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP, signal.SIGCHLD, signal.SIGCONT,
-                                                    signal.SIGURG, signal.SIGWINCH})
+        # them). -k forgets it, or, when -k misses as with timestamp_type=kernel, -K; the
+        # exit status stays install.sh's.
         for ending, number, expected in (("done", None, 0), ("failed", None, 1), ("INT", signal.SIGINT, 130),
-                                         ("TERM", signal.SIGTERM, 143), ("HUP twice", signal.SIGHUP, 129),
-                                         ("INT, output unread", signal.SIGINT, 130), ("any signal", None, 0)):
+                                         ("TERM", signal.SIGTERM, 143), ("HUP", signal.SIGHUP, 129)):
             for kernel in (False, True):
                 with self.subTest(ending=ending, kernel=kernel):
                     (self.root / "trace").unlink(missing_ok=True)
@@ -695,30 +463,17 @@ for path in args[3:]:
                     if ending in ("done", "failed"):
                         status, output = self.run_install()
                     else:
-                        unread = ending == "INT, output unread"
                         process = subprocess.Popen(["/bin/bash", str(self.clone / "install.sh"), "--yes"],
-                                                   env=self.env, stdin=subprocess.DEVNULL,
-                                                   stdout=subprocess.PIPE if unread else subprocess.DEVNULL,
+                                                   env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                                    stderr=subprocess.STDOUT, process_group=0)
                         try:
-                            if number:
-                                deadline = time.monotonic() + 15
-                                while ["pqkey", "setup", "--yes"] not in self.commands() and time.monotonic() < deadline:
-                                    time.sleep(0.05)
-                                if unread:
-                                    process.stdout.close()
-                                os.killpg(process.pid, number)
-                                if ending == "HUP twice":
-                                    self.forgetting()
-                                    os.killpg(process.pid, signal.SIGHUP)
-                            else:
-                                self.forgetting()
-                                for each in anything:
-                                    os.kill(process.pid, each)
+                            deadline = time.monotonic() + 15
+                            while ["pqkey", "setup", "--yes"] not in self.commands() and time.monotonic() < deadline:
+                                time.sleep(0.05)
+                            os.killpg(process.pid, number)
                             status, output = process.wait(timeout=15), ""
                         finally:
                             with contextlib.suppress(ProcessLookupError):
-                                os.killpg(process.pid, signal.SIGCONT)
                                 os.killpg(process.pid, signal.SIGKILL)
                             process.wait(timeout=5)
                     self.assertEqual(status, expected, output)
@@ -803,151 +558,6 @@ for path in args[3:]:
                 self.assertNotIn(["askpass ran"], commands)
                 self.assertEqual([command for command in after if command[0] == "askpass variable"], [])
 
-    def test_a_shell_that_read_your_startup_files_is_left_before_the_build(self):
-        # bash -p -i reads ~/.bashrc, and bash -p -l ~/.bash_profile, here a DEBUG trap
-        # that sources ~/.hook, which the build rewrites. install.sh starts again, once,
-        # in a shell that read neither, so the hook never runs.
-        (self.home / ".hook").write_text(":\n")
-        trap = "trap '. \"$HOME/.hook\"' DEBUG\n"
-        (self.home / ".bashrc").write_text(trap)
-        # A login shell's /etc/profile sets PATH; ~/.bash_profile puts the fixture's back.
-        (self.home / ".bash_profile").write_text('PATH=$FIXTURE_PATH\n' + trap)
-        self.env.update(REWRITE_HOOK="1", FIXTURE_PATH=self.env["PATH"])
-        script = str(self.clone / "install.sh")
-        for option in ("-i", "-l"):
-            with self.subTest(option=option):
-                (self.root / "trace").unlink(missing_ok=True)
-                (self.home / ".hook").write_text(":\n")
-                status, output = self.run_on_terminal(["/bin/bash", "-p", option, script, "--yes"])
-                self.assertEqual(status, 0, output)
-                self.assertIn("pqkey is ready.", output)
-                self.assertIn("hook ran", (self.home / ".hook").read_text())
-                self.assertNotIn(["hook ran"], self.commands())
-
-    def test_a_shell_install_sh_did_not_start_clean_stops_it(self):
-        # A shell that passes on PQKEY_INSTALL_PID as its own PID, as the restart does,
-        # but is not the clean one: install.sh stops before anything else.
-        script = str(self.clone / "install.sh")
-        for shell, extra in (("/bin/bash", {}), ("/bin/bash -p -i", {}), ("/bin/bash -p -l", {}),
-                             ("/bin/bash -p", {"LD_PRELOAD": "libc.so.6"})):
-            with self.subTest(shell=shell, extra=extra):
-                (self.root / "trace").unlink(missing_ok=True)
-                saved = dict(self.env)
-                self.env.update(extra)
-                try:
-                    status, output = self.run_install(argv=["/bin/sh", "-c", f'PQKEY_INSTALL_PID=$$ exec {shell} "$0" --yes',
-                                                            script])
-                finally:
-                    self.env = saved
-                self.assertNotEqual(status, 0, output)
-                self.assertIn("cannot start again in a clean shell", output)
-                # (A login shell's /etc/profile runs id itself.)
-                self.assertEqual([command for command in self.commands() if command[0] != "id"], [])
-
-    def test_a_nosuid_mount_is_found_whatever_its_name(self):
-        # The kernel writes a mount point's space, tab, newline and backslash as \040,
-        # \011, \012 and \134, so a name like "USB 2" reads USB\0402. Root's directories
-        # on nosuid mounts named so are not trusted. install.sh's own trusted, reading
-        # the fixture's mount table: this one, plus those mounts.
-        names = ("USB 2", "Backup 2024", "Tab\t7", "back\\slash 0")
-        lines = Path("/proc/self/mountinfo").read_text().splitlines()
-        directories = []
-        for number, name in enumerate(names):
-            mount = self.root / name
-            (mount / "bin").mkdir(parents=True)
-            directories.append(mount / "bin")
-            escaped = str(mount).replace("\\", "\\134").replace(" ", "\\040").replace("\t", "\\011")
-            lines.append(f"{900 + number} 1 0:{900 + number} / {escaped} rw,nosuid,nodev,relatime - tmpfs tmpfs rw")
-        (self.root / "mountinfo").write_text("\n".join(lines) + "\n")
-        function = re.search(r"^trusted\(\) \{\n.*?^\}\n", (self.clone / "install.sh").read_text(), re.M | re.S)[0]
-        self.assertEqual(function.count("</proc/self/mountinfo"), 1)
-        function = function.replace("</proc/self/mountinfo", '<"$FIXTURE_MOUNTINFO"')
-        result = subprocess.run(["/bin/bash", "-c", function + 'trusted "$1"', "trusted",
-                                 ":".join(map(str, [*directories, self.bin]))], env=dict(
-                                    self.env, FIXTURE_MOUNTINFO=str(self.root / "mountinfo")),
-                                capture_output=True, text=True, check=True)
-        self.assertEqual(result.stdout, f"{self.bin}\n")
-
-    def test_setup_finds_pqkey_where_usr_local_bin_is_not_trusted(self):
-        # Debian's staff option makes /usr/local and /usr/local/bin 2775 root:staff,
-        # which install.sh does not trust. pqkey setup checks that the first pqkey on
-        # its PATH is itself: it gets pqkey's directory last.
-        for path in (Path("/usr/local"), Path("/usr/local/bin")):
-            info = path.stat()
-            self.addCleanup(os.chown, path, info.st_uid, info.st_gid)
-            self.addCleanup(os.chmod, path, info.st_mode & 0o7777)
-            os.chown(path, 0, 50)
-            os.chmod(path, 0o2775)
-        status, output = self.run_install()
-        self.assertEqual(status, 0, output)
-        self.assertIn("pqkey is ready.", output)
-        self.assertEqual([command[1] for command in self.commands() if command[0] == "setup PATH"],
-                         [f"{self.bin}:/usr/local/bin"])
-
-    def test_loader_variables_reach_rust_and_the_build_alone(self):
-        # The variables with which a program's environment names files it loads code
-        # or data from: what install.sh runs itself never sees them, the system's
-        # commands included; what it runs alone, here the Rust update and the build,
-        # gets them back as you set them.
-        yours = {"LD_PRELOAD": "libc.so.6", "LD_LIBRARY_PATH": f"{self.home}/lib:", "LD_AUDIT": "",
-                 "GCONV_PATH": f"{self.home}/gconv", "MALLOC_TRACE": f"{self.home}/malloc",
-                 "TMPDIR": str(self.root)}
-        self.env.update(yours, RUST_VERSION="1.88.0")
-        names = "|".join(["LD_[A-Za-z0-9_]*", *yours])
-        for name in ("sleep", "tee", "dirname", "tail", "wc", "grep", "sed", "tr", "mkdir", "sort", "head",
-                     "cut", "awk", "ln", "setsid"):
-            real = (self.bin / name).resolve()
-            (self.bin / name).unlink()
-            (self.bin / name).write_text(
-                f"#!/bin/sh\nseen=$(/usr/bin/env | /usr/bin/grep -oE '^({names})=' | /usr/bin/tr -d '=\\n')\n"
-                f"[ -z \"$seen\" ] || printf '[\"loader\", \"{name}\"]\\n' >>\"$COMMAND_TRACE\"\n"
-                f"exec {real} \"$@\"\n")
-            (self.bin / name).chmod(0o755)
-        status, output = self.run_install()
-        self.assertEqual(status, 0, output)
-        seen = [command[1:] for command in self.commands() if command[0] == "loader"]
-        expected = sorted(f"{name}={value}" for name, value in yours.items())
-        self.assertEqual(seen, [[" ".join(UPDATE), *expected], [" ".join(BUILD), *expected]])
-
-    def test_the_build_ends_with_the_installer(self):
-        # Interrupted (as by Ctrl-C), terminated, hung up (as by a closed terminal) or
-        # killed while the build runs, the installer ends the build, and what the build
-        # left running, with it: TERM first (INT is ignored by background jobs), so the
-        # build can stop by itself.
-        self.env.update(BUILD_SECONDS="60", LEAVE_BEHIND="plain", BUILD_PIDS=str(self.root / "build-pids"))
-        for number, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143), (signal.SIGHUP, 129),
-                                 (signal.SIGKILL, -signal.SIGKILL)):
-            with self.subTest(signal=number.name):
-                for path in (self.root / "trace", self.root / "build-pids"):
-                    path.unlink(missing_ok=True)
-                with open(self.root / "output", "wb") as output:
-                    process = subprocess.Popen(["/bin/bash", str(self.clone / "install.sh"), "--yes"],
-                                               env=self.env, stdin=subprocess.DEVNULL, stdout=output,
-                                               stderr=subprocess.STDOUT, process_group=0)
-                try:
-                    deadline = time.monotonic() + 15
-                    while len(self.build_processes(0)) < 2 and time.monotonic() < deadline:
-                        time.sleep(0.05)
-                    self.assertEqual(len(self.build_processes(0)), 2, (self.root / "output").read_text())
-                    os.kill(process.pid, number)
-                    self.assertEqual(process.wait(timeout=10), expected, (self.root / "output").read_text())
-                    self.assertEqual(self.build_processes(), [])
-                    if number != signal.SIGKILL:
-                        self.assertIn(["cargo", "stopped by TERM"], self.commands())
-                finally:
-                    for pid in self.build_processes(0):
-                        os.kill(int(pid), signal.SIGKILL)
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=5)
-
-    def test_missing_setsid_fails_before_sudo_or_build(self):
-        (self.bin / "setsid").unlink()
-        status, output = self.run_install()
-        self.assertNotEqual(status, 0, output)
-        self.assertIn("needs setsid", output)
-        self.assertFalse(any(command[0] in ("sudo", "cargo") for command in self.commands()))
-
     def test_old_system_rust_is_actionable(self):
         (self.bin / "rustup").unlink()
         self.env["RUST_VERSION"] = "1.88.0"
@@ -1006,7 +616,7 @@ for path in args[3:]:
         self.assertNotIn("fixture: rust diagnostics", output)
         self.assertNotIn("syncing", output)
         self.assertIn("fixture: rust diagnostics", (self.home / ".cache/pqkey/install.log").read_text())
-        # Nor does the check before the build: rustup installs Rust only alone.
+        # Nor does the check before the build: only the update installs Rust.
         self.assertNotIn(["rustup", "installed by itself"], self.commands())
 
     def test_build_install_and_setup_failures_leave_recovery(self):

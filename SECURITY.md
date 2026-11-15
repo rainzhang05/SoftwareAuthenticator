@@ -56,6 +56,11 @@ sensor software cannot press.
   require their encrypted records as well.
 - **Offline PIN guessing by such an attacker.** The stored PIN hash is an
   unsalted, truncated SHA-256.
+- **The code that builds pqkey.** The build scripts and procedural macros of
+  pqkey's dependencies run as you when `install.sh` builds pqkey, and shape
+  the binary that it then runs as `pqkey setup` with your sudo password
+  cached. `install.sh` only keeps a password sudo cached before the build
+  away from that code.
 - **The moment another user's session becomes active.** With systemd 257 and
   older, and with elogind, they get the key's device a moment before logind
   changes its record of the seat, where the key looks for the switch. A

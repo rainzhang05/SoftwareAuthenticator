@@ -71,63 +71,11 @@ build tools and Rust), asks once to continue, and shows its progress as it:
 
 sudo asks for your password after the build, and also before it when the
 installer installs a C linker, curl or ACL tools. After the build it asks
-only on a terminal, never through a helper program (`SUDO_ASKPASS`, or
-askpass in `sudo.conf`): without a terminal, the installer goes on only where
-sudo needs no password, as with a `NOPASSWD` rule, and otherwise stops and
-asks you to run it in a terminal. When the installer ends, it has sudo forget
-the password, whether it finishes, fails, is interrupted with Ctrl-C or
-`kill`, or loses its terminal; a signal that kills it before then, such as
-`kill -9`, leaves the password cached until sudo's `timestamp_timeout`
-expires.
-
-The installer trusts the system's own commands, the Rust toolchain that
-rustup installs, and the pqkey it builds, with the code of pqkey's
-dependencies in it: installing a program trusts it. It does not trust the
-code the build runs, the build scripts and procedural macros of those
-dependencies, nor what that code writes or leaves running. So:
-
-- before it installs or updates Rust or builds pqkey, it has sudo forget
-  your password;
-- Rust's installer and updates, and the build, run in a session of their
-  own, without your terminal, and what they leave running there is stopped
-  before sudo asks again;
-- the installer reads all of itself before it runs, so that the build cannot
-  change what it does by changing the file; it starts again, once, in a clean
-  shell, which reads none of your startup files, and from then on sources
-  none of your files and runs only `/usr/local/bin/pqkey` and commands from
-  directories that only root can change; installing and running Rust, and
-  the build, use your `PATH`;
-- it clears every `LD_` variable, such as `LD_PRELOAD` and
-  `LD_LIBRARY_PATH`, with which a program loads code from files they name,
-  and the other variables glibc removes for set-user-ID programs, and gives
-  them back only to Rust's installer and updates, and to the build.
-
-What remains, which the installer cannot prevent:
-
-- Whatever your account can do without typing a password, the build can do
-  too: with a `NOPASSWD` rule in sudoers, or as a member of a group as good as
-  root, such as `docker`, or Debian's `staff` where it is set up to write
-  `/usr/local/bin`, which sudo's `secure_path` puts before `/usr/bin`.
-- With `timestamp_type=global` in sudoers, sudo caches one password for all
-  of your terminals, so the build can use one you type in another terminal
-  while it runs, and what the build changed can use the one the installer
-  asks for after the build, if it runs while that one is cached: a drop-in
-  for pqkey's user service, for example, which `pqkey setup` starts, or the
-  startup files of a terminal you open.
-- The build itself runs as you, so it can change your files: your shell's
-  startup files, which later sessions run; commands in directories on your
-  `PATH` that you can write, such as `~/.local/bin` and `~/.cargo/bin`, which
-  run when you type them, in this terminal too, and can use any password you
-  give sudo afterwards; this clone, which your next update builds and runs;
-  and the pqkey it builds, which the installer runs as `pqkey setup` with your
-  password cached. Where `kernel.yama.ptrace_scope` is 0, or Yama is absent,
-  it can also run code in programs you run, the installer included.
-- A process the build starts that leaves its session (with `setsid`, `at` or
-  `systemd-run`, say), or that forks and exits faster than the installer can
-  find it, can go on doing all that after the build, and also: use the
-  password you type after the build, with `timestamp_type=global`; read it
-  from the terminal as you type it; and change the script `pqkey setup` hands
-  to sudo.
+only on a terminal, never through a helper program (`SUDO_ASKPASS`). The
+installer has sudo forget your password before it installs or updates Rust
+and builds pqkey, and again when it ends;
+[SECURITY.md](SECURITY.md#what-it-does-not-protect-against) says what the
+code that builds pqkey can still do.
 
 A successful installation means the installed service is running, its HID
 client can exchange messages, the configured presence provider is usable,

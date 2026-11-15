@@ -1,14 +1,11 @@
 #!/usr/bin/python3
 """Controlled prerequisites for install.sh, only inside its disposable container."""
-import ctypes
 import json
 import os
 from pathlib import Path
-import platform
 import signal
 import subprocess
 import sys
-import threading
 import time
 
 
@@ -17,39 +14,24 @@ def record(*entry):
         trace.write(json.dumps(list(entry)) + "\n")
 
 
-# What install.sh clears before anything runs and gives back only to what it
-# runs alone: every LD_ variable, and the others of glibc's unsecvars.h.
-LOADER = ("GCONV_PATH", "GETCONF_DIR", "GLIBC_TUNABLES", "HOSTALIASES", "LOCALDOMAIN", "LOCPATH",
-          "MALLOC_ARENA_MAX", "MALLOC_ARENA_TEST", "MALLOC_MMAP_MAX_", "MALLOC_MMAP_THRESHOLD_",
-          "MALLOC_PERTURB_", "MALLOC_TOP_PAD_", "MALLOC_TRACE", "MALLOC_TRIM_THRESHOLD_", "NIS_PATH",
-          "NLSPATH", "RESOLV_HOST_CONF", "RES_OPTIONS", "TMPDIR", "TZDIR")
 # Commands planted in your directories, by name: install.sh's own and more.
 PLANTED = ("sudo", "sleep", "tee", "dirname", "ln", "tail", "tr", "grep", "sed", "wc", "setsid", "mkdir",
            "cut", "sort", "head", "awk", "df", "uname", "id", "git", "bash", "sh", "env", "cat", "stat",
            "kill", "install", "mv", "cp", "rm", "cc", "setfacl", "apt-get", "curl")
 
 
-def loader_variables():
-    return [f"{name}={value}" for name, value in sorted(os.environ.items())
-            if name.startswith("LD_") or name in LOADER]
-
-
 def plant(directory):
     """Recording commands in DIRECTORY, by the names in PLANTED, that then run the
-    fixture's (or the system's) command. Each records whether it ran in the
-    installer's session (INSTALLER_SID), where only install.sh's own commands run."""
+    fixture's (or the system's) command."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     for tool in PLANTED:
-        entry = json.dumps(["planted", tool, str(directory)])[:-1]
+        entry = json.dumps(["planted", tool, str(directory)])
         planted = directory / tool
         planted.unlink(missing_ok=True)
         planted.write_text(
             "#!/bin/sh\n"
-            "where() { set -- $1; [ \"$4\" = \"$INSTALLER_SID\" ] && echo installer || echo own; }\n"
-            "read -r stat </proc/self/stat\n"
-            "stat=${stat##*) }\n"
-            f"printf '%s, \"%s session\"]\\n' '{entry}' \"$(where \"$stat\")\" >>\"$COMMAND_TRACE\"\n"
+            f"printf '%s\\n' '{entry}' >>\"$COMMAND_TRACE\"\n"
             f"for real in \"$FIXTURE_BIN/{tool}\" /usr/bin/{tool} /bin/{tool}; do\n"
             "  [ -x \"$real\" ] && exec \"$real\" \"$@\"\n"
             "done\n"
@@ -57,66 +39,11 @@ def plant(directory):
         planted.chmod(0o755)
 
 
-def env_file(path):
-    """What rustup's env file does, PATH first, plus a recording function for each
-    name in PLANTED: what a Rust installer, or an earlier build, could leave."""
-    functions = "".join(f"{tool}() {{ printf '[\"env function\", \"{tool}\"]\\n' >>\"$COMMAND_TRACE\"; "
-                        f"command {tool} \"$@\"; }}\n" for tool in PLANTED)
-    Path(path).write_text(f'export PATH="{Path(path).parent}/bin:$PATH"\n' + functions)
-
-
-def running(pid):
-    """Whether process PID still runs: a zombie only while threads of its process do."""
-    try:
-        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-        return state not in ("Z", "X") or len(os.listdir(f"/proc/{pid}/task")) > 1
-    except (OSError, IndexError):
-        return False
-
-
 def third_party(what):
-    """Code that is not pqkey's own runs with no password cached, outside the
-    installer's session (INSTALLER_SID: the session the test started it in)."""
+    """Code that is not pqkey's own runs with no password cached."""
     if Path(os.environ["SUDO_TICKET"]).exists():
         print(f"fixture: sudo had a password cached while {what} ran", file=sys.stderr)
         sys.exit(18)
-    if os.environ.get("INSTALLER_SID") and os.getsid(0) == int(os.environ["INSTALLER_SID"]):
-        print(f"fixture: {what} ran in the installer's session", file=sys.stderr)
-        sys.exit(19)
-
-
-def leave_behind(shape, ticket, listed):
-    """What a build script could leave running, in the build's session but out of
-    its process group, deaf to HUP, INT and TERM, waiting for sudo to cache a
-    password, for 30 s at most. Shapes: plain; newline (a name holding a
-    newline); thread (its main thread gone, another one waiting); hop (a new PID
-    every fork); chain (each process forks the next at once, lingers 5 ms and
-    exits, so that several are alive at a time)."""
-    os.setpgid(0, 0)
-    for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
-        signal.signal(number, signal.SIG_IGN)
-    if shape == "newline":
-        Path("/proc/self/comm").write_text("left\nbehind")
-    if listed:
-        with open(listed, "a") as pids:
-            pids.write(f"{os.getpid()}\n")
-
-    def wait():
-        deadline = time.monotonic() + 30
-        while not ticket.exists() and time.monotonic() < deadline:
-            if shape in ("hop", "chain") and os.fork():
-                time.sleep(0.005 if shape == "chain" else 0)
-                os._exit(0)
-            time.sleep(0.001 if shape == "hop" else 0 if shape == "chain" else 0.01)
-        if ticket.exists():
-            record("left running", "found a password cached")
-        os._exit(0)
-
-    if shape == "thread":
-        threading.Thread(target=wait).start()
-        libc = ctypes.CDLL(None)
-        libc.syscall({"x86_64": 60, "aarch64": 93}[platform.machine()], 0)  # SYS_exit: this thread only
-    wait()
 
 
 name = Path(sys.argv[0]).name.removesuffix("-source")
@@ -125,8 +52,6 @@ args = sys.argv[1:]
 stable = Path(os.environ["HOME"], "stable-version")
 record(name, *args)
 command = " ".join([name, *args])
-if loader_variables():
-    record("loader", command, *loader_variables())
 if "SUDO_ASKPASS" in os.environ:
     record("askpass variable", command)
 if command == os.environ.get("FAIL_COMMAND") or name == os.environ.get("FAIL_COMMAND"):
@@ -167,11 +92,6 @@ elif name == "sudo":
         if "-n" in options:
             print("sudo: a password is required", file=sys.stderr)
             sys.exit(1)
-        # Whatever the build started (BUILD_PIDS) must be gone before sudo asks.
-        built = Path(os.environ.get("BUILD_PIDS", "/nonexistent"))
-        for pid in built.read_text().split() if built.exists() else ():
-            if running(pid):
-                record("left running", "when sudo asked")
         prompt = prompt.replace("%p", "tester")
         askpass = os.environ.get("SUDO_ASKPASS") or os.environ.get("SUDO_CONF_ASKPASS")
         try:
@@ -189,7 +109,9 @@ elif name == "sudo":
             signal.signal(signal.SIGINT, signal.SIG_DFL)
             os.killpg(0, signal.SIGINT)
         ticket.touch()
-    sys.exit(0 if "-v" in options or not args else subprocess.call(args))
+    # What it runs it finds as with sudo's secure_path: here the fixture's commands first.
+    path = f"{os.environ['FIXTURE_BIN']}:/usr/sbin:/usr/bin:/sbin:/bin"
+    sys.exit(0 if "-v" in options or not args else subprocess.call(args, env=dict(os.environ, PATH=path)))
 elif name == "rustc":
     print(f"rustc {stable.read_text() if stable.exists() else os.environ.get('RUST_VERSION', '1.89.0')}")
 elif name == "rustup":
@@ -210,21 +132,9 @@ elif name == "cargo":
         # sudo has a password cached: none may be, from start to end.
         ticket = Path(os.environ["SUDO_TICKET"])
         third_party("the build")
-        record("installer shell", os.readlink(f"/proc/{os.getppid()}/exe"))  # the bash running install.sh
-        signal.signal(signal.SIGTERM, lambda *_: (record("cargo", "stopped by TERM"), os._exit(143)))
-        built = os.environ.get("BUILD_PIDS")  # where the build's processes are listed
-        if built:
-            with open(built, "a") as pids:
-                pids.write(f"{os.getpid()}\n")
-        if os.environ.get("LEAVE_BEHIND") and os.fork() == 0:
-            leave_behind(os.environ["LEAVE_BEHIND"], ticket, built)
         # Commands the build plants in your directories (PLANT), recording any run.
         for directory in filter(None, os.environ.get("PLANT", "").split(":")):
             plant(directory)
-        if os.environ.get("REWRITE_HOOK"):
-            # A file your shell's startup files source, as a DEBUG trap might.
-            Path(os.environ["HOME"], ".hook").write_text(
-                'printf \'["hook ran"]\\n\' >>"$COMMAND_TRACE"\n')
         if os.environ.get("REWRITE_INSTALLER"):
             # install.sh, in place, from the command after the build on, as bash
             # would read it next if it read the script as it went.
@@ -244,13 +154,6 @@ elif name == "cargo":
 elif name == "curl":
     # rustup installer installed at the custom Cargo home used by this fixture.
     third_party("the Rust installer")
-    if os.environ.get("RUST_INSTALLER_PLANTS"):
-        # With rustup's env file holding functions, and commands planted in the
-        # directories RUST_INSTALLER_PLANTS lists, made yours: rustup's among them.
-        for directory in os.environ["RUST_INSTALLER_PLANTS"].split(":"):
-            plant(directory)
-            os.chown(directory, 1000, 1000)
-        env_file(Path(os.environ["CARGO_HOME"], "env"))
     print('mkdir -p "$CARGO_HOME/bin"')
     for tool in ("cargo", "rustup", "rustc"):
         print(f'ln -sf "$FIXTURE_BIN/{tool}-source" "$CARGO_HOME/bin/{tool}"')
