@@ -43,22 +43,12 @@ const UNIT_STATE: &str = "LoadState,UnitFileState,ActiveState,SubState,Result,Ex
 /// often (`StartLimitBurst=`).
 const FAILED_FIX: &str =
     "see why in `journalctl --user -u pqkey`, fix that, then run `pqkey start`";
-/// The fix for a service that is not enabled where it is not known whether
-/// the user's service manager lingers: with lingering, SECURITY.md advises
-/// disabling the service, which `pqkey setup` would enable again.
-const NOT_ENABLED_FIX: &str = "run `pqkey setup`; but if lingering is on (`loginctl \
-    enable-linger`) and you disabled it as SECURITY.md advises, leave it and use `pqkey start`";
-/// The fixes for a masked service. `unmask` removes a mask where setup
-/// installs the unit, and setup installs it again, which also overrides a
-/// mask elsewhere, and enables it. Where the user's service manager
-/// lingers, SECURITY.md advises disabling it then; where that is not known,
-/// the fix says so.
-const MASKED_FIX: &str = "run `systemctl --user unmask pqkey`, then `pqkey setup`";
-const MASKED_LINGERING_FIX: &str = "run `systemctl --user unmask pqkey`, then `pqkey setup`, \
-    then `systemctl --user disable pqkey`, as SECURITY.md advises with lingering";
-const MASKED_UNKNOWN_FIX: &str = "run `systemctl --user unmask pqkey`, then `pqkey setup`; but \
-    if lingering is on (`loginctl enable-linger`), then also `systemctl --user disable pqkey`, \
-    as SECURITY.md advises";
+/// How the fixes end for a service that is masked or not enabled, as a user
+/// may leave it on purpose. Both run `pqkey setup`, which enables it; where
+/// the user's service manager lingers (`loginctl enable-linger`), the key
+/// then starts at boot, before its user logs in, and SECURITY.md advises
+/// turning lingering off or keeping the service disabled.
+const LINGERING: &str = "but with lingering on, see SECURITY.md's \"Other users' sessions\" first";
 
 /// Where the user's systemd units live.
 fn unit_dir() -> PathBuf {
@@ -348,28 +338,6 @@ pub fn systemctl(args: &[&str]) -> io::Result<String> {
     }
 }
 
-/// Whether systemd-logind keeps the user's service manager running from
-/// boot and after logout (`loginctl enable-linger`), as its `Linger`
-/// property says. `None` where it cannot say, as for a user it does not
-/// know: one who has no session and does not linger.
-fn lingering() -> Option<bool> {
-    let output = ProcessCommand::new("loginctl")
-        .args([
-            "show-user",
-            &unistd::getuid().to_string(),
-            "--property=Linger",
-            "--value",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "yes" if output.status.success() => Some(true),
-        "no" if output.status.success() => Some(false),
-        _ => None,
-    }
-}
-
 pub(crate) fn warn_device_access() {
     if unistd::geteuid().is_root() {
         return;
@@ -515,8 +483,7 @@ impl UserService {
     }
     /// What keeps the service from starting the key with the session, or
     /// from running it, as `systemctl --user show` reports its unit: not
-    /// installed, or not found where setup installed it, masked, or not
-    /// enabled unless the user's service manager lingers, and, while the key
+    /// installed or not loaded, masked, or not enabled, and, while the key
     /// does not run, failed, or failed and about to be restarted. A key
     /// started by hand has [`Self::manual_start_problem`] instead of the
     /// service's failure.
@@ -537,55 +504,17 @@ impl UserService {
             // removed that file; its own unit there overrides a mask
             // elsewhere.
             "masked" => {
-                let fix = match lingering() {
-                    Some(false) => MASKED_FIX,
-                    Some(true) => MASKED_LINGERING_FIX,
-                    None => MASKED_UNKNOWN_FIX,
-                };
                 return Ok(vec![Problem::new(
                     format!("the {} is masked, {not_with_session}", Self::DESCRIPTION),
-                    fix,
+                    format!("run `systemctl --user unmask pqkey`, then `pqkey setup`; {LINGERING}"),
                 )]);
             }
-            // Not installed, or not where systemd looks. A unit file where
-            // setup installs it that systemd does not find is not linked from
-            // systemd's own directory: setup links it there, and SECURITY.md's
-            // `systemctl --user disable pqkey` removes that link too. Linking
-            // it again gives a unit that `pqkey start` starts and that is not
-            // enabled, as SECURITY.md advises where the user lingers.
-            load => {
-                let not_started = "the key does not start with your session";
-                let path = unit_dir().join(UNIT);
-                if load != "not-found"
-                    || !fs::symlink_metadata(&path).is_ok_and(|file| file.is_file())
-                {
-                    return Ok(vec![Problem::new(not_started, "run `pqkey setup`")]);
-                }
-                let link = format!(
-                    "`systemctl --user link {}`",
-                    super::setup::shell_quote(&path.to_string_lossy())
-                );
-                return Ok(vec![match lingering() {
-                    Some(false) => Problem::new(not_started, "run `pqkey setup`"),
-                    Some(true) => Problem::new(
-                        format!(
-                            "the {} is not found, so `pqkey start` starts the key by hand \
-                             instead of through it",
-                            Self::DESCRIPTION
-                        ),
-                        format!(
-                            "run {link}, which does not enable it, as SECURITY.md advises with \
-                             lingering"
-                        ),
-                    ),
-                    None => Problem::new(
-                        not_started,
-                        format!(
-                            "run `pqkey setup`; but if lingering is on (`loginctl enable-linger`) \
-                             and you disabled it as SECURITY.md advises, run {link} instead"
-                        ),
-                    ),
-                }]);
+            // Not installed, or not linked where systemd looks: setup does both.
+            _ => {
+                return Ok(vec![Problem::new(
+                    "the key does not start with your session",
+                    "run `pqkey setup`",
+                )]);
             }
         }
         let mut problems = Vec::new();
@@ -593,18 +522,13 @@ impl UserService {
             property("UnitFileState"),
             "disabled" | "linked" | "linked-runtime"
         ) {
-            let not_enabled = format!(
-                "the {} is not enabled, {not_with_session}",
-                Self::DESCRIPTION
-            );
-            match lingering() {
-                // What SECURITY.md advises where the service manager
-                // lingers, so that the key does not start at boot, before
-                // its user logs in; `pqkey start` starts it.
-                Some(true) => {}
-                Some(false) => problems.push(Problem::new(not_enabled, "run `pqkey setup`")),
-                None => problems.push(Problem::new(not_enabled, NOT_ENABLED_FIX)),
-            }
+            problems.push(Problem::new(
+                format!(
+                    "the {} is not enabled, {not_with_session}",
+                    Self::DESCRIPTION
+                ),
+                format!("run `pqkey setup`; {LINGERING}"),
+            ));
         }
         if running {
             return Ok(problems);
@@ -648,6 +572,7 @@ pub(crate) const PRESENCE_NOTIFY_HELP: &str = "Ask with a desktop notification t
 #[cfg(test)]
 mod setup_tests {
     use super::*;
+    use crate::test_support::{assert_names, assert_problem};
     #[test]
     fn service_install_child() {
         if env::var_os("PQKEY_SERVICE_CHILD").is_none() {
@@ -1144,52 +1069,23 @@ exit 0
 
     /// What [`UserService::problems`] finds, with the key `running` or not,
     /// for a unit that `systemctl --user show` reports as `shown`, or with a
-    /// query that fails for `None`, and for a user whose `Linger` property
-    /// `loginctl show-user` reports as `linger`, or cannot for `None`; with
-    /// the calls it made. No unit file is where setup installs it.
-    fn problems_with(
-        shown: Option<&str>,
-        linger: Option<&str>,
-        running: bool,
-    ) -> (Vec<Problem>, Vec<String>) {
+    /// query that fails for `None`. It asks systemctl once.
+    fn problems_of(shown: Option<&str>, running: bool) -> Vec<Problem> {
         use crate::test_support::TempDir;
-        let dir = TempDir::new("service-problems");
-        problems_in(dir.path(), shown, linger, running)
-    }
-
-    /// [`problems_with`] in `dir`, where the user's configuration directory
-    /// (XDG_CONFIG_HOME) is `dir/config`.
-    fn problems_in(
-        dir: &Path,
-        shown: Option<&str>,
-        linger: Option<&str>,
-        running: bool,
-    ) -> (Vec<Problem>, Vec<String>) {
         use std::os::unix::fs::PermissionsExt;
-        for (name, script) in [
-            (
-                "systemctl",
-                r#"#!/bin/sh
+        let dir = TempDir::new("service-problems");
+        let systemctl = dir.path().join("systemctl");
+        fs::write(
+            &systemctl,
+            r#"#!/bin/sh
 printf 'systemctl %s\n' "$*" >> "$COMMAND_TRACE"
 [ -n "${UNIT_SHOWN+set}" ] || { echo "Failed to connect to bus: No medium found" >&2; exit 1; }
 printf '%s\n' "$UNIT_SHOWN"
 "#,
-            ),
-            (
-                "loginctl",
-                r#"#!/bin/sh
-printf 'loginctl %s\n' "$*" >> "$COMMAND_TRACE"
-[ -n "${LINGER+set}" ] || { echo "Failed to get user: User ID $2 is not logged in or lingering" >&2; exit 1; }
-printf '%s\n' "$LINGER"
-"#,
-            ),
-        ] {
-            let path = dir.join(name);
-            fs::write(&path, script).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let trace = dir.join("trace");
-        let _ = fs::remove_file(&trace);
+        )
+        .unwrap();
+        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+        let trace = dir.path().join("trace");
         let mut child = ProcessCommand::new(env::current_exe().unwrap());
         child
             .args([
@@ -1201,60 +1097,30 @@ printf '%s\n' "$LINGER"
                 "PQKEY_PROBLEMS_CHILD",
                 if running { "running" } else { "stopped" },
             )
-            .env("PATH", dir)
-            .env("XDG_CONFIG_HOME", dir.join("config"))
+            .env("PATH", dir.path())
             .env("COMMAND_TRACE", &trace)
-            .env_remove("UNIT_SHOWN")
-            .env_remove("LINGER");
+            .env_remove("UNIT_SHOWN");
         if let Some(shown) = shown {
             child.env("UNIT_SHOWN", shown);
         }
-        if let Some(linger) = linger {
-            child.env("LINGER", linger);
-        }
         let output = child.output().unwrap();
         assert!(output.status.success(), "{output:?}");
-        let problems = String::from_utf8_lossy(&output.stdout)
+        assert_eq!(
+            fs::read_to_string(&trace).unwrap(),
+            format!("systemctl --user show --property {UNIT_STATE} pqkey.service\n")
+        );
+        String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| line.strip_prefix("PROBLEM\t")?.split_once('\t'))
             .map(|(what, fix)| Problem::new(what, fix))
-            .collect();
-        let calls = fs::read_to_string(&trace)
-            .unwrap()
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        (problems, calls)
+            .collect()
     }
 
-    /// The query of the unit with which [`UserService::problems`] starts.
-    fn show_call() -> String {
-        format!("systemctl --user show --property {UNIT_STATE} pqkey.service")
-    }
-
-    /// [`problems_with`] for a unit that is enabled, or neither loaded nor
-    /// masked, for which only systemctl is asked, once.
-    fn problems_of(shown: Option<&str>, running: bool) -> Vec<Problem> {
-        let (problems, calls) = problems_with(shown, None, running);
-        assert_eq!(calls, [show_call()]);
-        problems
-    }
-
-    /// [`problems_with`] for a unit that is masked or not enabled, for which
-    /// loginctl is asked next whether this user lingers.
-    fn problems_lingering(shown: &str, linger: Option<&str>, running: bool) -> Vec<Problem> {
-        let (problems, calls) = problems_with(Some(shown), linger, running);
-        assert_eq!(
-            calls,
-            [
-                show_call(),
-                format!(
-                    "loginctl show-user {} --property=Linger --value",
-                    unistd::getuid()
-                )
-            ]
-        );
-        problems
+    /// The one problem that [`problems_of`] finds.
+    fn problem_of(shown: Option<&str>, running: bool) -> Problem {
+        let mut problems = problems_of(shown, running);
+        assert_eq!(problems.len(), 1, "{shown:?} {running}: {problems:?}");
+        problems.remove(0)
     }
 
     /// What `systemctl --user show --property UNIT_STATE pqkey.service`
@@ -1274,6 +1140,9 @@ printf '%s\n' "$LINGER"
         )
     }
 
+    /// The commands of [`FAILED_FIX`].
+    const LOG_AND_START: [&str; 2] = ["journalctl --user -u pqkey", "pqkey start"];
+
     /// A unit that failed is named with how, where the cause is logged and
     /// `pqkey start`, which resets the failed state, for every result: a key
     /// that exited, as when systemd gave up restarting it after five starts
@@ -1285,25 +1154,18 @@ printf '%s\n' "$LINGER"
     #[test]
     fn status_names_a_failed_service_with_its_log_and_pqkey_start() {
         for (result, status, failed) in [
-            ("exit-code", "1", "failed: the key exited with status 1"),
-            ("exit-code", "3", "failed: the key exited with status 3"),
-            ("signal", "9", "failed: the key was killed by signal 9"),
-            ("core-dump", "11", "failed: the key was killed by signal 11"),
-            (
-                "start-limit-hit",
-                "15",
-                "failed with result 'start-limit-hit'",
-            ),
-            ("timeout", "0", "failed with result 'timeout'"),
+            ("exit-code", "1", "exited with status 1"),
+            ("exit-code", "3", "exited with status 3"),
+            ("signal", "9", "killed by signal 9"),
+            ("core-dump", "11", "killed by signal 11"),
+            ("start-limit-hit", "15", "'start-limit-hit'"),
+            ("timeout", "0", "'timeout'"),
         ] {
             let unit = shown("loaded", "enabled", "failed", "failed", result, status);
-            assert_eq!(
-                problems_of(Some(&unit), false),
-                [Problem::new(
-                    format!("the systemd user service pqkey.service {failed}"),
-                    "see why in `journalctl --user -u pqkey`, fix that, then run `pqkey start`",
-                )],
-                "{result}"
+            assert_problem(
+                &problem_of(Some(&unit), false),
+                &["pqkey.service", "failed", failed],
+                &LOG_AND_START,
             );
             let running = problems_of(Some(&unit), true);
             assert!(running.is_empty(), "{result}: {running:?}");
@@ -1317,29 +1179,14 @@ printf '%s\n' "$LINGER"
     #[test]
     fn status_names_a_service_that_systemd_restarts_after_a_failure() {
         for (sub, result, status, failed) in [
-            (
-                "auto-restart",
-                "exit-code",
-                "1",
-                "failed: the key exited with status 1",
-            ),
-            (
-                "auto-restart-queued",
-                "signal",
-                "9",
-                "failed: the key was killed by signal 9",
-            ),
+            ("auto-restart", "exit-code", "1", "exited with status 1"),
+            ("auto-restart-queued", "signal", "9", "killed by signal 9"),
         ] {
             let unit = shown("loaded", "enabled", "activating", sub, result, status);
-            assert_eq!(
-                problems_of(Some(&unit), false),
-                [Problem::new(
-                    format!(
-                        "the systemd user service pqkey.service {failed}; systemd is restarting it"
-                    ),
-                    FAILED_FIX,
-                )],
-                "{sub}"
+            assert_problem(
+                &problem_of(Some(&unit), false),
+                &["pqkey.service", "failed", failed, "restarting"],
+                &LOG_AND_START,
             );
             let running = problems_of(Some(&unit), true);
             assert!(running.is_empty(), "{sub}: {running:?}");
@@ -1351,53 +1198,27 @@ printf '%s\n' "$LINGER"
 
     /// A unit that is not enabled, after `systemctl --user disable pqkey`, or
     /// linked from outside systemd's directories but not enabled, does not
-    /// start with the session. Where the user's service manager lingers,
-    /// SECURITY.md advises exactly that, so it is not named. Otherwise it is,
-    /// whether the key runs or not, and beside a failure: with `pqkey setup`,
-    /// which enables it, where the user does not linger, and with that
-    /// advice as the exception where loginctl cannot tell, as for a user
-    /// without a session. An enabled unit is not named, and loginctl is not
-    /// asked.
+    /// start with the session. It is named whether the key runs or not, and
+    /// beside a failure, with `pqkey setup`, which enables it, and
+    /// [`LINGERING`], since SECURITY.md advises leaving it so with
+    /// lingering. An enabled unit is not named.
     #[test]
-    fn status_names_a_service_that_is_not_enabled_unless_the_user_lingers() {
-        let what = "the systemd user service pqkey.service is not enabled, so the key does not \
-                    start with your session";
-        let not_lingering = Problem::new(what, "run `pqkey setup`");
-        let unknown = Problem::new(
-            what,
-            "run `pqkey setup`; but if lingering is on (`loginctl enable-linger`) and you \
-             disabled it as SECURITY.md advises, leave it and use `pqkey start`",
-        );
+    fn status_names_a_service_that_is_not_enabled_with_setup() {
+        let not_enabled = ["pqkey.service", "not enabled", "does not start"];
+        let setup = ["pqkey setup", LINGERING];
         for file in ["disabled", "linked", "linked-runtime"] {
             let unit = shown("loaded", file, "inactive", "dead", "success", "0");
             for running in [false, true] {
-                assert_eq!(
-                    problems_lingering(&unit, Some("no"), running),
-                    std::slice::from_ref(&not_lingering),
-                    "{file}"
-                );
-                let lingers = problems_lingering(&unit, Some("yes"), running);
-                assert!(lingers.is_empty(), "{file}: {lingers:?}");
-                // loginctl fails, or answers something else.
-                for linger in [None, Some("")] {
-                    assert_eq!(
-                        problems_lingering(&unit, linger, running),
-                        std::slice::from_ref(&unknown),
-                        "{file} {linger:?}"
-                    );
-                }
+                assert_problem(&problem_of(Some(&unit), running), &not_enabled, &setup);
             }
         }
         let failed = shown("loaded", "disabled", "failed", "failed", "exit-code", "1");
-        let failure = Problem::new(
-            "the systemd user service pqkey.service failed: the key exited with status 1",
-            FAILED_FIX,
-        );
-        assert_eq!(
-            problems_lingering(&failed, Some("no"), false),
-            [not_lingering, failure.clone()]
-        );
-        assert_eq!(problems_lingering(&failed, Some("yes"), false), [failure]);
+        let problems = problems_of(Some(&failed), false);
+        let [disabled, failure] = problems.as_slice() else {
+            panic!("{problems:?}");
+        };
+        assert_problem(disabled, &not_enabled, &setup);
+        assert_problem(failure, &["failed", "exited with status 1"], &LOG_AND_START);
         for (running, active, sub) in [(false, "inactive", "dead"), (true, "active", "running")] {
             let enabled = shown("loaded", "enabled", active, sub, "success", "0");
             let found = problems_of(Some(&enabled), running);
@@ -1409,141 +1230,51 @@ printf '%s\n' "$LINGER"
     /// the user's configuration or in /run (`masked-runtime`), is named
     /// whether the key runs, as a key started by hand can, or not, with
     /// `systemctl --user unmask pqkey`, then `pqkey setup`, which installs
-    /// the unit again and enables it. Where the user's service manager
-    /// lingers, the fix goes on to disable it, as SECURITY.md advises; where
-    /// loginctl cannot tell, it names that as the exception.
+    /// the unit again and enables it, and [`LINGERING`].
     #[test]
     fn status_names_a_masked_service_with_unmask_and_setup() {
-        let unmask_and_setup = "run `systemctl --user unmask pqkey`, then `pqkey setup`";
-        for (linger, fix) in [
-            (Some("no"), unmask_and_setup.to_owned()),
-            (
-                Some("yes"),
-                format!(
-                    "{unmask_and_setup}, then `systemctl --user disable pqkey`, as SECURITY.md \
-                     advises with lingering"
-                ),
-            ),
-            (
-                None,
-                format!(
-                    "{unmask_and_setup}; but if lingering is on (`loginctl enable-linger`), then \
-                     also `systemctl --user disable pqkey`, as SECURITY.md advises"
-                ),
-            ),
-        ] {
-            for file in ["masked", "masked-runtime"] {
-                let unit = shown("masked", file, "inactive", "dead", "success", "0");
-                for running in [false, true] {
-                    assert_eq!(
-                        problems_lingering(&unit, linger, running),
-                        [Problem::new(
-                            "the systemd user service pqkey.service is masked, so the key does \
-                             not start with your session",
-                            fix.as_str(),
-                        )],
-                        "{file} {linger:?}"
-                    );
-                }
+        for file in ["masked", "masked-runtime"] {
+            let unit = shown("masked", file, "inactive", "dead", "success", "0");
+            for running in [false, true] {
+                assert_problem(
+                    &problem_of(Some(&unit), running),
+                    &["pqkey.service", "masked", "does not start"],
+                    &["systemctl --user unmask pqkey", "pqkey setup", LINGERING],
+                );
             }
         }
     }
 
-    /// A unit that is not installed, or that systemd cannot load, and a
-    /// user manager that cannot be asked, leave the key without its service,
-    /// which `pqkey setup` installs.
+    /// A unit that is not installed, or that systemd does not find or cannot
+    /// load, and a user manager that cannot be asked, leave the key without
+    /// its service, which `pqkey setup` installs.
     #[test]
     fn status_names_a_missing_service_with_setup() {
-        let missing = [Problem::new(
-            "the key does not start with your session",
-            "run `pqkey setup`",
-        )];
-        for load in ["not-found", "bad-setting"] {
-            let unit = shown(load, "", "inactive", "dead", "success", "0");
-            assert_eq!(problems_of(Some(&unit), false), missing, "{load}");
-        }
-        for running in [false, true] {
-            assert_eq!(problems_of(None, running), missing);
+        let not_found = shown("not-found", "", "inactive", "dead", "success", "0");
+        let bad = shown("bad-setting", "", "inactive", "dead", "success", "0");
+        for unit in [Some(not_found.as_str()), Some(bad.as_str()), None] {
+            for running in [false, true] {
+                assert_problem(
+                    &problem_of(unit, running),
+                    &["the key does not start with your session"],
+                    &["pqkey setup"],
+                );
+            }
         }
     }
 
-    /// A unit file where setup installs the unit that systemd does not find
-    /// has lost the link setup made to it, as `systemctl --user disable
-    /// pqkey`, SECURITY.md's advice where the user lingers, removes it for a
-    /// unit outside systemd's own directory. `pqkey start` then starts the
-    /// key by hand. Where the user lingers, the fix links it again, which
-    /// does not enable it; where that is not known, the fix says so; and
-    /// otherwise it is `pqkey setup`, as for a unit that is not installed.
-    /// Only for a regular file: systemd links no other, and loginctl is not
-    /// asked for any other unit that is not loaded.
+    /// [`LINGERING`] points to a section of SECURITY.md that gives its advice
+    /// on lingering.
     #[test]
-    fn status_names_a_unit_systemd_does_not_find_with_link_where_the_user_lingers() {
-        use crate::test_support::TempDir;
-        let dir = TempDir::new("service-unlinked");
-        let path = dir.path().join("config/systemd/user/pqkey.service");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, UNIT_TEMPLATE).unwrap();
-        let link = format!("`systemctl --user link '{}'`", path.display());
-        let what = "the key does not start with your session";
-        let not_found = shown("not-found", "", "inactive", "dead", "success", "0");
-        let linger_call = format!(
-            "loginctl show-user {} --property=Linger --value",
-            unistd::getuid()
+    fn the_lingering_clause_points_to_advice_in_security_md() {
+        let section = "Other users' sessions";
+        assert_names(
+            LINGERING,
+            &["lingering", &format!("SECURITY.md's \"{section}\"")],
         );
-        for running in [false, true] {
-            for (linger, problem) in [
-                (Some("no"), Problem::new(what, "run `pqkey setup`")),
-                (
-                    Some("yes"),
-                    Problem::new(
-                        "the systemd user service pqkey.service is not found, so `pqkey start` \
-                         starts the key by hand instead of through it",
-                        format!(
-                            "run {link}, which does not enable it, as SECURITY.md advises with \
-                             lingering"
-                        ),
-                    ),
-                ),
-                (
-                    None,
-                    Problem::new(
-                        what,
-                        format!(
-                            "run `pqkey setup`; but if lingering is on (`loginctl \
-                             enable-linger`) and you disabled it as SECURITY.md advises, run \
-                             {link} instead"
-                        ),
-                    ),
-                ),
-                (
-                    Some(""),
-                    Problem::new(
-                        what,
-                        format!(
-                            "run `pqkey setup`; but if lingering is on (`loginctl \
-                             enable-linger`) and you disabled it as SECURITY.md advises, run \
-                             {link} instead"
-                        ),
-                    ),
-                ),
-            ] {
-                let (problems, calls) = problems_in(dir.path(), Some(&not_found), linger, running);
-                assert_eq!(problems, [problem], "{linger:?} {running}");
-                assert_eq!(calls, [show_call(), linger_call.clone()], "{linger:?}");
-            }
-        }
-        // A unit systemd cannot load, a failed query, or a link where setup
-        // installs the unit: `pqkey setup`, without asking loginctl.
-        let bad = shown("bad-setting", "", "inactive", "dead", "success", "0");
-        for query in [Some(bad.as_str()), None] {
-            let (problems, calls) = problems_in(dir.path(), query, Some("yes"), false);
-            assert_eq!(problems, [Problem::new(what, "run `pqkey setup`")]);
-            assert_eq!(calls, [show_call()]);
-        }
-        fs::rename(&path, dir.path().join("elsewhere.service")).unwrap();
-        std::os::unix::fs::symlink(dir.path().join("elsewhere.service"), &path).unwrap();
-        let (problems, calls) = problems_in(dir.path(), Some(&not_found), Some("yes"), false);
-        assert_eq!(problems, [Problem::new(what, "run `pqkey setup`")]);
-        assert_eq!(calls, [show_call()]);
+        let security = include_str!("../../../../../SECURITY.md");
+        let (_, advice) = security.split_once(&format!("\n### {section}\n")).unwrap();
+        let advice = advice.split("\n#").next().unwrap();
+        assert_names(advice, &["lingering", "systemctl --user disable pqkey"]);
     }
 }
