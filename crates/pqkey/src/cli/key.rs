@@ -1345,7 +1345,7 @@ mod tests {
 
     use super::*;
     use crate::client::tests::{Daemon, TestLink, discoverable, start};
-    use crate::test_support::TempDir;
+    use crate::test_support::{TempDir, assert_ran, child_test};
 
     /// PINs from a script; reading past its end fails.
     struct Script(VecDeque<&'static str>);
@@ -1869,7 +1869,7 @@ esac
     /// started by hand, that it has none.
     #[test]
     fn status_names_a_key_that_approves_without_asking() {
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
         let dir = TempDir::new("status-presence");
         let bin = fake_systemctl(dir.path());
         let no_bus = format!("unix:path={}", dir.path().join("no-bus").display());
@@ -1881,8 +1881,8 @@ esac
         ]
         .into_iter()
         .map(|(presence, runs)| {
-            let child = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
+            let child = child_test!(status_child)
+                .command()
                 .env("PQKEY_STATUS_CHILD", presence)
                 .env("PQKEY_STATUS_RUNS", runs)
                 .env("PATH", &bin)
@@ -1901,6 +1901,7 @@ esac
         .collect();
         for (presence, runs, pid, child) in children {
             let output = child.wait_with_output().unwrap();
+            assert_ran(&output.stdout);
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let context = format!("{presence} {runs}: {stdout}{stderr}");
@@ -1958,7 +1959,6 @@ esac
     /// `platform::linux::daemon`'s tests.)
     #[test]
     fn status_names_a_unit_of_the_users_own_that_setup_keeps() {
-        use std::process::Command;
         let dir = TempDir::new("status-kept-unit");
         let bin = fake_systemctl(dir.path());
         let unit = dir.path().join("config/systemd/user/pqkey.service");
@@ -1979,8 +1979,8 @@ esac
             } else {
                 std::fs::remove_file(&unit).unwrap();
             }
-            let output = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
+            let output = child_test!(status_child)
+                .command()
                 .env("PQKEY_STATUS_CHILD", "notify")
                 .env("PQKEY_STATUS_RUNS", "service")
                 .env("PATH", &bin)
@@ -1992,6 +1992,7 @@ esac
                 )
                 .output()
                 .unwrap();
+            assert_ran(&output.stdout);
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert_eq!(output.status.code(), Some(0), "{own}: {output:?}");
             assert_eq!(stdout.contains(&kept), own, "{own}: {stdout}");
@@ -2010,7 +2011,7 @@ esac
     fn status_checks_notifications_on_the_keys_own_session_bus() {
         use crate::test_support::assert_names;
         use std::os::unix::net::UnixListener;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
         let dir = TempDir::new("status-bus");
         let bin = fake_systemctl(dir.path());
         let terminal = dir.path().join("shell-bus");
@@ -2033,8 +2034,8 @@ esac
         .into_iter()
         .enumerate()
         .map(|(n, (runs, bus, named))| {
-            let child = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
+            let child = child_test!(status_child)
+                .command()
                 .env("PQKEY_STATUS_CHILD", "notify")
                 .env("PQKEY_STATUS_RUNS", runs)
                 .env("PQKEY_STATUS_KEY_BUS", &bus)
@@ -2051,6 +2052,7 @@ esac
         .collect();
         for (key_runs, named, child) in children {
             let output = child.wait_with_output().unwrap();
+            assert_ran(&output.stdout);
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let context = format!("{key_runs}: {stdout}{stderr}");
@@ -2086,15 +2088,15 @@ esac
     /// on the device, and fails.
     #[test]
     fn status_of_a_key_another_pqkey_started() {
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
         let dir = TempDir::new("status-versions");
         let bin = fake_systemctl(dir.path());
         let here = format!("unix:path={}", dir.path().join("shell-bus").display());
         let children: Vec<_> = ["v1", "v3"]
             .into_iter()
             .map(|version| {
-                let child = Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
+                let child = child_test!(status_child)
+                    .command()
                     .env("PQKEY_STATUS_CHILD", "notify")
                     .env("PQKEY_STATUS_RUNS", "service")
                     .env("PQKEY_STATUS_KEY_VERSION", version)
@@ -2110,6 +2112,7 @@ esac
             .collect();
         for (version, pid, child) in children {
             let output = child.wait_with_output().unwrap();
+            assert_ran(&output.stdout);
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let context = format!("{version}: {stdout}{stderr}");
@@ -2150,11 +2153,10 @@ esac
     /// whether it is the service, before status reads what it published.
     #[test]
     fn status_finds_a_key_that_stops_meanwhile_starting_or_stopping() {
-        use std::process::Command;
         let dir = TempDir::new("status-stops");
         let data = dir.path().join("data");
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
+        let output = child_test!(status_child)
+            .command()
             .env("PQKEY_STATUS_CHILD", "notify")
             .env("PQKEY_STATUS_RUNS", "service")
             // The default state directory under XDG_DATA_HOME.
@@ -2170,6 +2172,7 @@ esac
             )
             .output()
             .unwrap();
+        assert_ran(&output.stdout);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let context = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(output.status.code(), Some(0), "{context}");
@@ -2227,19 +2230,15 @@ esac
     /// that approves without asking, which is warned about.
     #[test]
     fn status_reads_what_the_key_published_once() {
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
         let dir = TempDir::new("status-reads");
         let children: Vec<_> = ["notify", "auto-approve"]
             .into_iter()
             .map(|presence| {
                 let state_dir = dir.path().join(presence);
                 std::fs::create_dir(&state_dir).unwrap();
-                let child = Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "cli::key::tests::status_reads_child",
-                        "--nocapture",
-                    ])
+                let child = child_test!(status_reads_child)
+                    .command()
                     .env("PQKEY_STATUS_CHILD", presence)
                     .env("PQKEY_STATUS_READS", &state_dir)
                     .env(
@@ -2255,6 +2254,7 @@ esac
             .collect();
         for (presence, child) in children {
             let output = child.wait_with_output().unwrap();
+            assert_ran(&output.stdout);
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let context = format!("{presence}: {stdout}{stderr}");

@@ -336,7 +336,7 @@ fn uninstall_inner(state_dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::TempDir;
+    use crate::test_support::{TempDir, assert_ran, child_test};
     use std::path::PathBuf;
     struct Fixture {
         scenario: String,
@@ -482,15 +482,12 @@ mod tests {
 
     #[test]
     fn interrupted_setup_output_is_failure_while_status_pipes_remain_successful() {
-        let result = std::process::Command::new(env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "cli::setup::tests::setup_scenario_child",
-                "--nocapture",
-            ])
+        let result = child_test!(setup_scenario_child)
+            .command()
             .env("PQKEY_SETUP_SCENARIO", "closed-output")
             .output()
             .unwrap();
+        assert_ran(&result.stdout);
         assert_eq!(result.status.code(), Some(1), "{result:?}");
         assert!(String::from_utf8_lossy(&result.stderr).contains("setup did not finish"));
     }
@@ -522,17 +519,14 @@ mod tests {
             "path",
             "verify",
         ] {
-            let result = std::process::Command::new(env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "cli::setup::tests::setup_scenario_child",
-                    "--nocapture",
-                ])
+            let result = child_test!(setup_scenario_child)
+                .command()
                 .env("PQKEY_SETUP_SCENARIO", scenario)
                 .env("PATH", home.path())
                 .env("XDG_CONFIG_HOME", home.path())
                 .output()
                 .unwrap();
+            assert_ran(&result.stdout);
             let stdout = String::from_utf8_lossy(&result.stdout);
             let stderr = String::from_utf8_lossy(&result.stderr);
             let ready = ["fresh", "configured", "auto-approve"].contains(&scenario);
@@ -750,7 +744,7 @@ run_key() {
         set -- env -u DBUS_SESSION_BUS_ADDRESS
     fi
     "$@" PQKEY_SERVICE_KEY="$(cat "$FIXTURE/presence" 2>/dev/null)" "$KEY" --exact \
-        cli::setup::tests::service_key_child --nocapture </dev/null >/dev/null 2>&1 &
+        "$KEY_TEST" --nocapture </dev/null >/dev/null 2>&1 &
     echo $! > "$FIXTURE/main-pid"
 }
 stop_key() {
@@ -824,15 +818,15 @@ esac
             shell_bus: Option<&str>,
             can_ask: Option<&str>,
         ) -> std::process::Output {
-            let mut child = std::process::Command::new(env::current_exe().unwrap());
+            let mut child = child_test!(service_child).command();
             child
-                .args(["--exact", "cli::setup::tests::service_child", "--nocapture"])
                 .env("PQKEY_SERVICE_CHILD", step)
                 .env("PATH", self.file("bin"))
                 .env("XDG_CONFIG_HOME", self.file("config"))
                 .env("XDG_DATA_HOME", self.file("data"))
                 .env("FIXTURE", self.dir.path())
                 .env("KEY", env::current_exe().unwrap())
+                .env("KEY_TEST", child_test!(service_key_child).name())
                 .env_remove("DBUS_SESSION_BUS_ADDRESS")
                 .env_remove("PQKEY_CAN_ASK");
             if let Some(bus) = shell_bus {
@@ -841,7 +835,9 @@ esac
             if let Some(bus) = can_ask {
                 child.env("PQKEY_CAN_ASK", bus);
             }
-            child.output().unwrap()
+            let output = child.output().unwrap();
+            assert_ran(&output.stdout);
+            output
         }
 
         /// `pqkey setup`'s start of the service and its check of it, from a
@@ -1162,15 +1158,11 @@ esac
         let user_bus = manager.bus("user-bus");
         manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={user_bus}\n"));
         // `pqkey start --presence unanswered`, without the service.
-        let mut by_hand = std::process::Command::new(env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "cli::setup::tests::service_key_child",
-                "--nocapture",
-            ])
+        let by_hand = child_test!(service_key_child)
+            .command()
             .env("PQKEY_SERVICE_KEY", "unanswered")
             .env("XDG_DATA_HOME", manager.file("data"))
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
@@ -1210,7 +1202,9 @@ esac
         // `pqkey stop && pqkey setup`
         let stopped = manager.run("stop", Some(&user_bus), None);
         assert!(stopped.status.success(), "{stopped:?}");
-        assert!(by_hand.wait().unwrap().success());
+        let by_hand = by_hand.wait_with_output().unwrap();
+        assert_ran(&by_hand.stdout);
+        assert!(by_hand.status.success());
         let stdout = manager.setup(Some(&user_bus), None).unwrap();
         assert!(stdout.contains("✓ Key started;"), "{stdout}");
         let (after, _, presence) = manager.key();

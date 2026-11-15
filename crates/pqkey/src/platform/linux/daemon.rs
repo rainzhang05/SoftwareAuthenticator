@@ -572,7 +572,7 @@ pub(crate) const PRESENCE_NOTIFY_HELP: &str = "Ask with a desktop notification t
 #[cfg(test)]
 mod setup_tests {
     use super::*;
-    use crate::test_support::{assert_names, assert_problem};
+    use crate::test_support::{assert_names, assert_problem, assert_ran, child_test};
     #[test]
     fn service_install_child() {
         if env::var_os("PQKEY_SERVICE_CHILD").is_none() {
@@ -623,12 +623,8 @@ exit 0
         let config = dir.path().join("config");
         let unit = config.join("systemd/user/pqkey.service");
         let child = |failure: &str| {
-            ProcessCommand::new(env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "platform::linux::daemon::setup_tests::service_install_child",
-                    "--nocapture",
-                ])
+            let output = child_test!(service_install_child)
+                .command()
                 .env("PQKEY_SERVICE_CHILD", "1")
                 .env("PATH", &bin)
                 .env("XDG_CONFIG_HOME", &config)
@@ -637,7 +633,9 @@ exit 0
                 .env("COMMAND_TRACE", &trace)
                 .env("FAIL_ACTION", failure)
                 .output()
-                .unwrap()
+                .unwrap();
+            assert_ran(&output.stdout);
+            output
         };
         let failed = child("daemon-reload");
         assert_eq!(failed.status.code(), Some(1));
@@ -765,12 +763,8 @@ exit 0
                 .contains(&format!("cannot read {}: ", unit.display())),
             "{unreadable:?}"
         );
-        let probe = ProcessCommand::new(env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "platform::linux::daemon::setup_tests::service_install_child",
-                "--nocapture",
-            ])
+        let probe = child_test!(service_install_child)
+            .command()
             .env("PQKEY_SERVICE_CHILD", "1")
             .env("PQKEY_MANUAL_PROBE", "1")
             .env("PATH", &bin)
@@ -779,6 +773,7 @@ exit 0
             .env("FAIL_ACTION", "show")
             .output()
             .unwrap();
+        assert_ran(&probe.stdout);
         assert!(probe.status.success(), "{probe:?}");
     }
 
@@ -801,11 +796,7 @@ exit 0
                 "exec \"$0\" \"$@\""
             })
             .arg(env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "platform::linux::daemon::setup_tests::service_install_child",
-                "--nocapture",
-            ])
+            .args(child_test!(service_install_child).args())
             .env("PQKEY_SERVICE_CHILD", "1")
             .env("PQKEY_SERVICE_BINARY", binary)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
@@ -818,7 +809,9 @@ exit 0
             // where cargo llvm-cov merges every profile and fails on it.
             child.env("LLVM_PROFILE_FILE", dir.join("limited.profraw"));
         }
-        child.output().unwrap()
+        let output = child.output().unwrap();
+        assert_ran(&output.stdout);
+        output
     }
 
     /// A program whose path holds white space other than ASCII's, which
@@ -1086,13 +1079,8 @@ printf '%s\n' "$UNIT_SHOWN"
         .unwrap();
         fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
         let trace = dir.path().join("trace");
-        let mut child = ProcessCommand::new(env::current_exe().unwrap());
+        let mut child = child_test!(service_problems_child).command();
         child
-            .args([
-                "--exact",
-                "platform::linux::daemon::setup_tests::service_problems_child",
-                "--nocapture",
-            ])
             .env(
                 "PQKEY_PROBLEMS_CHILD",
                 if running { "running" } else { "stopped" },
@@ -1104,6 +1092,7 @@ printf '%s\n' "$UNIT_SHOWN"
             child.env("UNIT_SHOWN", shown);
         }
         let output = child.output().unwrap();
+        assert_ran(&output.stdout);
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
             fs::read_to_string(&trace).unwrap(),

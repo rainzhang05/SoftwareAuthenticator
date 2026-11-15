@@ -3,6 +3,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         Mutex, MutexGuard,
         atomic::{AtomicUsize, Ordering},
@@ -64,6 +65,64 @@ pub fn assert_names(text: &str, words: &[&str]) {
 pub fn assert_problem(problem: &crate::cli::checks::Problem, cause: &[&str], fix: &[&str]) {
     assert_names(&problem.what, cause);
     assert_names(&problem.fix, fix);
+}
+
+/// The `#[test]` function `$test` of the calling module, as a [`ChildTest`].
+/// Its libtest name comes from `module_path!()`, and the function itself is
+/// passed along, so that renaming or moving it fails to compile here instead
+/// of leaving a child that runs no test.
+macro_rules! child_test {
+    ($test:ident) => {
+        $crate::test_support::ChildTest::new(
+            concat!(module_path!(), "::", stringify!($test)),
+            $test,
+        )
+    };
+}
+pub(crate) use child_test;
+
+/// A test of this binary that another test runs as a child process, to see
+/// what it does in a process of its own: made by [`child_test!`], and checked
+/// with [`assert_ran`].
+pub struct ChildTest(&'static str);
+
+impl ChildTest {
+    /// `_test`, whose path is `path` with the crate's name first, as
+    /// [`child_test!`] gives them.
+    pub fn new(path: &'static str, _test: fn()) -> Self {
+        // libtest names a test by its path from the crate root.
+        let (_crate, name) = path.split_once("::").unwrap();
+        Self(name)
+    }
+
+    /// Its libtest name.
+    pub fn name(&self) -> &'static str {
+        self.0
+    }
+
+    /// libtest's arguments that run it alone, its output not captured.
+    pub fn args(&self) -> [&'static str; 3] {
+        ["--exact", self.0, "--nocapture"]
+    }
+
+    /// This test binary, run with [`Self::args`].
+    pub fn command(&self) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(self.args());
+        command
+    }
+}
+
+/// Fails unless `stdout`, a [`ChildTest`]'s standard output, shows that
+/// libtest ran the test: a name that matches no test, or an ignored test,
+/// runs nothing and exits with status 0, as a child that found nothing would.
+#[track_caller]
+pub fn assert_ran(stdout: &[u8]) {
+    let stdout = String::from_utf8_lossy(stdout);
+    assert!(
+        stdout.starts_with("\nrunning 1 test\n") && !stdout.contains(" ... ignored"),
+        "the child test did not run: {stdout}"
+    );
 }
 
 /// Captures everything logged anywhere in the unit test binary.

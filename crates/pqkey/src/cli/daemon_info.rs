@@ -295,9 +295,10 @@ mod tests {
 
     #[test]
     fn a_non_dumpable_daemon_can_be_inspected() {
+        use crate::test_support::{assert_ran, child_test};
         use std::{
             io::{BufRead, Write},
-            process::{Command, Stdio},
+            process::Stdio,
         };
         const CHILD: &str = "PQKEY_INFO_CHILD";
         if let Some(path) = std::env::var_os(CHILD) {
@@ -324,26 +325,22 @@ mod tests {
             return;
         }
         let dir = TempDir::new("daemon-info-child");
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "cli::daemon_info::tests::a_non_dumpable_daemon_can_be_inspected",
-                "--nocapture",
-            ])
+        let mut child = child_test!(a_non_dumpable_daemon_can_be_inspected)
+            .command()
             .env(CHILD, dir.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
         let mut reader = io::BufReader::new(child.stdout.take().unwrap());
-        let mut line = String::new();
-        while reader.read_line(&mut line).unwrap() > 0 {
+        let mut stdout = String::new();
+        while reader.read_line(&mut stdout).unwrap() > 0 {
             // libtest can prefix the line with the test's name.
-            if line.trim_end().ends_with("ready") {
+            if stdout.trim_end().ends_with("ready") {
                 break;
             }
-            line.clear();
         }
+        assert_ran(stdout.as_bytes());
         let pid = Pid::from_raw(i32::try_from(child.id()).unwrap());
         let info = DaemonInfo::read(dir.path(), pid);
         let args = super::super::daemon_args_of(dir.path(), pid);

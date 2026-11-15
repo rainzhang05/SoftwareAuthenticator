@@ -16,16 +16,23 @@ use pqkey::{
 fn startup_disables_dumps_before_opening_the_store() {
     const CHILD: &str = "PQKEY_CORE_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let status = Command::new(std::env::current_exe().unwrap())
+        let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "startup_disables_dumps_before_opening_the_store",
                 "--nocapture",
             ])
             .env(CHILD, "1")
-            .status()
+            .output()
             .unwrap();
-        assert!(status.success());
+        // A name that matches no test, or an ignored test, runs nothing and
+        // exits with status 0.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.starts_with("\nrunning 1 test\n") && !stdout.contains(" ... ignored"),
+            "the child test did not run: {stdout}"
+        );
+        assert!(output.status.success(), "{output:?}");
         return;
     }
     let (_, hard) = getrlimit(Resource::RLIMIT_CORE).unwrap();
