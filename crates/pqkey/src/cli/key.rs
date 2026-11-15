@@ -263,10 +263,8 @@ pub fn running_problems(
 }
 
 /// [`running_problems`] of the key `running`, whose published information and
-/// options are `info`. Notifications are checked on the key's own session bus,
-/// or on this process's: for a key of an older pqkey, which did not publish
-/// it, and for one started by hand on a bus over TCP, which status does not
-/// connect to (`System::key_notification_problem`).
+/// options are `info`. Notifications are checked on the key's own session bus
+/// (`System::key_notification_problem`).
 fn running_problems_of(
     system: &System,
     running: Running,
@@ -275,12 +273,9 @@ fn running_problems_of(
 ) -> io::Result<Vec<Problem>> {
     let mut problems = system.device_problems(running.pid(), wait)?;
     match args.presence {
-        super::PresenceArg::Notify => problems.extend(match info.session_bus_address() {
-            Some(address) => {
-                system.key_notification_problem(matches!(running, Running::Service(_)), &address)?
-            }
-            None => system.notification_problem(&notification_server())?,
-        }),
+        super::PresenceArg::Notify => {
+            problems.extend(system.key_notification_problem(info.session_bus_address().as_deref())?)
+        }
         // Setup does not restart a running key for a changed drop-in: the
         // key is stopped first, as for --presence auto-approve. A key started
         // by hand has the option from its own command line; the service then
@@ -2004,60 +1999,40 @@ esac
     }
 
     /// `status` checks notifications on the session bus the key published,
-    /// not on its own: the bus in the key's DBUS_SESSION_BUS_ADDRESS, or
-    /// without one `$XDG_RUNTIME_DIR/bus`. It names that bus, and gives the
-    /// fix that gives the key a bus. For the user service, which its unit
-    /// allows only Unix sockets, a bus over TCP is the problem itself; for a
-    /// key started by hand, status does not connect to a TCP address it read
-    /// from the key, and checks its own bus instead. Each child plays the key
-    /// on a bus of its own, with no bus there, and has another as its own
-    /// session bus.
+    /// never on this terminal's: the bus in the key's DBUS_SESSION_BUS_ADDRESS,
+    /// or without one `$XDG_RUNTIME_DIR/bus`. It names that bus, with the fix
+    /// that gives the key a bus. A bus over TCP it never connects to, whether
+    /// the key runs as the service or by hand: it says it cannot check it,
+    /// with the same fix. Each child plays the key on a bus of its own, with
+    /// no bus there; the test holds this terminal's bus and the TCP one, and
+    /// counts the connections waiting there.
     #[test]
     fn status_checks_notifications_on_the_keys_own_session_bus() {
+        use crate::test_support::assert_names;
+        use std::os::unix::net::UnixListener;
         use std::process::{Command, Stdio};
         let dir = TempDir::new("status-bus");
         let bin = fake_systemctl(dir.path());
-        let here = format!("unix:path={}", dir.path().join("shell-bus").display());
+        let terminal = dir.path().join("shell-bus");
+        let terminal_bus = UnixListener::bind(&terminal).unwrap();
+        let here = format!("unix:path={}", terminal.display());
+        let tcp_bus = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let tcp = format!(
+            "tcp:host=127.0.0.1,port={}",
+            tcp_bus.local_addr().unwrap().port()
+        );
         let key = format!("unix:path={}", dir.path().join("key-bus").display());
         let runtime = dir.path().join("runtime");
         let fallback = format!("unix:path={}/bus", runtime.display());
-        let tcp = "tcp:host=127.0.0.1,port=9";
-        let denied = "so every registration, sign-in and reset is denied";
-        let import = "    Fix: in a terminal of your desktop session, run `systemctl --user \
-                      import-environment DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey \
-                      start`\n";
-        let cannot_connect = |address: &str| {
-            format!(
-                "  ! the key cannot connect to its session bus (failed to connect to \
-                 `{address}`: No such file or directory (os error 2)), {denied}\n{import}"
-            )
-        };
         let children: Vec<_> = [
-            ("by-hand", key.clone(), cannot_connect(&key)),
-            ("service", "-".to_owned(), cannot_connect(&fallback)),
-            (
-                "service",
-                tcp.to_owned(),
-                format!(
-                    "  ! the key's session bus ({tcp}) is not a Unix socket, which the user \
-                     service cannot use (its unit allows only Unix sockets), {denied}\n    Fix: \
-                     in a terminal of a desktop session whose session bus is a Unix socket (its \
-                     address starts with unix:), run `systemctl --user import-environment \
-                     DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey start`\n"
-                ),
-            ),
-            (
-                "by-hand",
-                tcp.to_owned(),
-                format!(
-                    "  ! there is no D-Bus session bus (failed to connect to `{here}`: No such \
-                     file or directory (os error 2)), {denied}\n{import}"
-                ),
-            ),
+            ("by-hand", key.clone(), key.clone()),
+            ("service", "-".to_owned(), fallback),
+            ("service", tcp.clone(), tcp.clone()),
+            ("by-hand", tcp.clone(), tcp.clone()),
         ]
         .into_iter()
         .enumerate()
-        .map(|(n, (runs, bus, expected))| {
+        .map(|(n, (runs, bus, named))| {
             let child = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
                 .env("PQKEY_STATUS_CHILD", "notify")
@@ -2071,31 +2046,41 @@ esac
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
-            (format!("{runs} on {bus}"), expected, child)
+            (format!("{runs} on {bus}"), named, child)
         })
         .collect();
-        for (key_runs, expected, child) in children {
+        for (key_runs, named, child) in children {
             let output = child.wait_with_output().unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let context = format!("{key_runs}: {stdout}{stderr}");
             assert_eq!(output.status.code(), Some(0), "{context}");
-            assert!(stdout.contains(&expected), "{context}");
-            // Its one notification problem: this process's bus, which has
-            // none either, gives no other fix, and is named only where it
-            // stands in.
-            assert_eq!(stdout.matches(denied).count(), 1, "{context}");
-            assert_eq!(
-                stdout.contains(&here),
-                key_runs == format!("by-hand on {tcp}"),
-                "{context}"
-            );
+            // The cause, then the fix that gives the key the desktop's bus.
+            let cause = if named == tcp {
+                ["  ! pqkey cannot check", "session bus", named.as_str()]
+            } else {
+                ["  ! the key cannot connect", named.as_str(), "denied"]
+            };
+            let fix = [
+                "\n    Fix: ",
+                "systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS",
+                "pqkey stop && pqkey start",
+            ];
+            assert_names(&stdout, &[cause, fix].concat());
+            // Its one notification problem, which never names this
+            // terminal's bus.
+            assert_eq!(stdout.matches("session bus").count(), 1, "{context}");
+            assert!(!stdout.contains(&here), "{context}");
         }
+        terminal_bus.set_nonblocking(true).unwrap();
+        tcp_bus.set_nonblocking(true).unwrap();
+        assert_eq!(std::iter::from_fn(|| terminal_bus.accept().ok()).count(), 0);
+        assert_eq!(std::iter::from_fn(|| tcp_bus.accept().ok()).count(), 0);
     }
 
     /// `status` of a key another pqkey started. One too old to publish its
-    /// session bus (`pqkey-daemon-v1`) has notifications checked on this
-    /// terminal's bus, which the problem names. One whose information this
+    /// session bus (`pqkey-daemon-v1`) gets the hint that status cannot check
+    /// it, never a check of this terminal's bus. One whose information this
     /// pqkey cannot read at all, as from a newer pqkey, was not started by
     /// this version: it keeps running, so status says so after what it found
     /// on the device, and fails.
@@ -2136,16 +2121,16 @@ esac
             );
             if version == "v1" {
                 assert_eq!(output.status.code(), Some(0), "{context}");
-                assert!(
-                    stdout.contains(&format!(
-                        "  ! there is no D-Bus session bus (failed to connect to `{here}`: No \
-                         such file or directory (os error 2)), so every registration, sign-in \
-                         and reset is denied\n    Fix: in a terminal of your desktop session, \
-                         run `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS`, then \
-                         `pqkey stop && pqkey start`\n"
-                    )),
-                    "{context}"
+                crate::test_support::assert_names(
+                    &stdout,
+                    &[
+                        "  ! pqkey cannot check",
+                        "session bus\n    Fix: ",
+                        "systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS",
+                        "pqkey stop && pqkey start",
+                    ],
                 );
+                assert!(!stdout.contains(&here), "{context}");
             } else {
                 assert_eq!(output.status.code(), Some(1), "{context}");
                 assert!(
@@ -2157,49 +2142,6 @@ esac
                 );
             }
         }
-    }
-
-    /// Where the key cannot ask on its own bus, `status` tries this
-    /// terminal's, the one its DBUS_SESSION_BUS_ADDRESS names, as a bus to
-    /// move the key to. One that never answers is none, and the key keeps its
-    /// own fix. The test holds that bus's socket and counts the connections
-    /// waiting there.
-    #[test]
-    fn status_tries_this_terminals_bus_for_a_key_that_cannot_ask() {
-        use std::os::unix::net::UnixListener;
-        use std::process::Command;
-        let dir = TempDir::new("status-terminal-bus");
-        let terminal = dir.path().join("terminal-bus");
-        let listener = UnixListener::bind(&terminal).unwrap();
-        let key = format!("unix:path={}", dir.path().join("key-bus").display());
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "cli::key::tests::status_child", "--nocapture"])
-            .env("PQKEY_STATUS_CHILD", "notify")
-            .env("PQKEY_STATUS_RUNS", "service")
-            .env("PQKEY_STATUS_KEY_BUS", &key)
-            .env("PATH", fake_systemctl(dir.path()))
-            .env("XDG_DATA_HOME", dir.path().join("data"))
-            .env(
-                "DBUS_SESSION_BUS_ADDRESS",
-                format!("unix:path={}", terminal.display()),
-            )
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let context = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(output.status.code(), Some(0), "{context}");
-        assert!(
-            stdout.contains(&format!(
-                "  ! the key cannot connect to its session bus (failed to connect to `{key}`: No \
-                 such file or directory (os error 2)), so every registration, sign-in and reset \
-                 is denied\n    Fix: in a terminal of your desktop session, run `systemctl --user \
-                 import-environment DBUS_SESSION_BUS_ADDRESS`, then `pqkey stop && pqkey start`\n"
-            )),
-            "{context}"
-        );
-        listener.set_nonblocking(true).unwrap();
-        let tried = std::iter::from_fn(|| listener.accept().ok()).count();
-        assert_eq!(tried, 1, "{context}");
     }
 
     /// A key that stops or restarts just as `status` finds it is starting or

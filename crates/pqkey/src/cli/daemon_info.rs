@@ -142,16 +142,6 @@ impl DaemonInfo {
         })
     }
 
-    /// Whether the daemon's DBUS_SESSION_BUS_ADDRESS is this process's. Setup
-    /// compares the daemon's bus with the user manager's instead
-    /// ([`Self::session_bus_address`]).
-    #[cfg(test)]
-    pub fn session_bus_matches(&self) -> bool {
-        self.session_bus
-            == std::env::var_os("DBUS_SESSION_BUS_ADDRESS")
-                .map(|address| address.as_encoded_bytes().to_vec())
-    }
-
     pub fn runs_binary(&self, binary: &Path) -> io::Result<bool> {
         let metadata = fs::metadata(binary)?;
         Ok(self.device == metadata.dev() && self.inode == metadata.ino())
@@ -180,41 +170,11 @@ mod tests {
         lock
     }
 
-    #[test]
-    fn setup_checks_the_daemons_notification_bus_and_reads_old_runtime_info() {
-        let dir = TempDir::new("daemon-info-bus");
-        let lock = StateLock::try_acquire(dir.path()).unwrap().unwrap();
-        let mut info = crate::test_support::daemon_info(&DaemonArgs::default());
-        assert!(info.session_bus_matches());
-        let mut other = info.session_bus.clone().unwrap_or_default();
-        other.extend_from_slice(b"-another-session");
-        info.session_bus = Some(other);
-        info.publish(dir.path(), &lock).unwrap();
-        state_lock::write_pid_file(dir.path(), &lock).unwrap();
-        assert!(
-            !DaemonInfo::read(dir.path(), Pid::this())
-                .unwrap()
-                .session_bus_matches()
-        );
-        let mut old = format!(
-            "pqkey-daemon-v1 {} {} {}\n",
-            info.pid, info.device, info.inode
-        )
-        .into_bytes();
-        old.extend_from_slice(&info.cmdline);
-        fs::write(dir.path().join(state_lock::INFO_FILE), old).unwrap();
-        assert!(
-            DaemonInfo::read(dir.path(), Pid::this())
-                .unwrap()
-                .args()
-                .is_ok()
-        );
-    }
-
     /// What `pqkey status` checks notifications on: the bus the daemon
     /// published, or without one zbus's default, `$XDG_RUNTIME_DIR/bus`, which
     /// is also what zbus takes for an address that is not UTF-8; nothing for a
-    /// daemon of an older pqkey, which did not publish it.
+    /// daemon of an older pqkey, which did not publish it, but whose options
+    /// are read.
     #[test]
     fn status_finds_the_session_bus_the_daemon_published() {
         let dir = TempDir::new("daemon-info-address");
@@ -253,6 +213,7 @@ mod tests {
         old.extend_from_slice(&info.cmdline);
         fs::write(dir.path().join(state_lock::INFO_FILE), old).unwrap();
         assert_eq!(read().session_bus_address(), None);
+        assert!(read().args().is_ok());
     }
 
     #[test]

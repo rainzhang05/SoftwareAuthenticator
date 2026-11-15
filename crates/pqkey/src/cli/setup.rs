@@ -104,28 +104,13 @@ impl SetupHost for System {
                 "the service runs another executable; fix its ExecStart or drop-ins, then rerun `pqkey setup`",
             ));
         }
-        let info = super::daemon_info::DaemonInfo::read(state, running.pid())?;
-        // Setup restarts a service that does not use the session bus the user
-        // manager gives services (`start_service`), so one that still uses
-        // another bus gets it from its unit or a drop-in, whatever this
-        // shell's bus. Where the manager gives only a bus over TCP, the
-        // readiness check tests the key's own.
-        if info.args()?.presence == super::PresenceArg::Notify
-            && UserService::service_bus()?
-                .is_some_and(|bus| info.session_bus_address().as_deref() != Some(bus.as_str()))
-        {
-            return Err(io::Error::other(
-                "the service uses another notification session; remove its DBUS_SESSION_BUS_ADDRESS override and rerun `pqkey setup`",
-            ));
-        }
         Ok(())
     }
 }
 
 /// Install, enable and start the user service, or restart it where it runs
-/// with an older unit or binary, or with another session bus than the user
-/// manager gives services. `can_ask` checks this shell's session bus before
-/// the user manager is given it.
+/// with an older unit or binary, or where the user manager has just been
+/// given this shell's session bus, which `can_ask` checks first.
 fn start_service(
     state_dir: &Path,
     binary: &Path,
@@ -165,7 +150,7 @@ fn start_service(
     output::problems(UserService::kept_unit().as_slice())?;
     UserService::action(ServiceAction::Enable)?;
     UserService::action(ServiceAction::ResetFailed)?;
-    let service_bus = UserService::prepare_session(can_ask)?;
+    let given_bus = UserService::prepare_session(can_ask)?;
     let running = match daemon::running(state_dir)? {
         Some(Running::Daemon(_)) => {
             daemon::unplug(state_dir)?;
@@ -174,16 +159,11 @@ fn start_service(
         running => running,
     };
     let (running, how) = match running {
-        // A running service keeps the environment it started with, so one
-        // started before the user manager had the bus it gives services now,
-        // whichever terminal gave it, or before a drop-in's
-        // DBUS_SESSION_BUS_ADDRESS was removed, needs a restart.
+        // A running service keeps the environment it started with, so it
+        // gets the bus setup has just given the user manager only from a
+        // restart.
         Some(Running::Service(pid))
-            if changed
-                || runs_another_binary(state_dir, pid, binary)
-                || service_bus
-                    .as_deref()
-                    .is_some_and(|bus| !runs_on_bus(state_dir, pid, bus)) =>
+            if changed || given_bus || runs_another_binary(state_dir, pid, binary) =>
         {
             (daemon::replug(state_dir)?, "restarted")
         }
@@ -293,13 +273,6 @@ fn runs_another_binary(state_dir: &Path, pid: unistd::Pid, binary: &Path) -> boo
     !crate::cli::daemon_info::DaemonInfo::read(state_dir, pid)
         .and_then(|info| info.runs_binary(binary))
         .unwrap_or(false)
-}
-
-/// Whether the daemon uses the session bus at `address`. A daemon whose bus
-/// is unknown does not, so that setup restarts it.
-fn runs_on_bus(state_dir: &Path, pid: unistd::Pid, address: &str) -> bool {
-    crate::cli::daemon_info::DaemonInfo::read(state_dir, pid)
-        .is_ok_and(|info| info.session_bus_address().as_deref() == Some(address))
 }
 
 /// Whether `pqkey`, run from the shell, is `binary`, as the README's
@@ -760,11 +733,9 @@ mod tests {
 
     /// A user manager for `start_service`, played by a fake systemctl: it
     /// keeps the manager's environment block in the file `environment`,
-    /// which it shows as systemd does a value with a space or `;`, quoted as
-    /// `$'…'`, records each call in `trace`, and runs `service_key_child` as
-    /// the service. The key gets the session bus that block gives it, or the
-    /// one in the file `override`, as from a drop-in's `Environment=`, and
-    /// the presence in the file `presence`, as from a drop-in's `ExecStart=`.
+    /// records each call in `trace`, and runs `service_key_child` as the
+    /// service. The key gets the session bus that block gives it, and the
+    /// presence in the file `presence`, as from a drop-in's `ExecStart=`.
     struct Manager {
         dir: TempDir,
     }
@@ -773,9 +744,7 @@ mod tests {
 PATH=/usr/bin:/bin
 printf '%s\n' "$*" >> "$FIXTURE/trace"
 run_key() {
-    if [ -e "$FIXTURE/override" ]; then
-        set -- env DBUS_SESSION_BUS_ADDRESS="$(cat "$FIXTURE/override")"
-    elif bus=$(sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' "$FIXTURE/environment") && [ -n "$bus" ]; then
+    if bus=$(sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' "$FIXTURE/environment") && [ -n "$bus" ]; then
         set -- env DBUS_SESSION_BUS_ADDRESS="$bus"
     else
         set -- env -u DBUS_SESSION_BUS_ADDRESS
@@ -790,13 +759,7 @@ stop_key() {
     echo 0 > "$FIXTURE/main-pid"
 }
 case "$*" in
-"--user show-environment")
-    while IFS= read -r line; do
-        case "${line#*=}" in
-        *[\ \;]*) printf "%s=\$'%s'\n" "${line%%=*}" "${line#*=}" ;;
-        *) printf '%s\n' "$line" ;;
-        esac
-    done < "$FIXTURE/environment" ;;
+"--user show-environment") cat "$FIXTURE/environment" ;;
 "--user set-environment "*)
     grep -v "^${3%%=*}=" "$FIXTURE/environment" > "$FIXTURE/environment.new"
     printf '%s\n' "$3" >> "$FIXTURE/environment.new"
@@ -868,8 +831,6 @@ esac
                 .env("PATH", self.file("bin"))
                 .env("XDG_CONFIG_HOME", self.file("config"))
                 .env("XDG_DATA_HOME", self.file("data"))
-                // Where the per-user bus is.
-                .env("XDG_RUNTIME_DIR", self.file("runtime"))
                 .env("FIXTURE", self.dir.path())
                 .env("KEY", env::current_exe().unwrap())
                 .env_remove("DBUS_SESSION_BUS_ADDRESS")
@@ -1032,8 +993,7 @@ esac
     /// an earlier login, leaves the manager's environment as it was, and the
     /// service starts with the bus the manager gives it. A bus that can ask
     /// is given before the service starts. Run again from the same shell,
-    /// setup keeps the running service: a bus it did not give the manager
-    /// is not one the service should move to.
+    /// setup gives the manager nothing and keeps the running service.
     #[test]
     fn setup_gives_the_user_manager_only_a_checked_unix_bus() {
         let block = |bus: &str| format!("HOME=/home/u\nDBUS_SESSION_BUS_ADDRESS={bus}\n");
@@ -1070,8 +1030,6 @@ esac
                         "show-environment".to_owned(),
                         format!("set-environment DBUS_SESSION_BUS_ADDRESS={desktop}"),
                         "start pqkey.service".to_owned(),
-                        // The check of the started service.
-                        "show-environment".to_owned()
                     ]
                 );
                 // The unit is read again before then.
@@ -1099,52 +1057,30 @@ esac
             );
             assert_eq!(manager.key().0, pid, "{case}");
             assert_eq!(manager.environment(), environment, "{case}");
-            assert_eq!(
-                session_calls(&manager.calls()),
-                ["show-environment", "show-environment"],
-                "{case}"
+            let calls = manager.calls();
+            assert!(
+                session_calls(&calls)
+                    .iter()
+                    .all(|call| *call == "show-environment"),
+                "{case}: {calls:?}"
             );
         }
     }
 
-    /// A service that started before the user manager had this shell's bus,
-    /// as one does after `systemctl --user import-environment` without a
-    /// restart, is restarted onto it: setup neither keeps it on its old bus
-    /// nor tells the user to remove an override there is none of. A bus that
-    /// setup gives the manager itself is given before the restart.
+    /// A running service gets the bus setup gives the user manager, from a
+    /// terminal on a bus that can ask and that the manager does not have yet,
+    /// by a restart once the bus is given and the unit is read again.
     #[test]
-    fn setup_restarts_a_service_started_before_the_bus_was_imported() {
-        let manager = Manager::new("setup-imported-bus");
-        let (user_bus, desktop) = (manager.bus("user-bus"), manager.bus("desktop-bus"));
+    fn setup_restarts_the_service_onto_a_bus_it_gives_the_user_manager() {
+        let manager = Manager::new("setup-given-bus");
+        let user_bus = manager.bus("user-bus");
         manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={user_bus}\n"));
         manager.setup(Some(&user_bus), None).unwrap();
         let (before, bus, _) = manager.key();
-        assert_eq!(bus.as_deref(), Some(user_bus.as_str()));
-        // `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS` in
-        // a terminal of the desktop.
-        manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={desktop}\n"));
+        assert_eq!(bus.as_ref(), Some(&user_bus));
         manager.calls();
-        let stdout = manager.setup(Some(&desktop), None).unwrap();
-        assert!(
-            stdout.contains("✓ Key restarted; it starts with your session\n"),
-            "{stdout}"
-        );
-        // The last, the check of the restarted service.
-        assert_eq!(
-            session_calls(&manager.calls()),
-            [
-                "show-environment",
-                "restart pqkey.service",
-                "show-environment"
-            ]
-        );
-        let (after, bus, _) = manager.key();
-        assert_ne!(after, before);
-        assert_eq!(bus, Some(desktop));
-        // From a terminal on a bus that can ask and that the manager does not
-        // have yet.
-        let next = manager.bus("next-desktop-bus");
-        let stdout = manager.setup(Some(&next), Some(&next)).unwrap();
+        let desktop = manager.bus("desktop-bus");
+        let stdout = manager.setup(Some(&desktop), Some(&desktop)).unwrap();
         assert!(
             stdout.contains("✓ Key restarted; it starts with your session\n"),
             "{stdout}"
@@ -1154,9 +1090,8 @@ esac
             session_calls(&calls),
             [
                 "show-environment".to_owned(),
-                format!("set-environment DBUS_SESSION_BUS_ADDRESS={next}"),
+                format!("set-environment DBUS_SESSION_BUS_ADDRESS={desktop}"),
                 "restart pqkey.service".to_owned(),
-                "show-environment".to_owned()
             ]
         );
         let reload = calls.iter().position(|call| call == "daemon-reload");
@@ -1164,198 +1099,9 @@ esac
             .iter()
             .position(|call| call == "restart pqkey.service");
         assert!(reload < restart, "{calls:?}");
-        let (last, bus, _) = manager.key();
-        assert_ne!(last, after);
-        assert_eq!(bus, Some(next));
-    }
-
-    /// Setup's error for a service whose unit or drop-in sets its own
-    /// DBUS_SESSION_BUS_ADDRESS, as `Manager::setup` returns it.
-    const OVERRIDE_FIX: &str = "pqkey: the service uses another notification session; remove its \
-        DBUS_SESSION_BUS_ADDRESS override and rerun `pqkey setup`\n";
-
-    /// Shells whose bus the user manager does not take: none, one over TCP,
-    /// even where the check would pass, and an unreachable one, checked as
-    /// setup checks it.
-    const SHELLS_NOT_TAKEN: [&str; 3] = ["no-bus", "tcp", "unreachable"];
-
-    /// The session bus of the shell `case` of [`SHELLS_NOT_TAKEN`], and the
-    /// one bus where a notification server can ask, for `Manager::setup`.
-    fn shell_not_taken(manager: &Manager, case: &str) -> (Option<String>, Option<String>) {
-        let tcp = "tcp:host=127.0.0.1,port=9".to_owned();
-        match case {
-            "no-bus" => (None, None),
-            "tcp" => (Some(tcp.clone()), Some(tcp)),
-            _ => (Some(manager.bus("gone")), None),
-        }
-    }
-
-    /// A service that started before the user manager was given another
-    /// bus, from a terminal of the desktop, is restarted onto that bus by
-    /// setup run from a shell whose bus the manager does not take: the
-    /// service would get it when it next starts. Once there, it is kept.
-    #[test]
-    fn setup_restarts_a_service_onto_a_bus_imported_from_another_terminal() {
-        for case in SHELLS_NOT_TAKEN {
-            let manager = Manager::new("setup-imported-elsewhere");
-            let (user_bus, desktop) = (manager.bus("user-bus"), manager.bus("desktop-bus"));
-            manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={user_bus}\n"));
-            manager.setup(Some(&user_bus), None).unwrap();
-            let (before, ..) = manager.key();
-            // `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS`
-            // in a terminal of the desktop.
-            manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={desktop}\n"));
-            let (shell, can_ask) = shell_not_taken(&manager, case);
-            let stdout = manager
-                .setup(shell.as_deref(), can_ask.as_deref())
-                .unwrap_or_else(|err| panic!("{case}: {err}"));
-            assert!(
-                stdout.contains("✓ Key restarted; it starts with your session\n"),
-                "{case}: {stdout}"
-            );
-            let (after, bus, _) = manager.key();
-            assert_ne!(after, before, "{case}");
-            assert_eq!(bus.as_deref(), Some(desktop.as_str()), "{case}");
-            assert_eq!(
-                manager.environment(),
-                format!("DBUS_SESSION_BUS_ADDRESS={desktop}\n"),
-                "{case}"
-            );
-            let stdout = manager
-                .setup(shell.as_deref(), can_ask.as_deref())
-                .unwrap_or_else(|err| panic!("{case}: {err}"));
-            assert!(stdout.contains("✓ Key running;"), "{case}: {stdout}");
-            assert_eq!(manager.key().0, after, "{case}");
-        }
-    }
-
-    /// Setup's fix for a service whose unit or drop-in sets its own
-    /// DBUS_SESSION_BUS_ADDRESS, followed as written, ends with the service
-    /// on this shell's bus: rerun after the override is gone, setup restarts
-    /// it. A shell without a bus the manager gives, here none at all, gets
-    /// the same fix: the key started anew with the manager's environment
-    /// still uses another bus.
-    #[test]
-    fn the_override_fix_followed_as_written_moves_the_service_to_the_shells_bus() {
-        let manager = Manager::new("setup-override");
-        let (user_bus, desktop) = (manager.bus("user-bus"), manager.bus("desktop-bus"));
-        manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={user_bus}\n"));
-        let other = manager.bus("other-bus");
-        fs::write(manager.file("override"), &other).unwrap();
-        assert_eq!(
-            manager.setup(Some(&desktop), Some(&desktop)),
-            Err(OVERRIDE_FIX.to_owned())
-        );
-        assert_eq!(manager.key().1, Some(other.clone()));
-        assert_eq!(manager.setup(None, None), Err(OVERRIDE_FIX.to_owned()));
-        assert_eq!(manager.key().1, Some(other));
-        fs::remove_file(manager.file("override")).unwrap();
-        let stdout = manager.setup(Some(&desktop), Some(&desktop)).unwrap();
-        assert!(
-            stdout.contains("✓ Key restarted; it starts with your session\n"),
-            "{stdout}"
-        );
-        assert_eq!(manager.key().1, Some(desktop));
-    }
-
-    /// The override fix, shown whatever this shell's bus, also ends right
-    /// when followed in a shell whose bus the user manager does not take:
-    /// rerun there after the override is gone, setup restarts the service
-    /// onto the bus the manager gives services, and gives the manager none.
-    #[test]
-    fn the_override_fix_followed_as_written_in_a_shell_without_a_bus_given() {
-        for case in SHELLS_NOT_TAKEN {
-            let manager = Manager::new("setup-override-shell");
-            let user_bus = manager.bus("user-bus");
-            let environment = format!("DBUS_SESSION_BUS_ADDRESS={user_bus}\n");
-            manager.set_environment(&environment);
-            let other = manager.bus("other-bus");
-            fs::write(manager.file("override"), &other).unwrap();
-            let (shell, can_ask) = shell_not_taken(&manager, case);
-            let setup = || manager.setup(shell.as_deref(), can_ask.as_deref());
-            assert_eq!(setup(), Err(OVERRIDE_FIX.to_owned()), "{case}");
-            assert_eq!(manager.key().1.as_ref(), Some(&other), "{case}");
-            fs::remove_file(manager.file("override")).unwrap();
-            let stdout = setup().unwrap_or_else(|err| panic!("{case}: {err}"));
-            assert!(
-                stdout.contains("✓ Key restarted; it starts with your session\n"),
-                "{case}: {stdout}"
-            );
-            assert_eq!(manager.key().1.as_ref(), Some(&user_bus), "{case}");
-            assert_eq!(manager.environment(), environment, "{case}");
-        }
-    }
-
-    /// A bus over TCP in the user manager, as an older setup gave it, is not
-    /// one setup moves the service to, nor compares its bus with: the
-    /// service cannot use it.
-    #[test]
-    fn setup_does_not_move_the_service_to_a_bus_over_tcp() {
-        let manager = Manager::new("setup-tcp-given");
-        let user_bus = manager.bus("user-bus");
-        manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={user_bus}\n"));
-        manager.setup(Some(&user_bus), None).unwrap();
-        let key = manager.key();
-        manager.set_environment("DBUS_SESSION_BUS_ADDRESS=tcp:host=127.0.0.1,port=9\n");
-        let stdout = manager.setup(None, None).unwrap();
-        assert!(stdout.contains("✓ Key running;"), "{stdout}");
-        assert_eq!(manager.key(), key);
-    }
-
-    /// A bus whose address has a space, which systemctl shows quoted, is
-    /// read as the bus itself: once setup has given it to the user manager,
-    /// it keeps the service on it, from that shell and from one without a
-    /// bus, gives it no more, and shows no override fix.
-    #[test]
-    fn a_bus_systemctl_shows_quoted_is_the_one_the_manager_gives() {
-        let manager = Manager::new("setup-quoted-bus");
-        let user_bus = manager.bus("user-bus");
-        manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={user_bus}\n"));
-        let spaced = manager.bus("desktop bus");
-        manager.setup(Some(&spaced), Some(&spaced)).unwrap();
-        let (pid, bus, _) = manager.key();
-        assert_eq!(bus.as_ref(), Some(&spaced));
-        manager.calls();
-        for shell in [Some(spaced.as_str()), None] {
-            let stdout = manager
-                .setup(shell, Some(&spaced))
-                .unwrap_or_else(|err| panic!("{shell:?}: {err}"));
-            assert!(stdout.contains("✓ Key running;"), "{shell:?}: {stdout}");
-            assert_eq!(manager.key().0, pid, "{shell:?}");
-        }
-        let calls = manager.calls();
-        assert!(
-            !calls.iter().any(|call| call.starts_with("set-environment")),
-            "{calls:?}"
-        );
-    }
-
-    /// Without a bus in the user manager, a service uses the per-user bus,
-    /// `$XDG_RUNTIME_DIR/bus`: a key started so is on the bus the manager
-    /// gives once that is the per-user bus, and is kept, while one that an
-    /// override gives another bus gets the override fix.
-    #[test]
-    fn without_a_bus_in_the_manager_the_service_uses_the_per_user_bus() {
-        let manager = Manager::new("setup-no-given-bus");
-        manager.setup(None, None).unwrap();
-        let (before, bus, _) = manager.key();
-        assert_eq!(bus, None);
-        let per_user = format!("unix:path={}/bus", manager.file("runtime").display());
-        manager.set_environment(&format!("DBUS_SESSION_BUS_ADDRESS={per_user}\n"));
-        let stdout = manager.setup(None, None).unwrap();
-        assert!(stdout.contains("✓ Key running;"), "{stdout}");
-        assert_eq!(manager.key().0, before);
-        manager.set_environment("");
-        fs::write(manager.file("override"), manager.bus("other-bus")).unwrap();
-        assert!(manager.run("stop", None, None).status.success());
-        assert_eq!(manager.setup(None, None), Err(OVERRIDE_FIX.to_owned()));
-        fs::remove_file(manager.file("override")).unwrap();
-        let stdout = manager.setup(None, None).unwrap();
-        assert!(
-            stdout.contains("✓ Key restarted; it starts with your session\n"),
-            "{stdout}"
-        );
-        assert_eq!(manager.key().1, None);
+        let (after, bus, _) = manager.key();
+        assert_ne!(after, before);
+        assert_eq!(bus, Some(desktop));
     }
 
     /// The fix for a service that never answers, followed as written after
