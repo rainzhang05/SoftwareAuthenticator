@@ -16,6 +16,16 @@ use zeroize::Zeroize;
 /// (`tests/residue.rs` found `k`, or what it was drawn from, up to 6 KiB down,
 /// for P-521 in a release build, and Ed25519's `r` about 1 KiB down).
 /// `zeroize` writes with volatile stores the compiler may not remove.
+///
+/// The result is `run_below`'s, passed on as this function's own: it is
+/// stored where the caller asked for it before the scrub runs, so no copy of
+/// it stays in this frame, above the zeroed stack, such as of a key that
+/// [`try_credential_secret_from_bytes`] reads.  A caller that returns a
+/// secret from here passes it on the same way, as its tail expression.  A
+/// result small enough to come back in registers, 16 bytes or less, can be
+/// saved to the stack around the scrub instead; no secret here is that small.
+///
+/// [`try_credential_secret_from_bytes`]: crate::try_credential_secret_from_bytes
 pub(crate) fn with_scrubbed_stack<T>(operation: impl FnOnce() -> T) -> T {
     struct ScrubOnExit;
     impl Drop for ScrubOnExit {
@@ -23,10 +33,10 @@ pub(crate) fn with_scrubbed_stack<T>(operation: impl FnOnce() -> T) -> T {
             scrub_stack();
         }
     }
-    let guard = ScrubOnExit;
-    let result = run_below(operation);
-    drop(guard);
-    result
+    // Dropped, scrubbing the stack, once the tail expression has stored the
+    // result.
+    let _scrub = ScrubOnExit;
+    run_below(operation)
 }
 
 /// `operation()` in a frame of its own; see [`with_scrubbed_stack`].

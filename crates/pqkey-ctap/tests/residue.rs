@@ -13,12 +13,12 @@
 //! 186-5 Appendix A.2.1, as pqkey-ctap's `ecdsa::derive_scalar` documents).
 //! It checks that `k`·G gives the signature's r, and that `d`·G is the public
 //! key, so that it looks for the real secrets.  It reads the key, derives its
-//! public key and signs through the engine's public entry points, then scans
-//! the dead stack below the caller for `k`, for the HMAC blocks RFC 6979 drew
-//! `k` from (on P-521, `k` is their leftmost 521 bits), for `d`, for the
-//! SHAKE256 output, and for a control value nobody computed: each as
-//! big-endian bytes and reversed, the order of crypto-bigint's little-endian
-//! limbs.
+//! public key and signs through the engine's public entry points, and after
+//! each of the three, scans the dead stack below the caller for `k`, for the
+//! HMAC blocks RFC 6979 drew `k` from (on P-521, `k` is their leftmost 521
+//! bits), for `d`, for the SHAKE256 output, and for a control value nobody
+//! computed: each as big-endian bytes and reversed, the order of
+//! crypto-bigint's little-endian limbs.
 //!
 //! For each EdDSA curve, it follows RFC 8032 (§5.1.5 and §5.1.6, §5.2.5 and
 //! §5.2.6): for a key kept as a seed it derives the private key (as
@@ -694,9 +694,11 @@ fn check_eddsa(case: &EdDsaCase) -> Vec<String> {
 
 /// Read `key` as `alg`, derive its public key and sign
 /// [`AUTH_DATA`] ‖ [`CLIENT_DATA_HASH`] through the engine's public entry
-/// points, then scan the dead stack below for each of `needles` and for a
-/// control value nobody computed, each as given and reversed.  Returns the
-/// COSE_Key, the signature, and a line for each value found.
+/// points, and after each of the three, scan the dead stack below for each of
+/// `needles` and for a control value nobody computed, each as given and
+/// reversed: a later call must not hide what an earlier one left.  Returns
+/// the COSE_Key, the signature, and a line for each value found, naming the
+/// step it was found after.
 ///
 /// Every needle is made before the engine runs, so that making one leaves
 /// nothing behind that a scan would find.
@@ -707,6 +709,24 @@ fn run(
     needles: Vec<(String, Vec<u8>)>,
 ) -> (Vec<u8>, Vec<u8>, Vec<String>) {
     run_message(alg, key, needles, &AUTH_DATA, &CLIENT_DATA_HASH)
+}
+
+/// The steps of [`run_message`], after each of which it scans the stack.
+const STEPS: [&str; 3] = ["reading the key", "deriving the public key", "signing"];
+
+/// Count each of `needles` in the dead stack, as given and reversed, into
+/// entry `step` of its `counts`.  It allocates nothing, which would run over
+/// the stack it reads, and is inlined, so that [`scan`] reads from just below
+/// the caller.
+#[inline(always)]
+fn scan_all(
+    needles: &[(String, Vec<u8>, Vec<u8>)],
+    counts: &mut [[(usize, usize); STEPS.len()]],
+    step: usize,
+) {
+    for ((_, reversed, bytes), count) in needles.iter().zip(counts) {
+        count[step] = (scan(bytes), scan(reversed));
+    }
 }
 
 fn run_message(
@@ -722,29 +742,32 @@ fn run_message(
         .chain([("control".to_owned(), control)])
         .map(|(name, bytes)| (name, bytes.iter().rev().copied().collect(), bytes))
         .collect();
+    let mut counts = vec![[(0, 0); STEPS.len()]; needles.len()];
 
     wipe();
     let (cose_key, signature) = {
         let key = try_credential_secret_from_bytes(alg, key).expect("key");
+        scan_all(&needles, &mut counts, 0);
         let cose_key = try_cose_public_key(alg, &key).expect("public key");
+        scan_all(&needles, &mut counts, 1);
         let signature = try_sign_challenge(alg, &key, data, challenge).expect("sign");
         (cose_key, signature)
     };
-    let found: Vec<(&str, usize, usize)> = needles
-        .iter()
-        .map(|(name, reversed, bytes)| (name.as_str(), scan(bytes), scan(reversed)))
-        .collect();
+    scan_all(&needles, &mut counts, 2);
 
-    let report: Vec<String> = found
-        .iter()
-        .map(|(name, hits, reversed)| format!("{name} {hits}x/{reversed}x"))
-        .collect();
-    println!("{alg:?}: {} (as given/reversed)", report.join(", "));
-    let found = found
-        .into_iter()
-        .filter(|(_, hits, reversed)| hits + reversed > 0)
-        .map(|(name, hits, reversed)| format!("{alg:?}: {name} {hits}x/{reversed}x"))
-        .collect();
+    let mut found = Vec::new();
+    for (step, after) in STEPS.iter().enumerate() {
+        let mut report = Vec::new();
+        for ((name, _, _), count) in needles.iter().zip(&counts) {
+            let (hits, reversed) = count[step];
+            report.push(format!("{name} {hits}x/{reversed}x"));
+            if hits + reversed > 0 {
+                found.push(format!("{alg:?}: {name} {hits}x/{reversed}x after {after}"));
+            }
+        }
+        let report = report.join(", ");
+        println!("{alg:?} after {after}: {report} (as given/reversed)");
+    }
     (cose_key, signature, found)
 }
 
@@ -1316,7 +1339,7 @@ fn main() {
     failures.extend(check_mldsa(false));
     assert!(
         failures.is_empty(),
-        "secrets left in the stack after signing: {failures:?}"
+        "secrets left in the stack: {failures:?}"
     );
     println!("no ECDSA, EdDSA, RSA or ML-DSA secrets left in the stack");
     #[cfg(target_os = "linux")]
