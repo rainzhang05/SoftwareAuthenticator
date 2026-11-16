@@ -8,7 +8,7 @@
 //! (`cli::status::tests`).
 //!
 //! Then each is repaired, as `pqkey repair` does, and every passkey whose
-//! record is intact works again; and what the README's "Damaged credential
+//! record is intact works again; and what the user guide's "Damaged credential
 //! store" says of copies, hand edits and reset holds.  A damaged signature
 //! counter is named, fails what it is said to, and is repaired the same way,
 //! without a count going back.  The PIN state and the large-blob array have
@@ -1120,7 +1120,7 @@ fn a_deleted_passkey_whose_record_was_left_behind_comes_back_in_a_rebuild() {
     assert_eq!(store.get(&deleted.credential_id).unwrap(), None);
 }
 
-/// Why the README says not to restore `credential-set/active` by hand: an
+/// Why the user guide says not to restore `credential-set/active` by hand: an
 /// older copy hides the passkeys registered since, and the next change to
 /// that list deletes their records, which it does not name.
 #[test]
@@ -1193,7 +1193,7 @@ fn a_directory_in_the_counters_place_is_refused_until_an_empty_file_takes_it() {
     assert!(next > 3, "{next}");
 }
 
-/// Why the README says not to delete `signature-counter` by hand: nothing
+/// Why the user guide says not to delete `signature-counter` by hand: nothing
 /// tells a deleted counter from one never written, so the next sign-in
 /// counts again from 0, below the counts sites have seen.
 #[test]
@@ -1211,7 +1211,7 @@ fn a_deleted_counter_counts_again_from_zero() {
     assert_eq!(assertion_count(&mut app, &sealed), 1);
 }
 
-/// Why the README says to delete the copy of the state directory once the
+/// Why the user guide says to delete the copy of the state directory once the
 /// key works again: it holds the keys, so its passkeys stay readable after
 /// the key is reset.
 #[test]

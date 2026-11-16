@@ -1,159 +1,102 @@
-# Installed Linux desktop acceptance
+# Desktop acceptance
 
-[Installed Linux desktop acceptance](../../.github/workflows/desktop.yml) is a
-manual `workflow_dispatch` job on a disposable Ubuntu 24.04 x86_64 runner. It has
-a 90-minute job limit and a 35-minute native deadline per scenario. The owned
-desktop login must start its acceptance session within two minutes. It never
-runs on ordinary pushes. Push the reviewed commits, then dispatch this workflow
-on that revision; local macOS checks cannot establish a native acceptance pass.
+The [installed desktop acceptance workflow](../../.github/workflows/desktop.yml)
+installs pqkey with `install.sh` on a disposable Ubuntu 24.04 x86_64 runner, in
+real desktop sessions with real Dunst, and checks what a user sees. Push the
+commits, then dispatch it on that revision: it never runs on a push, and
+nothing on macOS can stand in for it. A job has 90 minutes, each scenario 35,
+and the desktop login 2 to start its session. The
+[run of 2026-11-16](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/43865928812)
+passed every case at `d0a4c76`.
 
-## Recorded native result
+## Environment
 
-[Run 38828959894](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/38828959894)
-passed on 2026-10-15 with source
-`6326d0c558edd9410057bccb9bab4dc99c09a4c5`: all 34 fresh-install cases and all
-15 baseline-update cases, including both Python and runner cleanup layers.
-The runner used Ubuntu 24.04 x86_64, kernel `6.17.0-1022-azure`, Dunst
-`1.9.2-1build2`, suckless-tools `47-1`, LightDM `1.30.0-0ubuntu14`, systemd
-`255.4-1ubuntu8.18`, Python 3.14.7, python-fido2 2.2.1 and cryptography 50.0.1
-with OpenSSL 4.0.2.
-
-Offline replay of the exported public evidence independently reverified six
-registrations and 17 assertions, including UP/UV, RP binding, signatures,
-consecutive retained-credential counters and signed minimum-PIN-length
-disclosure. Fresh-install counters reached 13; baseline-update counters reached
-4. Both user managers retained their original PID, start identity and groups;
-the installed daemon used its default command throughout. Real Dunst/dmenu
-actions were automated with xdotool, without auto-approve presence.
-
-The immutable baseline was `5dc4b7c83709a57773724e87fe4781a2f3cd0be5`.
-Its production Rust, manifests, lockfiles and installer match the accepted
-source. The update scenario observed equal executable hashes and replacement
-inodes/PIDs while preserving the same credential, PIN and policy. This records
-the installer transition actually tested; it does not measure a credential
-format migration between different production implementations.
-
-## Native environment
-
-The workflow creates two distinct ordinary users and active local LightDM/Xorg
-sessions. It uses the shipped udev rule and installer ACL, with no test HID
-permission rule. The login and user manager start before plugdev membership is
-changed and must keep their identities and group vectors. The authenticated
-user's existing logind runtime directory is checked for the correct path, owner
-and private mode before use. A private notification bus runs real Dunst, whose
-bus-owner PID and capabilities are checked. The installed service retains its
-default presence command and 30-second timeout. The daemon's
-non-dumpable protection stays enabled; sudo reads only its public executable and
-command identity.
-
-`install.sh` is the only setup/update path. The shell wrapper provisions the
-disposable desktop and dependencies, never a second authenticator setup system.
-Its `prepare|run|cleanup fresh|upgrade` commands refuse non-hosted runners,
-existing installations, existing desktops and ownership mismatches. Do not
-relax these guards or point this harness at a personal installation.
+The workflow creates two ordinary users with active LightDM/Xorg sessions. It
+uses the shipped udev rule and the installer's ACL, with no test permission
+rule; the login and user manager start before `plugdev` membership changes,
+and must keep their identities and groups. A private notification bus runs
+real Dunst, whose owner and capabilities are checked, and the installed
+service keeps its default presence, its 30-second timeout and its
+non-dumpable protection. `install.sh` is the only setup and update path. The
+harness's `prepare|run|cleanup fresh|upgrade` commands refuse non-hosted
+runners, existing installations and desktops, and ownership mismatches: never
+relax them, or point the harness at a personal installation.
 
 ## Scenarios
 
-- **Fresh current revision:** interactive PIN setup and immediate HID access;
-  independently verified discoverable ES256 creation and assertions; Deny and
-  unanswered registration/assertion (`0x27`, including the default timeout);
-  CTAPHID_CANCEL (`0x2d`); restart during both pending operations; approved
-  recovery after each failure; installer rerun, restart and policy retention;
-  required PIN change and unavailable/recovered notification-server readiness.
-- **Baseline update:** a separate fresh account installs
-  `5dc4b7c83709a57773724e87fe4781a2f3cd0be5`, first verifies noninteractive
-  missing-PIN failure, then configures a PIN and discoverable credential. The
-  final revision's installer updates that same state. Original-PIN verification,
-  signed assertions and increasing counters must survive rerun/update/restart.
+- **Fresh install** of the current revision: interactive PIN setup and
+  immediate HID access; verified discoverable ES256 registration and
+  assertions; Deny and unanswered requests (`0x27`, the default timeout
+  included), CTAPHID_CANCEL (`0x2d`) and restarts during pending operations,
+  each followed by an approved recovery; installer reruns, restarts and policy
+  retention; a required PIN change; and readiness with the notification server
+  gone and back.
+- **Update** from baseline `5dc4b7c83709a57773724e87fe4781a2f3cd0be5`, in a
+  separate account: a non-interactive install of the baseline must stop at
+  the missing PIN, then the account gets a PIN and a discoverable credential,
+  and the current installer updates that state. The original PIN, signed
+  assertions and increasing counters must survive reruns, the update and
+  restarts.
 
-Both scenarios end with CTAPHID_WINK, whose identification notification Dunst
-shows and expires, and an approved `pqkey reset`. The reset restarts the key, so
-its request arrives within the 10-second window after power-up. getInfo and an
-assertion attempt then show the PIN, policy and passkeys erased.
+Both end with CTAPHID_WINK, whose notification Dunst shows and expires, and an
+approved `pqkey reset`, after which getInfo and an assertion show the PIN,
+policy and passkeys erased. Every failed presence request must leave
+discoverable capacity unchanged, and the next approved assertion must advance
+the counter by exactly one. The minimum PIN length, always-UV and the RP
+disclosure list are checked after each lifecycle change, disclosure to an
+allowed RP and none to another included.
 
-Every failed presence request must leave discoverable capacity unchanged. The
-next approved assertion must advance the retained credential's counter by
-exactly one. Minimum PIN length, always-UV and the minimum-length RP disclosure
-list are verified after lifecycle changes. Approved non-discoverable policy
-probes verify disclosure for the allowed RP and its absence for an unlisted RP.
-
-Dunst's real context menu is opened with `dunstctl context`; xdotool selects
-Approve or Deny in real dmenu. This is **automated interaction**, not physical
-human presence. No fake server, injected ActionInvoked signals or auto-approve
-mode establishes these results. The existing fake-server E2E suite and
-[exact-version browser results](../browser/README.md) remain separate evidence.
-An owned launcher records its PID/start identity before executing real dmenu,
-because Dunst detaches the menu process. Its input/output and action selection
-remain Dunst's normal menu protocol.
+Approve and Deny are chosen in Dunst's real menu: `dunstctl context`, then
+xdotool in dmenu. This is automated interaction, not physical presence, but
+no fake notification server, injected signal or auto-approve mode is involved.
 
 ## System call evidence
 
 Each scenario runs the installed daemon under the system call filter being
-evaluated for the shipped unit. A drop-in with `SystemCallFilter=@system-service`
-and `SystemCallErrorNumber=EPERM` is in place before the first install and stays
-through every rerun, update, restart and reset. The shipped unit is not changed.
+evaluated, from a drop-in with `SystemCallFilter=@system-service` and
+`SystemCallErrorNumber=EPERM`, in place from before the first install through
+every rerun, update, restart and reset; the shipped unit is not changed.
 
-A refused call returns EPERM silently unless its seccomp filter asks the kernel
-to log it. `SystemCallLog=` cannot do that here: for exactly the calls in
-question, the filter's EPERM outranks its log action. So `prepare` makes two
-runtime changes, which cleanup undoes:
-- It starts the owned user manager with `SYSTEMD_LOG_SECCOMP=1`, through a
-  drop-in for its `user@UID.service`. systemd then flags every seccomp filter it
-  installs for logging.
-- It sets `kernel.printk_ratelimit=0`. The runner has no auditd, so audit records
-  reach the journal through the rate-limited kernel log.
+A refused call returns EPERM silently, and `SystemCallLog=` cannot log it,
+since the filter's EPERM outranks its log action. So `prepare` starts the
+owned user manager with `SYSTEMD_LOG_SECCOMP=1`, through a drop-in for its
+`user@UID.service`, which makes systemd flag every seccomp filter it installs
+for logging, and sets `kernel.printk_ratelimit=0`, because without auditd the
+records reach the journal through the rate-limited kernel log; cleanup undoes
+both. A canary unit under the same filter calls `chroot`, which is outside
+the set, before the first install and after the daemon stops. The `seccomp`
+case fails if a record other than clone3's names the daemon (its executable,
+systemd's `(pqkey)` executor or a service PID), a canary record is missing,
+the kernel or journald reports lost messages, or the daemons' seccomp filter
+counts differ.
 
-A canary transient unit under the same filter calls `chroot`, which is outside
-the set. It runs before the first install and again after the daemon stops, and
-both records must appear. The `seccomp` case fails if any of these holds:
-- a kernel record other than clone3's (below) names the daemon: its
-  executable, systemd's `(pqkey)` executor, or a service PID
-- a canary record is missing
-- the kernel or journald reports lost messages
-- the daemons' seccomp filter counts differ
-
-The shipped unit's `RestrictNamespaces=yes` also produces records: a seccomp
-filter cannot see clone3's flags, so systemd fails every clone3 with ENOSYS,
-and glibc falls back to clone(). A record does not show its errno, but the run
-checks that the filter allows clone3, so the case counts the daemon's clone3
-records (syscall 435 on x86_64 and aarch64) as ignored instead of failing.
-
-`seccomp.log` keeps the run's audit records. The summary's "System call filter"
-section names each refused call and counts the ignored clone3 calls.
-
-These rules live in `tests/e2e/seccomp_audit.py`. The installer E2E in
-[e2e.yml](../../.github/workflows/e2e.yml) applies them on every push, on
-x86_64 and arm64, to the shipped unit as installed, through reset and WINK.
+The shipped unit's `RestrictNamespaces=yes` makes systemd fail every clone3
+with ENOSYS, since a seccomp filter cannot see its flags, and glibc falls back
+to clone(). The run checks that the filter allows clone3, and counts the
+daemon's clone3 records (syscall 435 on x86_64 and aarch64) as ignored.
+`seccomp.log` keeps the records, and the summary's "System call filter"
+section names each refused call. The rules live in
+`tests/e2e/seccomp_audit.py`, which the installer E2E in
+[e2e.yml](../../.github/workflows/e2e.yml) also applies, on every push, on
+x86_64 and arm64, to the shipped unit as installed.
 
 ## Results and cleanup
 
-The workflow initializes incomplete results before setup. Final `report.json`
-and `summary.md` require all mandatory cases, native execution, successful
-workflow stages and both Python and runner cleanup layers. A recorded failure,
-missing scenario, unexecuted case or cleanup failure prevents a pass.
+`report.json` and `summary.md` pass only when every mandatory case ran
+natively and passed, every workflow stage succeeded and both cleanup layers,
+Python's and the runner's, finished. The artifacts, kept 14 days unless you download them, hold the
+source revisions; the runner, kernel, package, compiler, Python and crypto
+identities; executable hashes and inodes and service and session identities;
+commands with their statuses and timings; the public `ceremonies.jsonl`, whose
+signatures, RP binding and flags an independent pyca/cryptography verifier
+checks; prompt and menu screenshots; and named diagnostics. PINs travel only
+through hidden terminal input or in-memory CTAP authorization, and state,
+keys, tokens, browser profiles and X credentials are never uploaded.
 
-Artifacts include source revisions, runner/kernel/package/compiler/Python/crypto
-identities, installed executable hashes/inodes and service/session identities,
-commands with statuses/timings, public `ceremonies.jsonl`, prompt/menu screenshots
-and named diagnostics. Ceremony evidence includes client-data hashes and public
-CBOR response fields 1–3; the existing independent pyca/cryptography verifier
-checks attestation/assertion signatures, RP binding and UP/UV flags. Unchanged
-binary hashes across different source revisions are reported as such.
-
-PINs travel only through hidden terminal input or in-memory CTAP authorization.
-Echo/leak checks fail without publishing private output. State directories,
-private keys, authorization tokens, browser profiles/control endpoints and X
-credentials are excluded. Only allow-listed public files are uploaded, for 14
-days; download artifacts outside the repository for longer retention.
-
-An immutable runner-owned ledger names the account/UID/home and revisions before
-provisioning. Shared control and public evidence live in a runner-owned,
-run-specific directory under `/var/tmp`, accessible to the fresh desktop user
-without access to the runner's private home. Python teardown and `always()`
-workflow fallback remove only owned service/device/process/session/account
-resources, installed rules and temporary state. Cleanup failures fail the
-workflow and retain the ownership ledger for a
-safe retry. Runner disposal remains the final boundary after abrupt host loss.
+A runner-owned ledger names the account, home and revisions before anything
+is created. Cleanup removes only owned resources; a cleanup failure fails the
+workflow and keeps the ledger for a safe retry, and disposing of the runner is
+the final boundary.
 
 ## Offline checks
 
@@ -164,12 +107,6 @@ python3 -m unittest discover -s tests/desktop -p 'test_*.py' -v
 python3 -m unittest discover -s tests/browser -p 'test_*.py' -v
 actionlint .github/workflows/desktop.yml .github/workflows/ci.yml
 shellcheck -x -P SCRIPTDIR install.sh scripts/desktop-acceptance.sh scripts/check.sh scripts/lib.sh
-bash -n scripts/desktop-acceptance.sh
 ```
 
-The Linux-specific verifier test also runs in the existing locked E2E Python
-environment. Python syntax, collection, offline peers and Docker regressions do
-not exercise real Linux UHID or real desktop approval. Record exact commands,
-statuses, source/runtime identities and logs in a persistent directory outside
-the repository. Mark native execution unavailable when the host lacks the
-required kernel/session; never turn that into acceptance success.
+They do not exercise real UHID or desktop approval.

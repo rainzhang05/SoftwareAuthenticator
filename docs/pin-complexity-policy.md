@@ -1,41 +1,37 @@
 # PIN complexity policy
 
-pqkey starts with PIN complexity disabled. Enable it with
-`pqkey config pin-complexity` (or add `--yes` to skip confirmation).
-`pqkey config` shows the current setting.
+pqkey starts with PIN complexity disabled. `pqkey config pin-complexity`
+enables it (`--yes` skips the confirmation), and `pqkey config` shows the
+setting.
 
-When enabled, every new PIN must contain at least one ASCII letter (`A`–`Z`
-or `a`–`z`) and at least one ASCII digit (`0`–`9`). Other Unicode characters
-remain permitted, but non-ASCII letters and digits do not satisfy these two
-requirements. For example, `Ab12` and `éA12` qualify; `abcd`, `1234`, and
-`é234` do not.
-
-The existing requirements also apply: PIN input is normalized to NFC by the
-management client, a new PIN must meet the configured minimum length in
-Unicode code points (initially four), and its UTF-8 representation must be
-at most 63 bytes.
+When it is enabled, every new PIN must contain at least one ASCII letter
+(`A`–`Z` or `a`–`z`) and at least one ASCII digit (`0`–`9`). Other Unicode
+characters stay permitted, but non-ASCII letters and digits do not meet these
+requirements: `Ab12` and `éA12` qualify; `abcd`, `1234` and `é234` do not. The
+other requirements still apply: the management client normalizes PIN input to
+NFC, and a new PIN must meet the configured minimum length in Unicode code
+points (initially four) and be at most 63 bytes in UTF-8.
 
 Enabling complexity while a PIN exists requires one PIN change, even if that
-PIN already contains an ASCII letter and digit. The authenticator stores a
-hash and cannot establish its composition. Existing tokens are invalidated.
-The preceding PIN can still authorize a different, compliant replacement.
-Repeated enable requests do not themselves require another change. Enabling
-without a PIN makes the first PIN subject to the policy.
+PIN already contains an ASCII letter and digit, since the key stores only a
+hash and cannot tell; it also invalidates existing tokens. The current PIN can
+still authorize a different, compliant replacement. Repeated enable requests
+require no further change, and enabling without a PIN makes the first PIN
+subject to the policy.
 
-False or omitted configuration inputs preserve the setting and any required
-PIN change. Only `pqkey reset` disables an enabled policy. Reset also erases
-the PIN, credentials and large blobs and restores configuration defaults.
-Restarting pqkey preserves the policy.
+False or omitted configuration inputs keep the setting and any required PIN
+change, and restarting pqkey keeps the policy. Only `pqkey reset` disables it;
+reset also erases the PIN, credentials and large blobs and restores the
+default configuration.
 
-`authenticatorGetInfo` reports the current boolean at key `0x1B` and this
-page's URL as a CBOR byte string of UTF-8 bytes at key `0x1C`. The
-`pinComplexityPolicy` credential-creation extension returns the current
-boolean only when requested with `true` by an RP on the configured
-`minPinLengthRPIDs` list. This includes `false` when disabled. It produces
-no output for unauthorized RPs, false or absent requests, or assertions.
-PIN complexity does not independently restrict U2F; `alwaysUv` controls
-U2F availability.
+`authenticatorGetInfo` reports the current setting at key `0x1B`, and this
+page's URL, as a CBOR byte string of UTF-8, at key `0x1C`. The
+`pinComplexityPolicy` registration extension returns the current setting,
+`false` included, only when an RP on the configured `minPinLengthRPIDs` list
+requests it with `true`; it produces no output for other RPs, for false or
+absent requests, or for assertions. PIN complexity does not restrict U2F,
+which `alwaysUv` controls.
 
-The protocol behavior follows [CTAP 2.3 Proposed Standard, February 26,
+The behavior follows [CTAP 2.3 Proposed Standard, February 26,
 2026](https://fidoalliance.org/specs/fido-v2.3-ps-20260226/fido-client-to-authenticator-protocol-v2.3-ps-20260226.html),
 §§6.4, 6.11.4, 7.5 and 12.6.

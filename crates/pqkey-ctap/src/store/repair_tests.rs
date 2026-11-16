@@ -2524,7 +2524,7 @@ fn the_advice_for_a_file_repair_cannot_read_keeps_counts_above_under_a_right_clo
     assert!(count > before && before > last, "{count}, {before}, {last}");
 }
 
-/// What the README says of `damaged/`: it holds what repair took out of the
+/// What the user guide says of `damaged/`: it holds what repair took out of the
 /// store, here an intact record the list no longer named, which reads with
 /// the store's key until a reset replaces the key; and the store never
 /// needs it, so deleting it changes nothing the key does.

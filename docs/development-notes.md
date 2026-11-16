@@ -1,10 +1,11 @@
 # Development notes
 
+## Building and running
+
 pqkey builds with Rust stable, 1.89 or later; `rust-toolchain.toml` picks the
-toolchain. The daemon and CLI require Linux, with a compile-time diagnostic
-on other systems. `pqkey-ctap` and `pqkey-mldsa` are portable and can be
-linted and tested on their own, including on macOS, as CI's "test (macOS,
-portable crates)" job does:
+toolchain. The daemon and CLI require Linux, and fail to compile elsewhere.
+`pqkey-ctap` and `pqkey-mldsa` are portable, and CI's "test (macOS, portable
+crates)" job checks them on macOS with:
 
 ```bash
 cargo clippy -p pqkey-ctap -p pqkey-mldsa --all-targets --locked -- -D warnings
@@ -12,297 +13,167 @@ cargo test --locked -p pqkey-ctap -p pqkey-mldsa --all-targets
 cargo test --locked -p pqkey-ctap -p pqkey-mldsa --doc
 ```
 
-`./install.sh` is the Linux installation entry point. It rejects other
-systems before creating logs, installing tools or changing system setup.
-
-## Scripts
-
-| Script | What it does |
-|---|---|
-| `scripts/check.sh` | Runs the checks of the CI and Security workflows and of the Fuzz workflow's smoke job, as listed below. `--quick` runs formatting, lints and tests only. |
-| `scripts/install-tests.sh` | Runs the actual installer in disposable Docker filesystems with controlled prerequisites, PTYs and fault injection; requires Docker. |
-| `scripts/e2e.sh` | Runs the end-to-end tests against four test keys, through libfido2 and python-fido2. |
-| `scripts/fuzz.sh` | Runs each fuzz target for 30 seconds, or one target for as long as you ask. |
-| `scripts/diagnose.sh` | Shows the state of the key on this computer: binary, service, devices and log. |
-| `scripts/browser.sh` | Starts a local relying party for testing in real browsers ([details](../tests/browser/README.md)). |
-
-Each script above but `install-tests.sh` and `diagnose.sh` prints one line per
-step and keeps the full output of its steps in `target/scripts/`;
-`install-tests.sh` only shows its tests' output, and `diagnose.sh` only prints,
-writing no file. The top of each script says what it needs.
-
-`scripts/check.sh --quick` runs formatting; actionlint and shellcheck; a
-check that `fuzz/Cargo.lock` is up to date; the installer regression checks;
-the Python tests of the browser and desktop harnesses and of the ML-DSA
-verifier of the end-to-end tests; and clippy, tests and doctests, of the
-workspace and the fuzz crate on Linux and of the portable crates on macOS.
-Without `--quick` it adds the stack and heap residue tests in release mode,
-the release build, rustdoc, Rust 1.89 (a check, and the residue tests in debug
-and release, as CI's MSRV residue job runs them), every feature combination,
-`cargo audit` and `cargo deny` on both lockfiles, line coverage of at least
-85%, the tests of the auto-merge and promotion scripts, and the fuzz smoke
-run: a build of the fuzz targets with the nightly `fuzz.yml` pins, and 30
-seconds of fuzzing each.
-
-It prints a line for each of those checks it does not run, saying why: on
-macOS, those that need Linux; those whose tool or toolchain is not installed,
-with how to get it; and the lints and tests CI also runs on macOS, or on its
-other Linux architecture. The E2E workflow's tests are never run: they need
-`/dev/uhid`, and the installer's need sudo on a disposable machine too. The
-installer regression checks need Docker, and fail without it. A run leaves
-tracked files as they are.
-
-The heap residue test runs credential generation, reconstruction, signing
-and store roundtrips under the binary's wiping allocator. Its test allocator
-retains freed blocks until they have been scanned, and live controls prove
-that the scan finds each secret pattern. CI and `scripts/check.sh` run it in
-debug and release, as they do the stack residue tests.
-The final cleanup scan also checks blocks released by the last controls.
-
-ML-DSA drops its owned expanded keys inside a separate operation frame, then
-scrubs the retired stack before returning either success or an error. Seed
-expansion creates plain locals, moves SHAKE state and clones an expanded key;
-wiping the final owned values does not erase all retired copies. Parameter
-dispatch precedes the secret-handling closure, so each retired frame holds
-only one parameter set's key and decode result. The bounds are 640 KiB for
-ML-DSA-44, 960 KiB for ML-DSA-65 and 1,600 KiB for ML-DSA-87: at least 30%
-more than the deepest the operations of each parameter set reach without the
-scrub, which debug builds do, at up to 454, 724 and 1,195 KiB. The table of
-measured depths is in the documentation of `scrub_stack` in `pqkey-mldsa`.
-The former 1 MiB bound left the deepest 170 KiB of ML-DSA-87's debug frames
-unscrubbed, below the copies of rho-prime and K the probes look for.
-
-The stack probes retain their 2 MiB scans and controls, and check both
-32-byte halves of the 64-byte rho-prime and K after individual seed,
-expanded-key, context, malformed-key and CTAP wrapper operations. The ML-DSA
-probe reports how far down it finds each copy, and measures depth too: it
-fills the 2 MiB with a canary first, and nothing below the zeros an
-operation's scrub leaves may change but the scrub's own frame. Each operation
-then runs again from a copy of the wrapper's `ml-dsa` calls with no scrub
-after it, and the probe fails unless the bound is at least 25% deeper than
-that run reaches. In debug builds, which go deepest, the copy's frames match
-the wrapper's function for function, to within 48 bytes; an optimised build
-can inline the copy differently. Linux children also force an OS randomness
-failure after seed expansion to check the returned-error cleanup path. CI
-forces Rust 1.89.0 for runtime stack and heap probes in debug and release on
-x86_64 and aarch64, alongside the stable tests and the declared-MSRV
-compilation check.
-
-These are bounded empirical checks of selected patterns and operations.
-The stack scanners read uninitialized, retired storage, outside Rust's
-defined memory model; a clean scan is weaker evidence than a detected
-copy. Compiler, profile and CPU backend change layouts and incidental
-overwrites. The probes do not establish erasure of every intermediate,
-register, live caller-owned key, unwinding frame or swap copy. Heap probes
-separately retain surrendered allocations and require every byte to be
-zero; that guarantee comes from the daemon's wiping allocator. Standalone
-wrapper consumers still depend on each owned secret's explicit drop cleanup.
-
-U2F residue cases cover registration certificates and signatures,
-authentication with and without presence, and the provisioned attestation
-key. Stack checks independently reconstruct the nonces of U2F signing
-bases, and look for the P-256 scalar sealed into a key handle after
-`call_u2f` registers it and authenticates with it on a file store; heap
-checks retain released blocks for all three attestation modes.
-The packet fuzz target includes U2F APDUs, repeats, approval, denial and
-abandonment. Structured and sequence targets mix both protocols; the
-sequence model verifies U2F signatures, credential eligibility, application
-binding, shared counter monotonicity and always-UV. Its traces retain full
-U2F status words. Failed resets retain counter floors; successful resets keep
-invalidated IDs for the existing individual retired-ID probes. File-store
-reset tests inject failures and process exits at every persistence checkpoint
-in both layouts, including key publication, counter deletion, manifest and
-PIN writes, and verify explicit retry recovery. PIN/configuration regressions
-cover every preparation and post-rename checkpoint, both PIN protocols,
-legacy and managed stores, live/restarted policy and old-token invalidation.
-Private test observations prove unconfirmed retry debits reach no decryption,
-comparison or token issuance. The sequence harness schedules pre-publication
-failures and committed-but-unconfirmed outcomes, tracks live and published
-retry budgets, and reconstructs engines over the same published store. It also
-schedules I/O and corruption faults into PIN-state, credential, credential-set,
-signature-counter and large-blob reads and writes, and checks that each one
-fails only its command, or none where the engine tolerates it, such as a
-corrupt credential or large-blob array. Every fuzzed engine logs at Info into a
-discarding logger, so the request-log payload decode runs under fuzzing. Seeds
-cover these outcomes, retry recovery, protocol crossings and U2F disabled by
-always-UV. Fault controls exist only in unit tests and the fuzz harness.
-Large-blob tests cover fragmented writes, interrupted staging and restart
-persistence; the fuzz sequence model checks committed-array visibility and
-the lifetime of pending writes, and that credential keys are stable and
-returned only when requested. Heap residue tests include those keys and
-their registration, assertion and enumeration response copies.
-
-## PIN storage recovery
-
-A successful PIN/configuration command publishes its settings immediately.
-A warning about unconfirmed durability means a process restart observes the
-new settings, while power loss may roll back the rename. Read getInfo to
-observe PIN presence, minimum length, forced change and alwaysUv; RP disclosure
-is tested through the minPinLength extension. Avoid treating a durability
-warning as evidence that the old PIN or policy is still active.
-
-A retry-write processing error gives no verdict on the supplied PIN and issues
-no token. Inspect getPINRetries before further attempts: a failed write leaves
-the running budget as stored, while an unconfirmed published debit stays spent
-and is visible after restart. Restoring storage permits another attempt if
-retries remain. Restart clears the three-mismatch power-cycle block; it does
-not clear persisted retry exhaustion. An unreadable record remains untouched
-and fails closed until an explicit reset.
-
-Reset preserves attestation and rotates the credential key before removing
-counters or policy. Earlier errors may leave partial cleanup, but cannot
-revive invalidated credentials or lower surviving credentials' protections.
-Retrying explicit reset recovers without needing readable old records. Once
-all preceding work completes and default PIN state is published, reset returns
-success and adopts defaults even if the final publication is unconfirmed.
-
-## Running your changes
-
-CTAPHID packet fuzzing models partial transmission explicitly: report selection,
-successful and failed writes, INIT aborts and session teardown. A separate
-request/worker oracle checks response bytes, ordering and ownership through
-the final successful write; its incremental parser rejects stale continuations
-and truncation without an explicit abort. Seeds cover single-report and
-maximum-length responses, final-report competition, selected-report INIT,
-keepalives, late workers, cancellation and U2F pending/cached answers.
-
-Raw HID transport E2E tests pace maximum-length PING requests, send a competing
-CID during the reply and resynchronize a transmitting channel. Run them on a
-Linux host with `/dev/uhid`; socket and callback tests cannot replace that check.
-Management-client recording links verify zero rejected-command reports at
-the advertised and HID limits, including authenticated CBOR and getInfo
-refreshes. CLI tests preserve PIN policy and the RP list after oversized
-configuration; `test_cli.py` repeats this through real HID with and without
-a PIN, then successfully authorizes eight shorter RP IDs.
-
-`./install.sh` rebuilds pqkey and restarts the key with your changes. To
-watch the key's debug log, run it in the foreground. The log includes site and
-user names.
+`./install.sh` rebuilds pqkey and restarts the key with your changes. To watch
+the key's debug log, which names sites and users, run it in the foreground;
+Ctrl-C stops it, and `pqkey start` brings the service back:
 
 ```bash
 pqkey stop
 RUST_LOG=debug cargo run --release -p pqkey -- run
 ```
 
-Ctrl-C stops it, and `pqkey start` brings the service back.
+## Scripts
 
-## Continuous integration
+| Script | What it does |
+|---|---|
+| `scripts/check.sh` | The checks of the CI and Security workflows and of Fuzz's smoke job; `--quick` runs formatting, lints and tests only |
+| `scripts/e2e.sh` | The end-to-end tests against four test keys, through libfido2 and python-fido2 |
+| `scripts/install-tests.sh` | The installer in disposable Docker containers |
+| `scripts/fuzz.sh` | Each fuzz target for 30 seconds, or one for as long as you ask |
+| `scripts/diagnose.sh` | The state of the key on this computer: binary, service, devices and log |
+| `scripts/browser.sh` | A local relying party for real browsers ([browser tests](../tests/browser/README.md)) |
+| `scripts/browser-acceptance.sh`, `scripts/desktop-acceptance.sh` | The [browser](../tests/browser/README.md#acceptance-workflow) and [desktop](../tests/desktop/README.md) acceptance harnesses |
 
-GitHub Actions runs these workflows:
+The top of each script says what it needs. `check.sh`, `e2e.sh`, `fuzz.sh`
+and `browser.sh` print one line per step and keep each step's output in
+`target/scripts/`.
 
-- **CI** runs the checks of `scripts/check.sh` but for Security's and
-  Fuzz's, on Linux, with workspace tests on both x86_64 and arm64, and lints
-  and tests the portable crates on macOS.
-- **E2E** runs `scripts/e2e.sh`'s real HID tests on Linux.
-- **Security** runs `cargo audit` and `cargo deny`.
-- **Fuzz** runs each target for 30 seconds on changes and for 30 minutes
-  every week.
+`check.sh --quick` runs formatting, actionlint and shellcheck, a check that
+`fuzz/Cargo.lock` is current, the installer tests, the Python tests of the
+browser and desktop harnesses and of the end-to-end ML-DSA verifier, and
+clippy, tests and doctests: of the workspace and the fuzz crate on Linux, of
+the portable crates on macOS. The full run adds the release build, rustdoc,
+the residue tests in release, Rust 1.89 (a check, and the residue tests in
+debug and release), every feature combination, `cargo audit` and `cargo deny`
+on both lockfiles, line coverage of at least 85%, the tests of the auto-merge
+and promotion scripts, and a fuzz smoke run (a build with `fuzz.yml`'s nightly
+pins, then 30 seconds per target). It says why it skips a check (one that needs
+Linux, on macOS; a missing tool, with how to get it; lints CI runs elsewhere),
+never runs the end-to-end tests, and leaves tracked files as they are.
 
-Dependabot proposes updates every week; for Cargo, only to releases at least
-seven days old. Cargo updates that are semver-compatible, add no package and
-pass every workflow are merged automatically. Commit changes to `Cargo.lock`
-and `fuzz/Cargo.lock` together. When Security fails on an advisory, update the
-crate by hand rather than wait for Dependabot.
+## Tests
 
-`main` is the development branch, and its commits are tested after they are
-pushed. `stable` follows the newest commit on main that passed CI, E2E and
-Security. The **Promote stable** workflow moves it forward with
-`.github/scripts/promote-stable.sh` when one of those workflows finishes on
-main, and every six hours, which catches runs that another workflow started,
-such as the Dependabot auto-merge's; `gh workflow run promote.yml` runs it at
-once. It counts only runs started by a push, a schedule or a dispatch, and
-never moves `stable` back. GitHub does not let the workflow's token give
-`stable` workflow files that main's head does not have, so it skips a commit
-whose `.github/workflows` differs from both main's head and `stable`, and
-`stable` waits for a newer one. With `DRY_RUN=1` it only prints what it would
-do:
+| Layer | Where |
+|---|---|
+| Unit tests | in every crate, including the whole daemon over a socket pair |
+| Engine tests | `crates/pqkey-ctap/src/ctap/tests/`, every command and its CTAP rules |
+| Store tests | `crates/pqkey-ctap/tests/store/`, persistence, tampering and known-answer vectors |
+| ML-DSA known answers | `crates/pqkey-mldsa/tests/`, NIST ACVP vectors |
+| End to end | `tests/e2e/`, the release daemon driven by libfido2 and python-fido2 |
+| Fuzzing | `fuzz/`, CTAPHID packets, CTAP requests, request sequences, credential key bytes and stored records |
 
-```bash
-DRY_RUN=1 REPO=rainzhang05/SoftwareAuthenticator .github/scripts/promote-stable.sh
-```
+Tests inject devices, report links, clocks, seat sources, notification servers
+and store faults. Fault controls exist only in unit tests and the fuzz
+harness: the shipped executable has no test seam for the protocol or the
+state format. Store tests inject errors and process exits at every persistence
+checkpoint of registration, repair, reset and PIN writes, in both store
+layouts, and check that retrying recovers. CLI and kernel tests run on Linux,
+and only the end-to-end tests use real HID.
 
-## Linux platform boundary
+The residue tests look for secrets left in memory after key generation,
+reconstruction, signing (U2F and attestation included) and store roundtrips.
+The heap test (`crates/pqkey/tests/heap_residue.rs`) keeps freed blocks until
+it has scanned them, under the binary's wiping allocator, and requires every
+freed byte to be zero. The stack probes fill 2 MiB below an operation with a
+canary, then look for its secrets and for how deep it reached. ML-DSA scrubs
+640, 960 and 1,600 KiB of stack for ML-DSA-44, -65 and -87 before returning,
+success or error: at least 30% more than its operations reach without the
+scrub in debug builds, which go deepest (`scrub_stack` documents the measured
+depths). The probe fails unless that bound is at least 25% deeper than an
+unscrubbed copy of the calls reaches. Live controls prove that each scan finds
+its patterns, and on Linux a forced randomness failure, and an injected panic,
+check that cleanup also runs on the error path. CI and `check.sh` run these
+tests in debug and release, and under Rust 1.89 on x86_64 and aarch64. They
+are bounded empirical checks: a clean scan is weaker evidence than a found
+copy, and they cannot prove the erasure of every intermediate, register, live
+key, unwinding frame or swap copy.
 
-The [architecture notes](architecture.md) describe the boundary between
-command and protocol logic and the Linux backend. Keep kernel, udev,
-systemd, D-Bus and process operations under
-`crates/pqkey/src/platform/linux/`. Tests inject devices, clocks and
-notification servers while retaining Linux uhid assertions. Run the full
-workspace and fuzz checks on Linux and the unchanged E2E suite on a Linux
-host with `/dev/uhid`.
+## End-to-end tests
 
-On macOS, test the portable crates natively and use a Linux environment,
-such as Docker, for daemon and fuzz checks. Container unit tests can use
-socket-backed devices; real HID E2E tests require access to `/dev/uhid`.
+`scripts/e2e.sh` needs Linux with `/dev/uhid`, fido2-tools, dbus-daemon and
+python3-venv; it builds the pinned Python environment in `target/python` and
+starts its own D-Bus session. To run `tests/e2e/libfido2.sh` by hand, point
+`E2E_PYTHON` at that environment, and start and export a disposable D-Bus
+session before each test key, auto-approve ones included, since WINK uses
+notifications in every presence mode.
 
-## Checking another user's session by hand
+Besides python-fido2's and libfido2's own calls, including U2F in both
+directions of CTAP1/CTAP2 compatibility, the tests send raw HID requests:
+paced maximum-length PINGs, a competing CID during a reply,
+resynchronization, leases, busy replies without client retries, and CBOR
+the libraries cannot build (python-fido2 2.2.1 cannot encode null). In
+`tests/e2e/libfido2.sh`, every `run_test` line comes before the summary.
 
-Unit tests script logind's record of the seat and use a temporary seats
-directory, and E2E runners have no logged-in seat (see
-[e2e.yml](../.github/workflows/e2e.yml)), so nothing automated switches
-users. Check it by hand on a desktop with two accounts: A runs the key, B is
-another user, and you switch with your desktop's "Switch User" or
-`loginctl activate SESSION`.
+- **Payments:** `test_third_party_payment.py` sends real requests, and
+  `libfido2_payment.py` checks what libfido2 1.14.0 can, which cannot request
+  the extension or show its flag. The portable `payment_compatibility`
+  example prints 12 engine assertions for `libfido2_payment.py --fixtures PATH`
+  to verify offline. Browser and Secure Payment Confirmation support is the
+  client's, and is not tested.
+- **Credential management preview:** `test_credential_management_preview.py`
+  sends `0x41` through python-fido2's raw command API, whose convenience API
+  picks `0x0A`; `ClientPin.get_pin_token(PIN)` gets the legacy grant.
+  `libfido2_credman.py` uses libfido2's native I/O, which sends `0x41`: an
+  ML-DSA-44 key fits its 2 KiB receive buffer but fails its decoder
+  (FIDO_ERR_RX_INVALID_CBOR), and an ML-DSA-87 key exceeds the buffer.
+  Credentials are never filtered for older decoders.
+- **Brainpool:** `brainpool_vectors.py` regenerates the committed vectors with
+  pinned cryptography and OpenSSL, and
+  `cargo run --locked -p pqkey-ctap --example brainpool_compatibility` prints
+  8 registrations and 16 assertions for
+  `brainpool_compatibility.py --fixtures PATH` to verify offline. libfido2
+  1.14.0 accepts the advertised identifiers but has no Brainpool type.
+- **Persistent read-only management:** `persistent_management.py` builds raw
+  `pcmr` requests, and `test_cli.py` covers restarts and PIN rotation.
+- **Key agreement:** `test_key_agreement.py` sends malformed COSE metadata.
 
-1. As A, `pqkey status` names the device, say `/dev/hidraw3`. `getfacl
-   /dev/hidraw3` lists `user:A:rw-`, and `journalctl --user -u pqkey` has
-   "watching /run/systemd/seats". Keep a file open on the device in a
-   terminal: `exec 3<>/dev/hidraw3`.
-2. Switch to B. `grep ACTIVE_UID /run/systemd/seats/seat0` shows B's uid.
-   As B, `fido2-token -L` lists no device with vendor `0x1209` and product
-   `0x0001`, if B runs no key of their own, and `fido2-token -I
-   /dev/hidraw3` fails, unless another device has taken that node.
-3. Switch back to A. A's journal has "removing the key's device" and "the
-   key plugs its device in again". `pqkey status` names a device again,
-   perhaps another node, and `getfacl` on it lists `user:A:rw-` but not B.
-   In the terminal of step 1, `cat <&3 >/dev/null` ends with an input/output
-   error: the file opened on the old device no longer works.
-4. Still as A, end B's session without switching to it: `sudo loginctl
-   terminate-session SESSION`, with B's session from `loginctl
-   list-sessions`. A's journal has "logind rewrote seat0's record", and
-   `pqkey status` names a device again: a save of the record that leaves A
-   active replaces the device too.
-5. Still as A, on a test desktop, remove the record as systemd 257 and older
-   do when they cannot save it: `sudo rm /run/systemd/seats/seat0`. A's
-   journal has "cannot tell whose session is active on seat0", and
-   `pqkey status` says that logind's record of seat0 is missing. Switch to a
-   text console where nobody is logged in, and back: each switch saves the
-   record, and `pqkey status` names a device again.
+The E2E workflow also runs `tests/e2e/test_setup.py` with
+`PQKEY_INSTALLER_E2E=1` after the other keys stop. It installs, reruns setup
+and updates the executable for real, so it needs a disposable host with sudo,
+a systemd user manager and `/dev/uhid`, and ordinary runs skip it.
 
-With systemd 257 and older, or elogind, B can still open the device in the
-moment of the switch (see [SECURITY.md](../SECURITY.md#other-users-sessions));
-these steps do not race for it.
+## Installer tests
 
-## Installer regression checks
+`scripts/install-tests.sh` runs the real `install.sh` in disposable Docker
+containers, with no writable host mounts, host sudo or host devices.
+`INSTALL_TEST_IMAGE` may name a preloaded image with Bash, Python 3, coreutils
+and Git; the default is `rust:1.89-bookworm`. Fixtures record prerequisite
+commands, installed executables, recovery copies, output and exit statuses,
+and a PTY checks confirmation and hidden PIN input. Without Docker the check
+fails rather than passes.
 
-Run `scripts/install-tests.sh` with Docker running. It sends the installer and
-fixtures to disposable Linux containers, with no writable host mounts, host
-sudo or host devices. `INSTALL_TEST_IMAGE` may select a compatible preloaded
-image (Bash, Python 3, coreutils and Git); the default is `rust:1.89-bookworm`.
-Both `scripts/check.sh` modes and the CI installer job run these checks.
-Missing Docker is a failed required check rather than an implicit pass.
+## Linux checks on macOS
 
-Fixtures execute the real `install.sh`, recording prerequisite commands,
-installed executables, recovery copies, output and exit statuses. A PTY checks
-confirmation and hidden PIN input. Rust setup tests run the shared setup
-orchestration in child processes and verify PIN readiness against the existing
-socket-backed CTAP client/daemon. No protocol or state-format test seam is
-added to the shipped executable.
+Run the Linux checks in Docker, on a snapshot: `git archive` of a clean commit,
+extracted with `tar -xm` (an archive carries the commit time, and cargo judges
+freshness by mtime), without build artifacts or macOS extended attributes, in
+a shell with `set -o pipefail`. Named volumes, such as `pqkey-cargo`,
+`pqkey-cargo-registry`, `pqkey-rustup` and `pqkey-target`, keep caches between
+runs. Use separate target directories for each compiler, architecture and
+sanitizer, and for experiments on a modified copy, since cargo reuses
+artifacts newer than the sources. Containers have no `/dev/uhid`: they run
+socket-backed tests and fuzzing, not real HID. Keep the exact commands,
+statuses, versions and logs of such checks outside the repository, and report
+what could not run (real HID, browsers, another architecture) apart from what
+passed.
 
-The E2E workflow additionally runs `tests/e2e/test_setup.py` with
-`PQKEY_INSTALLER_E2E=1` after the other test keys stop. This opt-in test requires
-a disposable Linux host with sudo, a systemd user manager and `/dev/uhid`.
-It executes installation, setup reruns and executable updates using real HID
-clients and the existing fake desktop notification server. It is skipped in
-ordinary developer E2E runs so it cannot install over a personal key.
+## Fuzzing
 
-For macOS Linux validation, send a source snapshot to Docker and extract it
-with `tar -m` (or `tar -xm`) so container rebuilds use the snapshot's contents.
-Exclude build artifacts and macOS extended attributes, retain pipeline failure
-statuses with `set -o pipefail`, and reuse the `pqkey-cargo`,
-`pqkey-cargo-registry`, `pqkey-rustup` and `pqkey-target` volumes. Keep fuzz
-build outputs separate within the target volume. Containers without
-`/dev/uhid` can run fixture and socket-backed tests, but cannot verify real HID.
+`scripts/fuzz.sh` needs a nightly toolchain and cargo-fuzz; its header says
+how to replay a crash. The packet target models partial transmission (report
+selection, failed writes, INIT aborts, teardown, leases and identification)
+and checks it against an independent request oracle. The sequence model mixes
+CTAP2 and U2F, and checks signatures, counters, always-UV, PIN retry budgets,
+large-blob visibility, credential management grants and cursors, payment
+flags and key-agreement metadata, while it schedules I/O faults, corruption
+and unconfirmed commits, each of which must fail only its command.
+
+After changing an input layout or a seed generator, regenerate the seeds in
+`fuzz/seeds/` twice with
+`cargo run --locked --release --manifest-path fuzz/Cargo.toml --example seeds`
+(`-- --ctaphid-only` for the CTAPHID seeds alone), and compare the file names
+and contents of both runs; fixture encoders round-trip against the locked
+`arbitrary`.
 
 ## Adding a signature algorithm
 
@@ -311,393 +182,104 @@ Each algorithm is described once, in the table in
 else has to change.
 
 1. Add a `CoseAlg` variant whose value is its COSE identifier, its row in
-   `CoseAlg::properties` (its name and signature scheme), and its place in
-   `CoseAlg::ALL`, the order getInfo lists the algorithms in. An algorithm
-   that differs from another only in its identifier, as ESP256 does from
-   ES256, shares its scheme and needs nothing more in Rust.
-2. A new scheme needs a `Scheme` variant and a module for its family, as
-   `crypto/ecdsa.rs`, `crypto/eddsa.rs`, `crypto/mldsa.rs` and
-   `crypto/rsa.rs` are. ECDSA or EdDSA on a new curve needs a `Curve` or
-   `EdwardsCurve` variant, a module for the curve next to
-   `crypto/ecdsa_p384.rs` or `crypto/eddsa_ed25519.rs`, a case in
-   `tests/residue.rs` and, for keys derived from a seed, known answers in its
-   family's module. A new type of key needs a `CredentialSecretKey` variant.
-   Keys kept in a new form need a `KeyKind`, a `PrivateKeyMaterial` variant
-   and a key type in `store/codec.rs`; `CoseAlg::is_sealable` checks both
-   material width and algorithm encoding. Both must fit the existing sealed
-   credential ID. A key that does not, as RSA's primes do not, is stored even
-   for a non-discoverable credential.
-3. Build and run clippy, and handle every match they point to, among them
-   the test verifier in `crypto/verify.rs`, which pqkey's tests and the fuzz
-   targets reach through pqkey-ctap's `test-support` feature. Compile-time
-   invariants and explicit eligibility tests keep the signed-byte sealed
-   algorithm field separate from the private material width.
-4. Run the tests. The table-driven ones cover the new algorithm, and the
-   known-answer tests of the table, of getInfo and of the CLI say what to
-   add to them. If `UNSUPPORTED_ALGORITHMS` in `fuzz/src/requests.rs` lists
-   the algorithm, the fuzz crate's tests fail: replace it there with an
-   identifier the key does not support.
-5. Outside Rust, add it to `ALGORITHMS` in `tests/e2e/ctap.py` and to
+   `CoseAlg::properties` and its place in `CoseAlg::ALL`, the order getInfo
+   lists. An algorithm that differs from another only in its identifier, as
+   ESP256 does from ES256, needs nothing more in Rust.
+2. A new scheme needs a `Scheme` variant and a module for its family, like
+   `crypto/ecdsa.rs`; a new curve, a `Curve` or `EdwardsCurve` variant, a
+   module beside `crypto/ecdsa_p384.rs` or `crypto/eddsa_ed25519.rs`, a case in
+   `tests/residue.rs` and, for keys derived from a seed, known answers. A new
+   type of key needs a `CredentialSecretKey` variant, and keys kept in a new
+   form a `KeyKind`, a `PrivateKeyMaterial` variant and a key type in
+   `store/codec.rs`. A key that does not fit a sealed ID, as RSA's primes do
+   not, is stored even for a non-discoverable credential
+   (`CoseAlg::is_sealable`).
+3. Build and run clippy, and handle every match they point to, among them the
+   test verifier in `crypto/verify.rs`, which pqkey's tests and the fuzz
+   targets reach through the `test-support` feature.
+4. Run the tests: the table-driven ones cover the new algorithm, and the
+   known-answer tests of the table, getInfo and the CLI say what to add. If
+   `UNSUPPORTED_ALGORITHMS` in `fuzz/src/requests.rs` lists the algorithm,
+   replace it there with one the key does not support.
+5. Outside Rust, add it to `ALGORITHMS` in `tests/e2e/ctap.py`, to
    `test_get_info.py`, to `NAMES` in `tests/browser/q.py` and
    `tests/browser/index.html`, to the `fido2-token -I` line that
    `tests/e2e/libfido2.sh` expects (and its register-and-assert tests, if
-   libfido2 implements the algorithm), and to the algorithm lists in the
-   README and the [architecture notes](architecture.md).
+   libfido2 implements the algorithm), and to the list in the
+   [architecture notes](architecture.md#what-the-key-supports), and the
+   README's summary for a new family.
 
-Then run `scripts/check.sh`, regenerate the fuzz seeds with `cargo run
---release --manifest-path fuzz/Cargo.toml --example seeds` (the
-`credential_key` seeds pick algorithms by their place in `CoseAlg::ALL`, so
-give a new one layouts in `fuzz/examples/seeds.rs` first), run
-`scripts/fuzz.sh`, and run `scripts/e2e.sh` on Linux.
+Then run `scripts/check.sh`, regenerate the fuzz seeds (the `credential_key`
+seeds pick algorithms by their place in `CoseAlg::ALL`, so give a new one
+layouts in `fuzz/examples/seeds.rs` first), run `scripts/fuzz.sh`, and run
+`scripts/e2e.sh` on Linux.
 
-## Clients
+## Checking another user's session by hand
 
-The E2E suite also exercises python-fido2 2.2.1's Ctap1 registration and
-signature verification, WebAuthn fido-u2f verification, protocol crossings,
-PIN independence, always-UV and notification polling. A helper repeats only
-presence-required APDUs. libfido2's forced-U2F commands register and assert
-ES256 credentials and verify both directions of protocol compatibility.
-Raw HID tests observe busy replies without the client's automatic retries.
+Nothing automated switches users: unit tests script logind's record of the
+seat, and E2E runners have no logged-in seat. Check it on a desktop with two
+accounts, where A runs the key and B is another user, switching with the
+desktop's "Switch User" or `loginctl activate SESSION`.
 
-The [2026-10-15 native browser run](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/38818030676)
-verified source `83837b767bb3c6c35bf6871a8289f88aa8715e6d` on Ubuntu 24.04 x86_64,
-with Rust 1.98.1 and Python 3.14.7. Both browsers completed all R1–R35/L1–L7
-presets and the B1/B2 Brainpool probes, including mandatory PIN, discoverable,
-replacement and stored-ID controls, with no infrastructure or unexpected failures.
+1. As A, `pqkey status` names the device, say `/dev/hidraw3`;
+   `getfacl /dev/hidraw3` lists `user:A:rw-`, and `journalctl --user -u pqkey`
+   has "watching /run/systemd/seats". Keep a file open on the device:
+   `exec 3<>/dev/hidraw3`.
+2. Switch to B. `grep ACTIVE_UID /run/systemd/seats/seat0` shows B's uid. As
+   B, `fido2-token -L` lists no device `0x1209`:`0x0001` (if B runs no key of
+   their own), and `fido2-token -I /dev/hidraw3` fails, unless another device
+   has taken that node.
+3. Switch back to A. A's journal has "removing the key's device" and
+   "the key plugs its device in again"; `pqkey status` names a device again,
+   perhaps another node, whose ACL lists A but not B. In step 1's terminal,
+   `cat <&3 >/dev/null` fails with an input/output error.
+4. As A, end B's session without switching to it:
+   `sudo loginctl terminate-session SESSION`, with B's session from
+   `loginctl list-sessions`. A's journal has "logind rewrote seat0's record",
+   and `pqkey status` names a device again.
+5. On a test desktop, remove the record, as systemd 257 and older do when they
+   cannot save it: `sudo rm /run/systemd/seats/seat0`. A's journal has
+   "cannot tell whose session is active on seat0", and `pqkey status` says
+   that logind's record of seat0 is missing. Switch to a text console where nobody
+   is logged in, and back: each switch saves the record, and `pqkey status`
+   names a device again.
 
-| Exact browser | Verified presets/probes | Expected errors | Measured algorithm limits | Ceremonies |
-|---|---:|---:|---:|---:|
-| Chromium 158.0.8107.0, snapshot 1719332 | 41 | 3 | 0 | 91 |
-| Firefox 158.0 | 34 | 1 | 9 | 83 |
+These steps do not race for the device in the moment of a switch
+([SECURITY.md](../SECURITY.md#other-users-sessions)).
 
-Chromium created and asserted all 21 algorithms. Its expected errors are R14
-exclusion and R17/R19's inconsistent credProtect inputs. Firefox verified 15
-algorithms; its nine limit observations are ML-DSA in both credential modalities,
-ES256K, and the two Brainpool probes. Firefox's unknown algorithm filtering and
-missing secp256k1 curve representation are documented with pinned sources and
-correlated CTAP responses in the [acceptance guide](../tests/browser/ACCEPTANCE.md).
-Each accepted registration has independently verified companion assertions.
-Both runs observed native PIN/account actions, exited cleanly and removed their
-HID devices. Presence was explicitly automated with `auto-approve`; this does
-not establish manual physical-presence or browser/SPC payment behavior.
+## Continuous integration and releases
 
-The following are historical manual observations from 2026-09-30 on Ubuntu
-26.04.1 (aarch64, GNOME 50.1). They are not results from the new automated matrix.
+GitHub Actions runs these workflows:
 
-| Client | ES256 | ML-DSA | Notes |
-|---|:---:|:---:|---|
-| Chromium 153 (snap) | ✓ | ✓ | Passkeys and user verification need a PIN on the key. `getPublicKey()` returns null for ML-DSA and `toJSON()` leaves the key out, so relying parties read it from the attestation object. |
-| Firefox 154 (snap) | ✓ | | Drops algorithms it does not know: an ML-DSA-only request fails with `NotAllowedError`. Without a PIN, its account chooser shows "Unknown account". |
-| python-fido2 2.2.1 | ✓ | ✓ | Used by the end-to-end tests. |
-| libfido2 1.16 | ✓ | | Has no ML-DSA type, so `fido2-token -L -k` cannot list ML-DSA passkeys; `pqkey passkeys` can. PIN, credential management and `hmac-secret` work. |
+- **CI**: the checks of `scripts/check.sh` but Security's and Fuzz's, on Linux
+  with workspace tests on x86_64 and arm64, and the portable crates on macOS.
+- **E2E**: the real HID tests of `scripts/e2e.sh`, on Linux.
+- **Security**: `cargo audit` and `cargo deny`.
+- **Fuzz**: each target for 30 seconds on changes, and for 30 minutes every
+  week.
 
-The manually dispatched [browser/UHID workflow](../.github/workflows/browser.yml)
-builds the current Linux release and exercises the existing RP's R1–R35 and
-L1–L7 presets in isolated upstream Chromium and Mozilla Firefox jobs on native
-Linux x86_64. See the [acceptance guide](../tests/browser/ACCEPTANCE.md) for pinned
-downloads, local entry points, fixture order, native prompt automation, result
-policy and diagnostic artifacts. Presence uses the daemon's explicit
-`auto-approve` mode, so these are compatibility measurements rather than manual
-physical-presence tests.
+The [browser](../tests/browser/README.md#acceptance-workflow) and
+[desktop](../tests/desktop/README.md) acceptance workflows run only when
+dispatched.
 
-Only a completed exact-version native run establishes a preset pass. The matrix
-separates verified ceremonies, expected errors, measured client capabilities and
-infrastructure failures, with classic ES256/PIN/discovery and stored-ID controls.
-Independent RP verification remains mandatory when python-fido2 cannot verify
-an algorithm; such secondary-library limits are explicit in the evidence.
-macOS/Docker without UHID can run harness/RP regressions and collection, but that
-does not execute the browser/HID path. Retain command/status/version records
-outside the repository and keep them separate from actual acceptance artifacts.
+Dependabot proposes updates every week, for Cargo only to releases at least
+seven days old. Cargo updates that are semver-compatible, add no package and
+pass every workflow merge automatically. Commit changes to `Cargo.lock` and
+`fuzz/Cargo.lock` together, and when Security fails on an advisory, update the
+crate by hand rather than wait for Dependabot.
 
-## Troubleshooting
+`main` is the development branch, and its commits are tested after they are
+pushed. `stable` follows the newest commit on `main` that passed CI, E2E and
+Security: the **Promote stable** workflow moves it with
+`.github/scripts/promote-stable.sh` when one of those finishes on `main`, and
+every six hours, which catches runs another workflow started, such as the
+Dependabot auto-merge's; `gh workflow run promote.yml` runs it at once. It
+counts only runs started by a push, a schedule or a dispatch, and never moves
+`stable` back. Since the workflow's token cannot give `stable` workflow files
+that `main`'s head lacks, it skips a commit whose `.github/workflows` differs
+from both `main`'s head and `stable`, and `stable` waits for a newer one. With
+`DRY_RUN=1` it only prints what it would do:
 
-Start with `pqkey status`, which checks the service, device access,
-notifications, the state directory's filesystem and the credential store, and
-names a fix for each problem it finds, or `scripts/diagnose.sh` for the whole
-picture.
-
-**Installation exits without “pqkey is ready.”** The service may already be
-installed while a requirement remains incomplete. Keep the log at
-`~/.cache/pqkey/install.log`, fix the reported requirement and rerun
-`./install.sh` in the same desktop terminal. Setup requires an answering HID
-device, the installed service and matching notification session, a notification
-server advertising actions and message bodies, and a configured PIN with no
-outstanding change requirement. `--yes` approves installation but does not
-supply a PIN. Readiness checks do not approve future requests for you.
-
-**The installer just added me to plugdev.** Setup grants your UID a `/dev/uhid`
-ACL so the existing session and user manager can start the key immediately.
-Its hidraw node needs an active local desktop seat for `uaccess`. A plain SSH
-session, container or Xvfb display alone does not establish that permission
-path. Rerun `./install.sh` to repair permissions; inspect `getfacl /dev/uhid`
-and the device shown by `pqkey status` if it still fails.
-
-**Dunst shows a prompt but no inline buttons.** Open its actions with
-`dunstctl context` or your configured context shortcut and choose Approve or
-Deny. Dunst needs dmenu or a configured compatible menu. An unanswered request
-expires after 30 seconds. Client cancellation and service restart withdraw the
-pending prompt; a previous approval cannot authorize the next request.
-
-The [installed desktop acceptance guide](../tests/desktop/README.md) documents
-the manually dispatched native test and its artifacts. It uses automated
-interaction with real Dunst, separately from browser compatibility tests using
-explicit auto-approve presence and E2E tests using a fake notification server.
-On 2026-11-14, [native run 43562026012](https://github.com/rainzhang05/SoftwareAuthenticator/actions/runs/43562026012)
-passed every fresh-install and baseline-update case on Ubuntu 24.04 x86_64
-with Dunst, including default-presence failures/recovery, retained
-credentials/PIN/policy and both cleanup layers. The guide records the source
-and runtime identities of an earlier run, and an independent replay of its
-public signatures and consecutive counters. This establishes the tested
-automated desktop interaction, not physical human presence or untested desktop
-environments.
-
-**The key stops answering and `pqkey stop` hangs.** The Linux uhid queue has
-an unlocked read race, seen especially on arm64. When it hits, `dmesg` shows
-the following, with `uhid_char_read` in the call trace:
-
-```text
-usercopy: Kernel memory exposure attempt detected from null address (offset 0, size 4376)
-kernel BUG at mm/usercopy.c:102
+```bash
+DRY_RUN=1 REPO=rainzhang05/SoftwareAuthenticator .github/scripts/promote-stable.sh
 ```
-
-pqkey waits for each event to settle before reading it to avoid the race, but
-cannot rule it out. Restart the key; if its process cannot be stopped,
-reboot.
-
-**The browser waits, but no prompt appears.** On GNOME a prompt can queue
-behind another banner, so pqkey nudges the queue every 2 seconds. The prompt
-is also in the notification list (click the clock).
-
-**Every registration or sign-in fails at once.** No notification could be
-shown, so the key said no. `journalctl --user -u pqkey` says why. If your
-desktop starts its own D-Bus session bus, see the comments in
-[`contrib/systemd/user/pqkey.service`](../contrib/systemd/user/pqkey.service).
-
-**A snap browser never asks for the key.** Snaps open only devices tagged for
-them, and the udev rules tag the key for the Firefox and Chromium snaps. If
-`pqkey status` says the tag is missing, run `./install.sh`.
-
-**`pqkey passkeys` lists nothing, although sites accepted the key.** It lists
-passkeys, the credentials the key can find by itself. A site that registers it
-as a second factor (`residentKey: "discouraged"`) keeps the credential's ID
-and sends it back to sign in, and so does Chromium when the key has no PIN.
-Those sign-ins work, but the key does not list them, and their prompt says
-"Register a security key" instead of "Create a passkey".
-
-**Chromium says "Your device can't be used with this site".** Chromium uses a
-security key for passkeys only if it has a PIN. Set one with `pqkey pin`.
-
-**Firefox's account chooser shows "Unknown account".** Without a PIN, the key
-leaves user names out of its answer (CTAP 2.3 §6.2.2). With a PIN set, Firefox
-asks for it and shows the names.
-
-**Chromium shows "Something went wrong" after Deny or after 30 seconds.** The
-request was denied or timed out. Chromium keeps its sheet open until you click
-Cancel.
-
-**Another program fails while a browser waits for approval.** The key serves
-one request at a time and answers the others "busy", as CTAP requires. Answer
-or cancel the waiting request first.
-
-**The service and the command use different passkeys.** If you set
-`XDG_DATA_HOME` in your shell, set it for the systemd user manager too (see
-`environment.d(5)`).
-
-## Identification and channel lease regression checks
-
-The CTAPHID state machine tests inject monotonic milliseconds and check exact
-lease and identification expiry, resynchronization, selected output, and final
-successful writes. The independent fuzz model tracks leases and identification
-tokens separately from transactions and the CTAP worker. Regenerate only these
-seeds with `cargo run --locked --manifest-path fuzz/Cargo.toml --example seeds
--- --ctaphid-only`; the encoder round-trips each seed and runs the oracle.
-
-Real HID tests allocate competing CIDs before acquiring a lease and release
-leases in cleanup, including after failed assertions and partial responses.
-The disposable notification server checks Python FIDO WINK and libfido2's
-forced-U2F touch API, which sends WINK before its separate presence operation.
-The two notifications are checked independently. Prepare the pinned Python
-environment before running `tests/e2e/libfido2.sh`; `E2E_PYTHON` selects it.
-
-On macOS, distinguish E2E syntax and collection from actual HID execution.
-Containers without `/dev/uhid` can run simulated-device tests and sanitizer
-fuzzing, but cannot execute the real HID suite. Record validation architecture,
-compiler versions, command exit statuses, and each fuzz target's explicit
-30-second budget. Source snapshots must come from `git archive`, extracted
-with `tar -xm`, with separate cached outputs for each compiler and architecture.
-
-## Third-party payment verification
-
-[CTAP 2.3 §12.9 and §6.8, February 26, 2026 Proposed Standard](https://fidoalliance.org/specs/fido-v2.3-ps-20260226/fido-client-to-authenticator-protocol-v2.3-ps-20260226.html)
-support is tested at the authenticator boundary for every
-advertised algorithm and both credential modalities. Rust regressions verify
-signed bytes and counters, mixed next assertions, legacy record encodings,
-credential enumeration and updates, restart/reset/replacement, capacity,
-filesystem fault/crash recovery, protection and ES256 protocol crossings.
-The fuzz model independently follows registration metadata, assertion requests
-and per-credential next-assertion outputs. Regenerate all seeds after changing
-its input layout; fixture encoders round-trip against the locked `arbitrary`
-dependency before the corpus is written.
-
-`tests/e2e/test_third_party_payment.py` covers real Python FIDO HID requests.
-Its malformed-input tests bypass client validation and send CBOR null directly,
-because python-fido2 2.2.1 cannot encode null. `libfido2_payment.py` uses only
-libfido2 1.14.0 APIs: that version cannot request the extension or expose its CM
-flag. Its management API always sends prototype command `0x41`; pqkey now
-advertises `credentialMgmtPreview` and its native check requires successful
-enumeration. Standard `0x0A` enumeration is checked through Python FIDO. The
-native library asserts payment-enabled credentials and verifies signed
-authenticator data containing the unknown extension. The shell runner includes
-the check before its final summary.
-
-The portable `payment_compatibility` example emits 12 real CTAP engine
-assertions. Pass its stdout to `libfido2_payment.py --fixtures PATH` in the pinned
-Python environment to verify absent/false/true requests, increasing counters
-and signature rejection after changing the payment boolean without a HID node.
-This verifies signed-byte compatibility; real transport and enumeration checks
-still require a Linux host with `/dev/uhid`.
-
-Browser/WebAuthn and Secure Payment Confirmation verification are separate.
-The client platform determines payment eligibility and UI; advertising this
-extension does not establish browser or SPC support. Historical client results
-above concern authentication, and do not claim payment verification.
-
-## Credential management preview verification
-
-[Final CTAP 2.3 §§6.13, 6.8 and 6.5](https://fidoalliance.org/specs/fido-v2.3-ps-20260226/fido-client-to-authenticator-protocol-v2.3-ps-20260226.html)
-and the [prototype wire format](https://fidoalliance.org/specs/fido2/vendor/CredentialManagementPrototype.pdf)
-define compatibility command `0x41`. Subcommand 7 is a documented backport of
-standard user updates, required by [libfido2 1.14.0's native implementation](https://github.com/Yubico/libfido2/blob/1.14.0/src/credman.c).
-
-Rust engine regressions exercise both PIN protocols, explicit legacy issuance,
-modern permission isolation, RP scopes, expiry and consumption, reissue,
-PIN/policy publication failures, restart/reset, family switches and independent
-cursors. They check all seven operations, public keys for every advertised
-algorithm, capacity, truncation, rejected mutation usability, protection,
-largeBlobKey and thirdPartyPayment preservation. Preview uses the current
-protocol MAC verifier; repeated MAC failures never debit persistent PIN retries.
-The sequence oracle independently tracks authorization and cursor grants,
-including valid MAC use before later permission/data rejection. Fixture encoders
-round-trip against the locked `arbitrary` graph. After input-layout changes,
-regenerate every seed with `cargo run --locked --release --manifest-path
-fuzz/Cargo.toml --example seeds`, repeat, and compare filenames and contents.
-
-`tests/e2e/test_credential_management_preview.py` sends actual HID `0x41`
-requests. python-fido2 2.2.1's convenience API selects `0x0A` when credMgmt is
-present, so preview tests use its raw command API without modifying getInfo.
-Calling `ClientPin.get_pin_token(PIN)` obtains the legacy grant; explicit CM
-permissions obtain a modern grant. Tests include exact authentication statuses,
-RP restrictions, family switches, independent cursors and WINK/LOCK preservation.
-
-`tests/e2e/libfido2_credman.py` keeps libfido2's native HID I/O and exercises
-metadata, multi-RP/credential enumeration, user updates and deletion with ES256,
-ES384, EdDSA and RS256. Raw checks cover mixed payment flags and large-blob keys;
-libfido2 1.14 exposes largeBlobKey but ignores the additional payment field.
-Its separate ML-DSA-44 decoder check fits the library's 2 KiB receive buffer and
-expects FIDO_ERR_RX_INVALID_CBOR while raw preview enumeration and credential
-signing still succeed. An ML-DSA-87 public key exceeds that old receive buffer.
-Supported credentials are never filtered for older decoders. Every shell
-run_test precedes the summary,
-including the existing payment helper's advertised-preview success branch.
-
-Engine checks and E2E syntax/collection can run on macOS and Linux/aarch64
-containers. Actual HID execution requires Linux with `/dev/uhid`; container
-fixtures and collection do not establish native transport success. Keep exact
-commands, statuses, compiler/architecture details, deterministic regeneration
-results and unavailable HID/x86_64 execution in validation evidence outside the
-repository. Use fresh git archives extracted with `tar -xm`, preserve pipeline
-failures, and separate cache outputs by compiler, architecture and sanitizer.
-
-Start and export the disposable D-Bus session before every test key, including
-auto-approve keys: WINK identification uses notifications in every presence mode.
-
-## Brainpool validation and client limits
-
-`tests/e2e/brainpool_vectors.py` regenerates the committed independent vectors
-with pinned cryptography/OpenSSL, hashlib and Python integers. The vectors cover
-two seeds per curve, private/public derivation, SHAKE output, RFC 6979 nonces,
-and signatures with the correct and wrong hashes. Existing derivation vectors
-remain regression requirements. The stack probe independently computes both
-new scalars/nonces, handles bits2octets reduction and rejected candidates, and
-retains its full 2 MiB scan; heap controls include scalars, SHAKE output and
-nonces in both byte orders and retain the all-freed-bytes-zero requirement.
-
-Run `cargo run --locked -p pqkey-ctap --example brainpool_compatibility` and pass
-stdout to `tests/e2e/brainpool_compatibility.py --fixtures PATH` in the pinned
-Python environment. It independently verifies eight registrations and sixteen
-assertions with OpenSSL, including both stored modalities, payment/blob metadata,
-DER and tampering. This offline path does not establish HID or browser support.
-Raw HID regressions use the existing Python FIDO cryptography helpers with
-Brainpool curves and cover PIN protocols, credProtect and management.
-
-The libfido2 1.14.0 compatibility tests use its existing algorithm getters and
-`fido_cred_set_type`, plus native preview management. Advertising -265/-267
-succeeds; unsupported native credential types and COSE decoders fail as expected.
-Keep ES256/ES384/EdDSA/RS256 and ML-DSA decoder compatibility gates intact;
-do not filter authenticator credentials for an older decoder or imply verified
-Brainpool browser support. Non-discoverable Brainpool credentials cost a storage
-slot even when payment is disabled.
-
-After any algorithm/fixture-layout change, regenerate every committed fuzz seed
-with `cargo run --locked --release --manifest-path fuzz/Cargo.toml --example seeds`
-twice and compare filenames/content hashes. The explicit sequence fixtures carry
-an algorithm index and check their own round trips against locked `arbitrary`.
-Keep source snapshots, exact commands/statuses, compiler and architecture
-identity, full probe logs, corpus manifests and an explicit 30-second sanitizer
-result for every fuzz target outside the repository. Linux snapshots come from
-`git archive` extracted with `tar -xm`, with separate
-compiler/architecture/sanitizer caches.
-
-## Persistent credential management validation
-
-`tests/e2e/persistent_management.py` builds raw ClientPIN pcmr requests with the
-selected Python FIDO protocol. The raw HID suite covers both encrypted lengths,
-MAC lengths, permission negotiation, read-only operations and WINK/LOCK;
-`test_cli.py` uses dedicated daemons for restart and PIN rotation. These require
-Linux with `/dev/uhid`; successful collection does not establish HID execution.
-libfido2 1.14.0 compatibility gates remain unchanged. Its existing management API
-continues to use writable cm; raw Python supplies the missing pcmr request.
-
-Engine and FileStore tests compare live/reopened authority at retry, grant,
-PIN/policy and reset publication checkpoints. Native transport fixtures exercise
-listing fallback, explicit protocol selection, restart and cursor controls.
-Stack probes retain the full 2 MiB scan and cover encrypted and memory stores;
-heap probes retain live controls and the requirement that freed bytes are zero.
-The scrub guard also runs on unwinding from an injected RNG panic. Token draws
-reject zero/repeated entropy before publication, preventing cross-permission
-secret collisions.
-
-Fuzz sequence fixtures retain protocol-specific client secrets across restart;
-the authorization oracle keeps transient and persistent grants separate. After
-changing layouts or generators, regenerate all committed corpora twice using
-the locked graph and compare every filename and byte. Keep exact commands,
-source identities, statuses, compiler/architecture details and full logs outside
-the repository. Use fresh git archives extracted with `tar -xm`, existing cache
-volumes, separate compiler/architecture/sanitizer outputs and five explicit
-30-second sanitizer runs. Report unavailable real HID, browser and x86_64
-execution separately from passing portable/container checks.
-
-
-## Classic key-agreement metadata validation
-
-Engine regressions cover all seven shared-parser consumers under both PIN
-protocols, with otherwise valid points, ciphertexts and MACs. Metadata rejection
-prevents later PIN decryption/comparison, retry writes and credential publication;
-FileStore checks compare reopened authority. HMAC extension processing follows
-existing presence collection and token consumption, and rejected commands retain
-stateful-command invalidation. The native recording link mutates only public
-getKeyAgreement metadata and records all requests/reports to prove that malformed
-responses cause no authenticated follow-up, including partial reports.
-
-The stateful fuzz target uses controlled exchanges on a separate engine so its
-metadata oracle does not invent a global error ordering for arbitrary requests.
-Its cases include the engine-only integer `-7` exception and unknown labels;
-standard response parsing still requires `-25`. Every explicit fixture round-trips
-against locked `arbitrary`. Regenerate all corpora twice using the locked release
-seed generator and compare filenames and bytes before committing them.
-
-`tests/e2e/test_key_agreement.py` sends raw Python FIDO requests through the real
-HID fixture. Syntax/collection, recording links, callback fixtures and published
-python-fido2 bridge workflows do not establish HID execution. Retain external
-source/command/status evidence and report unavailable HID or architecture runs
-separately; keep the existing libfido2 1.14.0 compatibility gates intact.
