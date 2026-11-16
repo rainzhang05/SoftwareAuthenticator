@@ -80,8 +80,10 @@
 //! `pqkey repair` runs with the key stopped, changes damaged membership: it
 //! drops lost members, or builds new membership from the records that
 //! authenticate, writes a counter it cannot read again above every count
-//! the key returned on it, under the conditions it states, and keeps every
-//! file it replaces or removes in a quarantine directory.
+//! the key returned on it, under the conditions it states, replaces a
+//! corrupt PIN state with one without a PIN and with always-UV on, removes
+//! a corrupt large-blob array, and keeps every file it replaces or removes
+//! in a quarantine directory.
 //!
 //! # Concurrency
 //!

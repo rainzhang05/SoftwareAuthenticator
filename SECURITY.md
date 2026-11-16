@@ -32,9 +32,9 @@ sensor software cannot press.
   large-blob files in `~/.local/share/pqkey`, large-blob keys included, are
   encrypted and authenticated with XChaCha20-Poly1305 under keys derived from
   two root keys in `keys/`. A modified, truncated or swapped file is reported
-  as corrupt and never used; a corrupt large-blob array is served as the
-  initial, empty one until a committed write or a reset replaces it, and one
-  that cannot be read fails the read. File names are HMACs, so they reveal
+  as corrupt and never used; a corrupt large-blob array reads as empty, and
+  an unreadable one fails the read. `pqkey repair` replaces a corrupt PIN
+  state with no PIN and always-UV on. File names are HMACs, so they reveal
   neither credentials nor sites.
 - **Old data after a reset.** A reset replaces the credential root key, so
   leftover copies of files, and the credential IDs that sites hold, can no

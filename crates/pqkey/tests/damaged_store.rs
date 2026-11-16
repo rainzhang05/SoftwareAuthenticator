@@ -230,19 +230,20 @@ fn status_names_the_damage_and_repair_repairs_it() {
     assert_eq!(
         text(&repeated.stdout),
         format!(
-            "Found nothing to repair in the credential store in {}; it was not changed. Repair \
-             leaves pin-state and large-blobs alone: `pqkey status` says what to do if either is \
-             damaged.\n",
+            "Found nothing to repair in the credential store in {}; it was not changed.\n",
             dir.display()
         )
     );
 }
 
 /// A damaged PIN state alone: `pqkey status` names it with its fix, which
-/// moves it out of the state directory and sets a new PIN, and `pqkey
-/// repair`, which leaves it alone, says so and changes nothing.
+/// runs `pqkey repair` and sets a new PIN.  Repair says what it will do and
+/// what that changes, moves the damaged file, byte for byte, into its
+/// quarantine, writes a PIN state with no PIN and always-UV on, and says
+/// that a new PIN comes next; then `pqkey status` has nothing to say about
+/// the store.
 #[test]
-fn repair_leaves_a_damaged_pin_state_to_the_fix_status_names() {
+fn repair_replaces_a_damaged_pin_state_as_status_says() {
     let state = State::new("pin-state");
     let dir = &state.0;
     let mut store = FileStore::open(dir).unwrap();
@@ -253,7 +254,7 @@ fn repair_leaves_a_damaged_pin_state_to_the_fix_status_names() {
     let path = dir.join("pin-state");
     let mut contents = fs::read(&path).unwrap();
     *contents.last_mut().unwrap() ^= 1;
-    fs::write(&path, contents).unwrap();
+    fs::write(&path, &contents).unwrap();
 
     let shown = dir.display();
     let status = run(dir, &["status"], "");
@@ -262,25 +263,59 @@ fn repair_leaves_a_damaged_pin_state_to_the_fix_status_names() {
     let problem = format!(
         "\n  ! the credential store is damaged (pin-state is corrupt: authentication failed): \
          the key treats its PIN as blocked and requires it, so it cannot register passkeys, \
-         sign in or set a new PIN\n    Fix: stop the key with `pqkey stop`, move pin-state out \
-         of {shown}, then start the key again with `pqkey start` and set a new PIN with `pqkey \
-         pin`, and any PIN settings again with `pqkey config`; `pqkey reset` erases every \
-         passkey, so use it only as a last resort\n"
+         sign in or set a new PIN\n    Fix: stop the key with `pqkey stop`, keep a copy of \
+         {shown}, run `pqkey repair`, then start the key again with `pqkey start` and set a new \
+         PIN with `pqkey pin`; `pqkey reset` erases every passkey, so use it only as a last \
+         resort\n"
     );
     assert!(out.contains(&problem), "{out}");
 
-    let before = files(dir);
-    let repaired = run(dir, &["repair"], "");
+    let repaired = run(dir, &["repair", "--yes"], "");
     assert_eq!(repaired.status.code(), Some(0), "{repaired:?}");
+    assert_eq!(text(&repaired.stderr), "");
+    let quarantines: Vec<_> = fs::read_dir(dir.join("damaged"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let [quarantine] = quarantines.as_slice() else {
+        panic!("one quarantine: {quarantines:?}");
+    };
     assert_eq!(
         text(&repaired.stdout),
         format!(
-            "Found nothing to repair in the credential store in {shown}; it was not changed. \
-             Repair leaves pin-state and large-blobs alone: `pqkey status` says what to do if \
-             either is damaged.\n"
+            "The credential store in {shown} is damaged:\n\
+             \x20 pin-state is corrupt: authentication failed\n\
+             The key treats its PIN as blocked and requires it, so it cannot register passkeys, \
+             sign in or set a new PIN.\n\
+             \n\
+             `pqkey repair` will:\n\
+             \x20 - write a new pin-state with no PIN, always-UV on and every other PIN setting \
+             at its default\n\
+             \x20 - keep 1 passkey\n\
+             \x20 - move pin-state to a new directory in {shown}/damaged, instead of deleting \
+             it\n\
+             The key will then have no PIN, and always-UV on: it requires a new PIN before any \
+             registration or sign-in, and always-UV stays on after it until `pqkey config \
+             always-uv off` turns it off.\n\
+             The credential store is repaired: the key keeps 1 passkey.\n\
+             Moved it to {}.\n\
+             Start the key again with `pqkey start`, then set a new PIN with `pqkey pin`.\n",
+            quarantine.display()
         )
     );
-    assert_eq!(files(dir), before);
+    assert_eq!(fs::read(quarantine.join("pin-state")).unwrap(), contents);
+    let mut new = PinStateRecord::default();
+    new.always_uv = true;
+    assert_eq!(
+        FileStore::open(dir).unwrap().pin_state().unwrap(),
+        Some(new)
+    );
+    let status = run(dir, &["status"], "");
+    assert_eq!(status.status.code(), Some(0), "{status:?}");
+    assert!(
+        !text(&status.stdout).contains("credential store"),
+        "{status:?}"
+    );
 }
 
 /// While the key holds the state lock, `pqkey repair` refuses, naming it,
@@ -320,9 +355,7 @@ fn repair_refuses_while_the_key_runs_and_leaves_a_healthy_store_alone() {
     assert_eq!(
         text(&healthy.stdout),
         format!(
-            "Found nothing to repair in the credential store in {}; it was not changed. Repair \
-             leaves pin-state and large-blobs alone: `pqkey status` says what to do if either is \
-             damaged.\n",
+            "Found nothing to repair in the credential store in {}; it was not changed.\n",
             dir.display()
         )
     );

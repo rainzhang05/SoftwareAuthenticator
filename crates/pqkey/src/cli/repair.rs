@@ -154,13 +154,10 @@ fn is_record(path: &Path) -> bool {
         })
 }
 
-/// What `pqkey repair` says when it finds nothing to repair, where `pqkey
-/// status` can still find a damaged PIN state or large-blob array.
+/// What `pqkey repair` says when it finds nothing to repair.
 fn nothing_to_repair(state_dir: &Path) -> io::Result<()> {
     outln!(
-        "Found nothing to repair in the credential store in {}; it was not changed. Repair \
-         leaves pin-state and large-blobs alone: `pqkey status` says what to do if either is \
-         damaged.",
+        "Found nothing to repair in the credential store in {}; it was not changed.",
         state_dir.display()
     )
 }
@@ -190,6 +187,39 @@ fn kept(plan: &RepairPlan) -> String {
 const COME_BACK: &str = "A passkey that was deleted or replaced, or whose registration failed, \
                          can come back if its record was left behind, alone or beside another \
                          passkey of its account.";
+
+/// What repair writes in place of a damaged PIN state.
+const NEW_PIN_STATE: &str =
+    "write a new pin-state with no PIN, always-UV on and every other PIN setting at its default";
+
+/// What a new PIN state changes.
+const NO_PIN: &str = "The key will then have no PIN, and always-UV on: it requires a new PIN \
+                      before any registration or sign-in, and always-UV stays on after it until \
+                      `pqkey config always-uv off` turns it off.";
+
+/// What dropping a damaged large-blob array changes.
+const DROPPED: &str = "The large blobs that sites stored on the key, already unreadable, are \
+                       dropped.";
+
+/// Whether a repair as `plan` replaces `file`, outside the credential set,
+/// which it moves into the quarantine then.
+fn replaces(plan: &RepairPlan, file: &str) -> bool {
+    plan.moved.iter().any(|moved| moved == file)
+}
+
+/// What `pqkey repair` says after the steps of a repair as `plan`: that a
+/// rebuilt list can bring passkeys back, and what a new PIN state and a
+/// dropped large-blob array change.
+fn afterwards(plan: &RepairPlan) -> Vec<&'static str> {
+    [
+        (plan.membership == Membership::Rebuilt, COME_BACK),
+        (replaces(plan, "pin-state"), NO_PIN),
+        (replaces(plan, "large-blobs"), DROPPED),
+    ]
+    .into_iter()
+    .filter_map(|(said, line)| said.then_some(line))
+    .collect()
+}
 
 /// What `pqkey repair` prints before it asks: what is damaged, what fails,
 /// and what it will do, step by step, with each file and directory it
@@ -272,6 +302,7 @@ fn plan_lines(state_dir: &Path, plan: &RepairPlan) -> Vec<String> {
             quarantine.display()
         ));
     }
+    actions.extend(replaces(plan, "pin-state").then(|| NEW_PIN_STATE.to_owned()));
     if !matches!(plan.membership, Membership::Created(_)) {
         let held = plan.passkeys + plan.others;
         actions.push(if held > plan.max_credentials {
@@ -307,9 +338,7 @@ fn plan_lines(state_dir: &Path, plan: &RepairPlan) -> Vec<String> {
     if moved.len() > 1 {
         lines.extend(moved.iter().map(|moved| format!("      {moved}")));
     }
-    if plan.membership == Membership::Rebuilt {
-        lines.push(COME_BACK.to_owned());
-    }
+    lines.extend(afterwards(plan).into_iter().map(str::to_owned));
     lines
 }
 
@@ -336,7 +365,11 @@ fn repaired_lines(
             "Flushing the repair to storage failed, so a power failure can undo it.".to_owned(),
         );
     }
-    lines.push("Start the key again with `pqkey start`.".to_owned());
+    lines.push(if replaces(plan, "pin-state") {
+        "Start the key again with `pqkey start`, then set a new PIN with `pqkey pin`.".to_owned()
+    } else {
+        "Start the key again with `pqkey start`.".to_owned()
+    });
     lines
 }
 
@@ -371,7 +404,7 @@ mod tests {
     use crate::client::tests::discoverable;
     use crate::test_support::TempDir;
     use pqkey_ctap::CoseAlg;
-    use pqkey_ctap::store::CredentialStore;
+    use pqkey_ctap::store::{CredentialStore, PinStateRecord};
     use std::{collections::BTreeMap, fs, path::PathBuf};
 
     /// Every file under `dir`, with its contents, and every directory.
@@ -1173,6 +1206,80 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(u64::from(first.sign_count) > before, "{}", first.sign_count);
+    }
+
+    /// A damaged PIN state and large-blob array, as printed: what fails, the
+    /// new PIN state repair writes, the passkeys it keeps and the files it
+    /// moves, then what that changes; once repaired, that a new PIN comes
+    /// next.  The PIN state it writes has no PIN and always-UV on.
+    #[test]
+    fn a_damaged_pin_state_and_array_are_printed_with_what_repair_changes() {
+        let dir = TempDir::new("repair-pin-state");
+        let state = dir.path();
+        let shown = state.display();
+        let mut store = FileStore::open(state).unwrap();
+        store
+            .insert_or_replace_discoverable(&discoverable(
+                "example.com",
+                1,
+                "alice",
+                CoseAlg::ES256,
+            ))
+            .unwrap();
+        let mut pin = PinStateRecord::default();
+        pin.pin_hash = Some([7; 16]);
+        store.set_pin_state(&pin).unwrap();
+        store
+            .set_large_blob_array(&pqkey_ctap::store::INITIAL_LARGE_BLOB_ARRAY)
+            .unwrap();
+        flip_last_byte(&state.join("pin-state"));
+        flip_last_byte(&state.join("large-blobs"));
+        let plan = FileStore::plan_repair_in(state).unwrap().unwrap();
+        assert_eq!(
+            plan_lines(state, &plan),
+            [
+                format!("The credential store in {shown} is damaged:"),
+                "  pin-state is corrupt: authentication failed".to_owned(),
+                "  large-blobs is corrupt: authentication failed".to_owned(),
+                "The key treats its PIN as blocked and requires it, so it cannot register \
+                 passkeys, sign in or set a new PIN; the key cannot return the large blobs that \
+                 sites stored on it."
+                    .to_owned(),
+                String::new(),
+                "`pqkey repair` will:".to_owned(),
+                "  - write a new pin-state with no PIN, always-UV on and every other PIN setting \
+                 at its default"
+                    .to_owned(),
+                "  - keep 1 passkey".to_owned(),
+                format!(
+                    "  - move these to a new directory in {shown}/damaged, instead of deleting them:"
+                ),
+                "      large-blobs".to_owned(),
+                "      pin-state".to_owned(),
+                "The key will then have no PIN, and always-UV on: it requires a new PIN before any \
+                 registration or sign-in, and always-UV stays on after it until `pqkey config \
+                 always-uv off` turns it off."
+                    .to_owned(),
+                "The large blobs that sites stored on the key, already unreadable, are dropped."
+                    .to_owned(),
+            ]
+        );
+        let repaired = FileStore::repair_in(state, &plan).unwrap();
+        let quarantine = repaired.quarantine.clone().unwrap();
+        assert_eq!(
+            repaired_lines(&plan, Some(&quarantine), repaired.durability),
+            [
+                "The credential store is repaired: the key keeps 1 passkey.".to_owned(),
+                format!("Moved them to {}.", quarantine.display()),
+                "Start the key again with `pqkey start`, then set a new PIN with `pqkey pin`."
+                    .to_owned(),
+            ]
+        );
+        let mut new = PinStateRecord::default();
+        new.always_uv = true;
+        let store = FileStore::open(state).unwrap();
+        assert_eq!(store.pin_state().unwrap(), Some(new));
+        assert!(!state.join("large-blobs").exists());
     }
 
     /// A clock at or past the largest count, which the store's count rule

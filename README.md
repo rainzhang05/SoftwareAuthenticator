@@ -207,16 +207,18 @@ damaged files and what the key cannot do. To repair the store:
 3. Start the key again with `pqkey start`. Once it works, delete the copy:
    it holds the keys, so it keeps your passkeys readable even after a reset.
 
-Repair keeps the PIN, the keys and every passkey whose record is intact
+Repair keeps the keys and every passkey whose record is intact
 ([its rules](docs/architecture.md#credential-store)), and moves what it
 replaces or removes into `damaged/` in the state directory, which the key
 never uses; its records stay readable until a reset, and you may delete it
-once the key works. It leaves a damaged `pin-state` or `large-blobs` alone:
-move it aside as `pqkey status` says. Otherwise never edit, delete or
-replace the store's files by hand: an older `credential-set/active` hides
-the passkeys registered since, and the next change deletes their records; a
-deleted `signature-counter` counts again from 0. `pqkey reset` erases every
-passkey, so use it only as a last resort.
+once the key works. It replaces a damaged `pin-state` with one that has no
+PIN and always-UV on: the key then refuses to register or sign in until
+you set a new PIN with `pqkey pin`, and always-UV stays on until
+`pqkey config always-uv off`. A damaged `large-blobs` loses its large blobs.
+Never edit, delete or replace the store's files by hand: an older
+`credential-set/active` hides the passkeys registered since, and the next
+change deletes their records; a deleted `signature-counter` counts again
+from 0. `pqkey reset` erases every passkey, so use it only as a last resort.
 
 ## Uninstall
 

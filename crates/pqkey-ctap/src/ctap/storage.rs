@@ -76,8 +76,8 @@ pub(super) enum StoredPinState {
 /// the stored record.  After an I/O error the state is only
 /// [`StoredPinState::Unread`]: the commands that depend on it read it again
 /// first.  After any other error it stays closed until a reset, or until the
-/// engine starts on a record it can read, or none, as once a corrupt one is
-/// moved aside.
+/// engine starts on a record it can read, as once `pqkey repair` replaced a
+/// corrupt one, or on none.
 pub(super) fn load_pin_state(
     store: &dyn CredentialStore,
     rng: &mut dyn Rng,

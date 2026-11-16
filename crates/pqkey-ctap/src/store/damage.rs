@@ -160,8 +160,7 @@ impl fmt::Display for Damage {
 }
 
 /// What damage to a file costs, which its path tells.  The credential set's
-/// kinds come last, ordered by cost; the others cost nothing of the set, and
-/// repair leaves the first two alone.
+/// kinds come last, ordered by cost; the others cost nothing of the set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     /// The PIN state, which the key then takes for a PIN set and blocked,
@@ -185,12 +184,6 @@ impl Kind {
     /// Whether damage of this kind is to the credential set.
     fn in_set(self) -> bool {
         self >= Self::Record
-    }
-
-    /// Whether `pqkey repair` repairs damage of this kind: it leaves the PIN
-    /// state and the large-blob array alone.
-    fn repaired(self) -> bool {
-        self >= Self::Counter
     }
 }
 
@@ -282,10 +275,9 @@ pub fn damage_unchecked(err: &StoreError) -> String {
 /// What to do about `damage` to the credential store in `state_dir`, as
 /// `pqkey status` and the key's log say it, or, with no damage named, about
 /// a store that cannot be checked: with the key stopped, keep a copy of the
-/// store and repair it, unless all of the damage is to files that repair
-/// leaves alone; move those out of the state directory; start the key
-/// again, and set a new PIN in place of a damaged PIN state; and reset only
-/// as the last resort, which a damaged large-blob array alone never needs.
+/// store and repair it; start the key again, and set a new PIN in place of
+/// a damaged PIN state; and reset only as the last resort, which a damaged
+/// large-blob array alone never needs.
 #[must_use]
 pub fn damage_fix(damage: &[Damage], state_dir: &str) -> String {
     let files: Vec<&str> = damage.iter().map(|damage| damage.file.as_str()).collect();
@@ -294,24 +286,14 @@ pub fn damage_fix(damage: &[Damage], state_dir: &str) -> String {
 
 /// [`damage_fix`] for damage to `files`.
 fn fix(files: &[&str], state_dir: &str) -> String {
-    let (moved, repaired): (Vec<&str>, Vec<&str>) =
-        files.iter().partition(|file| !kind(file).repaired());
-    let repair = files.is_empty() || !repaired.is_empty();
-    let pin = moved.contains(&PIN_STATE_FILE);
-    let mut steps = vec!["stop the key with `pqkey stop`".to_owned()];
-    if repair {
-        steps.push(format!("keep a copy of {state_dir}, run `pqkey repair`"));
+    let mut fix = format!(
+        "stop the key with `pqkey stop`, keep a copy of {state_dir}, run `pqkey repair`, then \
+         start the key again with `pqkey start`"
+    );
+    if files.contains(&PIN_STATE_FILE) {
+        fix.push_str(" and set a new PIN with `pqkey pin`");
     }
-    if !moved.is_empty() {
-        steps.push(format!("move {} out of {state_dir}", moved.join(" and ")));
-    }
-    let mut fix = steps.join(", ") + ", then start the key again with `pqkey start`";
-    if pin {
-        fix.push_str(
-            " and set a new PIN with `pqkey pin`, and any PIN settings again with `pqkey config`",
-        );
-    }
-    if repair || pin {
+    if files != [LARGE_BLOBS_FILE] {
         fix.push_str("; `pqkey reset` erases every passkey, so use it only as a last resort");
     }
     fix
@@ -680,47 +662,36 @@ mod tests {
         );
     }
 
-    /// A damaged PIN state or large-blob array, which repair leaves alone, is
-    /// moved out of the state directory with the key stopped, and the key
-    /// started again, with a new PIN for the PIN state, which keeps reset the
-    /// last resort; the array alone needs no reset.  With damage that repair
-    /// repairs, the repair comes first, in one sequence.
+    /// A damaged PIN state or large-blob array has the fix every damage has,
+    /// in one sequence with any other: repair, with a new PIN after it for
+    /// the PIN state, and reset the last resort, which the array alone does
+    /// not need.
     #[test]
-    fn a_damaged_pin_state_or_array_is_moved_out_in_one_sequence() {
-        const PIN_FIX: &str = "stop the key with `pqkey stop`, move pin-state out of /state, then \
-                               start the key again with `pqkey start` and set a new PIN with \
-                               `pqkey pin`, and any PIN settings again with `pqkey config`; \
-                               `pqkey reset` erases every passkey, so use it only as a last resort";
+    fn a_damaged_pin_state_or_array_is_repaired_in_one_sequence() {
+        let pin_fix = FIX.replace(
+            "`pqkey start`;",
+            "`pqkey start` and set a new PIN with `pqkey pin`;",
+        );
+        assert_reset_is_the_last_resort(&pin_fix);
         let pin = Damage::corrupt("pin-state", Corruption::Authentication);
         let blobs = Damage::corrupt("large-blobs", Corruption::Authentication);
-        assert_eq!(damage_fix(std::slice::from_ref(&pin), "/state"), PIN_FIX);
+        assert_eq!(damage_fix(std::slice::from_ref(&pin), "/state"), pin_fix);
         assert_eq!(
             damage_fix(std::slice::from_ref(&blobs), "/state"),
-            "stop the key with `pqkey stop`, move large-blobs out of /state, then start the key \
-             again with `pqkey start`"
+            "stop the key with `pqkey stop`, keep a copy of /state, run `pqkey repair`, then start \
+             the key again with `pqkey start`"
         );
-        let both = PIN_FIX.replace("pin-state", "pin-state and large-blobs");
-        assert_eq!(damage_fix(&[pin.clone(), blobs.clone()], "/state"), both);
-        let repaired = both.replace(
-            "`pqkey stop`, ",
-            "`pqkey stop`, keep a copy of /state, run `pqkey repair`, ",
-        );
+        assert_eq!(damage_fix(&[pin.clone(), blobs.clone()], "/state"), pin_fix);
         let counter = Damage::corrupt("signature-counter", Corruption::Authentication);
         for other in [Damage::missing(RECORD), counter] {
-            let damage = [pin.clone(), blobs.clone(), other];
-            assert_eq!(damage_fix(&damage, "/state"), repaired);
+            let damage = [pin.clone(), blobs.clone(), other.clone()];
+            assert_eq!(damage_fix(&damage, "/state"), pin_fix);
             assert_eq!(
                 damage_log(&damage, "/state"),
-                format!("{}. S{}", damage_summary(&damage), &repaired[1..])
+                format!("{}. S{}", damage_summary(&damage), &pin_fix[1..])
             );
+            assert_eq!(damage_fix(&[blobs.clone(), other], "/state"), FIX);
         }
-        assert_eq!(
-            damage_fix(&[Damage::missing(RECORD), blobs], "/state"),
-            FIX.replace(
-                "repair`, then",
-                "repair`, move large-blobs out of /state, then"
-            )
-        );
     }
 
     /// Errors about membership metadata, about the legacy directory, about
@@ -786,19 +757,19 @@ mod tests {
         assert_eq!(
             corrupt("pin-state").damage_hint().unwrap(),
             format!(
-                "The credential store is damaged at pin-state: {PIN_STATE}. Stop the key with \
-                 `pqkey stop`, move pin-state out of the state directory, then start the key \
-                 again with `pqkey start` and set a new PIN with `pqkey pin`, and any PIN \
-                 settings again with `pqkey config`; `pqkey reset` erases every passkey, so use \
-                 it only as a last resort"
+                "The credential store is damaged at pin-state: {PIN_STATE}. {}",
+                fix.replace(
+                    "`pqkey start`;",
+                    "`pqkey start` and set a new PIN with `pqkey pin`;"
+                )
             )
         );
         assert_eq!(
             corrupt("large-blobs").damage_hint().unwrap(),
             format!(
                 "The credential store is damaged at large-blobs: {LARGE_BLOBS}. Stop the key \
-                 with `pqkey stop`, move large-blobs out of the state directory, then start the \
-                 key again with `pqkey start`"
+                 with `pqkey stop`, keep a copy of the state directory, run `pqkey repair`, then \
+                 start the key again with `pqkey start`"
             )
         );
         for other in [

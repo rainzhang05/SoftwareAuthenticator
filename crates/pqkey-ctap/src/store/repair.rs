@@ -1,4 +1,5 @@
-//! Explicit repair of a damaged credential set and signature counter.
+//! Explicit repair of a damaged credential set, signature counter, PIN state
+//! and large-blob array, the last two in `repair_pin_state.rs`.
 //!
 //! [`FileStore::plan_repair`] finds what to do without changing anything,
 //! and [`FileStore::repair`] does it.  `pqkey repair` plans with the key
@@ -6,25 +7,28 @@
 //! else repairs a store, and no operation rebuilds membership by itself.
 //!
 //! Every file of the store that repair replaces or removes, a damaged
-//! record, metadata file or signature counter, the replaced manifest, a
-//! failed upgrade's prepared manifest, a record the new list does not name,
-//! or a record whose counter it raises, first gets a name in a new
-//! quarantine directory, `damaged/<UTC time>/`, at its path relative to the
-//! state directory: a hard link for anything but a directory, which keeps it
-//! in place until whatever replaces or removes it, and a rename for a
-//! directory, which cannot be linked.  So a crash leaves every file of the
-//! store in its place, in `credential-set/` after a legacy store's rename,
-//! or in the quarantine, as [`FileStore::repair`] says.  Membership is
-//! published as every commit publishes it, and cleanup after the
-//! publication then removes the records' old names, as it removes any file
-//! membership no longer names.  A counter whose count is lost is written
-//! again above every count the key returned on it, under the conditions
-//! [`FileStore::repair`] states.
+//! record, metadata file, counter, PIN state or large-blob array, the
+//! replaced manifest, a failed upgrade's prepared manifest, a record the new
+//! list does not name, or a record whose counter it raises, first gets a
+//! name in a new quarantine directory, `damaged/<UTC time>/`, at its path
+//! relative to the state directory: a hard link for anything but a
+//! directory, which keeps it in place until whatever replaces or removes it,
+//! and a rename for a directory, which cannot be linked.  So a crash leaves
+//! every file of the store in its place, in `credential-set/` after a legacy
+//! store's rename, or in the quarantine, as [`FileStore::repair`] says.
+//! Membership is published as every commit publishes it, and cleanup after
+//! the publication then removes the records' old names, as it removes any
+//! file membership no longer names.  A counter whose count is lost is
+//! written again above every count the key returned on it, under the
+//! conditions [`FileStore::repair`] states.
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
+
+#[path = "repair_pin_state.rs"]
+mod pin_state;
 
 /// The largest count a counter holds, `u32::MAX`, read as a time in seconds
 /// since 1970: 2106-02-07T06:28:15Z.  The count rule leaves out a time at or
@@ -47,8 +51,7 @@ const CHANGED: &str = "it changed after its repair was planned";
 #[non_exhaustive]
 pub struct RepairPlan {
     /// Every damaged file and directory it repairs: what
-    /// [`FileStore::inspect`] reports but a damaged PIN state or large-blob
-    /// array, which repair leaves alone, first, then what damaged membership
+    /// [`FileStore::inspect`] reports first, then what damaged membership
     /// metadata hid from it: members whose records are missing or fail
     /// authentication or decoding, or, for a rebuild, the manifest and the
     /// records that fail authentication or decoding.
@@ -113,7 +116,7 @@ pub enum Membership {
     /// `credential-set`, with an empty list, or a legacy store's
     /// `credentials`.
     Created(String),
-    /// Nothing but the signature counter is damaged: the list, or a legacy
+    /// Nothing in the credential set is damaged: the list, or a legacy
     /// store's directory of records, stays as it is.
     Intact,
 }
@@ -202,8 +205,7 @@ impl Kept {
 impl<K: KeySource> FileStore<K> {
     /// What [`Self::repair`] would do, found without changing anything, or
     /// `None` if there is nothing to repair: [`Self::inspect`] finds no
-    /// damage but to the PIN state or the large-blob array, which repair
-    /// leaves alone, or the store needs no change.
+    /// damage, or the store needs no change.
     ///
     /// * If the manifest authenticates, the members whose records are
     ///   missing, or fail authentication or decoding, are dropped from it
@@ -245,16 +247,16 @@ impl<K: KeySource> FileStore<K> {
     /// stack that is scrubbed afterwards.
     pub fn plan_repair(&self) -> Result<Option<RepairPlan>, StoreError> {
         let mut damage = self.inspect()?;
-        // Left alone: `pqkey status` says what to do about them.
-        damage.retain(|damage| ![PIN_STATE_FILE, LARGE_BLOBS_FILE].contains(&&*damage.file));
         if damage.is_empty() {
             return Ok(None);
         }
+        let replaced = pin_state::take(&mut damage);
         let plan = crate::crypto::scrub::with_scrubbed_stack(|| {
             let Some(keys) = self.credential_keys()? else {
                 return Ok(None);
             };
-            self.plan_with(&keys, damage).map(Some)
+            self.plan_with(&keys, damage)
+                .map(|plan| Some(plan.replacing(replaced)))
         })?;
         Ok(plan.filter(|plan| {
             plan.publication != Publication::Nothing
@@ -291,8 +293,10 @@ impl<K: KeySource> FileStore<K> {
     ///    prepared `credentials/` to `credential-set/`, after writing the
     ///    format marker if it has no authentic one.  Cleanup then removes the
     ///    old names of the records the list does not name.
-    /// 4. A damaged or missing format marker of a managed store is written
-    ///    last, since it decides whether the list is used at all.
+    /// 4. A damaged or missing format marker of a managed store is written,
+    ///    after the list, since it decides whether the list is used at all.
+    /// 5. A damaged large-blob array is removed, and a damaged PIN state
+    ///    written again with no PIN and always-UV on, by a rename.
     ///
     /// A counter is written at every count, and each write renames its file
     /// into one of those directories, so a damaged counter's file, or a
@@ -321,19 +325,19 @@ impl<K: KeySource> FileStore<K> {
     ///
     /// By the order of the steps, an error or a crash at any checkpoint leaves
     /// the store serving the credentials it served before or those of the
-    /// repaired list, each counter it writes damaged as before or written
-    /// again, and every file of the store in its place, in `credential-set/`
-    /// after a legacy store's rename, or in the quarantine; repairing again
-    /// finishes the work, unless an error stops it too.  Only where the store
-    /// could serve no credential before, because its metadata or namespace is
-    /// damaged, can such a crash leave another fault of that kind: a
-    /// directory in a metadata file's place, moved away, or a recreated
-    /// namespace without its list yet.
+    /// repaired list, each counter and PIN state it writes damaged as before
+    /// or written again, and every file of the store in its place, in
+    /// `credential-set/` after a legacy store's rename, or in the quarantine;
+    /// repairing again finishes the work, unless an error stops it too.  Only
+    /// where the store could serve no credential before, because its metadata
+    /// or namespace is damaged, can such a crash leave another fault of that
+    /// kind: a directory in a metadata file's place, moved away, or a
+    /// recreated namespace without its list yet.
     ///
-    /// The PIN state, the large-blob array, the attestation record and the
-    /// keys are left as they are, and so is the shared signature counter
-    /// unless it is damaged; no record is rewritten but to raise its counter,
-    /// so each other keeps its own.
+    /// An undamaged PIN state and large-blob array, the attestation record
+    /// and the keys are left as they are, and so is the shared signature
+    /// counter unless it is damaged; no record is rewritten but to raise its
+    /// counter, so each other keeps its own.
     pub fn repair(&self, plan: &RepairPlan) -> Result<Repaired, StoreError> {
         if self.plan_repair()?.as_ref() != Some(plan) {
             return Err(fsio::io_error(&self.root, std::io::Error::other(CHANGED)));
@@ -413,8 +417,8 @@ impl<K: KeySource> FileStore<K> {
         Ok(plan)
     }
 
-    /// Only the signature counter is damaged: the credential set stays as
-    /// it is, and is read for its counters and what the plan reports.
+    /// Nothing in the credential set is damaged: it stays as it is, and is
+    /// read for its counters and what the plan reports.
     fn plan_intact(&self, keys: &CredentialKeys) -> Result<RepairPlan, StoreError> {
         let members: Vec<(String, Location, PathBuf)> = match self.active_manifest(keys)? {
             Some(manifest) => manifest
@@ -641,6 +645,9 @@ impl<K: KeySource> FileStore<K> {
             Publication::LegacyDirectory => fsio::ensure_private_dir(&self.credentials_dir)?,
         }
         if marker && self.replace_format_marker(keys)? == CommitDurability::Unconfirmed {
+            commit.durability = CommitDurability::Unconfirmed;
+        }
+        if self.replace_pin_state_and_large_blobs(keys, plan)? == CommitDurability::Unconfirmed {
             commit.durability = CommitDurability::Unconfirmed;
         }
         Ok(Repaired {

@@ -7,13 +7,15 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Debug;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::*;
 use crate::CoseAlg;
 use crate::ctap::{CtapApp, InterruptFlag, constants::*, presence::AutoApprove};
-use crate::store::{Fault, PrivateKeyMaterial, test_support::TempDir};
+use crate::store::test_support::{TempDir, copy_tree, files};
+use crate::store::{Fault, PrivateKeyMaterial};
 
 static INTERRUPT: InterruptFlag = InterruptFlag::new();
 const RP: &str = "example.com";
@@ -50,7 +52,7 @@ fn security_key(fill: u8) -> CredentialRecord {
     record
 }
 
-fn flip_last_byte(path: &Path) {
+pub(super) fn flip_last_byte(path: &Path) {
     let mut contents = fs::read(path).unwrap();
     *contents.last_mut().unwrap() ^= 1;
     fs::write(path, contents).unwrap();
@@ -103,7 +105,7 @@ fn plant(store: &FileStore, record: &CredentialRecord, created_at: u64, location
 /// registered since, one of which replaced another of its account, whose
 /// record cleanup left behind, and a stored security-key credential.  The
 /// passkeys' counters are 7, and the shared one is 500.
-fn managed(state: &Path) -> FileStore {
+pub(super) fn managed(state: &Path) -> FileStore {
     let mut store = FileStore::open(state).unwrap();
     let mut kept = passkey(b"kept", 1);
     kept.sign_count = 7;
@@ -188,7 +190,7 @@ impl Scenario {
     ];
 
     /// Whether repair writes the shared counter again.
-    fn rebuilds_counter(self) -> bool {
+    pub(super) fn rebuilds_counter(self) -> bool {
         self == Self::Copies || self.counter_alone()
     }
 
@@ -203,8 +205,8 @@ impl Scenario {
         )
     }
 
-    /// Set up the damaged store in `state`, with a PIN state, the shared
-    /// counter and a large-blob array, which repair leaves alone.
+    /// Set up the damaged store in `state`, with the shared counter and an
+    /// intact PIN state and large-blob array, which repair leaves alone.
     pub(super) fn apply(self, state: &Path) {
         let set = state.join(MANAGED_DIR);
         let legacy = |state: &Path| {
@@ -291,16 +293,16 @@ impl Scenario {
 /// What a store serves: its credentials, and its shared counter, which
 /// repair writes on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Served {
-    credentials: Credentials,
+pub(super) struct Served {
+    pub(super) credentials: Credentials,
     /// The shared counter, or `None` if it cannot be read.
-    counter: Option<u32>,
+    pub(super) counter: Option<u32>,
 }
 
 /// The credentials a store serves: none at all, or those it lists, with
 /// their counters, and for a managed store its members.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Credentials {
+pub(super) enum Credentials {
     Unavailable,
     Legacy(Vec<(Vec<u8>, u32)>),
     Managed(Vec<(Vec<u8>, u32)>, BTreeSet<String>),
@@ -320,7 +322,7 @@ fn shown(count: u32) -> u32 {
     }
 }
 
-fn served(state: &Path) -> Served {
+pub(super) fn served(state: &Path) -> Served {
     let store = FileStore::unopened(state);
     let keys = store.credential_keys().unwrap().unwrap();
     let listed = || {
@@ -365,45 +367,6 @@ fn entries(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
         }
     }
     found
-}
-
-/// Every regular file under `dir`, by its path relative to `dir`.
-fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
-    let mut found = BTreeMap::new();
-    let mut dirs = vec![dir.to_path_buf()];
-    while let Some(current) = dirs.pop() {
-        for entry in fs::read_dir(&current).unwrap() {
-            let path = entry.unwrap().path();
-            let metadata = fs::symlink_metadata(&path).unwrap();
-            if metadata.is_dir() {
-                dirs.push(path);
-            } else if metadata.is_file() {
-                found.insert(
-                    path.strip_prefix(dir).unwrap().to_path_buf(),
-                    fs::read(&path).unwrap(),
-                );
-            }
-        }
-    }
-    found
-}
-
-/// A copy of `from`, every file and directory, at `to`, with each symbolic
-/// link copied as a link: those these tests make point by relative names.
-fn copy_tree(from: &Path, to: &Path) {
-    fs::create_dir_all(to).unwrap();
-    for entry in fs::read_dir(from).unwrap() {
-        let path = entry.unwrap().path();
-        let target = to.join(path.file_name().unwrap());
-        let metadata = fs::symlink_metadata(&path).unwrap();
-        if metadata.file_type().is_symlink() {
-            std::os::unix::fs::symlink(fs::read_link(&path).unwrap(), &target).unwrap();
-        } else if metadata.is_dir() {
-            copy_tree(&path, &target);
-        } else {
-            fs::copy(&path, &target).unwrap();
-        }
-    }
 }
 
 /// Every symbolic link under `dir`, by its path relative to `dir`, with
@@ -486,7 +449,11 @@ fn assert_no_count_lower(
 /// was, in a quarantine at its relative path, or in `credential-set/` if
 /// it was in a legacy `credentials/`, which a store's first commit renames.
 #[track_caller]
-fn assert_nothing_lost(before: &BTreeMap<PathBuf, Vec<u8>>, state: &Path, context: &str) {
+pub(super) fn assert_nothing_lost(
+    before: &BTreeMap<PathBuf, Vec<u8>>,
+    state: &Path,
+    context: &str,
+) {
     let after = files(state);
     for (path, contents) in before {
         let renamed = path
@@ -570,7 +537,20 @@ impl Template {
             repaired,
         }
     }
+}
 
+/// A damaged store whose repair the checkpoint sweeps fail at each
+/// checkpoint in turn, in copies of it.
+pub(super) trait Swept {
+    /// A fresh copy of the damaged store, and the plan to repair it.
+    fn copy(&self, scratch: &TempDir) -> (PathBuf, RepairPlan);
+
+    /// Assert that the copy in `state`, after a repair that failed or
+    /// crashed, recovers, and return whether it was repaired already.
+    fn assert_recovers(&self, state: &Path, context: &str) -> bool;
+}
+
+impl Swept for Template {
     /// A fresh copy of the damaged store, and the plan to repair it.  Each
     /// copy is planned for itself: an unreadable file's error names it.
     fn copy(&self, scratch: &TempDir) -> (PathBuf, RepairPlan) {
@@ -646,14 +626,14 @@ fn assert_both_sides(scenario: Scenario, outcomes: &[bool]) {
 }
 
 /// The plan to repair the damaged store in `state`.
-fn plan(state: &Path) -> RepairPlan {
+pub(super) fn plan(state: &Path) -> RepairPlan {
     FileStore::plan_repair_in(state)
         .unwrap()
         .unwrap_or_else(|| panic!("{}: nothing to repair", state.display()))
 }
 
 /// The checkpoints of a repair of `template`, which plans it again first.
-fn trace(template: &Template) -> Vec<String> {
+fn trace(template: &impl Swept) -> Vec<String> {
     let scratch = TempDir::new();
     let (state, plan) = template.copy(&scratch);
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -672,30 +652,35 @@ fn trace(template: &Template) -> Vec<String> {
 #[test]
 fn an_error_at_every_checkpoint_leaves_the_old_or_the_repaired_store() {
     for scenario in Scenario::ALL {
-        let template = Template::new(scenario);
-        let events = trace(&template);
-        let mut outcomes = Vec::new();
-        for (boundary, event) in events.iter().enumerate() {
-            let scratch = TempDir::new();
-            let (state, plan) = template.copy(&scratch);
-            let mut index = 0;
-            let result = fsio::with_hook(
-                Box::new(move |_, path| {
-                    let current = index;
-                    index += 1;
-                    if current == boundary {
-                        Err(fsio::io_error(path, std::io::Error::other("injected")))
-                    } else {
-                        Ok(())
-                    }
-                }),
-                || FileStore::repair_in(&state, &plan),
-            );
-            let context = format!("{scenario:?}, error at {boundary}: {event}: {result:?}");
-            outcomes.push(template.assert_recovers(&state, &context));
-        }
+        let outcomes = errors_at_every_checkpoint(&Template::new(scenario), scenario);
         assert_both_sides(scenario, &outcomes);
     }
+}
+
+/// Fail a repair of a copy of `template`, named `name`, with an error at
+/// each checkpoint in turn: whether each copy was repaired already.
+pub(super) fn errors_at_every_checkpoint(template: &impl Swept, name: impl Debug) -> Vec<bool> {
+    let mut outcomes = Vec::new();
+    for (boundary, event) in trace(template).iter().enumerate() {
+        let scratch = TempDir::new();
+        let (state, plan) = template.copy(&scratch);
+        let mut index = 0;
+        let result = fsio::with_hook(
+            Box::new(move |_, path| {
+                let current = index;
+                index += 1;
+                if current == boundary {
+                    Err(fsio::io_error(path, std::io::Error::other("injected")))
+                } else {
+                    Ok(())
+                }
+            }),
+            || FileStore::repair_in(&state, &plan),
+        );
+        let context = format!("{name:?}, error at {boundary}: {event}: {result:?}");
+        outcomes.push(template.assert_recovers(&state, &context));
+    }
+    outcomes
 }
 
 #[test]
@@ -726,28 +711,34 @@ fn repair_crash_child() {
 #[test]
 fn a_process_exit_at_every_checkpoint_leaves_the_old_or_the_repaired_store() {
     for scenario in Scenario::ALL {
-        let template = Template::new(scenario);
-        let mut outcomes = Vec::new();
-        for (boundary, event) in trace(&template).iter().enumerate() {
-            let scratch = TempDir::new();
-            let (state, _) = template.copy(&scratch);
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "store::file::repair_tests::repair_crash_child",
-                    "--nocapture",
-                ])
-                .env("PQKEY_REPAIR_CHILD", &state)
-                .env("PQKEY_REPAIR_BOUNDARY", boundary.to_string())
-                .stdout(Stdio::null())
-                .status()
-                .unwrap();
-            let context = format!("{scenario:?}, exit at {boundary}: {event}");
-            assert_eq!(status.code(), Some(83), "{context}");
-            outcomes.push(template.assert_recovers(&state, &context));
-        }
+        let outcomes = exits_at_every_checkpoint(&Template::new(scenario), scenario);
         assert_both_sides(scenario, &outcomes);
     }
+}
+
+/// Repair a copy of `template`, named `name`, in a child process that exits
+/// at each checkpoint in turn: whether each copy was repaired already.
+pub(super) fn exits_at_every_checkpoint(template: &impl Swept, name: impl Debug) -> Vec<bool> {
+    let mut outcomes = Vec::new();
+    for (boundary, event) in trace(template).iter().enumerate() {
+        let scratch = TempDir::new();
+        let (state, _) = template.copy(&scratch);
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::file::repair_tests::repair_crash_child",
+                "--nocapture",
+            ])
+            .env("PQKEY_REPAIR_CHILD", &state)
+            .env("PQKEY_REPAIR_BOUNDARY", boundary.to_string())
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        let context = format!("{name:?}, exit at {boundary}: {event}");
+        assert_eq!(status.code(), Some(83), "{context}");
+        outcomes.push(template.assert_recovers(&state, &context));
+    }
+    outcomes
 }
 
 /// What a repair plans: the damage, how it repairs membership, the

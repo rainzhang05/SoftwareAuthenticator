@@ -39,7 +39,7 @@ use std::ops::Range;
 use std::os::unix::fs::MetadataExt;
 use std::rc::Rc;
 
-use super::repair_tests::Scenario;
+use super::repair_tests::{Scenario, flip_last_byte};
 use super::reset_tests::{KEY_COPY, leave_key_copy};
 use super::*;
 use crate::CoseAlg;
@@ -65,7 +65,7 @@ type Operation = fn(&mut FileStore);
 
 #[test]
 fn every_persisting_operation_flushes_before_it_publishes_removes_or_returns() {
-    let operations: [(&str, Setup, Operation); 31] = [
+    let operations: [(&str, Setup, Operation); 33] = [
         ("legacy put of a new record", legacy, |store| {
             store.put(&credential(b"new", 4)).unwrap();
         }),
@@ -199,6 +199,21 @@ fn every_persisting_operation_flushes_before_it_publishes_removes_or_returns() {
         (
             "repair of a counter that is a symbolic link",
             |path| damaged(path, Scenario::CounterLinkLoop),
+            repair,
+        ),
+        (
+            "repair of a PIN state and a large-blob array",
+            |path| {
+                outside(
+                    provisioned(managed(path)),
+                    &[PIN_STATE_FILE, LARGE_BLOBS_FILE],
+                )
+            },
+            repair,
+        ),
+        (
+            "repair of a large-blob array",
+            |path| outside(provisioned(managed(path)), &[LARGE_BLOBS_FILE]),
             repair,
         ),
     ];
@@ -583,6 +598,14 @@ fn repair(store: &mut FileStore) {
     let repaired = store.repair(&plan).unwrap();
     assert_eq!(repaired.durability, CommitDurability::Flushed);
     assert!(!repaired.cleanup_pending);
+}
+
+/// `store` with `files`, outside its credential set, damaged.
+fn outside(store: FileStore, files: &[&str]) -> FileStore {
+    for file in files {
+        flip_last_byte(&store.root.join(file));
+    }
+    store
 }
 
 /// A store in the legacy layout with two records.

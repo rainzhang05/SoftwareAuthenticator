@@ -392,8 +392,8 @@ fn service_problems(state_dir: &Path, running: Option<Running>) -> io::Result<Ve
 /// the passkeys.
 pub(super) fn pin_state(retries: PinRetries, damage: &[Damage]) -> String {
     if retries.retries == 0 && damage.iter().any(Damage::is_pin_state) {
-        "blocked, because pin-state is damaged: move it out of the state directory and set a new \
-         PIN, as the fix below says, which keeps every passkey"
+        "blocked, because pin-state is damaged: run `pqkey repair` and set a new PIN, as the fix \
+         below says, which keeps every passkey"
             .to_owned()
     } else if retries.retries == 0 {
         format!(
@@ -1380,9 +1380,10 @@ esac
     /// do; the key starts all the same.  Where the report says passkeys
     /// cannot be listed, `pqkey passkeys` cannot list them, and where the key
     /// cannot count its passkeys, the passkeys line says so.  A damaged PIN
-    /// state or large-blob array is moved out of the state directory rather
-    /// than repaired, and the PIN state's fix sets a new PIN; where it blocks
-    /// the PIN, the PIN line says so, and names no reset.
+    /// state or large-blob array is repaired as the rest is, and the PIN
+    /// state's fix then sets a new PIN; where it blocks the PIN, the PIN line
+    /// says so, names repair, and names no reset.  A damaged array alone
+    /// needs no reset.
     #[test]
     fn status_and_start_up_report_each_kind_of_damage_alike() {
         crate::test_support::logs::install();
@@ -1415,30 +1416,18 @@ esac
                 _ => "is damaged",
             };
             let shown = dir.path().display();
-            let fix = match fails {
-                Fails::PinState => vec![
-                    "`pqkey stop`".to_owned(),
-                    format!("move pin-state out of {shown}"),
-                    "`pqkey start`".to_owned(),
-                    "`pqkey pin`".to_owned(),
-                    "`pqkey config`".to_owned(),
-                    "`pqkey reset`".to_owned(),
-                    "last resort".to_owned(),
-                ],
-                Fails::LargeBlobs => vec![
-                    "`pqkey stop`".to_owned(),
-                    format!("move large-blobs out of {shown}"),
-                    "`pqkey start`".to_owned(),
-                ],
-                _ => vec![
-                    "`pqkey stop`".to_owned(),
-                    format!("a copy of {shown}"),
-                    "`pqkey repair`".to_owned(),
-                    "`pqkey start`".to_owned(),
-                    "`pqkey reset`".to_owned(),
-                    "last resort".to_owned(),
-                ],
-            };
+            let mut fix = vec![
+                "`pqkey stop`".to_owned(),
+                format!("a copy of {shown}"),
+                "`pqkey repair`".to_owned(),
+                "`pqkey start`".to_owned(),
+            ];
+            if fails == Fails::PinState {
+                fix.push("`pqkey pin`".to_owned());
+            }
+            if fails != Fails::LargeBlobs {
+                fix.extend(["`pqkey reset`".to_owned(), "last resort".to_owned()]);
+            }
             let fix: Vec<&str> = fix.iter().map(String::as_str).collect();
             assert_problem(&problem, &["credential store", state, &named], &fix);
 
@@ -1504,6 +1493,7 @@ esac
                         &[
                             "blocked",
                             "pin-state is damaged",
+                            "`pqkey repair`",
                             "set a new PIN",
                             "fix below",
                         ],

@@ -1,8 +1,11 @@
-//! A damaged PIN state or large-blob array, which repair leaves alone: each
-//! is named and fails what it is said to, repair leaves it as it is, and,
-//! moved out of the state directory as its fix says, the PIN state leaves
-//! the passkeys usable and a new PIN can be set.  A missing or unreadable
-//! one is no damage.
+//! A damaged PIN state or large-blob array: each is named and fails what it
+//! is said to, and repair, as its fix says, replaces it and keeps every
+//! passkey.  The PIN state's replacement has no PIN and always-UV on, so
+//! the key refuses registrations and sign-ins until a new PIN is set, and
+//! takes them with it; the array's is none, which reads as the initial one.
+//! Repair leaves an intact PIN state, a PIN blocked by wrong guesses
+//! included, and an intact array alone, and a missing or unreadable one is
+//! no damage.
 
 use super::*;
 
@@ -12,22 +15,22 @@ use pqkey_ctap::ctap::constants::{
     CTAP_CMD_CLIENT_PIN, CTAP_CMD_LARGE_BLOBS, CTAP2_ERR_PIN_AUTH_INVALID, CTAP2_ERR_PIN_BLOCKED,
     CTAP2_ERR_PUAT_REQUIRED,
 };
-use pqkey_ctap::platform::{PlatformKeyAgreement, padded_pin, pin_hash};
+use pqkey_ctap::platform::{PlatformKeyAgreement, authenticate, padded_pin, pin_hash};
 use pqkey_ctap::store::INITIAL_LARGE_BLOB_ARRAY;
 
 /// What a summary says fails after damage to the PIN state, and what the
 /// engine's hint advises.
 const PIN_STATE: &str = "the key treats its PIN as blocked and requires it, so it cannot \
                          register passkeys, sign in or set a new PIN";
-const PIN_STATE_FIX: &str = "Stop the key with `pqkey stop`, move pin-state out of the state \
-                             directory, then start the key again with `pqkey start` and set a \
-                             new PIN with `pqkey pin`, and any PIN settings again with `pqkey \
-                             config`; `pqkey reset` erases every passkey, so use it only as a \
-                             last resort";
+const PIN_STATE_FIX: &str = "Stop the key with `pqkey stop`, keep a copy of the state directory, \
+                             run `pqkey repair`, then start the key again with `pqkey start` and \
+                             set a new PIN with `pqkey pin`; `pqkey reset` erases every passkey, \
+                             so use it only as a last resort";
 /// The same after damage to the large-blob array.
 const LARGE_BLOBS: &str = "the key cannot return the large blobs that sites stored on it";
-const LARGE_BLOBS_FIX: &str = "Stop the key with `pqkey stop`, move large-blobs out of the state \
-                               directory, then start the key again with `pqkey start`";
+const LARGE_BLOBS_FIX: &str = "Stop the key with `pqkey stop`, keep a copy of the state \
+                               directory, run `pqkey repair`, then start the key again with \
+                               `pqkey start`";
 /// The PIN the tests set.
 const PIN: &[u8] = b"1234";
 
@@ -51,12 +54,13 @@ fn answer(app: &mut CtapApp<'static>, command: u8, parameters: Vec<(Value, Value
 }
 
 /// clientPIN `subcommand` of PIN/UV auth protocol two, with a shared secret
-/// from getKeyAgreement and the parameters `more` makes with it: the status.
+/// from getKeyAgreement and the parameters `more` makes with it: the
+/// response, and the shared secret.
 fn client_pin(
     app: &mut CtapApp<'static>,
     subcommand: i64,
     more: impl FnOnce(&PlatformKeyAgreement) -> Vec<(Value, Value)>,
-) -> u8 {
+) -> (Vec<u8>, PlatformKeyAgreement) {
     let protocol = (int(1), int(2));
     let key = answer(
         app,
@@ -87,7 +91,7 @@ fn client_pin(
     ]);
     let mut parameters = vec![protocol, (int(2), int(subcommand)), (int(3), platform)];
     parameters.extend(more(&shared));
-    app.call(&request(CTAP_CMD_CLIENT_PIN, parameters))[0]
+    (app.call(&request(CTAP_CMD_CLIENT_PIN, parameters)), shared)
 }
 
 /// setPIN with `pin`: the status.
@@ -101,6 +105,7 @@ fn set_pin(app: &mut CtapApp<'static>, pin: &[u8]) -> u8 {
             (int(5), Value::Bytes(new)),
         ]
     })
+    .0[0]
 }
 
 /// changePIN from `pin` to another: the status.
@@ -117,6 +122,7 @@ fn change_pin(app: &mut CtapApp<'static>, pin: &[u8]) -> u8 {
             (int(6), Value::Bytes(old)),
         ]
     })
+    .0[0]
 }
 
 /// getPinToken with `pin`: the status.
@@ -125,6 +131,76 @@ fn pin_token(app: &mut CtapApp<'static>, pin: &[u8]) -> u8 {
         let hash = shared.encrypt(&pin_hash(pin)[..], random_bytes()).unwrap();
         vec![(int(6), Value::Bytes(hash))]
     })
+    .0[0]
+}
+
+/// The pinUvAuthParam of `message` under a new token with `pin` for
+/// registering and signing in on example.com, from
+/// getPinUvAuthTokenUsingPinWithPermissions.
+fn pin_uv_auth(app: &mut CtapApp<'static>, pin: &[u8], message: &[u8]) -> Value {
+    let (response, shared) = client_pin(app, 9, |shared| {
+        let hash = shared.encrypt(&pin_hash(pin)[..], random_bytes()).unwrap();
+        vec![
+            (int(6), Value::Bytes(hash)),
+            (int(9), int(0x03)),
+            (int(10), text("example.com")),
+        ]
+    });
+    assert_eq!(response[0], CTAP2_OK);
+    let fields: Value = ciborium::de::from_reader(&response[1..]).unwrap();
+    let Value::Bytes(token) = field(&fields, 2) else {
+        panic!("no token");
+    };
+    let token = shared.decrypt(token).unwrap();
+    Value::Bytes(authenticate(ClassicPinProtocol::V2, &token, message))
+}
+
+/// makeCredential for a new passkey on example.com, as [`register`] makes
+/// it, with a pinUvAuthParam under a new token with `pin`: the status.
+fn register_with_pin(app: &mut CtapApp<'static>, pin: &[u8]) -> u8 {
+    let hash = [0x11; 32];
+    let auth = pin_uv_auth(app, pin, &hash);
+    let user = Value::Map(vec![
+        (text("id"), Value::Bytes(random_bytes::<16>().to_vec())),
+        (text("name"), text("new")),
+    ]);
+    let algorithms = Value::Array(vec![Value::Map(vec![
+        (text("alg"), int(-7)),
+        (text("type"), text("public-key")),
+    ])]);
+    app.call(&request(
+        CTAP_CMD_MAKE_CREDENTIAL,
+        vec![
+            (int(1), Value::Bytes(hash.to_vec())),
+            (int(2), Value::Map(vec![(text("id"), text("example.com"))])),
+            (int(3), user),
+            (int(4), algorithms),
+            (int(7), Value::Map(vec![(text("rk"), Value::Bool(true))])),
+            (int(8), auth),
+            (int(9), int(2)),
+        ],
+    ))[0]
+}
+
+/// getAssertion on example.com with `id`, as [`sign_in`] makes it, with a
+/// pinUvAuthParam under a new token with `pin`: the status.
+fn sign_in_with_pin(app: &mut CtapApp<'static>, id: &[u8], pin: &[u8]) -> u8 {
+    let hash = [0x22; 32];
+    let auth = pin_uv_auth(app, pin, &hash);
+    let allowed = Value::Array(vec![Value::Map(vec![
+        (text("id"), Value::Bytes(id.to_vec())),
+        (text("type"), text("public-key")),
+    ])]);
+    app.call(&request(
+        CTAP_CMD_GET_ASSERTION,
+        vec![
+            (int(1), text("example.com")),
+            (int(2), Value::Bytes(hash.to_vec())),
+            (int(3), allowed),
+            (int(6), auth),
+            (int(7), int(2)),
+        ],
+    ))[0]
 }
 
 /// The PIN retries getPINRetries reports.
@@ -166,16 +242,39 @@ fn large_blob_array(app: &mut CtapApp<'static>) -> Vec<u8> {
     array.clone()
 }
 
+/// The credential IDs of `passkeys`.
+fn stored(passkeys: &[(CredentialRecord, PathBuf)]) -> BTreeSet<Vec<u8>> {
+    passkeys
+        .iter()
+        .map(|(record, _)| record.credential_id.clone())
+        .collect()
+}
+
+/// The credential IDs the store in `state` lists.
+fn listed(state: &Path) -> BTreeSet<Vec<u8>> {
+    ids(&FileStore::open(state).unwrap().list().unwrap())
+        .into_iter()
+        .collect()
+}
+
+/// The PIN state repair writes in place of a damaged one.
+fn new_pin_state() -> PinStateRecord {
+    let mut state = PinStateRecord::default();
+    state.always_uv = true;
+    state
+}
+
 /// A damaged PIN state: the inspection names it, and what the summary says
 /// fails does.  The key reports the PIN set and blocked and requires it, so
 /// a token, a registration, sign-ins over CTAP 2 and U2F that worked before,
 /// and a new PIN all fail, and the engine names the file and what to do,
-/// whether it finds the file damaged as it runs or as it starts.  Moved out
-/// of the state directory with the key stopped, as that says, it leaves a
-/// key without a PIN, which takes a new one, and every passkey is listed and
-/// signs in again.
+/// whether it finds the file damaged as it runs or as it starts.  Repaired
+/// with the key stopped, as that says, it is in the quarantine, and the key
+/// has no PIN and always-UV on: it keeps every passkey, refuses to register
+/// or sign in until a new PIN is set, and then does both with it, while
+/// always-UV, which stays on, keeps U2F off.
 #[test]
-fn a_damaged_pin_state_fails_what_its_summary_says_until_it_is_moved_out() {
+fn a_damaged_pin_state_fails_what_its_summary_says_until_repair_replaces_it() {
     logs::install();
     let scratch = TempDir::new();
     let state = scratch.path().join("state");
@@ -246,56 +345,68 @@ fn a_damaged_pin_state_fails_what_its_summary_says_until_it_is_moved_out() {
     drop(app);
 
     let damaged = fs::read(&pin_state).unwrap();
-    let moved = scratch.path().join("pin-state");
-    fs::rename(&pin_state, &moved).unwrap();
-    assert_eq!(FileStore::inspect_in(&state).unwrap(), []);
-    let mut app = engine(&state);
+    let (plan, quarantine) = repair(&state);
+    assert_eq!(
+        (plan.membership, plan.moved, plan.passkeys),
+        (Membership::Intact, vec!["pin-state".to_owned()], 3)
+    );
+    assert_eq!(
+        fs::read(quarantine.unwrap().join("pin-state")).unwrap(),
+        damaged
+    );
+    let store = FileStore::open(&state).unwrap();
+    assert_eq!(store.pin_state().unwrap(), Some(new_pin_state()));
+    assert_eq!(listed(&state), stored(&passkeys));
+    let mut app = CtapApp::with_file_store(store, AutoApprove, &INTERRUPT, [0; 16]);
     assert_eq!(
         pin_options(&mut app),
-        (Value::Bool(false), Value::Bool(false))
+        (Value::Bool(false), Value::Bool(true))
     );
-    assert_eq!(set_pin(&mut app, b"5678"), CTAP2_OK);
-    assert_eq!(pin_token(&mut app, b"5678"), CTAP2_OK);
+    assert_eq!(register(&mut app), CTAP2_ERR_PUAT_REQUIRED);
     for (record, _) in &passkeys {
-        assert_eq!(sign_in(&mut app, Some(&record.credential_id)), CTAP2_OK);
+        assert_eq!(
+            sign_in(&mut app, Some(&record.credential_id)),
+            CTAP2_ERR_PUAT_REQUIRED
+        );
+    }
+    assert_eq!(set_pin(&mut app, b"5678"), CTAP2_OK);
+    assert_eq!(
+        pin_options(&mut app),
+        (Value::Bool(true), Value::Bool(true))
+    );
+    assert_eq!(register(&mut app), CTAP2_ERR_PUAT_REQUIRED);
+    assert_eq!(register_with_pin(&mut app, b"5678"), CTAP2_OK);
+    for (record, _) in &passkeys {
+        let id = &record.credential_id;
+        assert_eq!(sign_in(&mut app, Some(id)), CTAP2_ERR_PUAT_REQUIRED);
+        assert_eq!(sign_in_with_pin(&mut app, id, b"5678"), CTAP2_OK);
     }
     assert_eq!(
         authenticate_u2f(&mut app, application, &handle),
-        [0x90, 0x00]
+        [0x69, 0x86],
+        "SW_COMMAND_NOT_ALLOWED"
     );
     drop(app);
-    let listed: BTreeSet<Vec<u8>> = ids(&FileStore::open(&state).unwrap().list().unwrap())
-        .into_iter()
-        .collect();
-    let stored: BTreeSet<Vec<u8>> = passkeys
-        .iter()
-        .map(|(record, _)| record.credential_id.clone())
-        .collect();
-    assert_eq!(listed, stored);
-    assert_eq!(
-        fs::read(&moved).unwrap(),
-        damaged,
-        "kept where it was moved"
-    );
+    assert!(listed(&state).is_superset(&stored(&passkeys)));
 }
 
 /// A damaged large-blob array: the inspection names it, and what the summary
 /// says fails does: the key returns the initial array in its place, not the
-/// one stored, and names the file and what to do.  Moved out of the state
-/// directory, as that says, it is no damage, and the key returns the
-/// initial array, as it did.
+/// one stored, and names the file and what to do.  Repaired, as that says,
+/// it is in the quarantine and gone from its place, which is no damage, and
+/// the key returns the initial array, as it did.
 #[test]
-fn a_damaged_large_blob_array_fails_what_its_summary_says() {
+fn a_damaged_large_blob_array_fails_what_its_summary_says_until_repair_removes_it() {
     logs::install();
     let scratch = TempDir::new();
     let state = scratch.path().join("state");
-    passkeys_in(&state, true);
-    let stored = serialized_large_blob_array(&[0x81, 0x43, 1, 2, 3]);
+    let passkeys = passkeys_in(&state, true);
+    let stored_array = serialized_large_blob_array(&[0x81, 0x43, 1, 2, 3]);
     FileStore::open(&state)
         .unwrap()
-        .set_large_blob_array(&stored)
+        .set_large_blob_array(&stored_array)
         .unwrap();
-    assert_eq!(large_blob_array(&mut engine(&state)), stored);
+    assert_eq!(large_blob_array(&mut engine(&state)), stored_array);
     let large_blobs = state.join("large-blobs");
     flip_last_byte(&large_blobs);
 
@@ -324,8 +435,18 @@ fn a_damaged_large_blob_array_fails_what_its_summary_says() {
     );
     drop(app);
 
-    fs::rename(&large_blobs, scratch.path().join("large-blobs")).unwrap();
-    assert_eq!(FileStore::inspect_in(&state).unwrap(), []);
+    let damaged = fs::read(&large_blobs).unwrap();
+    let (plan, quarantine) = repair(&state);
+    assert_eq!(
+        (plan.membership, plan.moved),
+        (Membership::Intact, vec!["large-blobs".to_owned()])
+    );
+    assert_eq!(
+        fs::read(quarantine.unwrap().join("large-blobs")).unwrap(),
+        damaged
+    );
+    assert!(!large_blobs.exists());
+    assert_eq!(listed(&state), stored(&passkeys));
     assert_eq!(
         large_blob_array(&mut engine(&state)),
         INITIAL_LARGE_BLOB_ARRAY
@@ -334,11 +455,13 @@ fn a_damaged_large_blob_array_fails_what_its_summary_says() {
 
 /// A damaged PIN state and large-blob array are named with the credential
 /// set's and the counter's damage, first, even where membership metadata
-/// that cannot be used hides every record.  Repair, which leaves both
-/// alone, plans as it would without them and leaves both files as they
-/// were; with only them left, it finds nothing to repair, changing nothing.
+/// that cannot be used hides every record.  Repair plans them first too,
+/// beside what it plans without them, moves both into the quarantine, byte
+/// for byte, writes a PIN state with no PIN and always-UV on, every other
+/// setting at its default, and leaves no array, which reads as the initial
+/// one.
 #[test]
-fn repair_leaves_a_damaged_pin_state_and_array_alone() {
+fn repair_replaces_a_damaged_pin_state_and_array_beside_other_damage() {
     for membership in [false, true] {
         let scratch = TempDir::new();
         let state = scratch.path().join("state");
@@ -366,11 +489,11 @@ fn repair_leaves_a_damaged_pin_state_and_array_alone() {
         flip_last_byte(&state.join("signature-counter"));
         let without = FileStore::plan_repair_in(&state).unwrap().unwrap();
 
-        let left = ["pin-state", "large-blobs"];
-        for file in left {
+        let replaced = ["pin-state", "large-blobs"];
+        for file in replaced {
             flip_last_byte(&state.join(file));
         }
-        let damaged = left.map(|file| fs::read(state.join(file)).unwrap());
+        let damaged = replaced.map(|file| fs::read(state.join(file)).unwrap());
         let found = inspect(&store, &state);
         assert_eq!(
             faults(&found),
@@ -383,21 +506,76 @@ fn repair_leaves_a_damaged_pin_state_and_array_alone() {
             "membership: {membership}"
         );
         let plan = FileStore::plan_repair_in(&state).unwrap().unwrap();
-        assert_eq!(plan, without, "membership: {membership}");
-        let repaired = FileStore::repair_in(&state, &plan).unwrap();
-        let quarantine = repaired.quarantine.unwrap();
-        for (file, contents) in left.into_iter().zip(&damaged) {
-            assert_eq!(&fs::read(state.join(file)).unwrap(), contents, "{file}");
-            assert!(!quarantine.join(file).exists(), "{file}");
-        }
+        assert_eq!(plan.damage[..2], found[..2], "membership: {membership}");
+        assert_eq!(plan.damage[2..], without.damage, "membership: {membership}");
+        let mut moved = without.moved.clone();
+        moved.extend(replaced.map(String::from));
+        moved.sort();
+        assert_eq!(plan.moved, moved, "membership: {membership}");
         assert_eq!(
-            faults(&inspect(&store, &state)),
-            left.map(|file| (file.to_owned(), corrupt.clone()))
+            (plan.membership, plan.passkeys, plan.counter),
+            (without.membership, without.passkeys, without.counter),
+            "membership: {membership}"
         );
-        let before = snapshot(&state);
-        assert_eq!(FileStore::plan_repair_in(&state).unwrap(), None);
-        assert_eq!(snapshot(&state), before, "membership: {membership}");
+        let (_, quarantine) = repair(&state);
+        let quarantine = quarantine.unwrap();
+        for (file, contents) in replaced.into_iter().zip(&damaged) {
+            assert_eq!(
+                &fs::read(quarantine.join(file)).unwrap(),
+                contents,
+                "{file}"
+            );
+        }
+        let store = FileStore::open(&state).unwrap();
+        assert_eq!(store.pin_state().unwrap(), Some(new_pin_state()));
+        assert!(!state.join("large-blobs").exists());
+        assert_eq!(store.large_blob_array().unwrap(), INITIAL_LARGE_BLOB_ARRAY);
     }
+}
+
+/// An intact PIN state, a PIN blocked by wrong guesses included, and an
+/// intact large-blob array are no damage: with nothing else damaged there
+/// is nothing to repair, which changes nothing, and a repair of a damaged
+/// record beside them leaves both as they were, and the PIN blocked.
+#[test]
+fn repair_leaves_an_intact_pin_state_and_array_alone_a_blocked_pin_included() {
+    let scratch = TempDir::new();
+    let state = scratch.path().join("state");
+    let passkeys = passkeys_in(&state, true);
+    let mut store = FileStore::open(&state).unwrap();
+    let blocked = PinStateRecord {
+        pin_hash: Some(random_bytes()),
+        pin_retries: 0,
+        min_pin_length_rp_ids: Vec::new(),
+        persistent_tokens: [None, None],
+        ..PinStateRecord::default()
+    };
+    store.set_pin_state(&blocked).unwrap();
+    store
+        .set_large_blob_array(&serialized_large_blob_array(&[0x81, 0x43, 1, 2, 3]))
+        .unwrap();
+    let files = ["pin-state", "large-blobs"];
+    let intact = files.map(|file| fs::read(state.join(file)).unwrap());
+    assert_eq!(inspect(&store, &state), []);
+    let before = snapshot(&state);
+    assert_eq!(FileStore::plan_repair_in(&state).unwrap(), None);
+    assert_eq!(snapshot(&state), before);
+
+    flip_last_byte(&passkeys[2].1);
+    let (plan, _) = repair(&state);
+    assert_eq!(
+        faults(&plan.damage),
+        [(
+            relative(&state, &passkeys[2].1),
+            Fault::Corrupt(Corruption::Authentication)
+        )]
+    );
+    for (file, contents) in files.into_iter().zip(&intact) {
+        assert_eq!(&fs::read(state.join(file)).unwrap(), contents, "{file}");
+    }
+    let mut app = engine(&state);
+    assert_eq!(pin_retries(&mut app), int(0));
+    assert_eq!(pin_token(&mut app, PIN), CTAP2_ERR_PIN_BLOCKED);
 }
 
 /// A PIN state or large-blob array that is missing, or that cannot be read,

@@ -1261,10 +1261,12 @@ mod tests {
     /// unblock: `status`, which inspects the store, names the file on the PIN
     /// line and names no reset; the PIN commands, which cannot tell it from a
     /// PIN entered wrongly too often, send to `pqkey status` before they name
-    /// a reset.  Moved out of the state directory, as the fix says, it leaves
-    /// a key without a PIN, which takes a new one and keeps its passkeys.
+    /// a reset.  Repaired, as the fix says, it leaves a key without a PIN and
+    /// with always-UV on, which `pqkey config` shows; `pqkey pin` sets a new
+    /// PIN, the passkeys are kept, and always-UV stays on until `pqkey config
+    /// always-uv off` turns it off.
     #[test]
-    fn a_damaged_pin_state_is_moved_out_before_any_reset() {
+    fn a_damaged_pin_state_is_repaired_before_any_reset() {
         let dir = TempDir::new("cli-damaged-pin-state");
         FileStore::open(dir.path())
             .unwrap()
@@ -1288,6 +1290,10 @@ mod tests {
             );
             assert!(!line.contains("reset"), "{line}");
             assert!(
+                at(&line, "`pqkey repair`") < at(&line, "set a new PIN"),
+                "{line}"
+            );
+            assert!(
                 at(&line, "set a new PIN") < at(&line, "every passkey"),
                 "{line}"
             );
@@ -1307,13 +1313,32 @@ mod tests {
                 );
             }
         }
-        let aside = TempDir::new("cli-damaged-pin-state-aside");
-        std::fs::rename(&path, aside.path().join("pin-state")).unwrap();
+        let plan = FileStore::plan_repair_in(dir.path()).unwrap().unwrap();
+        FileStore::repair_in(dir.path(), &plan).unwrap();
         let (_daemon, mut key) = start(&dir);
-        assert_eq!(key.info().unwrap().pin_set, Some(false));
+        let info = key.info().unwrap();
+        assert_eq!((info.pin_set, info.always_uv), (Some(false), Some(true)));
+        let shown = configure(&mut key, &mut Script::of(&[]), None, &mut |_| {
+            unreachable!("nothing to confirm")
+        })
+        .unwrap();
+        assert_eq!(shown[0], "Always UV: on");
         set_or_change_pin(&mut key, &mut Script::of(&["5678"])).unwrap();
         let token = management_token(&mut key, &mut Script::of(&["5678"])).unwrap();
         assert_eq!(key.passkeys(&token).unwrap().len(), 1);
+        let info = key.info().unwrap();
+        assert_eq!((info.pin_set, info.always_uv), (Some(true), Some(true)));
+        let off = ConfigAction::AlwaysUv {
+            setting: super::super::AlwaysUv::Off,
+        };
+        let turned = configure(
+            &mut key,
+            &mut Script::of(&["5678"]),
+            Some(&off),
+            &mut |_| unreachable!("nothing to confirm"),
+        )
+        .unwrap();
+        assert_eq!(turned, ["Always UV: off."]);
     }
 
     /// A PIN check that fails because the key cannot read its PIN state says

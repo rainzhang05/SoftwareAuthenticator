@@ -345,8 +345,8 @@ SW_INTERNAL_ERROR) while it cannot.
 Unreadable state closes grants and blocks further PIN writes until explicit
 reset recovers, or a restart reads the record or finds none: a record that
 fails authentication or decoding, a root key that is unusable or missing, or
-no record although a PIN or grant exists. A corrupt `pin-state` moved out of
-the state directory leaves the key with no PIN and its passkeys.
+no record although a PIN or grant exists. `pqkey repair` replaces a corrupt
+`pin-state` with one that has no PIN and always-UV on, keeping the passkeys.
 
 The native client offers explicit protocol-specific read-only token acquisition.
 Listing selects pcmr from advertised capabilities and otherwise uses cm;
@@ -424,15 +424,14 @@ The daemon at start-up and `pqkey status` report damage from a read-only
 inspection, which looks again before reporting, so that a concurrent commit's
 cleanup is not taken for damage. It names first a PIN state or large-blob
 array that fails authentication or decoding, as the engine reads them: the
-PIN is then blocked and required, and the initial array is served. Repair
-leaves both alone: the fix `pqkey status` gives moves them out of the state
-directory, with a new PIN for the first. Next it names an unreadable or
-corrupt shared signature counter, since every sign-in with a sealed
-credential then fails. The engine logs each of these as it logs damage to
-the set. A store with neither namespace reports its missing `credentials/`,
-and also `credential-set/` if its format marker shows the managed layout.
-Opening a legacy store creates a missing `credentials/` again, empty, and
-logs the loss when the credential key shows that the directory existed.
+PIN is then blocked and required, and the initial array is served. Next it
+names an unreadable or corrupt shared signature counter, since every sign-in
+with a sealed credential then fails. The engine logs each of these as it
+logs damage to the set. A store with neither namespace reports its missing
+`credentials/`, and also `credential-set/` if its format marker shows the
+managed layout. Opening a legacy store creates a missing `credentials/`
+again, empty, and logs the loss when the credential key shows that the
+directory existed.
 
 `pqkey repair` repairs such damage with the key stopped, refusing while the
 daemon holds the state lock. It plans without changing anything, takes the
@@ -457,7 +456,7 @@ not), then plans once more and refuses a store that changed since.
 - A damaged format marker, or a missing one in the managed layout, is written
   again after the list; a manifest that authenticates is used even if the
   marker does not. A missing namespace is created again, empty: its records
-  are gone, but the keys, the PIN state and an undamaged shared counter stay,
+  are gone, but the keys and an undamaged PIN state and shared counter stay,
   so sealed credential IDs still open.
 - A lost shared counter, and a raised record, are written at one more than
   the largest of the clock's seconds since 1970, the newest modification time
@@ -473,6 +472,13 @@ not), then plans once more and refuses a store that changed since.
      its times can make one; and
   3. the clock is right during the repair, or the damaged file still has the
      time a right clock gave it at its last count or later.
+- Last, a PIN state that fails authentication or decoding is replaced, by a
+  rename, with one that has no PIN and always-UV on and other settings at
+  their defaults: never removed, which would read as no PIN with always-UV
+  off. Until a new PIN is set, the key refuses registrations and sign-ins;
+  always-UV stays on, keeping U2F off, until it is turned off. A large-blob
+  array that fails them is removed, which reads as the initial array. Repair
+  touches neither file otherwise, even for a PIN blocked by wrong guesses.
 
 Every file that repair replaces or removes first gets a name in a new
 `damaged/<UTC time>/`, at its path relative to the state directory, by a hard
@@ -481,10 +487,9 @@ cleanup, inspection or reset touches that directory, and nothing reads it.
 Counters are written, and raised records rewritten in place, before the new
 list is published and cleaned up as every commit is, so an error or crash at
 any checkpoint leaves the store serving its old or its repaired credentials,
-each counter damaged or written again, every file in place or quarantined,
-and repairing again finishes. Repair leaves the PIN state,
-the large-blob array, the attestation record and the keys alone, and
-rewrites a record only to raise its counter.
+each counter and the PIN state damaged or written again, every file in place
+or quarantined, and repairing again finishes. Repair leaves the attestation
+record and the keys alone, and rewrites a record only to raise its counter.
 
 Explicit reset works alike in both store layouts:
 

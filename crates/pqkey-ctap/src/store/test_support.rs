@@ -1,5 +1,6 @@
 //! Helpers shared by the store's unit tests.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -32,5 +33,44 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Every regular file under `dir`, by its path relative to `dir`.
+pub(crate) fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut found = BTreeMap::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(current) = dirs.pop() {
+        for entry in fs::read_dir(&current).unwrap() {
+            let path = entry.unwrap().path();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            if metadata.is_dir() {
+                dirs.push(path);
+            } else if metadata.is_file() {
+                found.insert(
+                    path.strip_prefix(dir).unwrap().to_path_buf(),
+                    fs::read(&path).unwrap(),
+                );
+            }
+        }
+    }
+    found
+}
+
+/// A copy of `from`, every file and directory, at `to`, with each symbolic
+/// link copied as a link: those these tests make point by relative names.
+pub(crate) fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let target = to.join(path.file_name().unwrap());
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        if metadata.file_type().is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&path).unwrap(), &target).unwrap();
+        } else if metadata.is_dir() {
+            copy_tree(&path, &target);
+        } else {
+            fs::copy(&path, &target).unwrap();
+        }
     }
 }
