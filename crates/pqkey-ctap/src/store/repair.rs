@@ -46,11 +46,12 @@ const CHANGED: &str = "it changed after its repair was planned";
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RepairPlan {
-    /// Every damaged file and directory: what [`FileStore::inspect`]
-    /// reports, first, then what damaged membership metadata hid from it:
-    /// members whose records are missing or fail authentication or
-    /// decoding, or, for a rebuild, the manifest and the records that fail
-    /// authentication or decoding.
+    /// Every damaged file and directory it repairs: what
+    /// [`FileStore::inspect`] reports but a damaged PIN state or large-blob
+    /// array, which repair leaves alone, first, then what damaged membership
+    /// metadata hid from it: members whose records are missing or fail
+    /// authentication or decoding, or, for a rebuild, the manifest and the
+    /// records that fail authentication or decoding.
     pub damage: Vec<Damage>,
     /// How the list of the store's credentials, its membership, is repaired.
     pub membership: Membership,
@@ -201,7 +202,8 @@ impl Kept {
 impl<K: KeySource> FileStore<K> {
     /// What [`Self::repair`] would do, found without changing anything, or
     /// `None` if there is nothing to repair: [`Self::inspect`] finds no
-    /// damage, or the store needs no change.
+    /// damage but to the PIN state or the large-blob array, which repair
+    /// leaves alone, or the store needs no change.
     ///
     /// * If the manifest authenticates, the members whose records are
     ///   missing, or fail authentication or decoding, are dropped from it
@@ -242,7 +244,9 @@ impl<K: KeySource> FileStore<K> {
     /// it again needs nothing of its contents.  Records are decrypted on a
     /// stack that is scrubbed afterwards.
     pub fn plan_repair(&self) -> Result<Option<RepairPlan>, StoreError> {
-        let damage = self.inspect()?;
+        let mut damage = self.inspect()?;
+        // Left alone: `pqkey status` says what to do about them.
+        damage.retain(|damage| ![PIN_STATE_FILE, LARGE_BLOBS_FILE].contains(&&*damage.file));
         if damage.is_empty() {
             return Ok(None);
         }
@@ -347,8 +351,8 @@ impl<K: KeySource> FileStore<K> {
         keys: &CredentialKeys,
         damage: Vec<Damage>,
     ) -> Result<RepairPlan, StoreError> {
-        // A damaged counter, which the inspection names first, says nothing
-        // of the credential set, and is repaired on its own.
+        // A damaged counter, which the inspection names before the credential
+        // set, says nothing of the set, and is repaired on its own.
         let (counter, damage): (Vec<Damage>, Vec<Damage>) = damage
             .into_iter()
             .partition(|damage| damage.file == SIGNATURE_COUNTER_FILE);

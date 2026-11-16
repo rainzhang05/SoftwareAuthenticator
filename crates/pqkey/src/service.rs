@@ -510,13 +510,13 @@ fn log_if_state_dir_cannot_flush(state_dir: &Path) {
     }
 }
 
-/// Log what is damaged in `store`'s credential set and signature counter,
-/// and what fails, or that it cannot be checked, with what to do: what
-/// `pqkey status` reports (`cli::status::store_problem`). The engine logs the
-/// same with each operation the damage fails; this names all of it once,
-/// before any operation, reading every record as one listing does. A legacy
-/// `credentials` directory that opening the store created again is logged
-/// by the store itself ([`FileStore::open`]).
+/// Log what is damaged in `store`'s credential set, signature counter, PIN
+/// state and large-blob array, and what fails, or that it cannot be checked,
+/// with what to do: what `pqkey status` reports (`cli::status::store_problem`).
+/// The engine logs the same with each operation the damage fails; this names
+/// all of it once, before any operation, reading every record as one listing
+/// does. A legacy `credentials` directory that opening the store created
+/// again is logged by the store itself ([`FileStore::open`]).
 fn log_if_store_damaged(store: &FileStore) {
     let state_dir = store.state_dir().display().to_string();
     match store.inspect() {

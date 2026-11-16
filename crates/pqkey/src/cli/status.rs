@@ -4,7 +4,7 @@
 use std::{io, path::Path, time::Duration};
 
 use pqkey_ctap::store::{
-    DirectoryFlush, FileStore, StoreError, damage_fix, damage_summary, damage_unchecked,
+    Damage, DirectoryFlush, FileStore, StoreError, damage_fix, damage_summary, damage_unchecked,
 };
 
 use super::checks::{FREE_SPACE, MAKE_WRITABLE, Problem};
@@ -37,6 +37,11 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
         }
         Ok(running) => running,
     };
+    // Checking the credential store decrypts every credential and the PIN
+    // state: keep them out of core files, and this process out of reach, as
+    // the daemon does.  The PIN line says whether the PIN state is damaged.
+    platform::disable_core_dumps()?;
+    let inspected = FileStore::inspect_in(state_dir);
     match running {
         None => {
             outln!("Key:      not running; `pqkey start` starts it")?;
@@ -66,17 +71,14 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
                 )?,
                 Running::Daemon(pid) => outln!("Key:      running (pid {pid})")?,
             }
-            show_key(running)?;
+            show_key(running, inspected.as_deref().unwrap_or_default())?;
             let info = info?;
             problems.extend(running_problems_of(&system, running, &info, STATUS_WAIT)?);
             problems.extend(presence_problem(&info.1, running));
         }
     }
     problems.extend(state_dir_problem(state_dir, running.is_some()));
-    // Checking the credential store decrypts every credential: keep them out
-    // of core files, and this process out of reach, as the daemon does.
-    platform::disable_core_dumps()?;
-    problems.extend(store_problem(state_dir));
+    problems.extend(store_problem(state_dir, inspected));
     problems.extend(service_problems(state_dir, running)?);
     if !problems.is_empty() {
         outln!()?;
@@ -85,8 +87,9 @@ pub fn status(state_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// The lines of `status` about the running key itself.
-fn show_key(running: Running) -> io::Result<()> {
+/// The lines of `status` about the running key itself, whose credential
+/// store was found to have `damage`.
+fn show_key(running: Running, damage: &[Damage]) -> io::Result<()> {
     let Ok((path, link)) = open_node(running, STATUS_WAIT) else {
         return outln!("Device:   cannot be opened (see below)");
     };
@@ -106,7 +109,7 @@ fn show_key(running: Running) -> io::Result<()> {
     match info.pin_set {
         Some(true) => {
             let retries = key.pin_retries().map_err(client_error)?;
-            outln!("PIN:      {}", pin_state(retries))?;
+            outln!("PIN:      {}", pin_state(retries, damage))?;
         }
         Some(false) => {
             outln!("PIN:      not set; `pqkey pin` sets one (Chromium asks for one)")?;
@@ -339,16 +342,19 @@ fn then_start(running: bool) -> &'static str {
     }
 }
 
-/// A credential store in `state_dir` that is damaged, with what fails, or
-/// that cannot be checked, and what to do: what the key logs as it starts
-/// (`service::log_if_store_damaged`). It is read as it is, while the key may
-/// change it ([`FileStore::inspect`]).
-fn store_problem(state_dir: &Path) -> Option<Problem> {
-    let fix = || damage_fix(&state_dir.display().to_string());
-    match FileStore::inspect_in(state_dir) {
+/// A credential store in `state_dir` that `inspected` found damaged, with
+/// what fails, or that it could not check, and what to do: what the key logs
+/// as it starts (`service::log_if_store_damaged`). The store is read as it
+/// is, while the key may change it ([`FileStore::inspect`]).
+fn store_problem(state_dir: &Path, inspected: Result<Vec<Damage>, StoreError>) -> Option<Problem> {
+    let dir = state_dir.display().to_string();
+    match inspected {
         Ok(damage) if damage.is_empty() => None,
-        Ok(damage) => Some(Problem::new(damage_summary(&damage), fix())),
-        Err(err) => Some(Problem::new(damage_unchecked(&err), fix())),
+        Ok(damage) => Some(Problem::new(
+            damage_summary(&damage),
+            damage_fix(&damage, &dir),
+        )),
+        Err(err) => Some(Problem::new(damage_unchecked(&err), damage_fix(&[], &dir))),
     }
 }
 
@@ -378,11 +384,18 @@ fn service_problems(state_dir: &Path, running: Option<Running>) -> io::Result<Ve
     Ok(problems)
 }
 
-/// The PIN line of `status`.  For a blocked PIN it says to restart the key
-/// first, which clears a block that came from a PIN state the key could not
-/// read, and only then to reset it, which erases the passkeys.
-pub(super) fn pin_state(retries: PinRetries) -> String {
-    if retries.retries == 0 {
+/// The PIN line of `status`, for a credential store found to have `damage`.
+/// A PIN blocked by a damaged PIN state is said to be, with the fix that
+/// keeps the passkeys, which `status` lists below.  For any other blocked PIN
+/// it says to restart the key first, which clears a block that came from a
+/// PIN state the key could not read, and only then to reset it, which erases
+/// the passkeys.
+pub(super) fn pin_state(retries: PinRetries, damage: &[Damage]) -> String {
+    if retries.retries == 0 && damage.iter().any(Damage::is_pin_state) {
+        "blocked, because pin-state is damaged: move it out of the state directory and set a new \
+         PIN, as the fix below says, which keeps every passkey"
+            .to_owned()
+    } else if retries.retries == 0 {
         format!(
             "blocked; restart the key ({REPLUG}) and run `pqkey status` again: if it is still \
              blocked, only `pqkey reset` makes the key usable again, and it erases every passkey \
@@ -398,8 +411,8 @@ pub(super) fn pin_state(retries: PinRetries) -> String {
 #[cfg(test)]
 mod tests {
     use pqkey_ctap::CoseAlg;
-    use pqkey_ctap::ctap::constants::CTAP2_ERR_PROCESSING;
-    use pqkey_ctap::store::CredentialStore;
+    use pqkey_ctap::ctap::constants::{CTAP2_ERR_PIN_BLOCKED, CTAP2_ERR_PROCESSING};
+    use pqkey_ctap::store::{CredentialStore, PinStateRecord};
 
     use super::*;
     use crate::cli::output::errln;
@@ -1199,6 +1212,11 @@ esac
         /// Sign-ins that count on the shared signature counter; passkeys
         /// count on their own, and the key counts them all.
         Counter,
+        /// Registration, sign-ins and a new PIN: the PIN state is damaged,
+        /// and the key takes the PIN for blocked; it counts every passkey.
+        PinState,
+        /// The large blobs sites stored; the key counts every passkey.
+        LargeBlobs,
         /// The store cannot be checked.
         Unchecked,
     }
@@ -1277,6 +1295,21 @@ esac
                 damage_file(&dir.join("signature-counter"));
                 ("(signature-counter is corrupt".into(), Fails::Counter)
             }
+            "pin state" => {
+                let mut pin = PinStateRecord::default();
+                pin.pin_hash = Some(*pqkey_ctap::platform::pin_hash(b"1234"));
+                FileStore::open(dir).unwrap().set_pin_state(&pin).unwrap();
+                damage_file(&dir.join("pin-state"));
+                ("(pin-state is corrupt".into(), Fails::PinState)
+            }
+            "large blobs" => {
+                FileStore::open(dir)
+                    .unwrap()
+                    .set_large_blob_array(&pqkey_ctap::store::INITIAL_LARGE_BLOB_ARRAY)
+                    .unwrap();
+                damage_file(&dir.join("large-blobs"));
+                ("(large-blobs is corrupt".into(), Fails::LargeBlobs)
+            }
             "short key" => {
                 std::fs::write(dir.join("keys").join("credential.key"), b"short").unwrap();
                 ("credential root key unavailable".into(), Fails::Unchecked)
@@ -1286,9 +1319,16 @@ esac
     }
 
     /// The lines the key logged as it started about its credential store
-    /// on `dir`, with their levels: those that tell to keep a copy of it.
+    /// on `dir`, with their levels: those that report it and name `dir`.
     fn start_up_lines(dir: &TempDir) -> Vec<(log::Level, String)> {
-        crate::test_support::logs::containing(&format!("keep a copy of {}", dir.path().display()))
+        let mut lines = crate::test_support::logs::containing(&dir.path().display().to_string());
+        lines.retain(|(_, line)| line.starts_with("the credential store "));
+        lines
+    }
+
+    /// [`store_problem`] of the store in `dir`, inspected as `status` does.
+    fn problem_in(dir: &Path) -> Option<Problem> {
+        store_problem(dir, FileStore::inspect_in(dir))
     }
 
     /// For healthy stores `status` shows what it showed, whatever the
@@ -1301,14 +1341,14 @@ esac
         crate::test_support::logs::install();
         let dir = TempDir::new("status-healthy");
         let missing = dir.path().join("missing");
-        assert_eq!(store_problem(&missing), None);
+        assert_eq!(problem_in(&missing), None);
         assert!(!missing.exists(), "status creates no state directory");
         let mut store = FileStore::open(dir.path()).unwrap();
-        assert_eq!(store_problem(dir.path()), None, "a new store");
+        assert_eq!(problem_in(dir.path()), None, "a new store");
         store
             .put(&discoverable("example.com", 1, "alice", CoseAlg::ES256))
             .unwrap();
-        assert_eq!(store_problem(dir.path()), None, "a legacy store");
+        assert_eq!(problem_in(dir.path()), None, "a legacy store");
         drop(store);
         {
             let (_daemon, mut key) = start(&dir);
@@ -1331,7 +1371,7 @@ esac
             passkeys_status(&key.info().unwrap()),
             "Passkeys: room for 998 more"
         );
-        assert_eq!(store_problem(dir.path()), None, "an upgraded store");
+        assert_eq!(problem_in(dir.path()), None, "an upgraded store");
         assert_eq!(start_up_lines(&dir), []);
     }
 
@@ -1339,7 +1379,10 @@ esac
     /// key logs it when it starts: the same files, what fails, and what to
     /// do; the key starts all the same.  Where the report says passkeys
     /// cannot be listed, `pqkey passkeys` cannot list them, and where the key
-    /// cannot count its passkeys, the passkeys line says so.
+    /// cannot count its passkeys, the passkeys line says so.  A damaged PIN
+    /// state or large-blob array is moved out of the state directory rather
+    /// than repaired, and the PIN state's fix sets a new PIN; where it blocks
+    /// the PIN, the PIN line says so, and names no reset.
     #[test]
     fn status_and_start_up_report_each_kind_of_damage_alike() {
         crate::test_support::logs::install();
@@ -1358,29 +1401,46 @@ esac
             "managed directory",
             "legacy directory",
             "counter",
+            "pin state",
+            "large blobs",
             "short key",
         ] {
             let dir = TempDir::new("status-damage");
             let legacy = matches!(kind, "legacy record" | "legacy directory");
             let files = store_with_passkeys(dir.path(), !legacy);
             let (named, fails) = damage(dir.path(), kind, &files);
-            let problem = store_problem(dir.path()).unwrap_or_else(|| panic!("{kind}: no problem"));
+            let problem = problem_in(dir.path()).unwrap_or_else(|| panic!("{kind}: no problem"));
             let state = match fails {
                 Fails::Unchecked => "cannot be checked",
                 _ => "is damaged",
             };
-            assert_problem(
-                &problem,
-                &["credential store", state, &named],
-                &[
-                    "`pqkey stop`",
-                    &format!("a copy of {}", dir.path().display()),
-                    "`pqkey repair`",
-                    "`pqkey start`",
-                    "`pqkey reset`",
-                    "last resort",
+            let shown = dir.path().display();
+            let fix = match fails {
+                Fails::PinState => vec![
+                    "`pqkey stop`".to_owned(),
+                    format!("move pin-state out of {shown}"),
+                    "`pqkey start`".to_owned(),
+                    "`pqkey pin`".to_owned(),
+                    "`pqkey config`".to_owned(),
+                    "`pqkey reset`".to_owned(),
+                    "last resort".to_owned(),
                 ],
-            );
+                Fails::LargeBlobs => vec![
+                    "`pqkey stop`".to_owned(),
+                    format!("move large-blobs out of {shown}"),
+                    "`pqkey start`".to_owned(),
+                ],
+                _ => vec![
+                    "`pqkey stop`".to_owned(),
+                    format!("a copy of {shown}"),
+                    "`pqkey repair`".to_owned(),
+                    "`pqkey start`".to_owned(),
+                    "`pqkey reset`".to_owned(),
+                    "last resort".to_owned(),
+                ],
+            };
+            let fix: Vec<&str> = fix.iter().map(String::as_str).collect();
+            assert_problem(&problem, &["credential store", state, &named], &fix);
 
             let (_daemon, mut key) = start(&dir);
             let level = match fails {
@@ -1417,7 +1477,7 @@ esac
                     key.set_pin(b"1234").unwrap();
                     let token = key.management_token(b"1234").unwrap();
                     assert_eq!(key.passkeys(&token).unwrap(), []);
-                    assert_eq!(store_problem(dir.path()), None, "{kind}");
+                    assert_eq!(problem_in(dir.path()), None, "{kind}");
                 }
                 Fails::Counter => {
                     assert_eq!(counted, "Passkeys: room for 997 more", "{kind}");
@@ -1430,6 +1490,29 @@ esac
                             "did not store",
                         ],
                     );
+                }
+                Fails::PinState => {
+                    assert_eq!(counted, "Passkeys: room for 997 more", "{kind}");
+                    assert!(matches!(
+                        key.management_token(b"1234"),
+                        Err(ClientError::Status(CTAP2_ERR_PIN_BLOCKED))
+                    ));
+                    let damage = FileStore::inspect_in(dir.path()).unwrap();
+                    let line = pin_state(key.pin_retries().unwrap(), &damage);
+                    assert_names(
+                        &line,
+                        &[
+                            "blocked",
+                            "pin-state is damaged",
+                            "set a new PIN",
+                            "fix below",
+                        ],
+                    );
+                    assert!(!line.contains("reset"), "{line}");
+                }
+                Fails::LargeBlobs => {
+                    assert_eq!(counted, "Passkeys: room for 997 more", "{kind}");
+                    assert!(!problem.fix.contains("reset"), "{problem:?}");
                 }
                 Fails::Unchecked => {
                     assert_eq!(counted, "Passkeys: cannot be counted", "{kind}");
@@ -1449,7 +1532,7 @@ esac
         store_with_passkeys(dir.path(), false);
         let (daemon, mut key) = start(&dir);
         std::fs::remove_dir_all(dir.path().join("credentials")).unwrap();
-        let problem = store_problem(dir.path()).expect("a lost directory is a problem");
+        let problem = problem_in(dir.path()).expect("a lost directory is a problem");
         assert_names(
             &problem.what,
             &["credential store", "is damaged", "(credentials is missing)"],
@@ -1468,6 +1551,6 @@ esac
                 format!("{}. S{}", problem.what, &problem.fix[1..])
             )]
         );
-        assert_eq!(store_problem(dir.path()), None);
+        assert_eq!(problem_in(dir.path()), None);
     }
 }

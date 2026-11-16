@@ -60,11 +60,54 @@ pub fn assert_names(text: &str, words: &[&str]) {
 }
 
 /// Asserts that `problem`'s cause names `cause` and its fix names `fix`,
-/// each in order ([`assert_names`]).
+/// each in order ([`assert_names`]), and that `fix` lists every command the
+/// fix names, in order: a fix writes each in backticks.
 #[track_caller]
 pub fn assert_problem(problem: &crate::cli::checks::Problem, cause: &[&str], fix: &[&str]) {
     assert_names(&problem.what, cause);
     assert_names(&problem.fix, fix);
+    let listed: Vec<&str> = fix.iter().flat_map(|words| commands(words)).collect();
+    assert_eq!(
+        commands(&problem.fix),
+        listed,
+        "the fix names a command the test did not list: {}",
+        problem.fix
+    );
+}
+
+/// The commands `text` names: what it puts in backticks.
+fn commands(text: &str) -> Vec<&str> {
+    text.split('`').skip(1).step_by(2).collect()
+}
+
+/// A problem whose fix names two commands, for the tests of [`assert_problem`].
+fn stopped_key() -> crate::cli::checks::Problem {
+    crate::cli::checks::Problem::new(
+        "the key is stopped",
+        "run `pqkey start`; if that fails, `pqkey reset`",
+    )
+}
+
+/// A fix whose every command the test lists passes.
+#[test]
+fn a_fix_with_every_command_listed_passes() {
+    assert_problem(
+        &stopped_key(),
+        &["stopped"],
+        &["`pqkey start`", "`pqkey reset`"],
+    );
+}
+
+/// A fix that names a command the test did not list fails it, as a stray
+/// `pqkey reset` would, though it names every word listed.
+#[test]
+#[should_panic(expected = "the fix names a command the test did not list")]
+fn a_fix_with_a_command_the_test_did_not_list_fails() {
+    assert_problem(
+        &stopped_key(),
+        &["stopped"],
+        &["`pqkey start`", "if that fails"],
+    );
 }
 
 /// The problem whose cause names `word` among those that `output` lists as

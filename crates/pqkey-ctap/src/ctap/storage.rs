@@ -5,8 +5,8 @@
 //! fails the command with CTAP2_ERR_PROCESSING (CTAP2_ERR_KEY_STORE_FULL for
 //! a full store), and corrupt individual credentials are skipped by
 //! [`CredentialStore::list`] itself.  An error that reports damage to the
-//! credential set is logged with the damaged file, what fails and what to do
-//! ([`StoreError::damage_hint`]).
+//! store, a corrupt PIN state included, is logged with the damaged file, what
+//! fails and what to do ([`StoreError::damage_hint`]).
 //! A corrupt large-blob array instead uses its initial value (§6.10.2).
 
 use super::CtapApp;
@@ -75,7 +75,9 @@ pub(super) enum StoredPinState {
 /// always-UV conservatively remains required.  Nothing is written back over
 /// the stored record.  After an I/O error the state is only
 /// [`StoredPinState::Unread`]: the commands that depend on it read it again
-/// first.  After any other error only reset recovers.
+/// first.  After any other error it stays closed until a reset, or until the
+/// engine starts on a record it can read, or none, as once a corrupt one is
+/// moved aside.
 pub(super) fn load_pin_state(
     store: &dyn CredentialStore,
     rng: &mut dyn Rng,
@@ -88,8 +90,9 @@ pub(super) fn load_pin_state(
         Ok(None) => (PinState::new(), StoredPinState::Read),
         Err(err) if closes_authority(&err) => {
             log::error!(
-                "the stored PIN state cannot be read ({err}); treating the PIN as set and \
-                 blocked until the authenticator is reset"
+                "treating the PIN as set and blocked, since the stored PIN state cannot be read: \
+                 {}",
+                explained(&err)
             );
             (unreadable_pin_state(rng), StoredPinState::Unreadable)
         }

@@ -343,8 +343,10 @@ than getKeyAgreement, makeCredential, getAssertion, or U2F registration or
 authentication reads it first, failing with CTAP2_ERR_PROCESSING (U2F:
 SW_INTERNAL_ERROR) while it cannot.
 Unreadable state closes grants and blocks further PIN writes until explicit
-reset recovers: a record that fails authentication or decoding, a root key
-that is unusable or missing, or no record although a PIN or grant exists.
+reset recovers, or a restart reads the record or finds none: a record that
+fails authentication or decoding, a root key that is unusable or missing, or
+no record although a PIN or grant exists. A corrupt `pin-state` moved out of
+the state directory leaves the key with no PIN and its passkeys.
 
 The native client offers explicit protocol-specific read-only token acquisition.
 Listing selects pcmr from advertised capabilities and otherwise uses cm;
@@ -420,13 +422,17 @@ fail logs the file, what fails and what to do; listing logs a missing member
 as it logs a corrupt one, and a lookup of one finds nothing and logs nothing.
 The daemon at start-up and `pqkey status` report damage from a read-only
 inspection, which looks again before reporting, so that a concurrent commit's
-cleanup is not taken for damage. It names an unreadable or corrupt shared
-signature counter first, since every sign-in with a sealed credential then
-fails; the engine logs a corrupt one as it logs damage to the set. A store
-with neither namespace reports its missing `credentials/`, and also
-`credential-set/` if its format marker shows the managed layout. Opening a
-legacy store creates a missing `credentials/` again, empty, and logs the loss
-when the credential key shows that the directory existed.
+cleanup is not taken for damage. It names first a PIN state or large-blob
+array that fails authentication or decoding, as the engine reads them: the
+PIN is then blocked and required, and the initial array is served. Repair
+leaves both alone: the fix `pqkey status` gives moves them out of the state
+directory, with a new PIN for the first. Next it names an unreadable or
+corrupt shared signature counter, since every sign-in with a sealed
+credential then fails. The engine logs each of these as it logs damage to
+the set. A store with neither namespace reports its missing `credentials/`,
+and also `credential-set/` if its format marker shows the managed layout.
+Opening a legacy store creates a missing `credentials/` again, empty, and
+logs the loss when the credential key shows that the directory existed.
 
 `pqkey repair` repairs such damage with the key stopped, refusing while the
 daemon holds the state lock. It plans without changing anything, takes the

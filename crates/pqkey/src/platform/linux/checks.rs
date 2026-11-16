@@ -817,8 +817,8 @@ mod tests {
     fn the_keys_own_bus_is_checked_and_named_with_its_fix() {
         const KEY: &str = "unix:path=/run/user/1000/bus";
         const IMPORT: [&str; 2] = [
-            "systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS",
-            "pqkey stop && pqkey start",
+            "`systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS`",
+            "`pqkey stop && pqkey start`",
         ];
         let server = |actions: bool| {
             Ok(ServerInfo {

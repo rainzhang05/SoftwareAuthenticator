@@ -1137,7 +1137,7 @@ printf '%s\n' "$UNIT_SHOWN"
     }
 
     /// The commands of [`FAILED_FIX`].
-    const LOG_AND_START: [&str; 2] = ["journalctl --user -u pqkey", "pqkey start"];
+    const LOG_AND_START: [&str; 2] = ["`journalctl --user -u pqkey`", "`pqkey start`"];
 
     /// A unit that failed is named with how, where the cause is logged and
     /// `pqkey start`, which resets the failed state, for every result: a key
@@ -1201,7 +1201,7 @@ printf '%s\n' "$UNIT_SHOWN"
     #[test]
     fn status_names_a_service_that_is_not_enabled_with_setup() {
         let not_enabled = ["pqkey.service", "not enabled", "does not start"];
-        let setup = ["pqkey setup", LINGERING];
+        let setup = ["`pqkey setup`", LINGERING];
         for file in ["disabled", "linked", "linked-runtime"] {
             let unit = shown("loaded", file, "inactive", "dead", "success", "0");
             for running in [false, true] {
@@ -1238,7 +1238,11 @@ printf '%s\n' "$UNIT_SHOWN"
                 assert_problem(
                     &problem_of(Some(&unit), running),
                     &["pqkey.service", "masked", "does not start"],
-                    &["systemctl --user unmask pqkey", "pqkey setup", LINGERING],
+                    &[
+                        "`systemctl --user unmask pqkey`",
+                        "`pqkey setup`",
+                        LINGERING,
+                    ],
                 );
             }
         }
@@ -1256,7 +1260,7 @@ printf '%s\n' "$UNIT_SHOWN"
                 assert_problem(
                     &problem_of(unit, running),
                     &["does not start", "your session"],
-                    &["pqkey setup"],
+                    &["`pqkey setup`"],
                 );
             }
         }

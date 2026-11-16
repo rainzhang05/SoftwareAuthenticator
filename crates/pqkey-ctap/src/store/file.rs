@@ -31,10 +31,10 @@ pub use repair::{Account, Membership, RepairPlan, Repaired};
 /// The legacy layout's credential directory.
 pub(super) const CREDENTIALS_DIR: &str = "credentials";
 const KEYS_DIR: &str = "keys";
-const PIN_STATE_FILE: &str = "pin-state";
+pub(super) const PIN_STATE_FILE: &str = "pin-state";
 /// The shared signature counter of the credentials sealed into their IDs.
 pub(super) const SIGNATURE_COUNTER_FILE: &str = "signature-counter";
-const LARGE_BLOBS_FILE: &str = "large-blobs";
+pub(super) const LARGE_BLOBS_FILE: &str = "large-blobs";
 const ATTESTATION_FILE: &str = "attestation";
 /// How often [`FileStore::inspect`] looks, at most, for damage that two
 /// looks in a row agree on.
@@ -427,17 +427,17 @@ impl<K: KeySource> FileStore<K> {
         &self.keys
     }
 
-    /// What is damaged in the credential set and the signature counter,
-    /// found without changing anything.  First the shared signature counter,
-    /// if it cannot be read or fails authentication or decoding: every
-    /// sign-in with a credential sealed into its ID counts on it.  Then the
-    /// membership metadata, or the directory of either layout, if operations
-    /// cannot use it, or else every member whose record is missing or fails
-    /// authentication or decoding, and in a legacy store every record that
-    /// fails them.  Unusable metadata, or a directory operations cannot use,
-    /// hides every stored credential; damage to a record fails every
-    /// registration of a passkey.  Empty if every credential can be used, as
-    /// in a store that has no credential key yet.
+    /// What is damaged in the store, found without changing anything.  First
+    /// the PIN state and the large-blob array, if they fail authentication or
+    /// decoding as the engine reads them (`damage::pin_state_and_large_blobs`).
+    /// Then the shared signature counter, if it cannot be read or fails
+    /// authentication or decoding: every sign-in with a credential sealed into
+    /// its ID counts on it.  Then the membership metadata, or the directory of
+    /// either layout, if operations cannot use it, or else every member whose
+    /// record is missing or fails authentication or decoding, and in a legacy
+    /// store every record that fails them, which hide every stored credential
+    /// or fail every registration of a passkey.  Empty if all of it can be
+    /// used, as in a store that has no credential key yet.
     ///
     /// Another process can commit while this looks: retire a member, and
     /// remove its file, between the reads of the manifest and the member, or
@@ -448,8 +448,8 @@ impl<K: KeySource> FileStore<K> {
     ///
     /// A failure to look, such as a credential key that is missing or
     /// unusable, or a record that cannot be read, is an error too, once two
-    /// looks in a row fail.  Each look decrypts every credential outside any
-    /// engine request, so it scrubs the stack it used, as requests do.
+    /// looks in a row fail.  Each look decrypts every credential and the PIN
+    /// state outside any engine request, so it scrubs the stack it used.
     pub fn inspect(&self) -> Result<Vec<Damage>, StoreError> {
         fn healthy(found: &Result<Vec<Damage>, StoreError>) -> bool {
             matches!(found, Ok(damage) if damage.is_empty())
@@ -485,7 +485,7 @@ impl<K: KeySource> FileStore<K> {
         let Some(keys) = self.credential_keys()? else {
             return Ok(Vec::new());
         };
-        let mut damage = Vec::new();
+        let mut damage = super::damage::pin_state_and_large_blobs(self);
         if let Err(err) = self.counter(&keys) {
             damage.push(Damage::unreadable(SIGNATURE_COUNTER_FILE, err));
         }

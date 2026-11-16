@@ -53,8 +53,9 @@
 //!
 //! For the store's inspection, which `pqkey status` and the daemon's start-up
 //! run outside any engine request, it stores a passkey with a known P-256
-//! scalar and CredRandom, inspects, and scans for both; and the same for
-//! `pqkey repair`'s planning and repair of a damaged manifest.
+//! scalar and CredRandom, and a PIN state with a known PIN hash, inspects,
+//! and scans for all three; and for the first two after `pqkey repair`'s
+//! planning and repair of a damaged manifest.
 //!
 //! It does not look for a newly generated private key: a key returned by
 //! value can leave copies in the frames it passes through on its way to the
@@ -85,7 +86,7 @@ use p256::elliptic_curve::sec1::ToSec1Point;
 use pqkey_ctap::{
     CoseAlg,
     ctap::{CtapApp, InterruptFlag, presence::AutoApprove},
-    store::{CredentialRecord, CredentialStore, FileStore},
+    store::{CredentialRecord, CredentialStore, FileStore, PinStateRecord},
     try_cose_public_key, try_credential_secret_from_bytes, try_sign_challenge,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -925,16 +926,20 @@ fn check_persistent_authority() {
 
 /// The store's inspection, which `pqkey status` and the daemon's start-up
 /// run outside any engine request, decrypts every credential as a listing
-/// does, so it scrubs the stack itself.  Neither a passkey's P-256 scalar nor
-/// its CredRandom, both stored by the test, may be left in the stack, as
-/// given or reversed, after inspecting a healthy store, or one with a
-/// damaged record, where the inspection looks twice, through the open store
-/// and from the state directory alone.
+/// does, and the PIN state, so it scrubs the stack itself.  Neither a
+/// passkey's P-256 scalar nor its CredRandom, nor the PIN hash, which can
+/// authenticate as the user, all stored by the test, may be left in the
+/// stack, as given or reversed, after inspecting a healthy store, or one
+/// with a damaged record, where the inspection looks twice, through the open
+/// store and from the state directory alone.
 fn check_inspection() {
     let dir = std::env::temp_dir().join(format!("pqkey-inspection-stack-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let scalar: [u8; 32] = Sha256::digest(b"an inspected passkey's P-256 scalar").into();
     let cred_random: [u8; 32] = Sha256::digest(b"an inspected passkey's CredRandom").into();
+    let pin_hash: [u8; 16] = Sha256::digest(b"an inspected PIN")[..16]
+        .try_into()
+        .unwrap();
     let passkey = |user: u8, scalar: [u8; 32]| CredentialRecord {
         credential_id: [vec![1], vec![user; 32]].concat(),
         rp_id: "inspection.example".into(),
@@ -956,15 +961,21 @@ fn check_inspection() {
     store
         .insert_or_replace_discoverable(&passkey(1, scalar))
         .expect("a passkey");
-    let needles: Vec<(&str, Vec<u8>)> = [("scalar", scalar), ("CredRandom", cred_random)]
-        .into_iter()
-        .flat_map(|(name, bytes)| {
-            [
-                (name, bytes.to_vec()),
-                (name, bytes.iter().rev().copied().collect()),
-            ]
-        })
-        .collect();
+    let mut pin = PinStateRecord::default();
+    pin.pin_hash = Some(pin_hash);
+    store.set_pin_state(&pin).expect("a PIN state");
+    drop(pin);
+    let needles: Vec<(&str, Vec<u8>)> = [
+        ("scalar", scalar.to_vec()),
+        ("CredRandom", cred_random.to_vec()),
+        ("PIN hash", pin_hash.to_vec()),
+    ]
+    .into_iter()
+    .flat_map(|(name, bytes)| {
+        let reversed = bytes.iter().rev().copied().collect();
+        [(name, bytes), (name, reversed)]
+    })
+    .collect();
     let records = dir.join("credential-set").join("records");
     for damaged in [false, true] {
         let mut expected = Vec::new();
@@ -1017,7 +1028,7 @@ fn check_inspection() {
     }
     std::fs::remove_dir_all(dir).unwrap();
     println!(
-        "inspection: no stored scalar or CredRandom left in the stack, healthy or damaged, through an open store or the state directory"
+        "inspection: no stored scalar, CredRandom or PIN hash left in the stack, healthy or damaged, through an open store or the state directory"
     );
 }
 

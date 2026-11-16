@@ -372,9 +372,9 @@ fn pin_error_message(err: &ClientError, retries: Option<PinRetries>) -> io::Erro
             PermissionDenied,
             format!(
                 "the PIN is blocked: it was entered wrongly too often, or the key could not read \
-                 or write its PIN state. Restart the key ({REPLUG}) and try again; if the PIN is \
-                 still blocked, only a reset makes the key usable again (`pqkey reset`), and it \
-                 erases every passkey and large blob on it"
+                 or write its PIN state. Restart the key ({REPLUG}) and try again. If it is still \
+                 blocked, run `pqkey status`: if it names a damaged PIN state, its fix keeps your \
+                 passkeys; if not, only `pqkey reset` helps, erasing every passkey and large blob"
             ),
         ),
         CTAP2_ERR_PIN_POLICY_VIOLATION => (
@@ -1235,7 +1235,7 @@ mod tests {
             let (_daemon, mut key) = start(&dir);
             key.set_pin(b"1234").unwrap();
             block_pin_until_restart(&dir, &mut key);
-            let line = pin_state(key.pin_retries().unwrap());
+            let line = pin_state(key.pin_retries().unwrap(), &[]);
             assert!(at(&line, REPLUG) < at(&line, "`pqkey reset`"), "{line}");
             assert!(line.contains("erases every passkey"), "{line}");
             // No PIN is asked for: the script is empty.
@@ -1249,12 +1249,71 @@ mod tests {
                     at(&message, REPLUG) < at(&message, "`pqkey reset`"),
                     "{message}"
                 );
-                assert!(message.contains("erases every passkey"), "{message}");
+                assert!(message.contains("erasing every passkey"), "{message}");
             }
         }
         let (_daemon, mut key) = start(&dir);
         assert_eq!(retries(&mut key), 8);
         assert!(management_token(&mut key, &mut Script::of(&["1234"])).is_ok());
+    }
+
+    /// A PIN blocked by a damaged PIN state, which a restart does not
+    /// unblock: `status`, which inspects the store, names the file on the PIN
+    /// line and names no reset; the PIN commands, which cannot tell it from a
+    /// PIN entered wrongly too often, send to `pqkey status` before they name
+    /// a reset.  Moved out of the state directory, as the fix says, it leaves
+    /// a key without a PIN, which takes a new one and keeps its passkeys.
+    #[test]
+    fn a_damaged_pin_state_is_moved_out_before_any_reset() {
+        let dir = TempDir::new("cli-damaged-pin-state");
+        FileStore::open(dir.path())
+            .unwrap()
+            .put(&discoverable("example.com", 1, "alice", CoseAlg::ES256))
+            .unwrap();
+        {
+            let (_daemon, mut key) = start(&dir);
+            key.set_pin(b"1234").unwrap();
+        }
+        let path = dir.path().join("pin-state");
+        let mut contents = std::fs::read(&path).unwrap();
+        *contents.last_mut().unwrap() ^= 1;
+        std::fs::write(&path, contents).unwrap();
+        {
+            let (_daemon, mut key) = start(&dir);
+            let damage = FileStore::inspect_in(dir.path()).unwrap();
+            let line = pin_state(key.pin_retries().unwrap(), &damage);
+            assert!(
+                line.starts_with("blocked, because pin-state is damaged"),
+                "{line}"
+            );
+            assert!(!line.contains("reset"), "{line}");
+            assert!(
+                at(&line, "set a new PIN") < at(&line, "every passkey"),
+                "{line}"
+            );
+            for err in [
+                management_token(&mut key, &mut Script::of(&[])).unwrap_err(),
+                set_or_change_pin(&mut key, &mut Script::of(&[])).unwrap_err(),
+            ] {
+                let message = err.to_string();
+                assert!(message.starts_with("the PIN is blocked"), "{message}");
+                assert!(
+                    at(&message, "`pqkey status`") < at(&message, "`pqkey reset`"),
+                    "{message}"
+                );
+                assert!(
+                    at(&message, "damaged PIN state") < at(&message, "`pqkey reset`"),
+                    "{message}"
+                );
+            }
+        }
+        let aside = TempDir::new("cli-damaged-pin-state-aside");
+        std::fs::rename(&path, aside.path().join("pin-state")).unwrap();
+        let (_daemon, mut key) = start(&dir);
+        assert_eq!(key.info().unwrap().pin_set, Some(false));
+        set_or_change_pin(&mut key, &mut Script::of(&["5678"])).unwrap();
+        let token = management_token(&mut key, &mut Script::of(&["5678"])).unwrap();
+        assert_eq!(key.passkeys(&token).unwrap().len(), 1);
     }
 
     /// A PIN check that fails because the key cannot read its PIN state says
@@ -1861,20 +1920,26 @@ mod tests {
             assert!(message.contains(says), "{code:#x}: {message}");
         }
         assert_eq!(
-            pin_state(PinRetries {
-                retries: 8,
-                power_cycle_needed: false
-            }),
+            pin_state(
+                PinRetries {
+                    retries: 8,
+                    power_cycle_needed: false
+                },
+                &[]
+            ),
             "set (8 retries left)"
         );
 
         // A blocked PIN: restart the key and look again, and only then reset
         // it, which erases the passkeys.
         let blocked = status(CTAP2_ERR_PIN_BLOCKED);
-        let line = pin_state(PinRetries {
-            retries: 0,
-            power_cycle_needed: false,
-        });
+        let line = pin_state(
+            PinRetries {
+                retries: 0,
+                power_cycle_needed: false,
+            },
+            &[],
+        );
         assert!(line.starts_with("blocked; "), "{line}");
         assert!(
             at(&line, REPLUG) < at(&line, "`pqkey status` again"),
@@ -1891,11 +1956,14 @@ mod tests {
                 at(advice, "still blocked") < at(advice, "`pqkey reset`"),
                 "{advice}"
             );
-            assert!(
-                advice.contains("erases every passkey and large blob"),
-                "{advice}"
-            );
+            assert!(advice.contains("every passkey and large blob"), "{advice}");
         }
+        // The PIN commands cannot tell a damaged PIN state, which a restart
+        // does not clear, so they send to `pqkey status`, which can, first.
+        assert!(
+            at(&blocked, "`pqkey status`") < at(&blocked, "`pqkey reset`"),
+            "{blocked}"
+        );
 
         // A key that could not read or write its state names the log, for
         // every command but setPIN, which says more.

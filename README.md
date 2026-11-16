@@ -188,15 +188,16 @@ that fails to show a prompt. The key logs why it denied each request it could
 not ask about: `journalctl --user -u pqkey`, or `authenticator.log` in the
 state directory for a key that `pqkey start` ran without the service.
 
-If the PIN looks blocked, or the key says it could not read or write its
-state, restart it with `pqkey stop && pqkey start` and run `pqkey status`
-again before you reset it: a restart reads the PIN state again, which clears
-a block that came from a disk or permission error, while `pqkey reset` erases
-every passkey. `journalctl --user -u pqkey` says what the key could not read
-or write, and `pqkey reset` asks again if its own restart unblocks the PIN.
+If the PIN looks blocked, or the key could not read or write its state,
+restart it with `pqkey stop && pqkey start` and run `pqkey status` again
+before resetting it, which erases every passkey: a restart clears a block
+from a disk or permission error, and `pqkey status` names a damaged
+`pin-state`, whose fix keeps your passkeys. `journalctl --user -u pqkey`
+says what the key could not read or write, and `pqkey reset` asks again if
+its own restart unblocks the PIN.
 
 **Damaged credential store.** `pqkey status` and the key's journal name the
-damaged files and what the key cannot do because of them. To repair the store:
+damaged files and what the key cannot do. To repair the store:
 
 1. Stop the key with `pqkey stop`, and keep a copy of the whole state
    directory, `keys/` included: `cp -a ~/.local/share/pqkey ~/pqkey-copy`.
@@ -204,18 +205,18 @@ damaged files and what the key cannot do because of them. To repair the store:
    signature counter from it. Run `pqkey repair`: it shows what it will do
    and asks first, or, if it stops before that, says what to do.
 3. Start the key again with `pqkey start`. Once it works, delete the copy:
-   it holds the keys, so it would keep your passkeys readable even after a
-   later reset.
+   it holds the keys, so it keeps your passkeys readable even after a reset.
 
 Repair keeps the PIN, the keys and every passkey whose record is intact
 ([its rules](docs/architecture.md#credential-store)), and moves what it
-replaces or removes into `damaged/` in the state directory. The key never
-uses that; its records stay readable with the keys in `keys/` until a reset,
-and you may delete it once the key works. Apart from what repair asks, never
-edit, delete or replace the store's files by hand: an older
-`credential-set/active` hides the passkeys registered since, and the next
-change deletes their records; a deleted `signature-counter` counts again
-from 0. `pqkey reset` erases every passkey, so use it only as a last resort.
+replaces or removes into `damaged/` in the state directory, which the key
+never uses; its records stay readable until a reset, and you may delete it
+once the key works. It leaves a damaged `pin-state` or `large-blobs` alone:
+move it aside as `pqkey status` says. Otherwise never edit, delete or
+replace the store's files by hand: an older `credential-set/active` hides
+the passkeys registered since, and the next change deletes their records; a
+deleted `signature-counter` counts again from 0. `pqkey reset` erases every
+passkey, so use it only as a last resort.
 
 ## Uninstall
 

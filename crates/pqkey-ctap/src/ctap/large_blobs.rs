@@ -5,7 +5,7 @@ use super::cbor;
 use super::get_info::MAX_MSG_SIZE;
 use super::pin::permissions::PIN_PERMISSION_LBW;
 use super::pin::protocol::parse_required_pin_uv_auth_protocol;
-use super::storage::store_status;
+use super::storage::{explained, store_status};
 use crate::store::{INITIAL_LARGE_BLOB_ARRAY, MAX_SERIALIZED_LARGE_BLOB_ARRAY, StoreError};
 
 use ciborium::{ser::into_writer, value::Value};
@@ -94,7 +94,7 @@ impl CtapApp<'_> {
                 // §6.10.2 lets an invalid stored array be reset to the initial
                 // one.  It is served instead, until a committed write replaces it.
                 Err(err @ StoreError::Corrupt { .. }) => {
-                    log::warn!("cannot read the large-blob array ({err}); using the initial array");
+                    log::warn!("using the initial large-blob array: {}", explained(&err));
                     INITIAL_LARGE_BLOB_ARRAY.to_vec()
                 }
                 // A failed read says nothing about the array.  Served the initial

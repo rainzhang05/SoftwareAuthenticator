@@ -154,9 +154,13 @@ fn is_record(path: &Path) -> bool {
         })
 }
 
+/// What `pqkey repair` says when it finds nothing to repair, where `pqkey
+/// status` can still find a damaged PIN state or large-blob array.
 fn nothing_to_repair(state_dir: &Path) -> io::Result<()> {
     outln!(
-        "Found nothing to repair in the credential store in {}; it was not changed.",
+        "Found nothing to repair in the credential store in {}; it was not changed. Repair \
+         leaves pin-state and large-blobs alone: `pqkey status` says what to do if either is \
+         damaged.",
         state_dir.display()
     )
 }

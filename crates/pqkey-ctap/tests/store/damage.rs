@@ -11,7 +11,8 @@
 //! record is intact works again; and what the README's "Damaged credential
 //! store" says of copies, hand edits and reset holds.  A damaged signature
 //! counter is named, fails what it is said to, and is repaired the same way,
-//! without a count going back.
+//! without a count going back.  The PIN state and the large-blob array, which
+//! repair leaves alone, have tests of their own (`pin_state_and_large_blobs`).
 
 #![expect(
     clippy::disallowed_methods,
@@ -35,6 +36,8 @@ use pqkey_ctap::store::{
 };
 
 use crate::common::{TempDir, ids, logs, new_record, random_bytes};
+
+mod pin_state_and_large_blobs;
 
 static INTERRUPT: InterruptFlag = InterruptFlag::new();
 
