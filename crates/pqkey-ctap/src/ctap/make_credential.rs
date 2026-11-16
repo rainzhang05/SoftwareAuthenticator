@@ -2,7 +2,7 @@
 
 use super::cbor::{self, canonical_map, canonical_sort};
 use super::credential_id::is_discoverable;
-use super::hmac_secret::parse_hmac_secret_request;
+use super::hmac_secret::{HmacSecretRequest, parse_hmac_secret_request};
 use super::pin::permissions::PIN_PERMISSION_MC;
 use super::pin::protocol::parse_pin_uv_auth_param;
 use super::presence::{PresenceOperation, PresenceRequest};
@@ -12,7 +12,7 @@ use super::{AttestationMode, CtapApp};
 use crate::CoseAlg;
 use crate::cbor::{SecretValue, encoded_len_bound};
 use crate::store::{AttestationRecord, CredentialRecord, MAX_CRED_BLOB_LENGTH};
-use crate::try_sign_challenge;
+use crate::{CredentialSecretKey, try_sign_challenge};
 use zeroize::{Zeroize, Zeroizing};
 
 use ciborium::{
@@ -41,6 +41,158 @@ impl Attestation {
             Attestation::SelfSigned => "self",
             Attestation::None => "no",
         }
+    }
+
+    /// The attestation statement format and statement of this kind for
+    /// `auth_data` and `client_hash`.  Self attestation signs with the
+    /// credential key `secret_key`, of algorithm `alg`.
+    fn statement(
+        &self,
+        alg: CoseAlg,
+        secret_key: &CredentialSecretKey,
+        auth_data: &[u8],
+        client_hash: &[u8],
+    ) -> Result<(&'static str, Value), u8> {
+        Ok(match self {
+            // Packed attestation with the attestation key and certificate
+            // chain (WebAuthn §8.2).
+            Attestation::Basic(attestation) => {
+                let signing_key = attestation.signing_key().map_err(|err| {
+                    log::error!("the attestation key is unusable: {err}");
+                    CTAP2_ERR_PROCESSING
+                })?;
+                let signature =
+                    try_sign_challenge(CoseAlg::ES256, &signing_key, auth_data, client_hash)
+                        .map_err(|err| {
+                            log::error!("the attestation signature failed: {err}");
+                            CTAP2_ERR_PROCESSING
+                        })?;
+                let statement = canonical_map(vec![
+                    (
+                        Value::Text("alg".into()),
+                        Value::Integer(Integer::from(CoseAlg::ES256.identifier())),
+                    ),
+                    (Value::Text("sig".into()), Value::Bytes(signature)),
+                    (
+                        Value::Text("x5c".into()),
+                        Value::Array(
+                            attestation
+                                .certificate_chain
+                                .iter()
+                                .cloned()
+                                .map(Value::Bytes)
+                                .collect(),
+                        ),
+                    ),
+                ]);
+                ("packed", statement)
+            }
+            // Self attestation with the credential key.
+            Attestation::SelfSigned => {
+                let signature = try_sign_challenge(alg, secret_key, auth_data, client_hash)
+                    .map_err(|err| {
+                        log::error!("self attestation with {alg:?} failed: {err}");
+                        CTAP2_ERR_PROCESSING
+                    })?;
+                let statement = canonical_map(vec![
+                    (
+                        Value::Text("alg".into()),
+                        Value::Integer(Integer::from(alg.identifier())),
+                    ),
+                    (Value::Text("sig".into()), Value::Bytes(signature)),
+                ]);
+                ("packed", statement)
+            }
+            Attestation::None => ("none", Value::Map(Vec::new())),
+        })
+    }
+}
+
+/// The extension inputs of a makeCredential request (CTAP 2.3 §12).
+#[derive(Default)]
+struct ExtensionInputs<'a> {
+    min_pin_length_requested: bool,
+    pin_complexity_requested: bool,
+    hmac_secret_requested: bool,
+    third_party_payment_requested: bool,
+    hmac_secret_mc_request: Option<HmacSecretRequest>,
+    cred_blob_input: Option<&'a [u8]>,
+    large_blob_key_input: Option<&'a Value>,
+    cred_protect_requested: Option<u8>,
+}
+
+impl<'a> ExtensionInputs<'a> {
+    /// Parse the extensions parameter (0x06), checked after step 9 and
+    /// before steps 10 and 11.
+    fn parse(extensions: Option<&'a Value>) -> Result<Self, u8> {
+        let mut inputs = Self::default();
+        let mut hmac_secret_mc_input = None;
+
+        // A wrongly typed extensions map is CTAP2_ERR_CBOR_UNEXPECTED_TYPE
+        // (§8). The largeBlobKey input is checked at step 15 (§12.3).
+        if let Some(value) = extensions {
+            let Value::Map(extension_map) = value else {
+                return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+            };
+            for (key, value) in extension_map.iter() {
+                match key {
+                    Value::Text(text) if text == "thirdPartyPayment" => match value {
+                        Value::Bool(flag) => inputs.third_party_payment_requested = *flag,
+                        _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+                    },
+                    Value::Text(text) if text == "minPinLength" => match value {
+                        Value::Bool(flag) => inputs.min_pin_length_requested = *flag,
+                        _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+                    },
+                    Value::Text(text) if text == "pinComplexityPolicy" => match value {
+                        Value::Bool(flag) => inputs.pin_complexity_requested = *flag,
+                        _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+                    },
+                    Value::Text(text) if text == "hmac-secret" => match value {
+                        Value::Bool(flag) => {
+                            inputs.hmac_secret_requested = *flag;
+                        }
+                        _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+                    },
+                    Value::Text(text) if text == "hmac-secret-mc" => {
+                        hmac_secret_mc_input = Some(value);
+                    }
+                    Value::Text(text) if text == "credBlob" => {
+                        let Value::Bytes(blob) = value else {
+                            return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+                        };
+                        inputs.cred_blob_input = Some(blob.as_slice());
+                    }
+                    Value::Text(text) if text == "largeBlobKey" => {
+                        inputs.large_blob_key_input = Some(value);
+                    }
+                    Value::Text(text) if text == "credProtect" => {
+                        let policy_value = match value {
+                            Value::Integer(int) => u8::try_from(i128::from(*int))
+                                .map_err(|_| CTAP2_ERR_INVALID_OPTION)?,
+                            _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
+                        };
+                        match policy_value {
+                            1..=3 => inputs.cred_protect_requested = Some(policy_value),
+                            _ => return Err(CTAP2_ERR_INVALID_OPTION),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // CTAP 2.3 §12.8 requires hmac-secret true alongside hmac-secret-mc.
+        // A false companion also fails to supply that required input.
+        inputs.hmac_secret_mc_request = if let Some(input) = hmac_secret_mc_input {
+            if !inputs.hmac_secret_requested {
+                return Err(CTAP2_ERR_MISSING_PARAMETER);
+            }
+            Some(parse_hmac_secret_request(input)?)
+        } else {
+            None
+        };
+        Ok(inputs)
     }
 }
 
@@ -226,79 +378,7 @@ impl CtapApp<'_> {
             Some(_) => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
         };
 
-        let mut min_pin_length_requested = false;
-        let mut pin_complexity_requested = false;
-        let mut hmac_secret_requested = false;
-        let mut third_party_payment_requested = false;
-        let mut hmac_secret_mc_input = None;
-        let mut cred_blob_input = None;
-        let mut large_blob_key_input = None;
-        let mut cred_protect_requested: Option<u8> = None;
-
-        // A wrongly typed extensions map is CTAP2_ERR_CBOR_UNEXPECTED_TYPE
-        // (§8). The largeBlobKey input is checked at step 15 (§12.3).
-        if let Some(value) = parameter(6) {
-            let Value::Map(extension_map) = value else {
-                return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
-            };
-            for (key, value) in extension_map.iter() {
-                match key {
-                    Value::Text(text) if text == "thirdPartyPayment" => match value {
-                        Value::Bool(flag) => third_party_payment_requested = *flag,
-                        _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
-                    },
-                    Value::Text(text) if text == "minPinLength" => match value {
-                        Value::Bool(flag) => min_pin_length_requested = *flag,
-                        _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
-                    },
-                    Value::Text(text) if text == "pinComplexityPolicy" => match value {
-                        Value::Bool(flag) => pin_complexity_requested = *flag,
-                        _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
-                    },
-                    Value::Text(text) if text == "hmac-secret" => match value {
-                        Value::Bool(flag) => {
-                            hmac_secret_requested = *flag;
-                        }
-                        _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
-                    },
-                    Value::Text(text) if text == "hmac-secret-mc" => {
-                        hmac_secret_mc_input = Some(value);
-                    }
-                    Value::Text(text) if text == "credBlob" => {
-                        let Value::Bytes(blob) = value else {
-                            return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
-                        };
-                        cred_blob_input = Some(blob.as_slice());
-                    }
-                    Value::Text(text) if text == "largeBlobKey" => {
-                        large_blob_key_input = Some(value);
-                    }
-                    Value::Text(text) if text == "credProtect" => {
-                        let policy_value = match value {
-                            Value::Integer(int) => u8::try_from(i128::from(*int))
-                                .map_err(|_| CTAP2_ERR_INVALID_OPTION)?,
-                            _ => return Err(CTAP2_ERR_CBOR_UNEXPECTED_TYPE),
-                        };
-                        match policy_value {
-                            1..=3 => cred_protect_requested = Some(policy_value),
-                            _ => return Err(CTAP2_ERR_INVALID_OPTION),
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // CTAP 2.3 §12.8 requires hmac-secret true alongside hmac-secret-mc.
-        // A false companion also fails to supply that required input.
-        let hmac_secret_mc_request = if let Some(input) = hmac_secret_mc_input {
-            if !hmac_secret_requested {
-                return Err(CTAP2_ERR_MISSING_PARAMETER);
-            }
-            Some(parse_hmac_secret_request(input)?)
-        } else {
-            None
-        };
+        let extensions = ExtensionInputs::parse(parameter(6))?;
 
         // Steps 10 and 11.  Without a PIN the authenticator is not protected,
         // step 11 is skipped and a pinUvAuthParam is not verified: the "uv"
@@ -311,7 +391,6 @@ impl CtapApp<'_> {
             uv_bit = true;
         }
 
-        let cred_protect_value = cred_protect_requested.unwrap_or(1);
         let timeout = self.presence_timeout;
         let register_request = |timeout| PresenceRequest {
             rp_id: Some(&rp_id),
@@ -367,7 +446,7 @@ impl CtapApp<'_> {
         // Step 15: §12.3 requires true and an explicitly discoverable
         // credential. Extension processing follows authentication,
         // exclusion and user presence.
-        let large_blob_key_requested = match large_blob_key_input {
+        let large_blob_key_requested = match extensions.large_blob_key_input {
             Some(Value::Bool(true)) if rk => true,
             Some(_) => return Err(CTAP2_ERR_INVALID_OPTION),
             None => false,
@@ -395,17 +474,18 @@ impl CtapApp<'_> {
             cred_random_without_uv: [0; 32],
             cred_blob: None,
             large_blob_key: large_blob_key_requested.then(|| self.random_array()),
-            third_party_payment: third_party_payment_requested,
-            cred_protect: cred_protect_value,
+            third_party_payment: extensions.third_party_payment_requested,
+            cred_protect: extensions.cred_protect_requested.unwrap_or(1),
             sign_count: 0,
             created_at: 0,
         };
         // Payment metadata does not fit the existing sealed ID format (§12.9
         // requires support for non-discoverable credentials too).
-        let stored = rk || third_party_payment_requested || !alg.is_sealable();
+        let stored = rk || extensions.third_party_payment_requested || !alg.is_sealable();
         // CTAP 2.3 §12.2: sealed IDs cannot carry a blob; stored credentials
         // can keep an empty blob too. A refused blob does not fail creation.
-        record.cred_blob = cred_blob_input
+        record.cred_blob = extensions
+            .cred_blob_input
             .filter(|blob| stored && blob.len() <= MAX_CRED_BLOB_LENGTH)
             .map(<[u8]>::to_vec);
         if stored {
@@ -428,8 +508,42 @@ impl CtapApp<'_> {
             CTAP2_ERR_PROCESSING
         })?;
 
+        let extension_bytes = self.extension_outputs(&extensions, &record, uv_bit)?;
+
+        let auth_data = self.attested_auth_data(
+            &record,
+            &cose_key,
+            up_bit,
+            uv_bit,
+            extension_bytes.as_ref().map(|bytes| bytes.as_slice()),
+        );
+        // Step 19.
+        let mut response = self.encode_with_attestation(
+            &record,
+            &secret_key,
+            &auth_data,
+            &client_hash,
+            none_requested,
+        )?;
+        // Stored only once the response is complete, so a request that
+        // fails leaves no credential behind that the platform never
+        // learned about.
+        if stored {
+            self.store_new_credential(&record)?;
+        }
+        Ok(core::mem::take(&mut *response))
+    }
+
+    /// The extension outputs of the new credential `record`, encoded for its
+    /// authenticator data, or `None` if there are none.
+    fn extension_outputs(
+        &mut self,
+        extensions: &ExtensionInputs<'_>,
+        record: &CredentialRecord,
+        uv_bit: bool,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, u8> {
         let mut extension_entries = Vec::new();
-        if min_pin_length_requested
+        if extensions.min_pin_length_requested
             && self
                 .pin_state
                 .persistent()
@@ -441,7 +555,7 @@ impl CtapApp<'_> {
                 Value::Integer(Integer::from(self.pin_state.persistent().min_pin_length)),
             ));
         }
-        if pin_complexity_requested
+        if extensions.pin_complexity_requested
             && self
                 .pin_state
                 .persistent()
@@ -453,16 +567,16 @@ impl CtapApp<'_> {
                 Value::Bool(self.pin_state.persistent().pin_complexity_policy),
             ));
         }
-        if cred_blob_input.is_some() {
+        if extensions.cred_blob_input.is_some() {
             extension_entries.push((
                 Value::Text("credBlob".into()),
                 Value::Bool(record.cred_blob.is_some()),
             ));
         }
-        if hmac_secret_requested {
+        if extensions.hmac_secret_requested {
             extension_entries.push((Value::Text("hmac-secret".into()), Value::Bool(true)));
         }
-        if let Some(request) = &hmac_secret_mc_request {
+        if let Some(request) = &extensions.hmac_secret_mc_request {
             // §12.8 uses §12.7's processing and the new credential's secrets.
             let (encrypted, _) = self.process_hmac_secret(
                 request,
@@ -475,21 +589,26 @@ impl CtapApp<'_> {
                 Value::Bytes(encrypted),
             ));
         }
-        if cred_protect_requested.is_some() {
+        if let Some(cred_protect) = extensions.cred_protect_requested {
             extension_entries.push((
                 Value::Text("credProtect".into()),
-                Value::Integer(Integer::from(cred_protect_value as u64)),
+                Value::Integer(Integer::from(cred_protect as u64)),
             ));
         }
-        let extension_bytes = cbor::encode_extensions(extension_entries)?;
+        cbor::encode_extensions(extension_entries)
+    }
 
-        let auth_data = self.attested_auth_data(
-            &record,
-            &cose_key,
-            up_bit,
-            uv_bit,
-            extension_bytes.as_ref().map(|bytes| bytes.as_slice()),
-        );
+    /// The makeCredential response for the new credential `record` and its
+    /// `auth_data`, with the attestation statement of step 19: the status
+    /// byte followed by the response map.
+    fn encode_with_attestation(
+        &self,
+        record: &CredentialRecord,
+        secret_key: &CredentialSecretKey,
+        auth_data: &[u8],
+        client_hash: &[u8],
+        none_requested: bool,
+    ) -> Result<Zeroizing<Vec<u8>>, u8> {
         // Step 19.  "If attestationFormatsPreference is present and
         // contains only one entry with the value "none", omit attestation from
         // the output."  Otherwise this authenticator, whose only format besides
@@ -518,58 +637,8 @@ impl CtapApp<'_> {
         kinds.push(Attestation::None);
 
         for kind in kinds {
-            let (attestation_format, att_stmt) = match &kind {
-                // Packed attestation with the attestation key and certificate
-                // chain (WebAuthn §8.2).
-                Attestation::Basic(attestation) => {
-                    let signing_key = attestation.signing_key().map_err(|err| {
-                        log::error!("the attestation key is unusable: {err}");
-                        CTAP2_ERR_PROCESSING
-                    })?;
-                    let signature =
-                        try_sign_challenge(CoseAlg::ES256, &signing_key, &auth_data, &client_hash)
-                            .map_err(|err| {
-                                log::error!("the attestation signature failed: {err}");
-                                CTAP2_ERR_PROCESSING
-                            })?;
-                    let statement = canonical_map(vec![
-                        (
-                            Value::Text("alg".into()),
-                            Value::Integer(Integer::from(CoseAlg::ES256.identifier())),
-                        ),
-                        (Value::Text("sig".into()), Value::Bytes(signature)),
-                        (
-                            Value::Text("x5c".into()),
-                            Value::Array(
-                                attestation
-                                    .certificate_chain
-                                    .iter()
-                                    .cloned()
-                                    .map(Value::Bytes)
-                                    .collect(),
-                            ),
-                        ),
-                    ]);
-                    ("packed", statement)
-                }
-                // Self attestation with the credential key.
-                Attestation::SelfSigned => {
-                    let signature = try_sign_challenge(alg, &secret_key, &auth_data, &client_hash)
-                        .map_err(|err| {
-                            log::error!("self attestation with {alg:?} failed: {err}");
-                            CTAP2_ERR_PROCESSING
-                        })?;
-                    let statement = canonical_map(vec![
-                        (
-                            Value::Text("alg".into()),
-                            Value::Integer(Integer::from(alg.identifier())),
-                        ),
-                        (Value::Text("sig".into()), Value::Bytes(signature)),
-                    ]);
-                    ("packed", statement)
-                }
-                Attestation::None => ("none", Value::Map(Vec::new())),
-            };
+            let (attestation_format, att_stmt) =
+                kind.statement(record.alg, secret_key, auth_data, client_hash)?;
 
             let mut response_map = vec![
                 (
@@ -578,7 +647,7 @@ impl CtapApp<'_> {
                 ),
                 (
                     Value::Integer(Integer::from(2)),
-                    Value::Bytes(auth_data.clone()),
+                    Value::Bytes(auth_data.to_vec()),
                 ),
                 (Value::Integer(Integer::from(3)), att_stmt),
             ];
@@ -602,16 +671,10 @@ impl CtapApp<'_> {
                 continue;
             }
 
-            // Stored only once the response is complete, so a request that
-            // fails leaves no credential behind that the platform never
-            // learned about.
             let mut out = Zeroizing::new(Vec::with_capacity(1 + encoded.len()));
             out.push(CTAP2_OK);
             out.extend_from_slice(&encoded);
-            if stored {
-                self.store_new_credential(&record)?;
-            }
-            return Ok(core::mem::take(&mut *out));
+            return Ok(out);
         }
         log::error!("the makeCredential response does not fit even without attestation");
         Err(CTAP2_ERR_PROCESSING)
