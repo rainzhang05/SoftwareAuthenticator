@@ -80,6 +80,102 @@ impl fmt::Debug for PersistentPinState {
     }
 }
 
+// The mapping to and from the stored record names every field of both types,
+// so that a field added to either has to be mapped here before it compiles.
+
+/// The persistent part of a stored PIN state.  The consecutive-mismatch
+/// lockout is volatile (a restart is this authenticator's power cycle), so it
+/// is not read back.
+impl From<&PinStateRecord> for PersistentPinState {
+    fn from(record: &PinStateRecord) -> Self {
+        let PinStateRecord {
+            pin_hash,
+            pin_retries,
+            consecutive_failures: _,
+            pin_auth_blocked: _,
+            min_pin_length,
+            min_pin_length_rp_ids,
+            force_pin_change,
+            pin_code_point_length,
+            always_uv,
+            pin_complexity_policy,
+            persistent_tokens,
+        } = record;
+        Self {
+            pin_hash: *pin_hash,
+            pin_retries: *pin_retries,
+            min_pin_length: *min_pin_length,
+            min_pin_length_rp_ids: min_pin_length_rp_ids.clone(),
+            force_pin_change: *force_pin_change,
+            pin_code_point_length: *pin_code_point_length,
+            always_uv: *always_uv,
+            pin_complexity_policy: *pin_complexity_policy,
+            persistent_tokens: persistent_tokens.clone(),
+        }
+    }
+}
+
+impl PersistentPinState {
+    /// The record that stores this state, with the volatile lockout cleared.
+    pub(crate) fn to_record(&self) -> PinStateRecord {
+        let Self {
+            pin_hash,
+            pin_retries,
+            min_pin_length,
+            min_pin_length_rp_ids,
+            force_pin_change,
+            pin_code_point_length,
+            always_uv,
+            pin_complexity_policy,
+            persistent_tokens,
+        } = self;
+        PinStateRecord {
+            pin_hash: *pin_hash,
+            pin_retries: *pin_retries,
+            consecutive_failures: 0,
+            pin_auth_blocked: false,
+            min_pin_length: *min_pin_length,
+            min_pin_length_rp_ids: min_pin_length_rp_ids.clone(),
+            force_pin_change: *force_pin_change,
+            pin_code_point_length: *pin_code_point_length,
+            always_uv: *always_uv,
+            pin_complexity_policy: *pin_complexity_policy,
+            persistent_tokens: persistent_tokens.clone(),
+        }
+    }
+
+    /// Whether `record` holds another PIN or PIN/UV policy than this state:
+    /// adopting it ends any pinUvAuthToken.  pinRetries and the persistent
+    /// tokens do not count.
+    pub(crate) fn pin_or_policy_changed(&self, record: &PinStateRecord) -> bool {
+        let PinStateRecord {
+            pin_hash,
+            pin_retries: _,
+            consecutive_failures: _,
+            pin_auth_blocked: _,
+            min_pin_length,
+            min_pin_length_rp_ids,
+            force_pin_change,
+            pin_code_point_length,
+            always_uv,
+            pin_complexity_policy,
+            persistent_tokens: _,
+        } = record;
+        let hash_changed = match (&self.pin_hash, pin_hash) {
+            (Some(a), Some(b)) => !bool::from(a.ct_eq(b)),
+            (None, None) => false,
+            _ => true,
+        };
+        hash_changed
+            || self.min_pin_length != *min_pin_length
+            || self.min_pin_length_rp_ids != *min_pin_length_rp_ids
+            || self.force_pin_change != *force_pin_change
+            || self.pin_code_point_length != *pin_code_point_length
+            || self.always_uv != *always_uv
+            || self.pin_complexity_policy != *pin_complexity_policy
+    }
+}
+
 /// The PIN retry state machine of CTAP 2.3 §6.5.2.3, as driven by the PIN
 /// checks of changePIN (§6.5.5.6), getPinToken (§6.5.5.7.1) and
 /// getPinUvAuthTokenUsingPinWithPermissions (§6.5.5.7.2).

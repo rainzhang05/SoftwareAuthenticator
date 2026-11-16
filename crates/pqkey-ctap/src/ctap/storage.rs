@@ -13,7 +13,7 @@ use super::CtapApp;
 use super::pin::state::{PersistentPinState, PinState};
 use crate::store::{
     AttestationRecord, CommitDurability, CredentialRecord, CredentialStore, DirectoryFlush,
-    PinStateRecord, StoreError,
+    StoreError,
 };
 
 use rand_core::Rng;
@@ -66,7 +66,8 @@ pub(super) enum StoredPinState {
 /// Only [`PersistentPinState`], the PIN and UV policy, is read from the
 /// store.  The consecutive-mismatch lockout is volatile (a restart is this
 /// authenticator's power cycle), so `consecutive_failures` and
-/// `pin_auth_blocked` in [`PinStateRecord`] are never read back.
+/// `pin_auth_blocked` in [`PinStateRecord`](crate::store::PinStateRecord) are
+/// never read back.
 ///
 /// A PIN state that cannot be read fails closed: the PIN is treated as set,
 /// with a random hash nobody knows, and blocked with no retries left, so PIN
@@ -81,17 +82,7 @@ pub(super) fn load_pin_state(
 ) -> (PinState, StoredPinState) {
     match store.pin_state() {
         Ok(Some(record)) => (
-            PinState::from_persistent(PersistentPinState {
-                pin_hash: record.pin_hash,
-                pin_retries: record.pin_retries,
-                min_pin_length: record.min_pin_length,
-                min_pin_length_rp_ids: record.min_pin_length_rp_ids.clone(),
-                force_pin_change: record.force_pin_change,
-                pin_code_point_length: record.pin_code_point_length,
-                always_uv: record.always_uv,
-                pin_complexity_policy: record.pin_complexity_policy,
-                persistent_tokens: record.persistent_tokens.clone(),
-            }),
+            PinState::from_persistent(PersistentPinState::from(&record)),
             StoredPinState::Read,
         ),
         Ok(None) => (PinState::new(), StoredPinState::Read),
@@ -206,30 +197,9 @@ impl CtapApp<'_> {
             }
         };
         let current = self.pin_state.persistent();
-        let hash_changed = match (&current.pin_hash, &record.pin_hash) {
-            (Some(a), Some(b)) => !bool::from(a.ct_eq(b)),
-            (None, None) => false,
-            _ => true,
-        };
-        let changed_pin = hash_changed
-            || current.min_pin_length != record.min_pin_length
-            || current.min_pin_length_rp_ids != record.min_pin_length_rp_ids
-            || current.force_pin_change != record.force_pin_change
-            || current.pin_code_point_length != record.pin_code_point_length
-            || current.always_uv != record.always_uv
-            || current.pin_complexity_policy != record.pin_complexity_policy;
+        let changed_pin = current.pin_or_policy_changed(&record);
         if changed_pin || current.persistent_tokens != record.persistent_tokens {
-            let persistent = PersistentPinState {
-                pin_hash: record.pin_hash,
-                pin_retries: record.pin_retries,
-                min_pin_length: record.min_pin_length,
-                min_pin_length_rp_ids: record.min_pin_length_rp_ids.clone(),
-                force_pin_change: record.force_pin_change,
-                pin_code_point_length: record.pin_code_point_length,
-                always_uv: record.always_uv,
-                pin_complexity_policy: record.pin_complexity_policy,
-                persistent_tokens: record.persistent_tokens.clone(),
-            };
+            let persistent = PersistentPinState::from(&record);
             if changed_pin {
                 self.pin_state.invalidate_pin_uv_auth_tokens();
             }
@@ -382,20 +352,8 @@ impl CtapApp<'_> {
         if self.stored_pin_state != StoredPinState::Read {
             return Err(CTAP2_ERR_PROCESSING);
         }
-        let record = PinStateRecord {
-            pin_hash: persistent.pin_hash,
-            pin_retries: persistent.pin_retries,
-            min_pin_length: persistent.min_pin_length,
-            min_pin_length_rp_ids: persistent.min_pin_length_rp_ids.clone(),
-            force_pin_change: persistent.force_pin_change,
-            pin_code_point_length: persistent.pin_code_point_length,
-            always_uv: persistent.always_uv,
-            pin_complexity_policy: persistent.pin_complexity_policy,
-            persistent_tokens: persistent.persistent_tokens.clone(),
-            ..PinStateRecord::default()
-        };
         self.store
-            .set_pin_state(&record)
+            .set_pin_state(&persistent.to_record())
             .map_err(|err| store_status("save the PIN state", err))
     }
 
